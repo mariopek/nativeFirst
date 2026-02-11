@@ -1,13 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+
+function getIsDark(): boolean {
+  if (typeof document !== 'undefined') {
+    return document.documentElement.classList.contains('dark');
+  }
+  return true; // default to dark
+}
 
 export default function ThemeToggle() {
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(getIsDark);
 
+  // Sync state when component mounts or re-hydrates after View Transitions
   useEffect(() => {
-    setDark(document.documentElement.classList.contains('dark'));
+    setDark(getIsDark());
+
+    // Listen for Astro View Transitions page loads
+    const syncTheme = () => setDark(getIsDark());
+    document.addEventListener('astro:page-load', syncTheme);
+    document.addEventListener('astro:after-swap', syncTheme);
+
+    return () => {
+      document.removeEventListener('astro:page-load', syncTheme);
+      document.removeEventListener('astro:after-swap', syncTheme);
+    };
   }, []);
 
-  function toggle() {
+  const toggle = useCallback(() => {
     const next = !dark;
     setDark(next);
     document.documentElement.classList.toggle('dark', next);
@@ -21,7 +39,7 @@ export default function ThemeToggle() {
         'https://giscus.app'
       );
     }
-  }
+  }, [dark]);
 
   return (
     <button
