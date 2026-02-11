@@ -30,7 +30,7 @@ export const POST: APIRoute = async ({ request }) => {
       const resend = new Resend(resendApiKey);
 
       await resend.emails.send({
-        from: 'NativeFirst Contact <onboarding@resend.dev>',
+        from: 'NativeFirst Contact <support@nativefirstapp.com>',
         to: 'support@nativefirstapp.com',
         replyTo: email,
         subject: `[Contact] ${subject} — ${name}`,
