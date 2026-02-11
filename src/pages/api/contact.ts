@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   try {
     const body = await request.json();
     const { name, email, subject, message } = body;
@@ -22,7 +22,9 @@ export const POST: APIRoute = async ({ request }) => {
       );
     }
 
-    const resendApiKey = import.meta.env.RESEND_API_KEY;
+    // Cloudflare runtime env (works on CF Pages) with fallback to import.meta.env (dev)
+    const runtime = (locals as any).runtime;
+    const resendApiKey = runtime?.env?.RESEND_API_KEY || import.meta.env.RESEND_API_KEY;
 
     if (resendApiKey) {
       // Send email via Resend
@@ -45,13 +47,11 @@ export const POST: APIRoute = async ({ request }) => {
         `,
       });
     } else {
-      // No API key configured — log and return success for development
-      console.log('--- Contact Form Submission (RESEND_API_KEY not configured) ---');
-      console.log(`Name: ${name}`);
-      console.log(`Email: ${email}`);
-      console.log(`Subject: ${subject}`);
-      console.log(`Message: ${message}`);
-      console.log('---------------------------------------------------------------');
+      console.error('RESEND_API_KEY is not configured.');
+      return new Response(
+        JSON.stringify({ success: false, message: 'Email service is not configured.' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
     return new Response(
