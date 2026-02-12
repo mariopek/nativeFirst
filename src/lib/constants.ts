@@ -27,7 +27,7 @@ export const APPS = {
     description: 'Create beautiful, professional invoices in seconds. Designed exclusively for macOS with a native experience that feels right at home on your Mac.',
     platform: 'macOS' as const,
     status: 'available' as const,
-    icon: '/images/apps/invoize-icon.svg',
+    icon: '/images/apps/invoize-icon.png',
     appStoreUrl: '#',
     features: [
       { title: 'Create in Seconds', description: 'Generate professional invoices with just a few clicks. No bloated forms, no unnecessary steps.', icon: 'zap' },
@@ -44,7 +44,7 @@ export const APPS = {
     description: 'Master any topic with interactive mind maps, flash cards, quizzes, and AI-powered summaries. ThinkBud turns learning into an engaging experience.',
     platform: 'iOS' as const,
     status: 'coming-soon' as const,
-    icon: '/images/apps/thinkbud-icon.svg',
+    icon: '/images/apps/thinkbud-icon.png',
     appStoreUrl: '#',
     features: [
       { title: 'Interactive Mind Maps', description: 'Visualize complex topics with beautiful, interactive mind maps that help you see the big picture.', icon: 'map' },
