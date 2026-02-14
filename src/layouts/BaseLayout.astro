@@ -6,23 +6,58 @@ import '@fontsource/bricolage-grotesque/700.css';
 import '@fontsource/bricolage-grotesque/800.css';
 import '../styles/global.css';
 import { ViewTransitions } from 'astro:transitions';
+import { SITE } from '../lib/constants';
 
 interface Props {
   title: string;
   description?: string;
   image?: string;
   type?: string;
+  keywords?: string;
+  publishedTime?: string;
+  modifiedTime?: string;
+  author?: string;
+  tags?: string[];
 }
+
+const defaultKeywords = 'native iOS apps, SwiftUI, macOS apps, Apple development, indie developer, Swift, vibe coding, AI coding, NativeFirst, invoicing app, learning app, iOS developer, Apple ecosystem, Swift programming, mobile app development, Mac app, iPhone app, iPad app, CoreData, CloudKit, App Store';
 
 const {
   title,
   description = 'Crafting thoughtful, native Apple apps that feel right at home on your devices.',
   image = '/og-default.png',
   type = 'website',
+  keywords = defaultKeywords,
+  publishedTime,
+  modifiedTime,
+  author = 'Mario',
+  tags = [],
 } = Astro.props;
 
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 const ogImageURL = new URL(image, Astro.site);
+
+// Organization JSON-LD (shown on all pages)
+const organizationSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'Organization',
+  name: 'NativeFirst',
+  url: SITE.url,
+  logo: new URL('/apple-touch-icon.png', Astro.site).toString(),
+  description: SITE.description,
+  email: SITE.email,
+  sameAs: [],
+};
+
+// WebSite JSON-LD (for sitelinks search box in Google)
+const websiteSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: 'NativeFirst',
+  url: SITE.url,
+  description: SITE.description,
+  publisher: { '@type': 'Organization', name: 'NativeFirst' },
+};
 ---
 
 <!doctype html>
@@ -34,11 +69,17 @@ const ogImageURL = new URL(image, Astro.site);
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="canonical" href={canonicalURL} />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title="NativeFirst Blog" href="/rss.xml" />
 
     <!-- Primary Meta Tags -->
     <title>{title}</title>
     <meta name="description" content={description} />
     <meta name="author" content="NativeFirst" />
+    <meta name="keywords" content={keywords} />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#0f172a" />
 
     <!-- Open Graph -->
     <meta property="og:type" content={type} />
@@ -46,13 +87,24 @@ const ogImageURL = new URL(image, Astro.site);
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:image" content={ogImageURL} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
     <meta property="og:site_name" content="NativeFirst" />
+    <meta property="og:locale" content="en_US" />
+    {publishedTime && <meta property="article:published_time" content={publishedTime} />}
+    {modifiedTime && <meta property="article:modified_time" content={modifiedTime} />}
+    {author && type === 'article' && <meta property="article:author" content={author} />}
+    {tags.map((tag) => <meta property="article:tag" content={tag} />)}
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImageURL} />
+
+    <!-- Structured Data -->
+    <script type="application/ld+json" set:html={JSON.stringify(organizationSchema)} />
+    <script type="application/ld+json" set:html={JSON.stringify(websiteSchema)} />
 
     <!-- Dark mode - prevent flash, default to dark -->
     <script is:inline>
@@ -80,5 +132,14 @@ const ogImageURL = new URL(image, Astro.site);
   </head>
   <body class="min-h-screen flex flex-col bg-white text-slate-800 dark:bg-slate-950 dark:text-slate-200">
     <slot />
+
+    <!-- Google Analytics (GA4) -->
+    <script is:inline async src="https://www.googletagmanager.com/gtag/js?id=G-L0FQYCE7WJ"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-L0FQYCE7WJ');
+    </script>
   </body>
 </html>
