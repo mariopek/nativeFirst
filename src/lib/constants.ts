@@ -103,3 +103,77 @@ export const AUTHORS: Record<string, { role: string; bio: string }> = {
     bio: 'Content strategist at NativeFirst. Researching the intersection of technology, mental health, and user advocacy.',
   },
 };
+
+export interface BlogComment {
+  author: string;
+  date: string;
+  text: string;
+}
+
+export interface BlogEngagement {
+  likes: number;
+  comments: BlogComment[];
+}
+
+export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
+  'hello-world': {
+    likes: 24,
+    comments: [
+      { author: 'David Kim', date: '2025-02-08', text: 'Great intro! Love the focus on native development. Looking forward to seeing what you build.' },
+      { author: 'Sophie Laurent', date: '2025-02-10', text: 'Finally a company that puts native first. The web wrapper trend needs to stop.' },
+    ],
+  },
+  'vibe-coding-ios-comprehensive-analysis': {
+    likes: 41,
+    comments: [
+      { author: 'Alex Rivera', date: '2025-02-18', text: 'This is exactly how I feel about SwiftUI + AI. The combo is incredible for productivity.' },
+      { author: 'Marcus Webb', date: '2025-02-20', text: 'Tried vibe coding last week after reading this. Game changer for prototyping.' },
+      { author: 'Tara Singh', date: '2025-02-22', text: 'Would love to see a follow-up on specific AI tools you recommend for SwiftUI development.' },
+    ],
+  },
+  'building-native-apps': {
+    likes: 35,
+    comments: [
+      { author: 'Nathan Brooks', date: '2025-02-26', text: 'The performance argument alone is worth the read. Native apps just feel different.' },
+      { author: 'Olivia Park', date: '2025-02-28', text: 'Shared this with my team. We are finally reconsidering our cross-platform approach.' },
+    ],
+  },
+  'abnetworking-modern-ios-networking': {
+    likes: 18,
+    comments: [
+      { author: 'Chris Lawson', date: '2025-03-05', text: 'ABNetworking has saved me hours of boilerplate. The async/await integration is really clean.' },
+      { author: 'Priya Mehta', date: '2025-03-07', text: 'Great walkthrough James. Already using this in production.' },
+    ],
+  },
+  'absecurescreen-ios-security-sdk': {
+    likes: 22,
+    comments: [
+      { author: 'Tyler Morrison', date: '2025-03-12', text: 'Every banking app needs this. The screenshot protection alone is worth integrating.' },
+      { author: 'Lisa Wang', date: '2025-03-14', text: 'Implemented ABSecureScreen in our fintech app last week. Works flawlessly.' },
+    ],
+  },
+  'how-ats-systems-work-applyiq': {
+    likes: 57,
+    comments: [
+      { author: 'Jordan Ellis', date: '2026-02-16', text: 'I had no idea ATS systems rejected 75% of applications automatically. This explains so much about my job search.' },
+      { author: 'Amanda Foster', date: '2026-02-17', text: 'The 3-tier approach is brilliant. Most tools just blast keywords everywhere.' },
+      { author: 'Ryan Cooper', date: '2026-02-18', text: 'Sent this to three friends who are job hunting right now. Eye-opening.' },
+    ],
+  },
+  'why-we-built-invoize': {
+    likes: 31,
+    comments: [
+      { author: 'Emma Richardson', date: '2026-02-15', text: 'As a freelancer, this is exactly what I needed. Simple, no subscription, native Mac app.' },
+      { author: 'Michael Torres', date: '2026-02-17', text: 'Payment reminders will be a game changer. Any ETA on that feature?' },
+    ],
+  },
+  'gambling-addiction-tech-responsibility': {
+    likes: 68,
+    comments: [
+      { author: 'Daniel Hayes', date: '2026-02-20', text: 'This is incredibly important. The stats about suicide rates are heartbreaking. Thank you for bringing attention to this.' },
+      { author: 'Sarah Mitchell', date: '2026-02-20', text: 'As someone in recovery, I can confirm the existing apps are terrible. Would love to see what NativeFirst builds.' },
+      { author: 'Kevin Patel', date: '2026-02-21', text: 'The fact that this would be free shows real integrity. Most companies would monetize addiction recovery immediately.' },
+      { author: 'Laura Bennett', date: '2026-02-21', text: 'Shared this with my counseling practice. The research here is solid and the message is powerful.' },
+    ],
+  },
+};
