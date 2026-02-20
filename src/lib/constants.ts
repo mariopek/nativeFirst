@@ -84,3 +84,22 @@ export const BLOG_TAGS = [
   'SwiftUI',
   'Announcements',
 ] as const;
+
+export const AUTHORS: Record<string, { role: string; bio: string }> = {
+  'Mario': {
+    role: 'Founder & CEO',
+    bio: 'Founder of NativeFirst. Building native Apple apps with SwiftUI and a passion for great user experiences.',
+  },
+  'Ana Petrovic': {
+    role: 'Lead Designer',
+    bio: 'Lead designer at NativeFirst. Focused on creating intuitive, beautiful interfaces that feel native to every Apple platform.',
+  },
+  'Luka Novak': {
+    role: 'iOS Engineer',
+    bio: 'iOS engineer at NativeFirst. SwiftUI enthusiast, open-source contributor, and performance optimization nerd.',
+  },
+  'Sara Markovic': {
+    role: 'Content & Research',
+    bio: 'Content strategist at NativeFirst. Researching the intersection of technology, mental health, and user advocacy.',
+  },
+};
