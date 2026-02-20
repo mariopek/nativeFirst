@@ -4,10 +4,11 @@ export const prerender = true;
 import PageLayout from '../../layouts/PageLayout.astro';
 import { getCollection, render } from 'astro:content';
 import { formatDate } from '../../lib/utils';
-import { SITE, AUTHORS } from '../../lib/constants';
+import { SITE, AUTHORS, BLOG_ENGAGEMENT } from '../../lib/constants';
 import readingTime from 'reading-time';
 import Comments from '../../components/blog/Comments';
 import LikeButton from '../../components/blog/LikeButton';
+import FeaturedComments from '../../components/blog/FeaturedComments.astro';
 
 export async function getStaticPaths() {
   const posts = await getCollection('blog', ({ data }) => !data.draft);
@@ -23,6 +24,7 @@ const rt = readingTime(post.body || '');
 const shareUrl = encodeURIComponent(new URL(`/blog/${post.id}`, Astro.site).toString());
 const shareTitle = encodeURIComponent(post.data.title);
 const authorInfo = AUTHORS[post.data.author] || { role: 'Team Member', bio: `Writer at NativeFirst, contributing to the blog and helping build great Apple apps.` };
+const engagement = BLOG_ENGAGEMENT[post.id] || { likes: 0, comments: [] };
 ---
 
 <PageLayout
@@ -99,7 +101,7 @@ const authorInfo = AUTHORS[post.data.author] || { role: 'Team Member', bio: `Wri
           </h3>
           <div class="flex items-center justify-center gap-3 flex-wrap">
             <!-- Like Button -->
-            <LikeButton slug={post.id} client:visible />
+            <LikeButton slug={post.id} seedLikes={engagement.likes} client:visible />
 
             <!-- Twitter/X -->
             <a
@@ -140,7 +142,10 @@ const authorInfo = AUTHORS[post.data.author] || { role: 'Team Member', bio: `Wri
           </div>
         </div>
 
-        <!-- Comments -->
+        <!-- Featured Comments -->
+        <FeaturedComments comments={engagement.comments} />
+
+        <!-- Live Comments (Giscus) -->
         <Comments slug={post.id} client:visible />
 
         <!-- Author Card -->

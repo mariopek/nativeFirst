@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 
 interface Props {
   slug: string;
+  seedLikes?: number;
 }
 
-export default function LikeButton({ slug }: Props) {
-  const [likes, setLikes] = useState(0);
+export default function LikeButton({ slug, seedLikes = 0 }: Props) {
+  const [likes, setLikes] = useState(seedLikes);
   const [hasLiked, setHasLiked] = useState(false);
 
   useEffect(() => {
@@ -36,7 +37,7 @@ export default function LikeButton({ slug }: Props) {
         if (res.ok) {
           const data = await res.json();
           if (data.length > 0) {
-            setLikes(data[0].likes);
+            setLikes(seedLikes + data[0].likes);
           }
         }
       } catch {
@@ -45,7 +46,7 @@ export default function LikeButton({ slug }: Props) {
     }
 
     fetchLikes();
-  }, [slug]);
+  }, [slug, seedLikes]);
 
   async function handleLike() {
     if (hasLiked) return;
