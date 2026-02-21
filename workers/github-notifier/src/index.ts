@@ -2,6 +2,9 @@ interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   GITHUB_WEBHOOK_SECRET: string;
+  SUPABASE_WEBHOOK_SECRET: string;
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
 }
 
 export default {
@@ -10,37 +13,175 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    const signature = request.headers.get("x-hub-signature-256");
-    const event = request.headers.get("x-github-event");
-    const body = await request.text();
+    const url = new URL(request.url);
 
-    if (!signature || !event) {
-      return new Response("Missing headers", { status: 400 });
+    if (url.pathname === "/blog-comment") {
+      return handleBlogComment(request, env);
     }
 
-    const isValid = await verifySignature(body, signature, env.GITHUB_WEBHOOK_SECRET);
-    if (!isValid) {
-      return new Response("Invalid signature", { status: 401 });
+    if (url.pathname === "/telegram") {
+      return handleTelegramCallback(request, env);
     }
 
-    if (event === "ping") {
-      return new Response("pong", { status: 200 });
+    return handleGitHub(request, env);
+  },
+};
+
+// --- Blog comment webhook from Supabase ---
+
+async function handleBlogComment(request: Request, env: Env): Promise<Response> {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${env.SUPABASE_WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  try {
+    const payload = await request.json() as any;
+
+    if (payload.type !== "INSERT" || payload.table !== "blog_comments") {
+      return new Response("Ignored", { status: 200 });
     }
 
-    try {
-      const payload = JSON.parse(body);
-      const message = formatMessage(event, payload);
+    const record = payload.record;
+    const commentId = record.id;
+    const author = record.author_name ?? "Anonymous";
+    const comment = truncate(record.comment ?? "", 300);
+    const slug = record.slug ?? "unknown";
+    const date = record.created_at ? new Date(record.created_at).toLocaleString("hr-HR") : "";
 
-      if (message) {
-        await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+    const message = [
+      `🌐 <b>New blog comment!</b>`,
+      `<b>Post:</b> ${escapeHtml(slug)}`,
+      `<b>By:</b> ${escapeHtml(author)}`,
+      date ? `<b>Date:</b> ${date}` : "",
+      ``,
+      escapeHtml(comment),
+    ].filter(Boolean).join("\n");
+
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "✅ Approve", callback_data: `approve:${commentId}` },
+          { text: "❌ Reject", callback_data: `reject:${commentId}` },
+        ],
+      ],
+    };
+
+    await sendTelegramWithButtons(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message, inlineKeyboard);
+    return new Response("OK", { status: 200 });
+  } catch (err) {
+    return new Response(`Error: ${err}`, { status: 500 });
+  }
+}
+
+// --- Telegram callback (button press) ---
+
+async function handleTelegramCallback(request: Request, env: Env): Promise<Response> {
+  try {
+    const update = await request.json() as any;
+    const callback = update.callback_query;
+
+    if (!callback) {
+      return new Response("OK", { status: 200 });
+    }
+
+    // Only allow the configured chat to approve/reject
+    const chatId = String(callback.message?.chat?.id);
+    if (chatId !== env.TELEGRAM_CHAT_ID) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    const data = callback.data as string;
+    const [action, commentId] = data.split(":");
+
+    if (!commentId || (action !== "approve" && action !== "reject")) {
+      await answerCallbackQuery(env.TELEGRAM_BOT_TOKEN, callback.id, "Unknown action");
+      return new Response("OK", { status: 200 });
+    }
+
+    if (action === "approve") {
+      // Update approved = true in Supabase
+      const res = await fetch(`${env.SUPABASE_URL}/rest/v1/blog_comments?id=eq.${commentId}`, {
+        method: "PATCH",
+        headers: {
+          "apikey": env.SUPABASE_SERVICE_ROLE_KEY,
+          "Authorization": `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify({ approved: true }),
+      });
+
+      if (res.ok) {
+        await answerCallbackQuery(env.TELEGRAM_BOT_TOKEN, callback.id, "✅ Comment approved!");
+        await editMessageButtons(env.TELEGRAM_BOT_TOKEN, chatId, callback.message.message_id,
+          callback.message.text || callback.message.caption || "",
+          "✅ <b>APPROVED</b>");
+      } else {
+        await answerCallbackQuery(env.TELEGRAM_BOT_TOKEN, callback.id, "Error approving comment");
       }
-    } catch (err) {
-      return new Response(`Error: ${err}`, { status: 500 });
+    } else {
+      // Delete the comment from Supabase
+      const res = await fetch(`${env.SUPABASE_URL}/rest/v1/blog_comments?id=eq.${commentId}`, {
+        method: "DELETE",
+        headers: {
+          "apikey": env.SUPABASE_SERVICE_ROLE_KEY,
+          "Authorization": `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+          "Prefer": "return=minimal",
+        },
+      });
+
+      if (res.ok) {
+        await answerCallbackQuery(env.TELEGRAM_BOT_TOKEN, callback.id, "❌ Comment rejected & deleted");
+        await editMessageButtons(env.TELEGRAM_BOT_TOKEN, chatId, callback.message.message_id,
+          callback.message.text || callback.message.caption || "",
+          "❌ <b>REJECTED</b>");
+      } else {
+        await answerCallbackQuery(env.TELEGRAM_BOT_TOKEN, callback.id, "Error rejecting comment");
+      }
     }
 
     return new Response("OK", { status: 200 });
-  },
-};
+  } catch (err) {
+    return new Response(`Error: ${err}`, { status: 500 });
+  }
+}
+
+// --- GitHub webhook ---
+
+async function handleGitHub(request: Request, env: Env): Promise<Response> {
+  const signature = request.headers.get("x-hub-signature-256");
+  const event = request.headers.get("x-github-event");
+  const body = await request.text();
+
+  if (!signature || !event) {
+    return new Response("Missing headers", { status: 400 });
+  }
+
+  const isValid = await verifySignature(body, signature, env.GITHUB_WEBHOOK_SECRET);
+  if (!isValid) {
+    return new Response("Invalid signature", { status: 401 });
+  }
+
+  if (event === "ping") {
+    return new Response("pong", { status: 200 });
+  }
+
+  try {
+    const payload = JSON.parse(body);
+    const message = formatGitHubMessage(event, payload);
+
+    if (message) {
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+    }
+  } catch (err) {
+    return new Response(`Error: ${err}`, { status: 500 });
+  }
+
+  return new Response("OK", { status: 200 });
+}
+
+// --- Helpers ---
 
 async function verifySignature(body: string, signature: string, secret: string): Promise<boolean> {
   const encoder = new TextEncoder();
@@ -56,7 +197,7 @@ async function verifySignature(body: string, signature: string, secret: string):
   return signature === digest;
 }
 
-function formatMessage(event: string, payload: any): string | null {
+function formatGitHubMessage(event: string, payload: any): string | null {
   const repo = payload.repository?.full_name ?? "unknown repo";
 
   if (event === "issue_comment" && payload.action === "created") {
@@ -105,7 +246,7 @@ function formatMessage(event: string, payload: any): string | null {
     const user = payload.review.user.login;
     const prTitle = payload.pull_request.title;
     const prNumber = payload.pull_request.number;
-    const state = payload.review.state; // approved, changes_requested, commented
+    const state = payload.review.state;
     const reviewBody = truncate(payload.review.body ?? "", 300);
     const url = payload.review.html_url;
 
@@ -146,6 +287,48 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
     body: JSON.stringify({
       chat_id: chatId,
       text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+}
+
+async function sendTelegramWithButtons(token: string, chatId: string, text: string, replyMarkup: any): Promise<void> {
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup,
+    }),
+  });
+}
+
+async function answerCallbackQuery(token: string, callbackId: string, text: string): Promise<void> {
+  const url = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: callbackId,
+      text,
+    }),
+  });
+}
+
+async function editMessageButtons(token: string, chatId: string, messageId: number, originalText: string, status: string): Promise<void> {
+  const url = `https://api.telegram.org/bot${token}/editMessageText`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text: originalText + `\n\n${status}`,
       parse_mode: "HTML",
       disable_web_page_preview: true,
     }),
