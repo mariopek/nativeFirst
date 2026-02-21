@@ -172,9 +172,12 @@ export default function BlogComments({ slug, seedComments = [] }: Props) {
         setName('');
         setText('');
       } else {
+        const errBody = await res.text().catch(() => '');
+        console.error('Comment POST failed:', res.status, errBody);
         setStatus('error');
       }
-    } catch {
+    } catch (err) {
+      console.error('Comment POST exception:', err);
       setStatus('error');
     }
   }
