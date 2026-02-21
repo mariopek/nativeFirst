@@ -29,7 +29,7 @@ export const APPS = {
     platform: 'macOS' as const,
     status: 'available' as const,
     icon: '/images/apps/invoize-icon.png',
-    appStoreUrl: '#',
+    appStoreUrl: 'https://apps.apple.com/us/app/invoize-easy-invoice-maker/id6752683623',
     features: [
       { title: 'Create in Seconds', description: 'Generate professional invoices with just a few clicks. No bloated forms, no unnecessary steps.', icon: 'zap' },
       { title: 'Beautiful PDF Export', description: 'Export pixel-perfect PDF invoices that look great and impress your clients.', icon: 'file' },
