@@ -23,11 +23,19 @@ export default {
       return new Response("Invalid signature", { status: 401 });
     }
 
-    const payload = JSON.parse(body);
-    const message = formatMessage(event, payload);
+    if (event === "ping") {
+      return new Response("pong", { status: 200 });
+    }
 
-    if (message) {
-      await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+    try {
+      const payload = JSON.parse(body);
+      const message = formatMessage(event, payload);
+
+      if (message) {
+        await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+      }
+    } catch (err) {
+      return new Response(`Error: ${err}`, { status: 500 });
     }
 
     return new Response("OK", { status: 200 });
