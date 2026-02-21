@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type FormEvent } from 'react';
 import type { BlogComment } from '../../lib/constants';
+// Supabase env vars configured
 
 interface SupabaseComment {
   id: string;
@@ -12,6 +13,8 @@ interface SupabaseComment {
 interface Props {
   slug: string;
   seedComments?: BlogComment[];
+  supabaseUrl?: string;
+  supabaseKey?: string;
 }
 
 const AVATAR_COLORS = [
@@ -42,16 +45,16 @@ function formatDate(dateStr: string): string {
   });
 }
 
-function getSupabaseConfig() {
-  const url = import.meta.env.PUBLIC_SUPABASE_URL;
-  const key = import.meta.env.PUBLIC_SUPABASE_ANON_KEY;
+function getSupabaseConfig(propUrl?: string, propKey?: string) {
+  const url = propUrl || import.meta.env.PUBLIC_SUPABASE_URL;
+  const key = propKey || import.meta.env.PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !key) return null;
   return { url, key };
 }
 
 const RATE_LIMIT_MS = 60_000; // 1 comment per minute
 
-export default function BlogComments({ slug, seedComments = [] }: Props) {
+export default function BlogComments({ slug, seedComments = [], supabaseUrl, supabaseKey }: Props) {
   const [comments, setComments] = useState<
     { author: string; text: string; date: string }[]
   >([]);
@@ -66,7 +69,7 @@ export default function BlogComments({ slug, seedComments = [] }: Props) {
 
   useEffect(() => {
     async function fetchComments() {
-      const config = getSupabaseConfig();
+      const config = getSupabaseConfig(supabaseUrl, supabaseKey);
       if (!config) {
         // No Supabase — show seed comments only
         setComments(
@@ -141,7 +144,7 @@ export default function BlogComments({ slug, seedComments = [] }: Props) {
       return;
     }
 
-    const config = getSupabaseConfig();
+    const config = getSupabaseConfig(supabaseUrl, supabaseKey);
     if (!config) {
       setStatus('error');
       return;
@@ -172,9 +175,12 @@ export default function BlogComments({ slug, seedComments = [] }: Props) {
         setName('');
         setText('');
       } else {
+        const errBody = await res.text().catch(() => '');
+        console.error('Comment POST failed:', res.status, errBody);
         setStatus('error');
       }
-    } catch {
+    } catch (err) {
+      console.error('Comment POST exception:', err);
       setStatus('error');
     }
   }
