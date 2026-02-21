@@ -2,6 +2,7 @@ interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   GITHUB_WEBHOOK_SECRET: string;
+  SUPABASE_WEBHOOK_SECRET: string;
 }
 
 export default {
@@ -10,37 +11,82 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    const signature = request.headers.get("x-hub-signature-256");
-    const event = request.headers.get("x-github-event");
-    const body = await request.text();
+    const url = new URL(request.url);
 
-    if (!signature || !event) {
-      return new Response("Missing headers", { status: 400 });
+    if (url.pathname === "/blog-comment") {
+      return handleBlogComment(request, env);
     }
 
-    const isValid = await verifySignature(body, signature, env.GITHUB_WEBHOOK_SECRET);
-    if (!isValid) {
-      return new Response("Invalid signature", { status: 401 });
-    }
-
-    if (event === "ping") {
-      return new Response("pong", { status: 200 });
-    }
-
-    try {
-      const payload = JSON.parse(body);
-      const message = formatMessage(event, payload);
-
-      if (message) {
-        await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
-      }
-    } catch (err) {
-      return new Response(`Error: ${err}`, { status: 500 });
-    }
-
-    return new Response("OK", { status: 200 });
+    return handleGitHub(request, env);
   },
 };
+
+async function handleBlogComment(request: Request, env: Env): Promise<Response> {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${env.SUPABASE_WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  try {
+    const payload = await request.json() as any;
+
+    if (payload.type !== "INSERT" || payload.table !== "blog_comments") {
+      return new Response("Ignored", { status: 200 });
+    }
+
+    const record = payload.record;
+    const author = record.author_name ?? "Anonymous";
+    const comment = truncate(record.comment ?? "", 300);
+    const slug = record.slug ?? "unknown";
+    const date = record.created_at ? new Date(record.created_at).toLocaleString("hr-HR") : "";
+
+    const message = [
+      `🌐 <b>New blog comment!</b>`,
+      `<b>Post:</b> ${escapeHtml(slug)}`,
+      `<b>By:</b> ${escapeHtml(author)}`,
+      date ? `<b>Date:</b> ${date}` : "",
+      ``,
+      escapeHtml(comment),
+    ].filter(Boolean).join("\n");
+
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+    return new Response("OK", { status: 200 });
+  } catch (err) {
+    return new Response(`Error: ${err}`, { status: 500 });
+  }
+}
+
+async function handleGitHub(request: Request, env: Env): Promise<Response> {
+  const signature = request.headers.get("x-hub-signature-256");
+  const event = request.headers.get("x-github-event");
+  const body = await request.text();
+
+  if (!signature || !event) {
+    return new Response("Missing headers", { status: 400 });
+  }
+
+  const isValid = await verifySignature(body, signature, env.GITHUB_WEBHOOK_SECRET);
+  if (!isValid) {
+    return new Response("Invalid signature", { status: 401 });
+  }
+
+  if (event === "ping") {
+    return new Response("pong", { status: 200 });
+  }
+
+  try {
+    const payload = JSON.parse(body);
+    const message = formatGitHubMessage(event, payload);
+
+    if (message) {
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, message);
+    }
+  } catch (err) {
+    return new Response(`Error: ${err}`, { status: 500 });
+  }
+
+  return new Response("OK", { status: 200 });
+}
 
 async function verifySignature(body: string, signature: string, secret: string): Promise<boolean> {
   const encoder = new TextEncoder();
@@ -56,7 +102,7 @@ async function verifySignature(body: string, signature: string, secret: string):
   return signature === digest;
 }
 
-function formatMessage(event: string, payload: any): string | null {
+function formatGitHubMessage(event: string, payload: any): string | null {
   const repo = payload.repository?.full_name ?? "unknown repo";
 
   if (event === "issue_comment" && payload.action === "created") {
@@ -105,7 +151,7 @@ function formatMessage(event: string, payload: any): string | null {
     const user = payload.review.user.login;
     const prTitle = payload.pull_request.title;
     const prNumber = payload.pull_request.number;
-    const state = payload.review.state; // approved, changes_requested, commented
+    const state = payload.review.state;
     const reviewBody = truncate(payload.review.body ?? "", 300);
     const url = payload.review.html_url;
 
