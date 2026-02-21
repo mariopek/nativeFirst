@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type FormEvent } from 'react';
 import type { BlogComment } from '../../lib/constants';
+// Supabase env vars configured
 
 interface SupabaseComment {
   id: string;
