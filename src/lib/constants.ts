@@ -82,6 +82,7 @@ export const COURSE = {
   subtitle: 'Build Real iOS Apps with AI',
   description: 'A free, comprehensive course teaching iOS developers how to leverage AI tools — especially Claude Code — to build production-quality native apps faster.',
   author: 'Mario',
+  isPremium: false,
   totalLessons: 21,
   modules: [
     {
@@ -122,6 +123,82 @@ export const COURSE = {
     },
   ],
 };
+
+export const PREMIUM_COURSE = {
+  slug: 'ship-native',
+  title: 'Ship Native',
+  subtitle: 'Build a Production iOS App with AI in 24 Hours',
+  description: 'Build "Moodbit" — an AI-powered mood journal for iOS — from zero to App Store. Master Swift 6, SwiftUI, SwiftData, Charts, WidgetKit, App Intents, and the OpenAI API through hands-on, prompt-driven lessons.',
+  author: 'Mario',
+  isPremium: true,
+  price: 79,
+  totalLessons: 26,
+  modules: [
+    {
+      number: 1,
+      title: 'Project Foundation',
+      description: 'Set up the Xcode project, define your architecture with MVVM + Repository, model your data layer with SwiftData, and write a CLAUDE.md that keeps AI on track.',
+      lessonCount: 3,
+    },
+    {
+      number: 2,
+      title: 'Core UI with SwiftUI',
+      description: 'Build a design system, mood timeline, entry flow with haptic feedback, and a Router-based navigation architecture.',
+      lessonCount: 4,
+    },
+    {
+      number: 3,
+      title: 'Data Layer & Persistence',
+      description: 'Implement protocol-based repositories, complex SwiftData queries with predicates, and a migration strategy that protects user data.',
+      lessonCount: 3,
+    },
+    {
+      number: 4,
+      title: 'AI Integration',
+      description: 'Connect to the OpenAI API, add on-device ML as a fallback, and build an insights engine that finds patterns in mood data.',
+      lessonCount: 3,
+    },
+    {
+      number: 5,
+      title: 'System Frameworks',
+      description: 'Visualize mood trends with Charts, create a WidgetKit home screen widget, and integrate Siri Shortcuts through App Intents.',
+      lessonCount: 3,
+    },
+    {
+      number: 6,
+      title: 'Quality & Testing',
+      description: 'Write AI-generated unit tests, automate UI testing, and master the Instruments debugging workflow.',
+      lessonCount: 3,
+    },
+    {
+      number: 7,
+      title: 'Production Polish',
+      description: 'Handle errors gracefully, add VoiceOver and localization support, and optimize performance for a smooth user experience.',
+      lessonCount: 3,
+    },
+    {
+      number: 8,
+      title: 'Ship It',
+      description: 'Prepare App Store assets, set up CI/CD with GitHub Actions, and distribute through TestFlight.',
+      lessonCount: 2,
+    },
+    {
+      number: 9,
+      title: 'Bonus — Advanced Patterns',
+      description: 'CloudKit sync for multi-device support and a Share Extension for logging moods from anywhere.',
+      lessonCount: 2,
+    },
+  ],
+};
+
+export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE> = {
+  'vibe-code-native': COURSE,
+  'ship-native': PREMIUM_COURSE,
+};
+
+export function getCourseBySlug(slug: string) {
+  return COURSES[slug] ?? null;
+}
 
 export const BLOG_TAGS = [
   'All',

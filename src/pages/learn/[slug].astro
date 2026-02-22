@@ -1,8 +1,7 @@
 ---
-export const prerender = true;
-
 import CourseLayout from '../../layouts/CourseLayout.astro';
 import { getCollection, render } from 'astro:content';
+import { getCourseBySlug } from '../../lib/constants';
 
 export async function getStaticPaths() {
   const lessons = await getCollection('course', ({ data }) => !data.draft);
@@ -15,24 +14,30 @@ export async function getStaticPaths() {
 const { lesson } = Astro.props;
 const { Content, headings } = await render(lesson);
 
-// Get all lessons sorted for navigation
-const allLessons = await getCollection('course', ({ data }) => !data.draft);
-const sorted = allLessons.sort(
-  (a, b) => (a.data.module * 100 + a.data.lesson) - (b.data.module * 100 + b.data.lesson)
-);
+const courseSlug = lesson.data.courseSlug;
+const courseData = getCourseBySlug(courseSlug);
 
-const currentIndex = sorted.findIndex((l) => l.id === lesson.id);
-const prevLesson = currentIndex > 0 ? sorted[currentIndex - 1] : null;
-const nextLesson = currentIndex < sorted.length - 1 ? sorted[currentIndex + 1] : null;
+// Filter lessons to only this course
+const allLessons = await getCollection('course', ({ data }) => !data.draft);
+const courseLessons = allLessons
+  .filter((l) => l.data.courseSlug === courseSlug)
+  .sort(
+    (a, b) => (a.data.module * 100 + a.data.lesson) - (b.data.module * 100 + b.data.lesson)
+  );
+
+const currentIndex = courseLessons.findIndex((l) => l.id === lesson.id);
+const prevLesson = currentIndex > 0 ? courseLessons[currentIndex - 1] : null;
+const nextLesson = currentIndex < courseLessons.length - 1 ? courseLessons[currentIndex + 1] : null;
 ---
 
 <CourseLayout
   lesson={lesson}
   headings={headings}
-  allLessons={sorted}
+  allLessons={courseLessons}
   prevLesson={prevLesson}
   nextLesson={nextLesson}
   currentIndex={currentIndex}
+  courseData={courseData}
 >
   <Content />
 </CourseLayout>

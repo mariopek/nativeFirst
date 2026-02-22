@@ -1,0 +1,419 @@
+---
+title: "Architecture for a Real Project"
+description: "Set up the Moodbit Xcode project with Swift 6 strict concurrency, define the MVVM + Repository architecture, and create the folder structure that will carry you through the entire build."
+courseSlug: "ship-native"
+module: 1
+moduleTitle: "Project Foundation"
+lesson: 1
+duration: "22 min read"
+difficulty: "intermediate"
+topics: ["Swift 6", "Xcode", "MVVM", "Repository Pattern", "Architecture", "Project Setup", "Concurrency", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+This is where we start building Moodbit — a real app, for real users, shipping to a real App Store. No toy examples. No "Hello World." We are laying the foundation that the rest of the course builds on, and a weak foundation means rework in every future lesson.
+
+In this lesson, we set up the Xcode project, lock in Swift 6 strict concurrency from day one, define the architecture, and create the folder structure. By the end, you will have a project that compiles, navigates, and is ready to accept features.
+
+## What You'll Learn
+
+- How to create an Xcode project configured for Swift 6 strict concurrency mode
+- The MVVM + Repository architecture and why it scales for production apps
+- A folder structure (`App/`, `Core/`, `Features/`, `Data/`, `Tests/`) that keeps a growing codebase navigable
+- How to build an enum-based `AppRouter` for type-safe navigation with `NavigationStack`
+
+## Why This Matters
+
+Every production iOS app that survives past v1.0 has a clear architecture. Without one, you end up with massive view files, untestable logic, and a codebase that fights you on every change. Swift 6's strict concurrency catches data races at compile time — adopting it now saves you from mysterious crashes in production. The 20 minutes you spend on architecture today will save you 20 hours of refactoring later.
+
+## Plan Phase: Defining What We Build
+
+Open Claude Code (or your AI tool of choice) in Plan mode. We want the AI to think through the architecture before it writes a single line. Here is the prompt — copy-paste it exactly:
+
+```
+I am starting a new iOS app called "Moodbit" — an AI-powered mood
+journal. Before writing any code, help me plan the project setup.
+
+Requirements:
+- Xcode 16+, iOS 17+, Swift 6 with strict concurrency enabled
+- Architecture: MVVM + Repository pattern
+- Navigation: enum-based Router with NavigationStack
+- Persistence: SwiftData (set up the ModelContainer, no models yet)
+- Logging: os.Logger everywhere, zero print() calls
+- Dependency injection via protocols (no singletons)
+
+Think through:
+1. What Xcode project settings do I need for Swift 6 strict
+   concurrency?
+2. What is the folder structure?
+3. What files do I need for the app entry point and router?
+4. How should dependency injection work at the app root?
+5. What protocols do I define now to keep things testable?
+
+Do not generate code yet. Give me the plan.
+```
+
+### What the AI Plan Should Contain
+
+A good plan from this prompt will include:
+
+1. **Build Settings** — `SWIFT_STRICT_CONCURRENCY = complete` and the Swift language version set to 6 in the Xcode build settings.
+2. **Folder structure** — something close to `App/`, `Core/`, `Features/`, `Data/`, `Tests/`, with clear separation of concerns.
+3. **Entry point** — `MoodbitApp.swift` with a `ModelContainer` configured and injected into the environment.
+4. **Router** — an `AppRouter` class (or struct) using an enum for routes, paired with `NavigationStack(path:)`.
+5. **Protocols** — at minimum, a `Repository` protocol pattern so the data layer can be swapped for mocks in tests.
+6. **DI strategy** — protocols defined in `Core/`, implementations in `Data/`, injected at the `App` level.
+
+If the plan is missing any of these, ask a follow-up. The plan is cheap. Rework is expensive.
+
+### Anti-Pattern: The Lazy Prompt
+
+Here is what NOT to send:
+
+```
+Set up an Xcode project for a mood tracking app
+```
+
+This prompt gives the AI almost nothing to work with. You will get Swift 5 defaults, no concurrency settings, `NavigationView` instead of `NavigationStack`, `print()` statements, a flat file structure, and an architecture that is "whatever the AI felt like today." Vague input produces vague output. Every time.
+
+## Execute Phase: Implementation
+
+Now that we have a plan, switch to Execute mode. Here is the implementation prompt:
+
+```
+Create the Moodbit project foundation. Generate the following
+files with full Swift 6 strict concurrency compliance:
+
+1. MoodbitApp.swift — @main entry point
+   - Configure a SwiftData ModelContainer (empty schema for now,
+     we will add models next lesson)
+   - Create and inject an AppRouter as an @State property
+   - Inject the router into the environment
+   - Use os.Logger for any error logging
+
+2. AppRouter.swift — navigation controller
+   - An @Observable class marked @MainActor
+   - A Route enum with cases: home, settings (more added later)
+   - A NavigationPath property
+   - Methods: navigate(to:), pop(), popToRoot()
+   - Use os.Logger, not print()
+
+3. Folder structure (create empty placeholder files where needed):
+   App/          → MoodbitApp.swift, AppRouter.swift
+   Core/         → (empty for now — protocols go here)
+   Features/     → (empty for now — feature modules go here)
+   Data/         → (empty for now — repositories go here)
+   Tests/        → (empty for now)
+
+Every type that touches UI must be @MainActor.
+Every Sendable boundary must be explicit.
+Zero warnings under strict concurrency.
+```
+
+### Analyzing the AI Output
+
+When the AI responds, here is what to look for:
+
+**MoodbitApp.swift:**
+
+- ✅ Uses `@main` and conforms to `App`
+- ✅ Creates `ModelContainer` in an `init()` with proper error handling
+- ✅ Uses `os.Logger` for the catch block, not `print()`
+- ✅ Injects the router via `.environment()`
+- ⚠️ If it uses `fatalError` in the `ModelContainer` catch — that is acceptable for the container (the app cannot function without its database), but watch for `fatalError` anywhere else
+- ❌ If it uses `@StateObject` — reject. We use `@State` with `@Observable` in modern SwiftUI
+- ❌ If it uses `NavigationView` — reject. `NavigationStack` only
+- ❌ If it imports `Combine` — reject. We use `@Observable`, not `ObservableObject`
+
+**AppRouter.swift:**
+
+- ✅ Marked `@MainActor` and `@Observable`
+- ✅ `Route` enum is `Hashable` (required for `NavigationPath`)
+- ✅ Uses `NavigationPath`, not a custom array
+- ⚠️ If `Route` does not conform to `Codable` — not critical now but useful for state restoration later. Note it for a future iteration
+- ❌ If it uses a singleton pattern (`static let shared`) — reject immediately
+- ❌ If it uses `@Published` — reject. `@Observable` handles this
+
+## Iteration
+
+After reviewing the output, send this follow-up to tighten things up:
+
+```
+Good start. Make these adjustments:
+
+1. Add an EnvironmentKey + Environment extension for AppRouter
+   so views can access it via @Environment(\.router)
+2. Add a `Sendable` conformance to Route
+3. Add a logger instance to AppRouter using
+   os.Logger(subsystem: "com.moodbit.app", category: "Router")
+4. In MoodbitApp, wrap the ModelContainer creation in a static
+   method `makeModelContainer()` to keep init() clean
+5. Make sure every public method has a brief doc comment
+
+Zero warnings. Swift 6 strict concurrency.
+```
+
+This is the iteration pattern: review, identify gaps, send targeted fixes. Never re-describe the whole thing — just tell the AI what to change.
+
+## Verify Phase
+
+Before moving to the next lesson, verify these things:
+
+**In Xcode:**
+1. Build the project with `Cmd+B` — zero errors, zero warnings
+2. Open Build Settings, search "Swift Concurrency" — confirm `Strict Concurrency Checking` is set to `Complete`
+3. Open Build Settings, search "Swift Language Version" — confirm it is set to `Swift 6`
+4. Run the app in the Simulator — it should launch without crashing (you will see an empty view, which is correct)
+
+**In the code:**
+1. Grep for `print(` — there should be zero matches. Only `os.Logger` calls
+2. Grep for `singleton`, `shared`, `static let shared` — zero matches
+3. Grep for `ObservableObject`, `@Published`, `@StateObject` — zero matches
+4. Confirm `AppRouter` is annotated with `@MainActor`
+5. Confirm `Route` conforms to `Hashable` and `Sendable`
+
+**Navigation test:**
+1. Temporarily add a button in your root view that calls `router.navigate(to: .settings)`
+2. Confirm the navigation stack pushes a new view
+3. Call `router.popToRoot()` — confirm you return to the root
+4. Remove the temporary test button
+
+## Final Code
+
+Here are the complete, compilable files for this lesson.
+
+### Folder Structure
+
+```
+Moodbit/
+├── App/
+│   ├── MoodbitApp.swift
+│   └── AppRouter.swift
+├── Core/
+│   └── (empty — protocols added in future lessons)
+├── Features/
+│   └── (empty — feature modules added in future lessons)
+├── Data/
+│   └── (empty — repositories added in future lessons)
+└── Tests/
+    └── (empty — tests added in Module 6)
+```
+
+### MoodbitApp.swift
+
+```swift
+import SwiftUI
+import SwiftData
+import os
+
+@main
+struct MoodbitApp: App {
+    private static let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "App"
+    )
+
+    @State private var router = AppRouter()
+    let modelContainer: ModelContainer
+
+    init() {
+        self.modelContainer = Self.makeModelContainer()
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            NavigationStack(path: $router.path) {
+                HomeView()
+                    .navigationDestination(for: AppRouter.Route.self) { route in
+                        router.destination(for: route)
+                    }
+            }
+            .environment(\.router, router)
+        }
+        .modelContainer(modelContainer)
+    }
+
+    /// Creates and configures the SwiftData model container.
+    private static func makeModelContainer() -> ModelContainer {
+        do {
+            let configuration = ModelConfiguration(isStoredInMemoryOnly: false)
+            let container = try ModelContainer(
+                for: Schema([]),
+                configurations: [configuration]
+            )
+            logger.info("ModelContainer created successfully.")
+            return container
+        } catch {
+            logger.fault(
+                "Failed to create ModelContainer: \(error.localizedDescription)"
+            )
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }
+}
+
+// MARK: - Placeholder views (replaced in future lessons)
+
+struct HomeView: View {
+    @Environment(\.router) private var router
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Moodbit")
+                .font(.largeTitle.bold())
+            Text("Your foundation is ready.")
+                .foregroundStyle(.secondary)
+        }
+        .navigationTitle("Home")
+    }
+}
+```
+
+### AppRouter.swift
+
+```swift
+import SwiftUI
+import os
+
+// MARK: - Router
+
+/// Manages app-wide navigation state using a type-safe Route enum.
+@MainActor
+@Observable
+final class AppRouter {
+    private let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "Router"
+    )
+
+    /// All navigable destinations in the app.
+    enum Route: Hashable, Sendable {
+        case home
+        case settings
+    }
+
+    /// The navigation path driving the NavigationStack.
+    var path = NavigationPath()
+
+    /// Pushes a new route onto the navigation stack.
+    func navigate(to route: Route) {
+        logger.debug("Navigating to \(String(describing: route))")
+        path.append(route)
+    }
+
+    /// Pops the top view off the navigation stack.
+    func pop() {
+        guard !path.isEmpty else { return }
+        logger.debug("Popping top route.")
+        path.removeLast()
+    }
+
+    /// Pops all views and returns to the root.
+    func popToRoot() {
+        logger.debug("Popping to root.")
+        path = NavigationPath()
+    }
+
+    /// Resolves a route to its destination view.
+    @ViewBuilder
+    func destination(for route: Route) -> some View {
+        switch route {
+        case .home:
+            HomeView()
+        case .settings:
+            SettingsPlaceholderView()
+        }
+    }
+}
+
+// MARK: - Environment Key
+
+private struct RouterKey: EnvironmentKey {
+    @MainActor static let defaultValue = AppRouter()
+}
+
+extension EnvironmentValues {
+    /// The shared app router, available via `@Environment(\.router)`.
+    var router: AppRouter {
+        get { self[RouterKey.self] }
+        set { self[RouterKey.self] = newValue }
+    }
+}
+
+// MARK: - Placeholder (removed in Module 2)
+
+struct SettingsPlaceholderView: View {
+    var body: some View {
+        Text("Settings — coming soon")
+            .navigationTitle("Settings")
+    }
+}
+```
+
+### Key Design Decisions
+
+**Why `@Observable` instead of `ObservableObject`?** The `@Observable` macro (iOS 17+) gives you granular property tracking without `@Published` wrappers. SwiftUI only re-renders views that read specific properties that changed, rather than any view that observes the object. Less boilerplate, better performance.
+
+**Why `@MainActor` on the router?** The router drives UI state (`NavigationPath`). Under Swift 6 strict concurrency, any type that mutates UI state must be isolated to the main actor. Without this annotation, you get compiler errors the moment you bind it to a `NavigationStack`.
+
+**Why `NavigationPath` instead of `[Route]`?** `NavigationPath` is Apple's type-erased container for heterogeneous navigation stacks. It integrates directly with `NavigationStack(path:)` and supports `Codable` state restoration. A plain array works for simple cases, but `NavigationPath` scales when you later have routes with associated values of different types.
+
+**Why an `EnvironmentKey`?** Passing the router through `@Environment(\.router)` means any view in the hierarchy can navigate without prop drilling. This is the standard SwiftUI pattern for shared dependencies.
+
+**Why protocols in `Core/` and implementations in `Data/`?** This is dependency inversion. Your features depend on abstractions (protocols), not concrete types. In tests, you swap in mock implementations. In production, you use real ones. The separation happens at the folder level so it is impossible to accidentally import a concrete type where you meant to use a protocol.
+
+## Checkpoint
+
+Before moving to Lesson 1.2, confirm every item:
+
+- [ ] Xcode project builds with zero errors and zero warnings
+- [ ] Swift Language Version is set to 6 in Build Settings
+- [ ] Strict Concurrency Checking is set to Complete
+- [ ] `MoodbitApp.swift` compiles with `ModelContainer` and router injection
+- [ ] `AppRouter.swift` compiles with `@MainActor`, `@Observable`, and `NavigationPath`
+- [ ] `@Environment(\.router)` resolves correctly in `HomeView`
+- [ ] App launches in the Simulator without crashing
+- [ ] No `print()` statements in the codebase — only `os.Logger`
+- [ ] No singletons (`static let shared`) anywhere
+- [ ] Folder structure matches: `App/`, `Core/`, `Features/`, `Data/`, `Tests/`
+
+## Challenge
+
+**Add a third route with associated data.**
+
+Extend `AppRouter.Route` with a new case:
+
+```swift
+case moodDetail(id: UUID)
+```
+
+Then:
+1. Update the `destination(for:)` method to return a placeholder view that displays the UUID
+2. Add a button in `HomeView` that navigates to `moodDetail(id: UUID())` on tap
+3. Verify it compiles under strict concurrency with zero warnings
+4. Verify `pop()` and `popToRoot()` still work correctly
+
+<details>
+<summary>Hint</summary>
+
+`UUID` already conforms to `Hashable`, `Sendable`, and `Codable`, so adding it as an associated value requires zero extra conformances. The `Route` enum keeps its `Hashable` and `Sendable` conformance automatically because all associated values satisfy those protocols.
+
+Your placeholder view just needs to accept a `UUID` parameter:
+
+```swift
+struct MoodDetailPlaceholder: View {
+    let moodID: UUID
+
+    var body: some View {
+        Text("Mood: \(moodID.uuidString)")
+            .navigationTitle("Detail")
+    }
+}
+```
+</details>
+
+---
+
+Next up: **Lesson 1.2 — Data Modeling with SwiftData**, where we define the `MoodEntry` model, set up relationships, and build the repository protocol that the entire app depends on.

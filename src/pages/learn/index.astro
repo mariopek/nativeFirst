@@ -3,29 +3,42 @@ export const prerender = true;
 
 import PageLayout from '../../layouts/PageLayout.astro';
 import { getCollection } from 'astro:content';
-import { SITE, COURSE } from '../../lib/constants';
+import { SITE, COURSE, PREMIUM_COURSE } from '../../lib/constants';
 
 const allLessons = await getCollection('course', ({ data }) => !data.draft);
-const publishedCount = allLessons.length;
-const publishedModules = [...new Set(allLessons.map((l) => l.data.module))].length;
+
+const freeLessons = allLessons.filter((l) => l.data.courseSlug === 'vibe-code-native');
+const premiumLessons = allLessons.filter((l) => l.data.courseSlug === 'ship-native');
 
 const courses = [
   {
     ...COURSE,
-    publishedLessons: publishedCount,
-    publishedModules,
+    publishedLessons: freeLessons.length,
+    publishedModules: [...new Set(freeLessons.map((l) => l.data.module))].length,
     href: `/learn/${COURSE.slug}`,
     badge: 'Free',
+    badgeClass: 'gradient-brand text-white',
     level: 'Beginner',
     duration: '~2h',
+    status: 'active' as const,
+  },
+  {
+    ...PREMIUM_COURSE,
+    publishedLessons: premiumLessons.length,
+    publishedModules: [...new Set(premiumLessons.map((l) => l.data.module))].length,
+    href: `/learn/${PREMIUM_COURSE.slug}`,
+    badge: 'Premium',
+    badgeClass: 'bg-gradient-to-r from-amber-500 to-orange-500 text-white',
+    level: 'Intermediate',
+    duration: '~6h',
     status: 'active' as const,
   },
 ];
 ---
 
 <PageLayout
-  title={`Learn — Free iOS Development Courses — ${SITE.name}`}
-  description="Free courses to learn iOS development with AI. Build real native apps using Swift, SwiftUI, and Claude Code."
+  title={`Learn — iOS Development Courses — ${SITE.name}`}
+  description="Courses to learn iOS development with AI. Build real native apps using Swift, SwiftUI, and Claude Code — from beginner to production."
 >
   <!-- Hero -->
   <section class="relative py-20 sm:py-28 overflow-hidden bg-white dark:bg-slate-950">
@@ -45,7 +58,7 @@ const courses = [
       </h1>
 
       <p class="text-lg sm:text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto">
-        Free, hands-on courses that teach you how to build production-quality iOS apps using AI-powered development workflows.
+        Hands-on courses that teach you how to build production-quality iOS apps using AI-powered development workflows.
       </p>
     </div>
   </section>
@@ -64,13 +77,13 @@ const courses = [
             class="group relative flex flex-col rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden hover:border-purple-300 dark:hover:border-purple-700 hover:shadow-xl hover:shadow-purple-500/5 transition-all"
           >
             {/* Gradient top bar */}
-            <div class="h-2 gradient-brand" />
+            <div class={`h-2 ${course.isPremium ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'gradient-brand'}`} />
 
             <div class="flex-1 p-6 sm:p-8">
               {/* Badges */}
               <div class="flex items-center gap-2 mb-4">
                 {course.badge && (
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold gradient-brand text-white">
+                  <span class={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${course.badgeClass}`}>
                     {course.badge}
                   </span>
                 )}
@@ -89,7 +102,7 @@ const courses = [
               <h3 class="font-display font-bold text-2xl text-slate-900 dark:text-white mb-1 group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">
                 {course.title}
               </h3>
-              <p class="text-sm font-medium text-purple-600 dark:text-purple-400 mb-3">
+              <p class={`text-sm font-medium mb-3 ${course.isPremium ? 'text-amber-600 dark:text-amber-400' : 'text-purple-600 dark:text-purple-400'}`}>
                 {course.subtitle}
               </p>
 
@@ -118,13 +131,18 @@ const courses = [
                   </svg>
                   {course.duration}
                 </div>
+                {course.isPremium && (
+                  <div class="flex items-center gap-1.5 font-semibold text-amber-600 dark:text-amber-400">
+                    $79
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Footer */}
             <div class="px-6 sm:px-8 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20 flex items-center justify-between">
-              <span class="text-sm font-medium text-purple-600 dark:text-purple-400 group-hover:gap-2 transition-all inline-flex items-center gap-1.5">
-                View Course
+              <span class={`text-sm font-medium group-hover:gap-2 transition-all inline-flex items-center gap-1.5 ${course.isPremium ? 'text-amber-600 dark:text-amber-400' : 'text-purple-600 dark:text-purple-400'}`}>
+                {course.isPremium ? 'View Course' : 'Start Learning'}
                 <svg class="w-4 h-4 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
                 </svg>
@@ -135,21 +153,6 @@ const courses = [
             </div>
           </a>
         ))}
-
-        {/* Coming soon placeholder */}
-        <div class="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-8 sm:p-12 text-center min-h-[300px]">
-          <div class="w-14 h-14 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
-            <svg class="w-7 h-7 text-slate-400 dark:text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-            </svg>
-          </div>
-          <p class="font-display font-semibold text-lg text-slate-500 dark:text-slate-400 mb-1">
-            More Courses Coming Soon
-          </p>
-          <p class="text-sm text-slate-400 dark:text-slate-500 max-w-xs">
-            We're working on new courses covering advanced SwiftUI, app architecture, and more.
-          </p>
-        </div>
       </div>
     </div>
   </section>
