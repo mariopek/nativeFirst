@@ -1,0 +1,619 @@
+---
+title: "Notifications & App Intents"
+description: "Schedule daily mood check-in reminders with local notifications and let users log moods hands-free through Siri Shortcuts powered by App Intents."
+courseSlug: "ship-native"
+module: 5
+moduleTitle: "System Frameworks"
+lesson: 3
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["Notifications", "App Intents", "Siri Shortcuts", "UNUserNotificationCenter", "Reminders", "Automation", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+A mood tracking app that relies on users remembering to open it is a mood tracking app that gets abandoned in two weeks. The data is only valuable if entries are consistent, and consistency requires a nudge. That nudge is a local notification — a gentle daily reminder that says "How are you feeling?" at whatever time the user chooses.
+
+And once you have notifications, the next question is obvious: can I log a mood without even opening the app? That is what App Intents and Siri Shortcuts give you. The user says "Hey Siri, log my mood as great" and the entry appears in the database. No app launch, no navigation, no tapping.
+
+These two features — notifications and App Intents — are different frameworks, but they solve the same problem: keeping users engaged with your app outside of the app itself.
+
+## What You'll Learn
+
+- Build a `NotificationManager` that schedules daily reminders at a user-chosen time using `UNUserNotificationCenter`
+- Request notification permission at the right moment — not at launch, but when the user explicitly enables reminders
+- Create a `LogMoodIntent` using the App Intents framework that lets users log moods through Siri and the Shortcuts app
+- Register your intents with an `AppShortcutsProvider` so they appear automatically in Spotlight and the Shortcuts gallery
+
+## Why This Matters
+
+Notification permission is a one-shot deal on iOS. If you ask at the wrong moment — like the first time the app launches, before the user understands why you need it — and they tap "Don't Allow," you cannot ask again. Ever. The system remembers. You are locked out of notifications for that user unless they manually go to Settings. This is why timing the permission request correctly is not a UX nicety; it is a business requirement.
+
+App Intents are the modern replacement for SiriKit's older Intents framework. They are simpler to implement, they do not require a separate extension, and they automatically integrate with Siri, Shortcuts, Spotlight, and the Action Button. If your app has a clear action users perform repeatedly — logging a mood, starting a timer, adding a task — an App Intent makes that action accessible from everywhere on the device.
+
+## Plan Phase: Defining What We Build
+
+We need two systems: a notification manager for daily reminders and an App Intent for Siri-driven mood logging. They share the same underlying data layer (the `MoodEntry` model and its SwiftData store) but are otherwise independent.
+
+Here is the planning prompt:
+
+```
+I'm adding two features to Moodbit, my SwiftUI mood tracking
+app. The app uses SwiftData with MoodEntry (id, mood 1-5,
+date, note) and the shared ModelContainer from App Groups.
+
+Feature 1 — Daily Reminder Notifications:
+- A NotificationManager (@Observable) that schedules a daily
+  local notification at a user-chosen time
+- Permission is requested ONLY when the user toggles on the
+  "Daily Reminder" switch in Settings — NOT at app launch
+- If permission was previously denied, show a message with
+  a button to open Settings
+- The notification should have a title "Moodbit" and body
+  "How are you feeling? Take a moment to log your mood."
+- User can change the reminder time, which cancels the old
+  notification and schedules a new one
+- Store the reminder time and enabled state in UserDefaults
+
+Feature 2 — Log Mood via Siri:
+- An AppIntent called LogMoodIntent that lets users say
+  "Log my mood as [level]" to Siri
+- The mood level is a parameter (1-5 or the labels: Awful,
+  Bad, Okay, Good, Great)
+- The intent creates a MoodEntry in the shared SwiftData store
+- An AppShortcutsProvider that registers the intent with
+  suggested phrases
+- A parameter summary that reads naturally in the Shortcuts app
+
+Technical:
+- Target iOS 17+, Swift 6
+- Use UNUserNotificationCenter for notifications
+- Use AppIntents framework (NOT the old SiriKit Intents)
+- Both features must work with the shared App Group container
+
+What is the implementation plan?
+```
+
+**What to look for in the plan.** The AI should separate notification logic from the view layer. It should propose storing the reminder time and enabled state in `UserDefaults` (not SwiftData — this is a user preference, not app data). For App Intents, it should mention conforming to `AppIntent`, using `@Parameter` for the mood level, and implementing `AppShortcutsProvider`. If the AI proposes creating an Intents Extension or using the old `INIntent` protocol, stop it — that is the deprecated approach.
+
+**Anti-pattern: requesting notification permission at app launch.** I cannot stress this enough. The worst thing you can do is call `UNUserNotificationCenter.requestAuthorization()` in your `App.init()` or in `ContentView.onAppear`. The user has no context for why you want permission. They will deny it reflexively. Request permission only when the user takes an explicit action that requires notifications — in our case, when they toggle on the "Daily Reminder" switch.
+
+## Execute Phase: Implementation
+
+```
+Generate the NotificationManager, the reminder settings view,
+the LogMoodIntent, and the AppShortcutsProvider. Specifics:
+
+NotificationManager:
+- @Observable class in Services/NotificationManager.swift
+- Properties: isAuthorized (Bool), isDenied (Bool),
+  reminderEnabled (Bool, persisted to UserDefaults),
+  reminderTime (Date, persisted to UserDefaults, default 9:00 AM)
+- Methods: checkAuthorization(), requestPermission() async,
+  scheduleReminder(), cancelReminder(), openSettings()
+- Notification identifier: "moodbit.daily.reminder"
+- Use UNCalendarNotificationTrigger with repeats: true
+- Add a custom notification category "MOOD_CHECKIN" with
+  actions for quick mood logging (Good, Okay, Bad)
+
+ReminderSettingsView:
+- A Form-based view in Views/ReminderSettingsView.swift
+- Toggle for enabling/disabling the daily reminder
+- DatePicker (hourAndMinute only) for choosing the time
+- Shows permission status
+- If denied, shows a warning with "Open Settings" button
+
+LogMoodIntent:
+- AppIntent in Intents/LogMoodIntent.swift
+- Title: "Log Mood"
+- Parameter: moodLevel (an AppEnum with cases awful, bad,
+  okay, good, great mapped to 1-5)
+- Creates a MoodEntry in the shared container and saves it
+- Returns a dialog confirming what was logged
+
+MoodShortcuts:
+- AppShortcutsProvider in Intents/MoodShortcuts.swift
+- Phrases: "Log my mood in Moodbit", "How am I feeling"
+- Uses the Moodbit app icon as systemImageName
+```
+
+Review the AI output for these specific issues:
+
+- **Permission request is inside `requestPermission()`, not in `init()`.** The method should be called only from user interaction, not automatically.
+- **`scheduleReminder()` cancels existing before scheduling new.** Without canceling first, you get duplicate notifications.
+- **UserDefaults persistence for reminder time.** The reminder preferences should survive app restarts. The AI should store both the enabled state and the time in UserDefaults.
+- **LogMoodIntent uses the shared ModelContainer.** It must use the same App Group container URL so entries appear in the main app.
+- **The AppEnum for mood levels has string representations.** Siri needs to match spoken words to enum cases. The `typeDisplayRepresentation` and case display names must be natural language, not code identifiers.
+- **`AppShortcutsProvider` has phrases.** Without phrases, the shortcut does not appear in Spotlight suggestions.
+
+## Iteration
+
+The first pass typically gets the functionality right but misses UX polish. Send this:
+
+```
+Two improvements needed:
+
+1. For notifications: When the user toggles the reminder ON
+   for the first time and permission hasn't been requested yet,
+   request permission first. If granted, schedule the reminder.
+   If denied, turn the toggle back off and show the denied
+   message. The toggle should feel responsive — use the
+   onChange(of:) modifier to trigger the flow.
+
+2. For the App Intent: Add an @Parameter for an optional note
+   string so users can say "Log my mood as great, feeling
+   energized." Also add an IntentDialog result that includes
+   the emoji for the logged mood, like "Logged 😄 Great."
+   Make sure the parameter summary reads as a complete
+   sentence: "Log mood as ${moodLevel} with note ${note}"
+```
+
+This iteration handles the critical permission flow for the toggle. Without it, the toggle can be ON while notifications are actually denied, which is confusing. The toggle state must always reflect the real authorization status.
+
+## Verify Phase
+
+These features need specific testing scenarios:
+
+**Notifications:**
+
+1. **First toggle ON** — Does the system permission dialog appear? If you tap "Allow," does the reminder schedule? Check in Settings > Notifications > Moodbit that the permission is granted.
+2. **Deny permission** — Reset notification permissions in the simulator (Settings > General > Transfer or Reset iPhone > Reset All Settings, or delete and reinstall the app). Toggle the reminder ON, then deny. Does the toggle flip back to OFF? Does the denied message with "Open Settings" appear?
+3. **Change the time** — With the reminder enabled, change the time from 9:00 AM to 8:00 PM. Check the scheduled notification was updated: call `UNUserNotificationCenter.current().getPendingNotificationRequests()` in a debug log and verify only one request exists with the new time.
+4. **Kill and relaunch the app** — Is the reminder still enabled? Is the time still correct? UserDefaults should persist these.
+5. **Receive the notification** — In the simulator, you can trigger a notification by scheduling it 10 seconds in the future for testing. Does it appear? Do the custom actions (Good, Okay, Bad) show when you long-press the notification?
+
+**App Intents:**
+
+1. **Shortcuts app** — Open the Shortcuts app. Search for "Moodbit." Does the "Log Mood" shortcut appear? Can you run it manually?
+2. **Siri** — Hold the side button and say "Log my mood in Moodbit." Does Siri recognize the phrase and prompt for a mood level?
+3. **Data integrity** — After logging via Siri, open the main app. Does the mood entry appear in the list with the correct date, level, and note?
+4. **Parameter validation** — Try logging with an invalid level. Does the intent handle it gracefully?
+
+## Final Code
+
+### NotificationManager
+
+```swift
+import UserNotifications
+import UIKit
+import os
+
+@Observable
+final class NotificationManager {
+    var isAuthorized = false
+    var isDenied = false
+
+    var reminderEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "reminderEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "reminderEnabled") }
+    }
+
+    var reminderTime: Date {
+        get {
+            let interval = UserDefaults.standard.double(forKey: "reminderTimeInterval")
+            if interval == 0 {
+                var components = DateComponents()
+                components.hour = 9
+                components.minute = 0
+                return Calendar.current.date(from: components) ?? .now
+            }
+            return Date(timeIntervalSince1970: interval)
+        }
+        set {
+            UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: "reminderTimeInterval")
+        }
+    }
+
+    private let center = UNUserNotificationCenter.current()
+    private let notificationID = "moodbit.daily.reminder"
+    private let categoryID = "MOOD_CHECKIN"
+    private let logger = Logger(subsystem: "com.moodbit", category: "NotificationManager")
+
+    init() {
+        registerCategory()
+    }
+
+    func checkAuthorization() async {
+        let settings = await center.notificationSettings()
+        isAuthorized = settings.authorizationStatus == .authorized
+        isDenied = settings.authorizationStatus == .denied
+    }
+
+    func requestPermission() async -> Bool {
+        do {
+            let granted = try await center.requestAuthorization(
+                options: [.alert, .badge, .sound]
+            )
+            isAuthorized = granted
+            isDenied = !granted
+            logger.debug("Notification permission granted: \(granted)")
+            return granted
+        } catch {
+            logger.error("Permission request failed: \(error.localizedDescription)")
+            isDenied = true
+            return false
+        }
+    }
+
+    func scheduleReminder() {
+        cancelReminder()
+
+        let content = UNMutableNotificationContent()
+        content.title = "Moodbit"
+        content.body = "How are you feeling? Take a moment to log your mood."
+        content.sound = .default
+        content.categoryIdentifier = categoryID
+
+        let components = Calendar.current.dateComponents(
+            [.hour, .minute],
+            from: reminderTime
+        )
+        let trigger = UNCalendarNotificationTrigger(
+            dateMatching: components,
+            repeats: true
+        )
+
+        let request = UNNotificationRequest(
+            identifier: notificationID,
+            content: content,
+            trigger: trigger
+        )
+
+        center.add(request) { [weak self] error in
+            if let error {
+                self?.logger.error("Failed to schedule reminder: \(error.localizedDescription)")
+            } else {
+                self?.logger.debug("Reminder scheduled at \(components.hour ?? 0):\(components.minute ?? 0)")
+            }
+        }
+    }
+
+    func cancelReminder() {
+        center.removePendingNotificationRequests(withIdentifiers: [notificationID])
+        logger.debug("Reminder cancelled")
+    }
+
+    func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    private func registerCategory() {
+        let goodAction = UNNotificationAction(
+            identifier: "MOOD_GOOD",
+            title: "Good 🙂",
+            options: []
+        )
+        let okayAction = UNNotificationAction(
+            identifier: "MOOD_OKAY",
+            title: "Okay 😐",
+            options: []
+        )
+        let badAction = UNNotificationAction(
+            identifier: "MOOD_BAD",
+            title: "Bad 😕",
+            options: []
+        )
+
+        let category = UNNotificationCategory(
+            identifier: categoryID,
+            actions: [goodAction, okayAction, badAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([category])
+    }
+}
+```
+
+### ReminderSettingsView
+
+```swift
+import SwiftUI
+
+struct ReminderSettingsView: View {
+    @State private var notificationManager = NotificationManager()
+    @State private var localReminderEnabled = false
+    @State private var localReminderTime = Date.now
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Daily Reminder", isOn: $localReminderEnabled)
+
+                if localReminderEnabled && notificationManager.isAuthorized {
+                    DatePicker(
+                        "Reminder Time",
+                        selection: $localReminderTime,
+                        displayedComponents: .hourAndMinute
+                    )
+                }
+            } footer: {
+                Text("Get a daily nudge to log your mood at the time you choose.")
+            }
+
+            if notificationManager.isDenied {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            "Notifications are disabled",
+                            systemImage: "bell.slash"
+                        )
+                        .foregroundStyle(.red)
+
+                        Text("You previously denied notification permission. To enable reminders, allow notifications in Settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button("Open Settings") {
+                            notificationManager.openSettings()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            if notificationManager.isAuthorized && localReminderEnabled {
+                Section {
+                    Label(
+                        "Reminder set for \(localReminderTime, format: .dateTime.hour().minute())",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .foregroundStyle(.green)
+                }
+            }
+        }
+        .navigationTitle("Reminders")
+        .task {
+            await notificationManager.checkAuthorization()
+            localReminderEnabled = notificationManager.reminderEnabled
+            localReminderTime = notificationManager.reminderTime
+        }
+        .onChange(of: localReminderEnabled) { _, newValue in
+            handleReminderToggle(newValue)
+        }
+        .onChange(of: localReminderTime) { _, newTime in
+            if localReminderEnabled && notificationManager.isAuthorized {
+                notificationManager.reminderTime = newTime
+                notificationManager.scheduleReminder()
+            }
+        }
+    }
+
+    private func handleReminderToggle(_ enabled: Bool) {
+        if enabled {
+            Task {
+                await notificationManager.checkAuthorization()
+
+                if notificationManager.isDenied {
+                    localReminderEnabled = false
+                    return
+                }
+
+                if !notificationManager.isAuthorized {
+                    let granted = await notificationManager.requestPermission()
+                    if !granted {
+                        localReminderEnabled = false
+                        return
+                    }
+                }
+
+                notificationManager.reminderEnabled = true
+                notificationManager.reminderTime = localReminderTime
+                notificationManager.scheduleReminder()
+            }
+        } else {
+            notificationManager.reminderEnabled = false
+            notificationManager.cancelReminder()
+        }
+    }
+}
+
+#Preview {
+    NavigationStack {
+        ReminderSettingsView()
+    }
+}
+```
+
+### LogMoodIntent
+
+```swift
+import AppIntents
+import SwiftData
+
+enum MoodLevel: String, AppEnum {
+    case awful
+    case bad
+    case okay
+    case good
+    case great
+
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Mood Level")
+
+    static var caseDisplayRepresentations: [MoodLevel: DisplayRepresentation] = [
+        .awful: "Awful",
+        .bad: "Bad",
+        .okay: "Okay",
+        .good: "Good",
+        .great: "Great"
+    ]
+
+    var numericValue: Int {
+        switch self {
+        case .awful: 1
+        case .bad: 2
+        case .okay: 3
+        case .good: 4
+        case .great: 5
+        }
+    }
+
+    var emoji: String {
+        switch self {
+        case .awful: "😣"
+        case .bad: "😕"
+        case .okay: "😐"
+        case .good: "🙂"
+        case .great: "😄"
+        }
+    }
+}
+
+struct LogMoodIntent: AppIntent {
+    static var title: LocalizedStringResource = "Log Mood"
+    static var description = IntentDescription("Log your current mood in Moodbit.")
+
+    @Parameter(title: "Mood Level")
+    var moodLevel: MoodLevel
+
+    @Parameter(title: "Note", default: nil)
+    var note: String?
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Log mood as \(\.$moodLevel)") {
+            \.$note
+        }
+    }
+
+    static var openAppWhenRun: Bool = false
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let container = try SharedModelContainer.create()
+        let context = ModelContext(container)
+
+        let entry = MoodEntry(
+            mood: moodLevel.numericValue,
+            date: .now,
+            note: note ?? ""
+        )
+
+        context.insert(entry)
+        try context.save()
+
+        let dialog = IntentDialog(
+            "Logged \(moodLevel.emoji) \(moodLevel.rawValue.capitalized)"
+        )
+
+        return .result(dialog: dialog)
+    }
+}
+```
+
+### MoodShortcuts (AppShortcutsProvider)
+
+```swift
+import AppIntents
+
+struct MoodShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: LogMoodIntent(),
+            phrases: [
+                "Log my mood in \(.applicationName)",
+                "Log mood in \(.applicationName)",
+                "How am I feeling in \(.applicationName)",
+                "Record my mood with \(.applicationName)"
+            ],
+            shortTitle: "Log Mood",
+            systemImageName: "face.smiling"
+        )
+    }
+}
+```
+
+### Handling Notification Actions in the App Delegate
+
+To handle the quick-action buttons on the notification (Good, Okay, Bad), add a `UNUserNotificationCenterDelegate`:
+
+```swift
+import UserNotifications
+import SwiftData
+
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let actionID = response.actionIdentifier
+
+        let mood: Int? = switch actionID {
+        case "MOOD_GOOD": 4
+        case "MOOD_OKAY": 3
+        case "MOOD_BAD": 2
+        default: nil
+        }
+
+        if let mood {
+            Task {
+                guard let container = try? SharedModelContainer.create() else { return }
+                let context = ModelContext(container)
+                let entry = MoodEntry(mood: mood, date: .now, note: "")
+                context.insert(entry)
+                try? context.save()
+            }
+        }
+
+        completionHandler()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+```
+
+Register this delegate early in your app lifecycle:
+
+```swift
+@main
+struct MoodbitApp: App {
+    private let notificationDelegate = NotificationDelegate()
+
+    init() {
+        UNUserNotificationCenter.current().delegate = notificationDelegate
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+        .modelContainer(try! SharedModelContainer.create())
+    }
+}
+```
+
+## Checkpoint
+
+Verify each of these:
+
+- [ ] Notification permission is requested only when the user toggles the reminder switch ON — never at launch, never automatically
+- [ ] If the user denies permission, the toggle flips back to OFF and a "Notifications are disabled" message appears with an "Open Settings" button
+- [ ] Changing the reminder time cancels the old notification and schedules a new one — there is only ever one pending notification with ID `moodbit.daily.reminder`
+- [ ] The reminder time and enabled state persist in `UserDefaults` across app restarts
+- [ ] The notification shows custom actions (Good, Okay, Bad) when long-pressed
+- [ ] Tapping a notification action logs a mood entry without opening the app
+- [ ] `LogMoodIntent` appears in the Shortcuts app under Moodbit
+- [ ] Running the shortcut creates a `MoodEntry` in the shared SwiftData store that the main app can see
+- [ ] The intent's result dialog shows the emoji and mood label: "Logged [emoji] [Level]"
+- [ ] `AppShortcutsProvider` phrases work with Siri — "Log my mood in Moodbit" triggers the intent
+
+## Challenge
+
+**Add configurable notification actions with mood-based deep linking.**
+
+Extend the notification system so that tapping the notification itself (not just the quick actions) opens the app directly to the "Add Mood" screen with today's date pre-selected. Use a URL scheme (`moodbit://log`) and handle it with `.onOpenURL` in your root view to navigate programmatically.
+
+Then, make the quick-action buttons configurable: let users choose which three mood levels appear as notification actions in the settings screen. Store the selection in `UserDefaults` and rebuild the `UNNotificationCategory` whenever the selection changes.
+
+**Hint:** For deep linking, register a URL type in your Info.plist with the scheme `moodbit`. In your root view, add `.onOpenURL { url in ... }` and parse the URL path. If the path is `/log`, set a `@State` property that presents the mood logging sheet. For configurable actions, create a new `UNNotificationCategory` with the user's chosen mood levels and call `center.setNotificationCategories([updatedCategory])` — the system replaces the previous category registration.
