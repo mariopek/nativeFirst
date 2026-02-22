@@ -77,6 +77,7 @@ export const APPS = {
 };
 
 export const COURSE = {
+  slug: 'vibe-code-native',
   title: 'Vibe Code Native',
   subtitle: 'Build Real iOS Apps with AI',
   description: 'A free, comprehensive course teaching iOS developers how to leverage AI tools — especially Claude Code — to build production-quality native apps faster.',
