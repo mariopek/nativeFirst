@@ -1,0 +1,1211 @@
+---
+title: "Unit Testing with AI"
+description: "Build a comprehensive test suite for Moodbit using the Swift Testing framework and AI-generated tests, covering mock repositories, the makeSUT pattern, and async ViewModel testing that catches real bugs."
+courseSlug: "ship-native"
+module: 6
+moduleTitle: "Quality & Testing"
+lesson: 1
+duration: "28 min read"
+difficulty: "intermediate"
+topics: ["Testing", "XCTest", "AI Testing", "Mock Objects", "ViewModels", "Swift Testing", "Protocols", "Async", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+You have a working app. The mood entry flow saves data, the timeline displays it, the AI generates insights. Everything works when you tap through it manually. But you have no idea if it still works after the next change you make.
+
+That is the problem unit tests solve. Not in some abstract "best practices" sense — in the concrete sense that without tests, every code change is a gamble. You refactor the ViewModel, and you have to manually tap through every screen to check nothing broke. You add a new feature, and you cannot be sure the old features still work. Tests remove the guessing.
+
+## What You'll Learn
+
+1. **Build a `MockMoodRepository`** with call tracking that verifies your ViewModels interact with the data layer correctly, without touching SwiftData.
+2. **Use the `makeSUT` pattern** to create clean, isolated test setups that prevent test pollution and make failures easy to diagnose.
+3. **Write async ViewModel tests** using the Swift Testing framework (`@Test`, `#expect`) that verify loading, saving, error handling, and state transitions.
+4. **Prompt AI to generate tests**, then review and fix the output — because AI-generated tests compile but often test the wrong things.
+
+## Why This Matters
+
+Most indie developers skip tests because "the app is small enough to test by hand." That works until it does not. The first time you refactor the repository layer and accidentally break the mood entry save — but do not notice for three days because you were working on the chart screen — you will wish you had a test that ran in two seconds and caught the regression immediately.
+
+Unit tests in a SwiftUI app are not about 100% coverage. They are about testing the logic that matters: ViewModels, services, and data transformations. The View layer is tested by UI tests (next lesson) and your own eyes. The ViewModel layer is tested here, thoroughly and fast.
+
+## Plan Phase: Designing the Test Strategy
+
+Before writing a single test, we need a strategy. What do we test? What do we skip? Send this to Claude Code:
+
+```
+I need to build a unit test suite for Moodbit. Before writing
+any code, help me plan a test strategy.
+
+The app has:
+- MoodTimelineViewModel: loads entries from MoodRepository,
+  deletes entries, handles errors, manages loading state
+- MoodEntryViewModel: multi-step form state, validation,
+  saves via MoodRepository
+- MoodRepository protocol with SwiftDataMoodRepository
+  (production) and MockMoodRepository (tests)
+- AIService protocol for generating insights
+
+Plan:
+1. What should we test? What should we NOT test?
+2. What mocks do we need?
+3. How should test files be organized?
+4. What patterns should we follow (makeSUT, Given-When-Then)?
+
+Do NOT write code yet. Think through the design.
+```
+
+### AI Plan Review
+
+The AI should return a clear strategy. Here is what to look for:
+
+- ✅ **Test ViewModels, not Views.** ViewModels contain the business logic. Views are declarative UI descriptions. Testing a View means testing SwiftUI itself, which Apple already does. Test the ViewModel that drives the View.
+- ✅ **Test behavior, not implementation.** A good test says "when I call `loadEntries()`, the entries array is populated." A bad test says "when I call `loadEntries()`, `fetchAll()` is called on the repository." The first survives refactoring. The second breaks every time you change the internal wiring.
+- ✅ **Mock at the protocol boundary.** We already have `MoodRepository` as a protocol. The mock implements that protocol with in-memory storage and call tracking. No SwiftData, no disk, no flakiness.
+- ⚠️ **Watch for over-mocking.** If the AI suggests mocking `Date`, `UUID`, and every system type, push back. Mock the things you own (repositories, services). Use real value types for everything else.
+- ❌ **Reject snapshot testing for unit tests.** Snapshot testing is a UI concern. If the AI mixes it into the unit test plan, separate it. We cover snapshot testing in the UI testing lesson.
+
+### Anti-Pattern: Testing Implementation Details
+
+Here is a test that looks thorough but is actually harmful:
+
+```swift
+// BAD — tests implementation details
+@Test func loadEntries_callsRepositoryFetchAll() async {
+    let mock = MockMoodRepository()
+    let sut = MoodTimelineViewModel(repository: mock)
+
+    await sut.loadEntries()
+
+    #expect(mock.fetchAllCallCount == 1)  // Brittle!
+}
+```
+
+This test breaks the moment you add caching, debouncing, or batch loading — even though the behavior (entries appear) is unchanged. It tests how the ViewModel works, not what it does. A better test checks the observable outcome:
+
+```swift
+// GOOD — tests observable behavior
+@Test func loadEntries_populatesEntriesArray() async {
+    let mock = MockMoodRepository()
+    mock.entries = [MoodEntry.sample()]
+    let sut = MoodTimelineViewModel(repository: mock)
+
+    await sut.loadEntries()
+
+    #expect(sut.entries.count == 1)
+}
+```
+
+Same scenario, but this test survives any internal refactoring. It only breaks when the behavior actually changes.
+
+## Execute Phase: Building the Test Infrastructure
+
+Now we build. Send this prompt:
+
+```
+Create the test infrastructure for Moodbit. Generate these files:
+
+1. MoodbitTests/Mocks/MockMoodRepository.swift
+   - Implements MoodRepository protocol
+   - Stores entries in an in-memory array
+   - Tracks which methods were called and how many times
+   - Has a throwingError property — when set, all methods
+     throw that error instead of executing normally
+   - Has a delay property — when set, methods wait that
+     duration before returning (for testing loading states)
+
+2. MoodbitTests/Helpers/MoodEntry+Sample.swift
+   - Extension on MoodEntry with static factory methods:
+     .sample() returns a single entry with sensible defaults
+     .samples(count:) returns an array of entries
+
+3. MoodbitTests/MoodRepositoryTests.swift
+   - Tests for the MockMoodRepository itself — verify it
+     stores, retrieves, updates, and deletes correctly
+   - Use Swift Testing framework: @Test, #expect, @Suite
+
+4. MoodbitTests/TimelineViewModelTests.swift
+   - Tests for MoodTimelineViewModel
+   - Use the makeSUT() pattern for setup
+   - Test: loadEntries populates array, loadEntries sets
+     loading state, loadEntries handles errors, deleteEntry
+     removes from array, deleteEntry handles errors
+
+Use Swift Testing framework (@Test, #expect), NOT XCTest
+(no XCTAssertEqual). Swift 6, @MainActor where needed.
+```
+
+### Code Review
+
+Here is what Claude Code should produce. Let me walk through each file with the review markers.
+
+**MockMoodRepository.swift:**
+
+```swift
+import Foundation
+@testable import Moodbit
+
+final class MockMoodRepository: MoodRepository, @unchecked Sendable {
+    // MARK: - Storage
+
+    var entries: [MoodEntry] = []
+
+    // MARK: - Configuration
+
+    var throwingError: AppError?
+    var artificialDelay: Duration?
+
+    // MARK: - Call Tracking
+
+    private(set) var fetchAllCallCount = 0
+    private(set) var fetchByIDCallCount = 0
+    private(set) var saveCallCount = 0
+    private(set) var updateCallCount = 0
+    private(set) var deleteCallCount = 0
+
+    private(set) var lastSavedEntry: MoodEntry?
+    private(set) var lastDeletedEntry: MoodEntry?
+
+    // MARK: - MoodRepository
+
+    func fetchAll() async throws -> [MoodEntry] {
+        fetchAllCallCount += 1
+        if let delay = artificialDelay {
+            try await Task.sleep(for: delay)
+        }
+        if let error = throwingError { throw error }
+        return entries.sorted { $0.date > $1.date }
+    }
+
+    func fetch(by id: UUID) async throws -> MoodEntry? {
+        fetchByIDCallCount += 1
+        if let error = throwingError { throw error }
+        return entries.first { $0.id == id }
+    }
+
+    func save(_ entry: MoodEntry) async throws {
+        saveCallCount += 1
+        if let error = throwingError { throw error }
+        lastSavedEntry = entry
+        entries.append(entry)
+    }
+
+    func update(_ entry: MoodEntry) async throws {
+        updateCallCount += 1
+        if let error = throwingError { throw error }
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else {
+            return
+        }
+        entries[index] = entry
+    }
+
+    func delete(_ entry: MoodEntry) async throws {
+        deleteCallCount += 1
+        if let error = throwingError { throw error }
+        lastDeletedEntry = entry
+        entries.removeAll { $0.id == entry.id }
+    }
+
+    // MARK: - Helpers
+
+    func reset() {
+        entries = []
+        throwingError = nil
+        artificialDelay = nil
+        fetchAllCallCount = 0
+        fetchByIDCallCount = 0
+        saveCallCount = 0
+        updateCallCount = 0
+        deleteCallCount = 0
+        lastSavedEntry = nil
+        lastDeletedEntry = nil
+    }
+}
+```
+
+Review checklist:
+
+- ✅ **`@unchecked Sendable`** — the mock is only used in single-threaded test contexts. Adding full synchronization would add complexity without value.
+- ✅ **`throwingError` property** — set this before calling a method to simulate failure. When `nil`, methods behave normally. This is far cleaner than subclassing or creating separate "failing" mock types.
+- ✅ **`artificialDelay`** — uses `Duration` (not `TimeInterval`) for consistency with Swift concurrency's `Task.sleep(for:)`. This lets us test loading states.
+- ✅ **Call tracking is `private(set)`** — tests can read the counts but cannot accidentally mutate them.
+- ✅ **`lastSavedEntry` and `lastDeletedEntry`** — lets tests verify which entry was passed to save/delete without asserting on call counts.
+- ⚠️ **Watch for the AI using `XCTest` assertions inside the mock.** Mocks should be inert data containers. Assertions belong in the test, not the mock.
+
+**MoodEntry+Sample.swift:**
+
+```swift
+import Foundation
+@testable import Moodbit
+
+extension MoodEntry {
+    static func sample(
+        id: UUID = UUID(),
+        mood: MoodLevel = .good,
+        note: String = "Test mood entry",
+        activities: [String] = ["Work", "Exercise"],
+        date: Date = .now,
+        createdAt: Date = .now
+    ) -> MoodEntry {
+        MoodEntry(
+            id: id,
+            mood: mood,
+            note: note,
+            activities: activities,
+            date: date,
+            createdAt: createdAt
+        )
+    }
+
+    static func samples(count: Int) -> [MoodEntry] {
+        let calendar = Calendar.current
+        let moods: [MoodLevel] = [.great, .good, .okay, .bad, .awful]
+
+        return (0..<count).map { index in
+            MoodEntry.sample(
+                mood: moods[index % moods.count],
+                note: "Sample entry \(index + 1)",
+                activities: ["Activity \(index + 1)"],
+                date: calendar.date(
+                    byAdding: .day,
+                    value: -index,
+                    to: .now
+                ) ?? .now
+            )
+        }
+    }
+}
+```
+
+- ✅ **Default parameters on `sample()`** — you can call `.sample()` for a generic entry or `.sample(mood: .awful, note: "bad day")` when specific values matter for the test.
+- ✅ **`samples(count:)` spreads dates across days** — entries are not all timestamped at the same second, which matters for sort-order tests.
+- ✅ **Cycles through mood levels** — gives variety in test data without randomness.
+
+**MoodRepositoryTests.swift — testing the mock itself:**
+
+```swift
+import Testing
+@testable import Moodbit
+
+@Suite("MockMoodRepository")
+struct MoodRepositoryTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> MockMoodRepository {
+        MockMoodRepository()
+    }
+
+    // MARK: - Fetch
+
+    @Test("fetchAll returns entries sorted by date descending")
+    func fetchAllReturnsSorted() async throws {
+        let sut = makeSUT()
+        let older = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: -86400)
+        )
+        let newer = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: 0)
+        )
+        sut.entries = [older, newer]
+
+        let result = try await sut.fetchAll()
+
+        #expect(result.first?.id == newer.id)
+        #expect(result.last?.id == older.id)
+    }
+
+    @Test("fetch by ID returns matching entry")
+    func fetchByIDReturnsMatch() async throws {
+        let sut = makeSUT()
+        let target = MoodEntry.sample()
+        sut.entries = [MoodEntry.sample(), target, MoodEntry.sample()]
+
+        let result = try await sut.fetch(by: target.id)
+
+        #expect(result?.id == target.id)
+    }
+
+    @Test("fetch by ID returns nil when not found")
+    func fetchByIDReturnsNilWhenMissing() async throws {
+        let sut = makeSUT()
+        sut.entries = [MoodEntry.sample()]
+
+        let result = try await sut.fetch(by: UUID())
+
+        #expect(result == nil)
+    }
+
+    // MARK: - Save
+
+    @Test("save appends entry to storage")
+    func saveAppendsEntry() async throws {
+        let sut = makeSUT()
+        let entry = MoodEntry.sample()
+
+        try await sut.save(entry)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.id == entry.id)
+        #expect(sut.saveCallCount == 1)
+        #expect(sut.lastSavedEntry?.id == entry.id)
+    }
+
+    // MARK: - Update
+
+    @Test("update replaces entry with matching ID")
+    func updateReplacesEntry() async throws {
+        let sut = makeSUT()
+        let original = MoodEntry.sample(note: "Original")
+        sut.entries = [original]
+
+        let updated = MoodEntry.sample(
+            id: original.id,
+            note: "Updated"
+        )
+        try await sut.update(updated)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.note == "Updated")
+    }
+
+    // MARK: - Delete
+
+    @Test("delete removes entry from storage")
+    func deleteRemovesEntry() async throws {
+        let sut = makeSUT()
+        let entry = MoodEntry.sample()
+        sut.entries = [entry]
+
+        try await sut.delete(entry)
+
+        #expect(sut.entries.isEmpty)
+        #expect(sut.deleteCallCount == 1)
+        #expect(sut.lastDeletedEntry?.id == entry.id)
+    }
+
+    // MARK: - Error Simulation
+
+    @Test("throwingError causes methods to throw")
+    func throwingErrorCausesThrow() async {
+        let sut = makeSUT()
+        sut.throwingError = .persistence(.saveFailed(underlying: "Test error"))
+
+        await #expect(throws: AppError.self) {
+            try await sut.fetchAll()
+        }
+    }
+}
+```
+
+Review checklist:
+
+- ✅ **`@Suite` with descriptive name** — groups related tests in the test navigator.
+- ✅ **`makeSUT()` pattern** — every test creates a fresh System Under Test. No shared state between tests. No `setUp()` / `tearDown()` lifecycle methods that hide dependencies.
+- ✅ **Each test has one clear assertion target** — "fetchAll returns sorted" only checks sort order. "save appends entry" only checks that the entry was stored. If a test fails, the name tells you exactly what broke.
+- ✅ **`#expect(throws:)` for error paths** — Swift Testing's built-in way to verify that a function throws the expected error type.
+- ⚠️ **The AI may generate redundant tests.** If it tests "fetchAll returns empty array when no entries" — that is testing Swift's array literal, not your code. Remove trivially obvious tests. Keep tests that verify behavior you could actually break during a refactor.
+
+## Iteration: ViewModel Tests
+
+The repository tests verify the infrastructure. Now we test the actual business logic. This is where the real value is.
+
+```
+Now write TimelineViewModelTests.swift using the makeSUT pattern.
+
+MoodTimelineViewModel has:
+- entries: [MoodEntry] (populated by loadEntries)
+- isLoading: Bool
+- errorMessage: String?
+- loadEntries() async
+- addEntry(_ entry: MoodEntry) async
+- deleteEntry(_ entry: MoodEntry) async
+
+It takes a MoodRepository in its init.
+
+Write tests for:
+1. loadEntries populates the entries array
+2. loadEntries sets isLoading to true during load
+3. loadEntries sets errorMessage on failure
+4. loadEntries clears previous error on success
+5. addEntry inserts entry at the beginning
+6. addEntry sets errorMessage on failure
+7. deleteEntry removes the entry from the array
+8. deleteEntry sets errorMessage on failure
+9. entries are sorted by date descending after load
+
+Use @Suite, @Test, #expect. Use makeSUT() that returns
+(sut: MoodTimelineViewModel, repository: MockMoodRepository).
+All tests are async. Use @MainActor on the suite.
+```
+
+### Code Review
+
+```swift
+import Testing
+@testable import Moodbit
+
+@Suite("MoodTimelineViewModel")
+@MainActor
+struct TimelineViewModelTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> (
+        sut: MoodTimelineViewModel,
+        repository: MockMoodRepository
+    ) {
+        let repository = MockMoodRepository()
+        let sut = MoodTimelineViewModel(repository: repository)
+        return (sut, repository)
+    }
+
+    // MARK: - Load Entries
+
+    @Test("loadEntries populates entries from repository")
+    func loadEntriesPopulatesArray() async {
+        let (sut, repository) = makeSUT()
+        repository.entries = MoodEntry.samples(count: 3)
+
+        await sut.loadEntries()
+
+        #expect(sut.entries.count == 3)
+    }
+
+    @Test("loadEntries sets isLoading during fetch")
+    func loadEntriesSetsLoadingState() async {
+        let (sut, repository) = makeSUT()
+        repository.artificialDelay = .milliseconds(50)
+        repository.entries = [MoodEntry.sample()]
+
+        let loadTask = Task {
+            await sut.loadEntries()
+        }
+
+        // Give the task a moment to start
+        try? await Task.sleep(for: .milliseconds(10))
+        #expect(sut.isLoading == true)
+
+        await loadTask.value
+        #expect(sut.isLoading == false)
+    }
+
+    @Test("loadEntries sets errorMessage on failure")
+    func loadEntriesSetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        repository.throwingError = .persistence(
+            .fetchFailed(underlying: "disk error")
+        )
+
+        await sut.loadEntries()
+
+        #expect(sut.errorMessage != nil)
+        #expect(sut.entries.isEmpty)
+    }
+
+    @Test("loadEntries clears previous error on success")
+    func loadEntriesClearsPreviousError() async {
+        let (sut, repository) = makeSUT()
+
+        // First call fails
+        repository.throwingError = .persistence(
+            .fetchFailed(underlying: "disk error")
+        )
+        await sut.loadEntries()
+        #expect(sut.errorMessage != nil)
+
+        // Second call succeeds
+        repository.throwingError = nil
+        repository.entries = [MoodEntry.sample()]
+        await sut.loadEntries()
+
+        #expect(sut.errorMessage == nil)
+        #expect(sut.entries.count == 1)
+    }
+
+    @Test("loadEntries returns entries sorted by date descending")
+    func loadEntriesReturnsSorted() async {
+        let (sut, repository) = makeSUT()
+        let oldEntry = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: -86400)
+        )
+        let newEntry = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: 0)
+        )
+        repository.entries = [oldEntry, newEntry]
+
+        await sut.loadEntries()
+
+        #expect(sut.entries.first?.id == newEntry.id)
+        #expect(sut.entries.last?.id == oldEntry.id)
+    }
+
+    // MARK: - Add Entry
+
+    @Test("addEntry inserts entry at the beginning of the array")
+    func addEntryInsertsAtBeginning() async {
+        let (sut, repository) = makeSUT()
+        let existing = MoodEntry.sample(
+            note: "Existing",
+            date: Date(timeIntervalSinceNow: -3600)
+        )
+        repository.entries = [existing]
+        await sut.loadEntries()
+
+        let newEntry = MoodEntry.sample(
+            note: "New",
+            date: .now
+        )
+        await sut.addEntry(newEntry)
+
+        #expect(sut.entries.first?.note == "New")
+        #expect(sut.entries.count == 2)
+    }
+
+    @Test("addEntry sets errorMessage on failure")
+    func addEntrySetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "disk full")
+        )
+
+        let entry = MoodEntry.sample()
+        await sut.addEntry(entry)
+
+        #expect(sut.errorMessage != nil)
+    }
+
+    // MARK: - Delete Entry
+
+    @Test("deleteEntry removes entry from the array")
+    func deleteEntryRemovesFromArray() async {
+        let (sut, repository) = makeSUT()
+        let entry = MoodEntry.sample()
+        repository.entries = [entry]
+        await sut.loadEntries()
+        #expect(sut.entries.count == 1)
+
+        await sut.deleteEntry(entry)
+
+        #expect(sut.entries.isEmpty)
+    }
+
+    @Test("deleteEntry sets errorMessage on failure")
+    func deleteEntrySetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        let entry = MoodEntry.sample()
+        repository.entries = [entry]
+        await sut.loadEntries()
+
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "delete failed")
+        )
+        await sut.deleteEntry(entry)
+
+        #expect(sut.errorMessage != nil)
+        // Entry should still be in the array since delete failed
+        #expect(sut.entries.count == 1)
+    }
+}
+```
+
+Review checklist:
+
+- ✅ **`@MainActor` on the suite** — `MoodTimelineViewModel` is `@MainActor` because it drives UI. All tests that touch it must run on the main actor. Without this annotation, Swift 6 will reject the tests at compile time.
+- ✅ **`makeSUT()` returns a tuple** — the test gets both the ViewModel and the mock repository. This is critical: the test configures the mock, calls methods on the ViewModel, and asserts on the ViewModel's observable state. The tuple makes both accessible without instance variables.
+- ✅ **Loading state test uses `artificialDelay`** — this creates a small window where `isLoading` is `true`. The test checks mid-flight, then waits for completion and checks again. This is the correct way to test transient states.
+- ✅ **Error clearing test runs two scenarios in sequence** — first fails, then succeeds. This catches a common bug where the error message persists even after a successful retry.
+- ✅ **Delete failure test verifies the entry is still present** — if the repository throws during delete, the ViewModel should not remove the entry from its local array. This is a real bug that AI-generated code often has.
+- ⚠️ **The loading state test has a timing dependency.** The `Task.sleep(for: .milliseconds(10))` is a pragmatic workaround. In a perfect world, you would use a synchronization primitive. In practice, a 10ms sleep in a test that runs in under 100ms total is acceptable. If it flakes, increase the delay slightly.
+
+## Verify Phase: Running the Tests
+
+Build and run the tests. Here is what to check:
+
+**1. All tests pass on first run.** If any test fails, the failure message from `#expect` will tell you exactly which assertion broke. Fix the test or the production code — never both at the same time. Change one thing, run again, confirm.
+
+**2. Tests run fast.** The entire suite should complete in under one second. If any test takes more than 200ms, something is wrong — you might be accidentally hitting the disk or network. Unit tests are in-memory only.
+
+**3. Tests are independent.** Run each test in isolation (click the diamond next to the test name in Xcode). Every test should pass when run alone. If a test only passes when run after another test, there is shared mutable state leaking between them — usually a static variable or a singleton. The `makeSUT()` pattern prevents this by creating fresh instances every time.
+
+**4. Swift 6 concurrency.** The project should compile with strict concurrency enabled. If you see warnings about `Sendable` conformance or actor isolation in the test target, fix them now. Common fixes:
+- Add `@MainActor` to the test suite struct
+- Mark the mock as `@unchecked Sendable`
+- Use `await` when calling actor-isolated methods
+
+**5. Edge case: empty repository.** Add a test that calls `loadEntries()` on an empty repository and verifies `entries` is empty and `errorMessage` is `nil`. This sounds trivial but catches ViewModels that set an error state when there are no results.
+
+```swift
+@Test("loadEntries with empty repository sets empty array without error")
+func loadEntriesEmptyRepository() async {
+    let (sut, _) = makeSUT()
+
+    await sut.loadEntries()
+
+    #expect(sut.entries.isEmpty)
+    #expect(sut.errorMessage == nil)
+    #expect(sut.isLoading == false)
+}
+```
+
+## Final Code
+
+Here is the complete, final implementation for all files. These are the versions that should be in your test target after the plan, execute, and iterate phases.
+
+### MoodbitTests/Mocks/MockMoodRepository.swift
+
+```swift
+import Foundation
+@testable import Moodbit
+
+final class MockMoodRepository: MoodRepository, @unchecked Sendable {
+    // MARK: - Storage
+
+    var entries: [MoodEntry] = []
+
+    // MARK: - Configuration
+
+    var throwingError: AppError?
+    var artificialDelay: Duration?
+
+    // MARK: - Call Tracking
+
+    private(set) var fetchAllCallCount = 0
+    private(set) var fetchByIDCallCount = 0
+    private(set) var saveCallCount = 0
+    private(set) var updateCallCount = 0
+    private(set) var deleteCallCount = 0
+
+    private(set) var lastSavedEntry: MoodEntry?
+    private(set) var lastDeletedEntry: MoodEntry?
+
+    // MARK: - MoodRepository
+
+    func fetchAll() async throws -> [MoodEntry] {
+        fetchAllCallCount += 1
+        if let delay = artificialDelay {
+            try await Task.sleep(for: delay)
+        }
+        if let error = throwingError { throw error }
+        return entries.sorted { $0.date > $1.date }
+    }
+
+    func fetch(by id: UUID) async throws -> MoodEntry? {
+        fetchByIDCallCount += 1
+        if let error = throwingError { throw error }
+        return entries.first { $0.id == id }
+    }
+
+    func save(_ entry: MoodEntry) async throws {
+        saveCallCount += 1
+        if let error = throwingError { throw error }
+        lastSavedEntry = entry
+        entries.append(entry)
+    }
+
+    func update(_ entry: MoodEntry) async throws {
+        updateCallCount += 1
+        if let error = throwingError { throw error }
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else {
+            return
+        }
+        entries[index] = entry
+    }
+
+    func delete(_ entry: MoodEntry) async throws {
+        deleteCallCount += 1
+        if let error = throwingError { throw error }
+        lastDeletedEntry = entry
+        entries.removeAll { $0.id == entry.id }
+    }
+
+    // MARK: - Helpers
+
+    func reset() {
+        entries = []
+        throwingError = nil
+        artificialDelay = nil
+        fetchAllCallCount = 0
+        fetchByIDCallCount = 0
+        saveCallCount = 0
+        updateCallCount = 0
+        deleteCallCount = 0
+        lastSavedEntry = nil
+        lastDeletedEntry = nil
+    }
+}
+```
+
+### MoodbitTests/Helpers/MoodEntry+Sample.swift
+
+```swift
+import Foundation
+@testable import Moodbit
+
+extension MoodEntry {
+    static func sample(
+        id: UUID = UUID(),
+        mood: MoodLevel = .good,
+        note: String = "Test mood entry",
+        activities: [String] = ["Work", "Exercise"],
+        date: Date = .now,
+        createdAt: Date = .now
+    ) -> MoodEntry {
+        MoodEntry(
+            id: id,
+            mood: mood,
+            note: note,
+            activities: activities,
+            date: date,
+            createdAt: createdAt
+        )
+    }
+
+    static func samples(count: Int) -> [MoodEntry] {
+        let calendar = Calendar.current
+        let moods: [MoodLevel] = [.great, .good, .okay, .bad, .awful]
+
+        return (0..<count).map { index in
+            MoodEntry.sample(
+                mood: moods[index % moods.count],
+                note: "Sample entry \(index + 1)",
+                activities: ["Activity \(index + 1)"],
+                date: calendar.date(
+                    byAdding: .day,
+                    value: -index,
+                    to: .now
+                ) ?? .now
+            )
+        }
+    }
+}
+```
+
+### MoodbitTests/MoodRepositoryTests.swift
+
+```swift
+import Testing
+@testable import Moodbit
+
+@Suite("MockMoodRepository")
+struct MoodRepositoryTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> MockMoodRepository {
+        MockMoodRepository()
+    }
+
+    // MARK: - Fetch
+
+    @Test("fetchAll returns entries sorted by date descending")
+    func fetchAllReturnsSorted() async throws {
+        let sut = makeSUT()
+        let older = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: -86400)
+        )
+        let newer = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: 0)
+        )
+        sut.entries = [older, newer]
+
+        let result = try await sut.fetchAll()
+
+        #expect(result.first?.id == newer.id)
+        #expect(result.last?.id == older.id)
+    }
+
+    @Test("fetch by ID returns matching entry")
+    func fetchByIDReturnsMatch() async throws {
+        let sut = makeSUT()
+        let target = MoodEntry.sample()
+        sut.entries = [MoodEntry.sample(), target, MoodEntry.sample()]
+
+        let result = try await sut.fetch(by: target.id)
+
+        #expect(result?.id == target.id)
+    }
+
+    @Test("fetch by ID returns nil when not found")
+    func fetchByIDReturnsNilWhenMissing() async throws {
+        let sut = makeSUT()
+        sut.entries = [MoodEntry.sample()]
+
+        let result = try await sut.fetch(by: UUID())
+
+        #expect(result == nil)
+    }
+
+    // MARK: - Save
+
+    @Test("save appends entry to storage")
+    func saveAppendsEntry() async throws {
+        let sut = makeSUT()
+        let entry = MoodEntry.sample()
+
+        try await sut.save(entry)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.id == entry.id)
+        #expect(sut.saveCallCount == 1)
+        #expect(sut.lastSavedEntry?.id == entry.id)
+    }
+
+    // MARK: - Update
+
+    @Test("update replaces entry with matching ID")
+    func updateReplacesEntry() async throws {
+        let sut = makeSUT()
+        let original = MoodEntry.sample(note: "Original")
+        sut.entries = [original]
+
+        let updated = MoodEntry.sample(
+            id: original.id,
+            note: "Updated"
+        )
+        try await sut.update(updated)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.note == "Updated")
+    }
+
+    // MARK: - Delete
+
+    @Test("delete removes entry from storage")
+    func deleteRemovesEntry() async throws {
+        let sut = makeSUT()
+        let entry = MoodEntry.sample()
+        sut.entries = [entry]
+
+        try await sut.delete(entry)
+
+        #expect(sut.entries.isEmpty)
+        #expect(sut.deleteCallCount == 1)
+        #expect(sut.lastDeletedEntry?.id == entry.id)
+    }
+
+    @Test("delete does not affect other entries")
+    func deleteOnlyRemovesTarget() async throws {
+        let sut = makeSUT()
+        let keep = MoodEntry.sample(note: "Keep")
+        let remove = MoodEntry.sample(note: "Remove")
+        sut.entries = [keep, remove]
+
+        try await sut.delete(remove)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.id == keep.id)
+    }
+
+    // MARK: - Error Simulation
+
+    @Test("throwingError causes methods to throw")
+    func throwingErrorCausesThrow() async {
+        let sut = makeSUT()
+        sut.throwingError = .persistence(
+            .saveFailed(underlying: "Test error")
+        )
+
+        await #expect(throws: AppError.self) {
+            try await sut.fetchAll()
+        }
+    }
+
+    @Test("reset clears all state and counters")
+    func resetClearsState() async throws {
+        let sut = makeSUT()
+        sut.entries = MoodEntry.samples(count: 3)
+        sut.throwingError = .network(.timeout)
+        _ = try? await sut.fetchAll()
+
+        sut.reset()
+
+        #expect(sut.entries.isEmpty)
+        #expect(sut.throwingError == nil)
+        #expect(sut.fetchAllCallCount == 0)
+    }
+}
+```
+
+### MoodbitTests/TimelineViewModelTests.swift
+
+```swift
+import Testing
+@testable import Moodbit
+
+@Suite("MoodTimelineViewModel")
+@MainActor
+struct TimelineViewModelTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> (
+        sut: MoodTimelineViewModel,
+        repository: MockMoodRepository
+    ) {
+        let repository = MockMoodRepository()
+        let sut = MoodTimelineViewModel(repository: repository)
+        return (sut, repository)
+    }
+
+    // MARK: - Load Entries
+
+    @Test("loadEntries populates entries from repository")
+    func loadEntriesPopulatesArray() async {
+        let (sut, repository) = makeSUT()
+        repository.entries = MoodEntry.samples(count: 3)
+
+        await sut.loadEntries()
+
+        #expect(sut.entries.count == 3)
+    }
+
+    @Test("loadEntries with empty repository sets empty array without error")
+    func loadEntriesEmptyRepository() async {
+        let (sut, _) = makeSUT()
+
+        await sut.loadEntries()
+
+        #expect(sut.entries.isEmpty)
+        #expect(sut.errorMessage == nil)
+        #expect(sut.isLoading == false)
+    }
+
+    @Test("loadEntries sets isLoading during fetch")
+    func loadEntriesSetsLoadingState() async {
+        let (sut, repository) = makeSUT()
+        repository.artificialDelay = .milliseconds(50)
+        repository.entries = [MoodEntry.sample()]
+
+        let loadTask = Task {
+            await sut.loadEntries()
+        }
+
+        try? await Task.sleep(for: .milliseconds(10))
+        #expect(sut.isLoading == true)
+
+        await loadTask.value
+        #expect(sut.isLoading == false)
+    }
+
+    @Test("loadEntries sets errorMessage on failure")
+    func loadEntriesSetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        repository.throwingError = .persistence(
+            .fetchFailed(underlying: "disk error")
+        )
+
+        await sut.loadEntries()
+
+        #expect(sut.errorMessage != nil)
+        #expect(sut.entries.isEmpty)
+    }
+
+    @Test("loadEntries clears previous error on success")
+    func loadEntriesClearsPreviousError() async {
+        let (sut, repository) = makeSUT()
+
+        // First call fails
+        repository.throwingError = .persistence(
+            .fetchFailed(underlying: "disk error")
+        )
+        await sut.loadEntries()
+        #expect(sut.errorMessage != nil)
+
+        // Second call succeeds
+        repository.throwingError = nil
+        repository.entries = [MoodEntry.sample()]
+        await sut.loadEntries()
+
+        #expect(sut.errorMessage == nil)
+        #expect(sut.entries.count == 1)
+    }
+
+    @Test("loadEntries returns entries sorted by date descending")
+    func loadEntriesReturnsSorted() async {
+        let (sut, repository) = makeSUT()
+        let oldEntry = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: -86400)
+        )
+        let newEntry = MoodEntry.sample(
+            date: Date(timeIntervalSinceNow: 0)
+        )
+        repository.entries = [oldEntry, newEntry]
+
+        await sut.loadEntries()
+
+        #expect(sut.entries.first?.id == newEntry.id)
+        #expect(sut.entries.last?.id == oldEntry.id)
+    }
+
+    // MARK: - Add Entry
+
+    @Test("addEntry inserts entry at the beginning of the array")
+    func addEntryInsertsAtBeginning() async {
+        let (sut, repository) = makeSUT()
+        let existing = MoodEntry.sample(
+            note: "Existing",
+            date: Date(timeIntervalSinceNow: -3600)
+        )
+        repository.entries = [existing]
+        await sut.loadEntries()
+
+        let newEntry = MoodEntry.sample(
+            note: "New",
+            date: .now
+        )
+        await sut.addEntry(newEntry)
+
+        #expect(sut.entries.first?.note == "New")
+        #expect(sut.entries.count == 2)
+    }
+
+    @Test("addEntry sets errorMessage on failure")
+    func addEntrySetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "disk full")
+        )
+
+        let entry = MoodEntry.sample()
+        await sut.addEntry(entry)
+
+        #expect(sut.errorMessage != nil)
+    }
+
+    @Test("addEntry does not add to array on failure")
+    func addEntryDoesNotAddOnFailure() async {
+        let (sut, repository) = makeSUT()
+        await sut.loadEntries()
+        #expect(sut.entries.isEmpty)
+
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "disk full")
+        )
+
+        let entry = MoodEntry.sample()
+        await sut.addEntry(entry)
+
+        #expect(sut.entries.isEmpty)
+    }
+
+    // MARK: - Delete Entry
+
+    @Test("deleteEntry removes entry from the array")
+    func deleteEntryRemovesFromArray() async {
+        let (sut, repository) = makeSUT()
+        let entry = MoodEntry.sample()
+        repository.entries = [entry]
+        await sut.loadEntries()
+        #expect(sut.entries.count == 1)
+
+        await sut.deleteEntry(entry)
+
+        #expect(sut.entries.isEmpty)
+    }
+
+    @Test("deleteEntry sets errorMessage on failure")
+    func deleteEntrySetsErrorOnFailure() async {
+        let (sut, repository) = makeSUT()
+        let entry = MoodEntry.sample()
+        repository.entries = [entry]
+        await sut.loadEntries()
+
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "delete failed")
+        )
+        await sut.deleteEntry(entry)
+
+        #expect(sut.errorMessage != nil)
+    }
+
+    @Test("deleteEntry keeps entry in array on failure")
+    func deleteEntryKeepsEntryOnFailure() async {
+        let (sut, repository) = makeSUT()
+        let entry = MoodEntry.sample()
+        repository.entries = [entry]
+        await sut.loadEntries()
+
+        repository.throwingError = .persistence(
+            .saveFailed(underlying: "delete failed")
+        )
+        await sut.deleteEntry(entry)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.id == entry.id)
+    }
+
+    @Test("deleteEntry only removes the targeted entry")
+    func deleteEntryOnlyRemovesTarget() async {
+        let (sut, repository) = makeSUT()
+        let keep = MoodEntry.sample(note: "Keep")
+        let remove = MoodEntry.sample(note: "Remove")
+        repository.entries = [keep, remove]
+        await sut.loadEntries()
+
+        await sut.deleteEntry(remove)
+
+        #expect(sut.entries.count == 1)
+        #expect(sut.entries.first?.note == "Keep")
+    }
+}
+```
+
+## Checkpoint
+
+Before moving to the next lesson, verify every item:
+
+- [ ] `MockMoodRepository` conforms to `MoodRepository` with no compiler warnings
+- [ ] `MoodEntry.sample()` creates valid entries with sensible defaults
+- [ ] All `MoodRepositoryTests` pass — fetch, save, update, delete, error simulation
+- [ ] All `TimelineViewModelTests` pass — load, add, delete, error states, sort order
+- [ ] The test suite runs in under one second with zero flaky failures
+- [ ] Every test uses `makeSUT()` — no shared mutable state between tests
+- [ ] Swift 6 strict concurrency compiles without warnings in the test target
+- [ ] No test imports `SwiftData` — all persistence is mocked through the protocol
+
+If any test is flaky (passes sometimes, fails sometimes), the cause is almost always shared state or timing. Check for static variables, singletons, or reliance on `Task.sleep` without enough margin.
+
+## Challenge
+
+**Test the `MoodEntryViewModel` form validation logic.**
+
+Write a new test suite `MoodEntryViewModelTests` that covers:
+1. `canAdvance` returns `true` on step 1 (mood selection does not require validation)
+2. `canAdvance` returns `false` on step 2 when no emoji is selected
+3. `canAdvance` returns `true` on step 2 after selecting an emoji
+4. `advance()` increments `currentStep` when `canAdvance` is true
+5. `advance()` does not increment past `totalSteps`
+6. `goBack()` decrements `currentStep`
+7. `goBack()` does not decrement below 1
+8. `save(using:)` creates a `MoodEntry` with the correct values from the form state
+9. `reset()` returns all state to defaults
+
+<details>
+<summary>Hint</summary>
+
+The `MoodEntryViewModel` does not depend on a repository for most of its logic — only `save()` needs one. Your `makeSUT()` for this suite should still create a `MockMoodRepository`, but most tests will only manipulate the ViewModel's properties directly:
+
+```swift
+private func makeSUT() -> (
+    sut: MoodEntryViewModel,
+    repository: MockMoodRepository
+) {
+    let repository = MockMoodRepository()
+    let sut = MoodEntryViewModel()
+    return (sut, repository)
+}
+
+@Test("canAdvance is false on step 2 without emoji")
+func canAdvanceStep2RequiresEmoji() {
+    let (sut, _) = makeSUT()
+    sut.currentStep = 2
+    sut.selectedEmoji = nil
+
+    #expect(sut.canAdvance == false)
+}
+```
+
+For the `save()` test, set all form properties, call `save(using: repository)`, and then check `repository.lastSavedEntry` to verify the entry was created with the correct mood level, emoji, note, and tags.
+</details>

@@ -1,0 +1,1025 @@
+---
+title: "Debugging Workflow with AI"
+description: "Master a systematic debugging workflow combining Xcode instruments, LLDB, os.Logger, and AI-assisted root cause analysis for Moodbit"
+courseSlug: "ship-native"
+module: 6
+moduleTitle: "Quality & Testing"
+lesson: 3
+duration: "25 min read"
+difficulty: "intermediate"
+topics: ["Debugging", "os.Logger", "LLDB", "Instruments", "OSSignposter", "SwiftUI", "Performance", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+order: 23
+---
+
+Your tests pass. Your app compiles. You tap through the mood entry flow and everything looks fine. Then a tester reports that the timeline screen freezes for two seconds after logging five entries in a row. Or the app crashes on launch — but only on their device, never on yours. Or memory climbs steadily until the system kills the process after ten minutes of normal use.
+
+These are not problems that unit tests catch. These are runtime problems — performance regressions, threading violations, memory leaks, state corruption that only manifests under specific conditions. Solving them requires a different toolkit: structured logging that survives release builds, a debugger that lets you inspect state without recompiling, profiling instruments that show you exactly where time and memory go, and a systematic process for narrowing down root causes.
+
+This lesson builds that toolkit for Moodbit.
+
+## What You'll Learn
+
+1. **Build structured logging with `os.Logger`** using subsystem and category conventions that make filtering trivial in Console.app and Instruments.
+2. **Create a debug overlay** that shows live app state — active view, memory footprint, recent log entries — visible only in DEBUG builds.
+3. **Use LLDB effectively** with breakpoint actions, watchpoints, and expression evaluation to inspect and modify state without recompiling.
+4. **Profile with Instruments** using Time Profiler, Allocations, and `OSSignposter` to find and fix performance bottlenecks and memory leaks.
+
+## Why This Matters
+
+Most developers debug by adding `print()` statements, running the app, reading the console, and deleting the prints when they find the bug. This works for trivial issues. It does not work when the bug only appears on a physical device, or when the timing of the print changes the behavior, or when you need to correlate events across multiple subsystems, or when the crash happens in production and you have no console.
+
+`os.Logger` is Apple's structured logging system. It is designed for exactly these situations. Log messages are categorized by subsystem and severity. They persist across app launches. They can be filtered in Console.app and Instruments without rebuilding. They have near-zero overhead when the log level is below the active threshold — meaning you can leave them in production code without measurable performance cost.
+
+Combined with LLDB for interactive debugging, Instruments for profiling, and a debug overlay for quick visual feedback, you get a workflow that handles everything from "this button does not work" to "the app uses 400MB of memory after twenty minutes."
+
+## Plan Phase: Designing the Debugging Strategy
+
+Before writing any debug tooling, plan the system. Send this to Claude Code:
+
+```
+I need to build a debugging and diagnostics toolkit for Moodbit,
+a SwiftUI mood tracking app. Before writing code, help me plan
+the approach.
+
+The app has:
+- SwiftData persistence layer (MoodRepository)
+- ViewModels driving SwiftUI views (@MainActor, @Observable)
+- AI service layer calling OpenAI API
+- Background tasks for data sync
+
+I need:
+1. Structured logging with os.Logger — what subsystems and
+   categories should we define? How do we handle log levels?
+2. A debug overlay view — what information should it show?
+   How do we ensure it only appears in DEBUG builds?
+3. A diagnostic report struct — what device/app info should
+   it collect for bug reports?
+4. OSSignposter integration — where should we place signposts
+   for Instruments profiling?
+
+Do NOT write code yet. Design the architecture.
+```
+
+### AI Plan Review
+
+The AI should return a structured plan. Here is what to look for:
+
+- ✅ **Single subsystem, multiple categories.** The subsystem should be your bundle identifier (e.g., `com.yourname.Moodbit`). Categories map to functional areas: `persistence`, `viewModel`, `network`, `ai`, `sync`. This structure lets you filter all Moodbit logs with one subsystem filter, then drill into specific categories.
+- ✅ **Log levels mapped to intent.** `.debug` for developer-only details (state dumps, entry/exit). `.info` for routine operations (entry saved, sync completed). `.error` for recoverable failures (network timeout, parse error). `.fault` for unrecoverable states (database corruption, missing required data). The AI should not map everything to `.error`.
+- ✅ **Debug overlay scoped to `#if DEBUG`.** The entire overlay view and its supporting code should be compiled out of release builds. No runtime checks — compile-time exclusion.
+- ⚠️ **Watch for over-engineering.** If the AI suggests a logging abstraction layer on top of `os.Logger`, push back. `os.Logger` is already the abstraction. Wrapping it adds indirection without value. Extensions that add convenience methods are fine. Wrapper classes that hide the logger are not.
+- ❌ **Reject `print()` or `NSLog()`.** If the AI includes either in the logging plan, reject it. `print()` is not structured, not filterable, not performant, and not available in production. `NSLog()` has been superseded by `os.Logger` since iOS 14.
+
+## Execute Phase: Building the Debug Toolkit
+
+Now we build. Send this prompt:
+
+```
+Create the debugging toolkit for Moodbit. Generate these files:
+
+1. Logger+Extensions.swift
+   - Define a Logger enum or struct with static loggers for
+     each Moodbit subsystem category: persistence, viewModel,
+     network, ai, sync, ui
+   - Add convenience methods for common patterns: function
+     entry/exit, operation timing, state snapshots
+   - Use os.Logger with subsystem from Bundle.main.bundleIdentifier
+
+2. DiagnosticReport.swift
+   - Sendable struct that collects: device model, OS version,
+     app version and build, available memory, disk space,
+     locale, timezone, recent log summaries
+   - Method to export as formatted string for bug reports
+   - Use ProcessInfo, UIDevice, Bundle APIs
+
+3. DebugOverlayView.swift
+   - SwiftUI overlay showing: current memory usage, active
+     view name, last 10 log entries, app uptime
+   - Only compiled in DEBUG builds (#if DEBUG)
+   - Toggled with a floating button or shake gesture
+   - Semi-transparent background, does not interfere with
+     normal app interaction
+
+Use Swift 6, @MainActor where needed, os.Logger (not print),
+OSSignposter for performance intervals. No third-party deps.
+```
+
+### Code Review
+
+Here is what Claude Code should produce. Let me walk through each file with the review markers.
+
+**Logger+Extensions.swift:**
+
+The AI should generate a clean namespace for loggers plus convenience extensions. Key review points:
+
+- ✅ **Static loggers per category** — each functional area gets its own `os.Logger` instance with a distinct category string. This enables fine-grained filtering in Console.app.
+- ✅ **Bundle-based subsystem** — using `Bundle.main.bundleIdentifier` ensures the subsystem matches your app across targets.
+- ✅ **`OSSignposter` integration** — signpost intervals wrap long-running operations so Instruments can visualize them as named regions on the timeline.
+- ✅ **No wrapper class** — the extensions add convenience without hiding the underlying `os.Logger` API. You can always fall back to raw logger calls.
+- ⚠️ **Watch for string interpolation privacy.** `os.Logger` redacts dynamic strings by default in release builds. The AI may forget to add `privacy: .public` where appropriate (e.g., mood level names are not sensitive). Conversely, it should use `.private` for user-entered notes.
+
+**DiagnosticReport.swift:**
+
+- ✅ **`Sendable` conformance** — the report may be generated on a background thread and passed to the main actor for display.
+- ✅ **Value type (struct)** — the report is a snapshot, not a live object. Once generated, it is immutable.
+- ✅ **Formatted export** — a `description` or `formattedReport()` method that produces a paste-friendly string for bug reports.
+- ⚠️ **`UIDevice` availability.** If the AI uses `UIDevice.current.model` without an `import UIKit`, it will not compile. Also, `UIDevice` is not available in SwiftUI previews on macOS. Guard appropriately.
+
+**DebugOverlayView.swift:**
+
+- ✅ **Entire file wrapped in `#if DEBUG`** — not just the view body, but the struct itself. This ensures zero overhead in release builds.
+- ✅ **`@MainActor`** — the overlay reads UI state, so it must run on the main actor.
+- ✅ **Non-intrusive** — the overlay should use `.allowsHitTesting(false)` on the information display and only make the toggle button tappable.
+- ❌ **Reject persistent state.** The debug overlay should not write to `UserDefaults` or disk. It is ephemeral — visible during the current session only.
+
+### Improvements to Request
+
+After reviewing the initial output, send this follow-up:
+
+```
+Good foundation. Now improve the debugging toolkit:
+
+1. Add a signpost interval helper to Logger+Extensions that
+   wraps any async operation with OSSignposter begin/end —
+   so we can see named intervals in Instruments.
+
+2. Add memory pressure tracking to DebugOverlayView — show
+   current memory footprint using task_info and update it
+   every 2 seconds with a Timer.
+
+3. Add a MXMetricManager mention in DiagnosticReport for
+   production crash diagnostics — include a note about
+   registering as a subscriber in AppDelegate.
+
+4. Add an LLDB cheat sheet as a code comment block in
+   Logger+Extensions — common commands developers should
+   know: po, v, expr, breakpoint actions, watchpoints.
+
+5. Make the diagnostic report include the last 20 log entries
+   by adding a simple in-memory ring buffer to the logging
+   system (DEBUG only).
+```
+
+## Verify Phase: Testing the Debug Toolkit
+
+**1. Logger output appears in Console.app.** Run the app in the Simulator, open Console.app on your Mac, and filter by your subsystem. You should see categorized log entries with the correct severity levels. If nothing appears, verify the subsystem string matches your bundle identifier exactly.
+
+**2. Debug overlay renders without blocking interaction.** Tap the toggle button. The overlay should appear with memory usage and recent logs. Tap buttons underneath the overlay — they should still respond. If the overlay blocks touches, check that `.allowsHitTesting(false)` is applied to the information layer.
+
+**3. Diagnostic report generates without crashes.** Call `DiagnosticReport.generate()` from a test or button action. The formatted output should include device model, OS version, app version, and memory information. No fields should be "Unknown" unless running in a Simulator (where some hardware queries return generic values).
+
+**4. Signpost intervals appear in Instruments.** Open Instruments, select the `os_signpost` instrument, and profile the app. Trigger an operation wrapped with a signpost (e.g., loading entries). You should see a named interval in the timeline. If nothing appears, verify the signpost name and the subsystem match.
+
+**5. Release build excludes debug code.** Archive the app or build with the Release configuration. Search the binary for debug overlay strings — they should not be present. The `#if DEBUG` guards must be at the file level, not just the method level.
+
+**6. LLDB commands work in a live session.** Set a breakpoint in `MoodTimelineViewModel.loadEntries()`. When it hits, try these commands in the Xcode debug console:
+
+```
+(lldb) po self.entries.count
+(lldb) v self.isLoading
+(lldb) expr self.isLoading = true
+(lldb) breakpoint set -n "MoodRepository.fetchAll"
+```
+
+All four should execute without errors. If `po` fails with "expression produced error," try `v` instead — it reads memory directly without running code.
+
+## Final Code
+
+Here is the complete, final implementation for all files. These are the versions that should be in your project after the plan, execute, and iterate phases.
+
+### Moodbit/Debug/Logger+Extensions.swift
+
+```swift
+import os
+import Foundation
+
+// MARK: - Moodbit Logger Namespace
+
+enum Log {
+    /// Subsystem identifier for all Moodbit logging.
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.moodbit.app"
+
+    // MARK: - Category Loggers
+
+    /// Database operations: SwiftData queries, saves, deletes, migrations.
+    static let persistence = Logger(subsystem: subsystem, category: "persistence")
+
+    /// ViewModel state transitions: loading, error, data updates.
+    static let viewModel = Logger(subsystem: subsystem, category: "viewModel")
+
+    /// HTTP requests, responses, and connectivity changes.
+    static let network = Logger(subsystem: subsystem, category: "network")
+
+    /// AI service calls: prompt construction, response parsing, token usage.
+    static let ai = Logger(subsystem: subsystem, category: "ai")
+
+    /// Background sync, CloudKit operations, merge conflicts.
+    static let sync = Logger(subsystem: subsystem, category: "sync")
+
+    /// View lifecycle, navigation events, user interactions.
+    static let ui = Logger(subsystem: subsystem, category: "ui")
+
+    // MARK: - Signposter
+
+    /// Shared signposter for Instruments profiling intervals.
+    static let signposter = OSSignposter(subsystem: subsystem, category: "performance")
+}
+
+// MARK: - Convenience Extensions
+
+extension Logger {
+    /// Log entry into a function with its name automatically captured.
+    func enter(_ function: String = #function) {
+        self.debug("ENTER: \(function, privacy: .public)")
+    }
+
+    /// Log exit from a function with its name automatically captured.
+    func exit(_ function: String = #function) {
+        self.debug("EXIT: \(function, privacy: .public)")
+    }
+
+    /// Log a state snapshot for debugging. Values are redacted in release.
+    func stateSnapshot(_ label: String, values: [String: String]) {
+        let formatted = values.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        self.debug("\(label, privacy: .public): [\(formatted, privacy: .private)]")
+    }
+
+    /// Log an operation with its duration.
+    func measure<T>(
+        _ label: String,
+        operation: () async throws -> T
+    ) async rethrows -> T {
+        let start = ContinuousClock.now
+        let result = try await operation()
+        let elapsed = ContinuousClock.now - start
+        self.info("\(label, privacy: .public) completed in \(elapsed, privacy: .public)")
+        return result
+    }
+}
+
+// MARK: - Signpost Interval Helper
+
+extension OSSignposter {
+    /// Wrap an async operation in a signpost interval for Instruments.
+    ///
+    /// Usage:
+    /// ```swift
+    /// let entries = try await Log.signposter.measure("Load Entries") {
+    ///     try await repository.fetchAll()
+    /// }
+    /// ```
+    func measure<T>(
+        _ name: StaticString,
+        operation: () async throws -> T
+    ) async rethrows -> T {
+        let state = beginInterval(name)
+        do {
+            let result = try await operation()
+            endInterval(name, state)
+            return result
+        } catch {
+            endInterval(name, state, "\(error.localizedDescription)")
+            throw error
+        }
+    }
+}
+
+// MARK: - In-Memory Log Buffer (DEBUG Only)
+
+#if DEBUG
+/// Ring buffer that stores the most recent log entries in memory
+/// for display in the debug overlay and diagnostic reports.
+@MainActor
+final class LogBuffer: Observable {
+    static let shared = LogBuffer()
+
+    private(set) var entries: [LogEntry] = []
+    private let maxEntries = 50
+
+    struct LogEntry: Identifiable, Sendable {
+        let id = UUID()
+        let timestamp: Date
+        let category: String
+        let level: String
+        let message: String
+
+        var formatted: String {
+            let time = timestamp.formatted(.dateTime.hour().minute().second())
+            return "[\(time)] [\(category)] \(level): \(message)"
+        }
+    }
+
+    func append(category: String, level: String, message: String) {
+        let entry = LogEntry(
+            timestamp: .now,
+            category: category,
+            level: level,
+            message: message
+        )
+        entries.append(entry)
+        if entries.count > maxEntries {
+            entries.removeFirst(entries.count - maxEntries)
+        }
+    }
+
+    func clear() {
+        entries.removeAll()
+    }
+
+    /// The most recent entries, newest first.
+    var recentEntries: [LogEntry] {
+        Array(entries.suffix(20).reversed())
+    }
+}
+
+extension Logger {
+    /// Log and simultaneously buffer the message for the debug overlay.
+    func buffered(
+        _ level: OSLogType,
+        category: String,
+        _ message: String
+    ) {
+        let levelName: String = switch level {
+        case .debug: "DEBUG"
+        case .info: "INFO"
+        case .error: "ERROR"
+        case .fault: "FAULT"
+        default: "DEFAULT"
+        }
+
+        switch level {
+        case .debug: self.debug("\(message, privacy: .public)")
+        case .info: self.info("\(message, privacy: .public)")
+        case .error: self.error("\(message, privacy: .public)")
+        case .fault: self.fault("\(message, privacy: .public)")
+        default: self.log("\(message, privacy: .public)")
+        }
+
+        Task { @MainActor in
+            LogBuffer.shared.append(
+                category: category,
+                level: levelName,
+                message: message
+            )
+        }
+    }
+}
+#endif
+
+// MARK: - LLDB Cheat Sheet
+//
+// Keep this reference handy when debugging Moodbit in Xcode.
+//
+// ┌─────────────────────────────────────────────────────────────────┐
+// │ Command          │ Description                                  │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ po <expr>        │ Print object description (runs code)         │
+// │ v <var>          │ Print variable (reads memory, no execution)  │
+// │ p <expr>         │ Print with full type info                    │
+// │ expr <code>      │ Evaluate Swift expression in current frame   │
+// │ fr v             │ Show all local variables in current frame    │
+// │ bt               │ Print backtrace of current thread            │
+// │ bt all           │ Print backtraces of all threads              │
+// │ thread list      │ List all threads with their states           │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ BREAKPOINTS                                                     │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ br s -n <func>   │ Set breakpoint on function name              │
+// │ br s -f <file>   │ Set breakpoint on file + line                │
+// │   -l <line>      │                                              │
+// │ br s -S <sel>    │ Set breakpoint on Objective-C selector       │
+// │ br mod -c        │ Add condition to existing breakpoint         │
+// │   "<expr>" <id>  │                                              │
+// │ br com add <id>  │ Add commands to run when breakpoint hits     │
+// │ br del <id>      │ Delete breakpoint by ID                      │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ WATCHPOINTS                                                     │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ w s v <var>      │ Break when variable value changes            │
+// │ w s e -- <addr>  │ Break when memory at address changes         │
+// │ w l              │ List all active watchpoints                  │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ ADVANCED                                                        │
+// ├─────────────────────────────────────────────────────────────────┤
+// │ expr -l objc --  │ Evaluate Objective-C expression              │
+// │   <code>         │                                              │
+// │ image lookup -a  │ Find symbol at address (crash analysis)      │
+// │   <addr>         │                                              │
+// │ expr unsafeBit   │ Cast raw pointer to Swift type               │
+// │   Cast(to:from:) │                                              │
+// │ memory read <a>  │ Read raw memory at address                   │
+// │ register read    │ Show CPU register values                     │
+// └─────────────────────────────────────────────────────────────────┘
+//
+// TIPS:
+// - Use `v` instead of `po` when `po` fails with "expression error"
+// - Add `-O` to `po` for custom debugDescription output
+// - Use `expr self.isLoading = true` to modify state mid-debug
+// - Breakpoint actions: right-click breakpoint > Edit > Add Action
+//   → "Log Message" with %B (breakpoint name) and %H (hit count)
+//   → Check "Automatically continue" for printf-style debugging
+// - Conditional breakpoints: right-click > Edit > Condition
+//   → e.g., `entries.count > 10` to break only on large datasets
+```
+
+### Moodbit/Debug/DiagnosticReport.swift
+
+```swift
+import Foundation
+import os
+
+#if canImport(UIKit)
+import UIKit
+#endif
+
+/// A snapshot of device and app state for attaching to bug reports.
+///
+/// Generate a report with `DiagnosticReport.generate()` and export
+/// it as a formatted string with `formattedReport()`.
+struct DiagnosticReport: Sendable {
+    // MARK: - Device Info
+
+    let deviceModel: String
+    let osVersion: String
+    let locale: String
+    let timezone: String
+
+    // MARK: - App Info
+
+    let appVersion: String
+    let buildNumber: String
+    let bundleIdentifier: String
+
+    // MARK: - Runtime Info
+
+    let memoryFootprintMB: Double
+    let availableDiskGB: Double
+    let processorCount: Int
+    let activeProcessorCount: Int
+    let isLowPowerMode: Bool
+    let thermalState: String
+    let uptime: TimeInterval
+
+    // MARK: - Log Snapshot
+
+    let recentLogs: [String]
+    let generatedAt: Date
+
+    // MARK: - Generation
+
+    @MainActor
+    static func generate() -> DiagnosticReport {
+        let processInfo = ProcessInfo.processInfo
+        let bundle = Bundle.main
+
+        // Device model
+        var deviceModel = "Unknown"
+        #if canImport(UIKit)
+        deviceModel = UIDevice.current.model
+        #endif
+
+        // OS version
+        let osVersion = processInfo.operatingSystemVersionString
+
+        // App version
+        let appVersion = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+        let buildNumber = bundle.infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
+        let bundleId = bundle.bundleIdentifier ?? "Unknown"
+
+        // Memory footprint
+        let memoryMB = Self.currentMemoryFootprintMB()
+
+        // Disk space
+        let diskGB = Self.availableDiskSpaceGB()
+
+        // Thermal state
+        let thermal: String = switch processInfo.thermalState {
+        case .nominal: "Nominal"
+        case .fair: "Fair"
+        case .serious: "Serious"
+        case .critical: "Critical"
+        @unknown default: "Unknown"
+        }
+
+        // Recent logs
+        var logs: [String] = []
+        #if DEBUG
+        logs = LogBuffer.shared.recentEntries.map { $0.formatted }
+        #endif
+
+        return DiagnosticReport(
+            deviceModel: deviceModel,
+            osVersion: osVersion,
+            locale: Locale.current.identifier,
+            timezone: TimeZone.current.identifier,
+            appVersion: appVersion,
+            buildNumber: buildNumber,
+            bundleIdentifier: bundleId,
+            memoryFootprintMB: memoryMB,
+            availableDiskGB: diskGB,
+            processorCount: processInfo.processorCount,
+            activeProcessorCount: processInfo.activeProcessorCount,
+            isLowPowerMode: processInfo.isLowPowerModeEnabled,
+            thermalState: thermal,
+            uptime: processInfo.systemUptime,
+            recentLogs: logs,
+            generatedAt: .now
+        )
+    }
+
+    // MARK: - Formatted Output
+
+    func formattedReport() -> String {
+        let divider = String(repeating: "-", count: 50)
+        var lines: [String] = []
+
+        lines.append("MOODBIT DIAGNOSTIC REPORT")
+        lines.append("Generated: \(generatedAt.formatted(.dateTime))")
+        lines.append(divider)
+
+        lines.append("DEVICE")
+        lines.append("  Model:           \(deviceModel)")
+        lines.append("  OS:              \(osVersion)")
+        lines.append("  Locale:          \(locale)")
+        lines.append("  Timezone:        \(timezone)")
+        lines.append("  Processors:      \(activeProcessorCount)/\(processorCount)")
+        lines.append("  Thermal State:   \(thermalState)")
+        lines.append("  Low Power Mode:  \(isLowPowerMode ? "Yes" : "No")")
+        lines.append(divider)
+
+        lines.append("APP")
+        lines.append("  Version:         \(appVersion) (\(buildNumber))")
+        lines.append("  Bundle ID:       \(bundleIdentifier)")
+        lines.append("  Memory:          \(String(format: "%.1f", memoryFootprintMB)) MB")
+        lines.append("  Disk Available:  \(String(format: "%.1f", availableDiskGB)) GB")
+        lines.append("  Uptime:          \(Self.formatUptime(uptime))")
+        lines.append(divider)
+
+        if !recentLogs.isEmpty {
+            lines.append("RECENT LOGS (last \(recentLogs.count) entries)")
+            for log in recentLogs {
+                lines.append("  \(log)")
+            }
+            lines.append(divider)
+        }
+
+        // Production diagnostics note
+        lines.append("PRODUCTION DIAGNOSTICS")
+        lines.append("  For crash and performance data in production,")
+        lines.append("  register as a MXMetricManager subscriber in")
+        lines.append("  AppDelegate.didFinishLaunchingWithOptions:")
+        lines.append("")
+        lines.append("    MXMetricManager.shared.add(self)")
+        lines.append("")
+        lines.append("  Implement MXMetricManagerSubscriber to receive")
+        lines.append("  daily diagnostic payloads including:")
+        lines.append("  - Launch time metrics")
+        lines.append("  - Hang rate and duration")
+        lines.append("  - Memory and disk usage peaks")
+        lines.append("  - Crash and exception diagnostics")
+        lines.append(divider)
+
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Private Helpers
+
+    /// Read the current memory footprint using Mach task_info.
+    private static func currentMemoryFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) { infoPtr in
+            infoPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { ptr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), ptr, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Double(info.phys_footprint) / (1024 * 1024)
+    }
+
+    /// Query available disk space using FileManager.
+    private static func availableDiskSpaceGB() -> Double {
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(
+            forPath: NSHomeDirectory()
+        ),
+            let freeSize = attrs[.systemFreeSize] as? Int64
+        else { return 0 }
+        return Double(freeSize) / (1024 * 1024 * 1024)
+    }
+
+    /// Format seconds into a human-readable uptime string.
+    private static func formatUptime(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+        return "\(hours)h \(minutes)m \(secs)s"
+    }
+}
+```
+
+### Moodbit/Debug/DebugOverlayView.swift
+
+```swift
+#if DEBUG
+import SwiftUI
+import os
+
+/// A floating debug overlay that shows live app state during development.
+///
+/// Add this as an overlay on your root view:
+/// ```swift
+/// ContentView()
+///     .overlay { DebugOverlayView() }
+/// ```
+///
+/// The overlay is compiled out of release builds entirely.
+@MainActor
+struct DebugOverlayView: View {
+    @State private var isExpanded = false
+    @State private var memoryMB: Double = 0
+    @State private var appUptime: String = "0s"
+    @State private var timer: Timer?
+
+    var body: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                if isExpanded {
+                    debugPanel
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+                toggleButton
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: isExpanded)
+        .onAppear { startMonitoring() }
+        .onDisappear { stopMonitoring() }
+    }
+
+    // MARK: - Toggle Button
+
+    private var toggleButton: some View {
+        Button {
+            isExpanded.toggle()
+        } label: {
+            Image(systemName: isExpanded ? "xmark.circle.fill" : "ladybug.fill")
+                .font(.title2)
+                .foregroundStyle(.white)
+                .padding(12)
+                .background(Circle().fill(.red.opacity(0.85)))
+                .shadow(radius: 4)
+        }
+        .padding(.trailing, 16)
+        .padding(.bottom, 100)
+        .accessibilityLabel("Toggle debug overlay")
+    }
+
+    // MARK: - Debug Panel
+
+    private var debugPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header
+            HStack {
+                Image(systemName: "ant.fill")
+                Text("Debug")
+                    .font(.headline)
+                Spacer()
+            }
+            .foregroundStyle(.white)
+
+            Divider().background(.white.opacity(0.3))
+
+            // Metrics
+            metricsSection
+
+            Divider().background(.white.opacity(0.3))
+
+            // Recent Logs
+            logsSection
+
+            Divider().background(.white.opacity(0.3))
+
+            // Actions
+            actionsSection
+        }
+        .padding(12)
+        .frame(width: 300, maxHeight: 420)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.black.opacity(0.7))
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.trailing, 8)
+        .padding(.bottom, 100)
+        .allowsHitTesting(true)
+    }
+
+    // MARK: - Metrics Section
+
+    private var metricsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            metricRow(
+                icon: "memorychip",
+                label: "Memory",
+                value: String(format: "%.1f MB", memoryMB)
+            )
+            metricRow(
+                icon: "clock",
+                label: "Uptime",
+                value: appUptime
+            )
+            metricRow(
+                icon: "cpu",
+                label: "Threads",
+                value: "\(Thread.activeThreadCount())"
+            )
+        }
+    }
+
+    private func metricRow(icon: String, label: String, value: String) -> some View {
+        HStack {
+            Image(systemName: icon)
+                .frame(width: 20)
+            Text(label)
+            Spacer()
+            Text(value)
+                .monospacedDigit()
+        }
+        .font(.caption)
+        .foregroundStyle(.white.opacity(0.9))
+    }
+
+    // MARK: - Logs Section
+
+    private var logsSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Recent Logs")
+                .font(.caption.bold())
+                .foregroundStyle(.white.opacity(0.7))
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(LogBuffer.shared.recentEntries.prefix(10)) { entry in
+                        Text(entry.formatted)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(colorForLevel(entry.level))
+                            .lineLimit(2)
+                    }
+                }
+            }
+            .frame(maxHeight: 160)
+        }
+    }
+
+    private func colorForLevel(_ level: String) -> Color {
+        switch level {
+        case "ERROR", "FAULT": .red
+        case "INFO": .green
+        case "DEBUG": .white.opacity(0.6)
+        default: .white.opacity(0.8)
+        }
+    }
+
+    // MARK: - Actions Section
+
+    private var actionsSection: some View {
+        HStack(spacing: 12) {
+            Button("Copy Report") {
+                let report = DiagnosticReport.generate()
+                UIPasteboard.general.string = report.formattedReport()
+                Log.ui.info("Diagnostic report copied to clipboard")
+            }
+            .font(.caption)
+            .buttonStyle(.borderedProminent)
+            .tint(.blue.opacity(0.8))
+
+            Button("Clear Logs") {
+                LogBuffer.shared.clear()
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            .tint(.white.opacity(0.6))
+        }
+    }
+
+    // MARK: - Monitoring
+
+    private func startMonitoring() {
+        updateMetrics()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+            Task { @MainActor in
+                updateMetrics()
+            }
+        }
+    }
+
+    private func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func updateMetrics() {
+        memoryMB = currentMemoryFootprintMB()
+        let uptimeSeconds = ProcessInfo.processInfo.systemUptime
+        let hours = Int(uptimeSeconds) / 3600
+        let minutes = (Int(uptimeSeconds) % 3600) / 60
+        let seconds = Int(uptimeSeconds) % 60
+        appUptime = "\(hours)h \(minutes)m \(seconds)s"
+    }
+
+    // MARK: - Memory Reading
+
+    private func currentMemoryFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) { infoPtr in
+            infoPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { ptr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), ptr, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Double(info.phys_footprint) / (1024 * 1024)
+    }
+}
+
+// MARK: - Thread Count Helper
+
+private extension Thread {
+    static func activeThreadCount() -> Int {
+        var threadList: thread_act_array_t?
+        var threadCount: mach_msg_type_number_t = 0
+        let result = task_threads(mach_task_self_, &threadList, &threadCount)
+        if result == KERN_SUCCESS, let list = threadList {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(bitPattern: list),
+                vm_size_t(Int(threadCount) * MemoryLayout<thread_act_t>.size)
+            )
+        }
+        return Int(threadCount)
+    }
+}
+#endif
+```
+
+### LLDB Commands Quick Reference
+
+Use these commands in the Xcode debug console when a breakpoint hits. This table covers the commands you will use most often when debugging Moodbit.
+
+| Command | What It Does | Example |
+|---|---|---|
+| `po <expr>` | Print object using `debugDescription` | `po self.entries` |
+| `v <var>` | Print variable by reading memory directly | `v self.isLoading` |
+| `p <expr>` | Print with full type information | `p entries.count` |
+| `expr <code>` | Evaluate arbitrary Swift in current frame | `expr self.isLoading = true` |
+| `fr v` | Show all variables in the current frame | `fr v` |
+| `bt` | Backtrace of current thread | `bt` |
+| `bt all` | Backtrace of every thread | `bt all` |
+| `br s -n <func>` | Set breakpoint on function name | `br s -n "loadEntries"` |
+| `br s -f <file> -l <line>` | Set breakpoint on file and line | `br s -f ViewModel.swift -l 42` |
+| `br mod -c "<cond>" <id>` | Add condition to breakpoint | `br mod -c "entries.count > 5" 3` |
+| `br com add <id>` | Add auto-run commands to breakpoint | `br com add 3` |
+| `w s v <var>` | Watchpoint: break when variable changes | `w s v self.errorMessage` |
+| `w s e -- <addr>` | Watchpoint: break on memory address change | `w s e -- 0x7fff5fbff8a0` |
+| `image lookup -a <addr>` | Find symbol at crash address | `image lookup -a 0x1000042a0` |
+| `thread return` | Force-return from current function | `thread return` |
+
+**When `po` fails:** If you see "expression produced error," use `v` instead. `po` evaluates Swift code to produce output, which can fail if the expression context is ambiguous. `v` reads the variable directly from memory and almost never fails.
+
+**Breakpoint actions without stopping:** Right-click a breakpoint in Xcode, choose Edit Breakpoint, add a "Log Message" action with `%B` (breakpoint name) and `%H` (hit count), then check "Automatically continue after evaluating actions." This gives you `print()`-style debugging without modifying code or pausing execution.
+
+**Watchpoints for state corruption:** If `errorMessage` changes to a value you do not expect, set a watchpoint with `w s v self.errorMessage`. The debugger will break at the exact line that mutates the property — even if the mutation comes from a different function or thread than you suspect.
+
+### Instruments Workflow Checklist
+
+Follow this checklist when profiling Moodbit with Instruments.
+
+```
+INSTRUMENTS PROFILING WORKFLOW
+==============================
+
+SETUP:
+  [ ] Build with Release configuration (Product > Scheme > Edit >
+      Profile action > Build Configuration > Release)
+  [ ] Use a physical device, not the Simulator
+  [ ] Close unnecessary apps to reduce noise
+  [ ] Disable Low Power Mode (throttles CPU)
+
+TIME PROFILER (finding slow code):
+  [ ] Open Instruments > Time Profiler
+  [ ] Record for 30–60 seconds of normal usage
+  [ ] Focus on the heaviest stack trace (Call Tree view)
+  [ ] Check "Hide System Libraries" to see only your code
+  [ ] Check "Invert Call Tree" to see leaf functions first
+  [ ] Look for: main thread work > 16ms (causes frame drops)
+  [ ] Look for: repeated identical work (missing caching)
+
+ALLOCATIONS (finding memory leaks):
+  [ ] Open Instruments > Allocations
+  [ ] Use "Mark Generation" before and after a user action
+  [ ] Compare generations — growth between marks = potential leak
+  [ ] Filter by "Moodbit" to see only your allocations
+  [ ] Look for: objects that grow but never shrink
+  [ ] Look for: retain cycles in closures (strong self captures)
+  [ ] Check "Allocation Lifespan: Created & Still Living"
+
+SWIFTUI VIEW BODY TRACKING:
+  [ ] Add os_signpost intervals around expensive view logic
+  [ ] Use Self._printChanges() in view body during debug:
+        let _ = Self._printChanges()
+  [ ] Watch for: body called on every frame (missing Equatable)
+  [ ] Watch for: @Observable property causing unrelated redraws
+  [ ] Profile with Instruments > SwiftUI template (Xcode 16+)
+
+OS_SIGNPOST (custom intervals):
+  [ ] Wrap key operations with OSSignposter begin/end
+  [ ] Use Log.signposter.measure("Operation Name") { ... }
+  [ ] Open Instruments > os_signpost instrument
+  [ ] Filter by your subsystem to see named intervals
+  [ ] Look for: intervals > 100ms on the main thread
+  [ ] Look for: overlapping intervals (concurrency issues)
+
+PRODUCTION (MXMetricManager):
+  [ ] Register as MXMetricManagerSubscriber in AppDelegate
+  [ ] Implement didReceive(_:) for daily diagnostic payloads
+  [ ] Monitor: launch time, hang rate, memory peaks
+  [ ] Access crash diagnostics via didReceive(diagnostics:)
+  [ ] Review metrics in Xcode Organizer > Metrics tab
+```
+
+## Checkpoint
+
+Before moving to the next lesson, verify every item:
+
+- [ ] `Logger+Extensions.swift` compiles with `import os` and defines loggers for all Moodbit subsystems
+- [ ] Log messages appear in Console.app filtered by your subsystem when running in the Simulator
+- [ ] `os.Logger` is used everywhere — no `print()` or `NSLog()` calls remain in the codebase
+- [ ] `DebugOverlayView` renders with memory, uptime, and recent logs when tapped in a DEBUG build
+- [ ] `DebugOverlayView` does not appear in a Release build (verify with `#if DEBUG` at file level)
+- [ ] `DiagnosticReport.generate()` returns a report with correct device model, OS version, and memory
+- [ ] `DiagnosticReport.formattedReport()` produces a readable, paste-friendly string
+- [ ] `OSSignposter` intervals appear in Instruments when profiling a wrapped operation
+- [ ] LLDB `po`, `v`, and `expr` commands work at a breakpoint in `MoodTimelineViewModel`
+- [ ] A watchpoint on `errorMessage` triggers when the property changes value
+
+## Challenge
+
+**Build a network request logger using `OSSignposter`.**
+
+Add signpost instrumentation to the AI service layer so that every API request appears as a named interval in Instruments. The interval should:
+
+1. Begin when the `URLRequest` is created
+2. Include the endpoint URL as metadata
+3. End when the response is received (with status code) or when an error occurs
+4. Log the response size in bytes and elapsed time via `os.Logger`
+
+Wrap an existing AI service call (e.g., `generateInsight()`) with the signpost and verify it appears in the Instruments `os_signpost` timeline.
+
+<details>
+<summary>Hint</summary>
+
+Use `Log.signposter` to create the interval, and pair it with `Log.network` for the structured log entry. The key is to capture the `OSSignpostIntervalState` from `beginInterval` and pass it to `endInterval` in both the success and error paths:
+
+```swift
+func generateInsight(for entries: [MoodEntry]) async throws -> String {
+    let state = Log.signposter.beginInterval(
+        "API Request",
+        "endpoint: /v1/chat/completions"
+    )
+
+    do {
+        let (data, response) = try await urlSession.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let sizeKB = Double(data.count) / 1024.0
+
+        Log.signposter.endInterval("API Request", state)
+        Log.network.info(
+            "API response: status=\(statusCode, privacy: .public), size=\(sizeKB, format: .fixed(precision: 1), privacy: .public) KB"
+        )
+
+        return try decode(data)
+    } catch {
+        Log.signposter.endInterval("API Request", state, "\(error)")
+        Log.network.error(
+            "API request failed: \(error.localizedDescription, privacy: .public)"
+        )
+        throw error
+    }
+}
+```
+
+Profile with Instruments using the `os_signpost` instrument. Filter by your subsystem. Each API call should appear as a horizontal bar on the timeline, making it easy to spot slow requests and correlate them with UI freezes.
+
+</details>

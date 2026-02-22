@@ -3,11 +3,11 @@ title: "CloudKit Sync"
 description: "Add multi-device sync to Moodbit with SwiftData's CloudKit integration — configure the container, handle merge conflicts, and test sync between simulator and device."
 courseSlug: "ship-native"
 module: 9
-moduleTitle: "Bonus — Advanced Patterns"
+moduleTitle: "Bonus: Advanced Topics"
 lesson: 1
-duration: "22 min read"
+duration: "24 min read"
 difficulty: "advanced"
-topics: ["CloudKit", "Sync", "SwiftData", "Multi-Device", "Conflict Resolution", "iCloud", "Moodbit"]
+topics: ["CloudKit", "SwiftData Sync", "iCloud", "Conflict Resolution", "Multi-Device", "Moodbit"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
@@ -15,12 +15,12 @@ pubDate: 2026-02-22
 
 Your users have an iPhone and an iPad. They log a mood on the train with their phone, then open the iPad at home and expect to see it there. If it is not there, they do not file a bug report — they just stop using your app. Multi-device sync is not a feature. It is table stakes.
 
-The good news: SwiftData and CloudKit were designed to work together. The bad news: "designed to work together" does not mean "works without thinking." Merge conflicts, network failures, and sync delays are real, and ignoring them produces an app that silently loses data. This lesson gets you through the full setup, the gotchas, and the testing strategy.
+The good news: SwiftData and CloudKit were designed to work together. The bad news: "designed to work together" does not mean "works without thinking." Merge conflicts, network failures, and sync delays are real, and ignoring them produces an app that silently loses data. This lesson gets you through the full setup, the conflict resolution strategy, and the testing workflow you need to ship sync with confidence.
 
 ## What You'll Learn
 
-- How to enable CloudKit sync in a SwiftData `ModelConfiguration` with a single line change
-- How to configure the iCloud container, entitlements, and capabilities in Xcode
+- How to enable CloudKit sync in a SwiftData `ModelConfiguration` with a single property change and configure the iCloud container in Xcode
+- What CloudKit-compatibility constraints apply to your SwiftData model — and why `@Attribute(.unique)` breaks everything
 - Merge conflict strategies (last-write-wins vs. custom resolution) and how SwiftData handles them by default
 - A testing workflow for verifying sync between simulator instances and physical devices, including offline-to-online transitions
 
@@ -28,7 +28,7 @@ The good news: SwiftData and CloudKit were designed to work together. The bad ne
 
 Users expect their data to follow them across devices. Apple makes this possible through iCloud and CloudKit, and SwiftData's integration means you do not need to build a backend, manage authentication, or run a server. But the abstraction is leaky — sync is eventually consistent, not instant, and merge conflicts are silent unless you handle them. Understanding what happens under the hood is the difference between "sync works" and "sync works until two devices edit the same entry, then one user's data disappears."
 
-## Plan Phase: Defining What We Build
+## Plan Phase: Designing the CloudKit Integration
 
 Open plan mode and think through the full integration before writing code:
 
@@ -58,18 +58,19 @@ Plan the CloudKit integration:
 Do not generate code yet. Plan first.
 ```
 
-### What the AI Plan Should Contain
+### AI Plan Review
 
-1. **ModelConfiguration change** — set `cloudKitDatabase: .automatic` (or `.private`) on the `ModelConfiguration`. That is the entire SwiftData change to enable sync.
-2. **Xcode capabilities** — iCloud capability with CloudKit checked, plus Background Modes with "Remote notifications" enabled (CloudKit uses silent push to trigger sync).
-3. **Container setup** — an iCloud container identifier like `iCloud.com.yourname.moodbit`, created in the Apple Developer portal or automatically by Xcode.
-4. **Entitlements** — `com.apple.developer.icloud-container-identifiers` and `com.apple.developer.icloud-services` with `CloudKit` value.
-5. **Conflict resolution** — SwiftData with CloudKit uses last-write-wins by default. The most recent change (by device timestamp) overwrites the older one. No merge, no prompt. If you need field-level merging, you must implement it yourself.
-6. **CloudKit limitations** — `@Attribute(.unique)` constraints are not supported with CloudKit. All properties should be optional or have default values. `@Transient` properties do not sync. Relationships must be optional.
-7. **Testing** — use two simulator instances signed into the same iCloud account, or one simulator + one physical device. The CloudKit Dashboard (console.developer.apple.com) shows records in real time.
-8. **Offline handling** — SwiftData queues changes locally and syncs when connectivity returns. No code needed for basic offline support, but you should handle `NSPersistentCloudKitContainer` notifications if you want to show sync status.
+The AI plan should contain these specific items. If any are missing, push back before moving to code:
 
-If the plan does not mention that `@Attribute(.unique)` breaks CloudKit sync, flag it. This is the single most common cause of "sync just does not work" bugs.
+- ✅ **ModelConfiguration change** — set `cloudKitDatabase: .automatic` (or `.private`) on the `ModelConfiguration`. That is the entire SwiftData change to enable sync. If the plan says to import CloudKit and manually create `CKContainer` instances, it is overcomplicating things.
+- ✅ **Xcode capabilities** — iCloud capability with CloudKit checked, plus Background Modes with "Remote notifications" enabled. CloudKit uses silent push notifications to trigger sync between devices.
+- ✅ **Container identifier** — an iCloud container identifier like `iCloud.com.yourname.moodbit`, created in the Apple Developer portal or automatically by Xcode when you check the CloudKit capability.
+- ✅ **Entitlements** — `com.apple.developer.icloud-container-identifiers` and `com.apple.developer.icloud-services` with `CloudKit` value in the entitlements file.
+- ✅ **Conflict resolution** — SwiftData with CloudKit uses last-write-wins by default. The most recent change (by device timestamp) overwrites the older one. No merge, no prompt. If the plan describes field-level merging as a built-in feature, it is wrong.
+- ⚠️ **CloudKit limitations** — `@Attribute(.unique)` constraints are **not supported** with CloudKit. All properties should be optional or have default values. `@Transient` properties do not sync. Relationships must be optional. If the plan does not mention the `@Attribute(.unique)` restriction, flag it. This is the single most common cause of "sync just does not work" bugs.
+- ⚠️ **Testing strategy** — use two simulator instances signed into the same iCloud account, or one simulator plus one physical device. The CloudKit Dashboard at `console.developer.apple.com` shows records in real time.
+- ❌ If the plan says to use `NSPersistentCloudKitContainer` directly — reject. SwiftData wraps this internally. You should not be creating Core Data containers alongside SwiftData.
+- ❌ If the plan ignores offline handling — push back. SwiftData queues changes locally and syncs when connectivity returns. No extra code is needed for basic offline support, but you should know this behavior exists.
 
 ### Anti-Pattern: Assuming Instant Sync
 
@@ -79,11 +80,13 @@ Just enable CloudKit and it will sync automatically
 
 Technically true. Practically misleading. CloudKit sync is eventually consistent, meaning changes can take seconds to minutes to propagate depending on network conditions, iCloud account status, and Apple's server load. If your tests assume instant sync, they will be flaky. If your UI assumes instant sync, users will think the app is broken. Plan for latency from the start.
 
-## Execute Phase: Implementation
+## Execute Phase: Building the Sync Layer
+
+We need two things: an updated model that is CloudKit-compatible and a container configuration that enables sync.
 
 ### Step 1: Model Compatibility
 
-First, make sure the data model is CloudKit-compatible:
+First, make sure the data model works with CloudKit:
 
 ```
 Review and update the MoodEntry SwiftData model for CloudKit
@@ -109,15 +112,17 @@ Requirements for CloudKit sync:
 Generate the updated model.
 ```
 
-### Analyzing the AI Output
+### Code Review
 
-- ✅ No `@Attribute(.unique)` on any property
-- ✅ All properties have default values (CloudKit requires this for new fields added in future schema versions)
-- ✅ `aiInsight` remains optional (as it should be — not every entry has one)
-- ✅ `lastModified` property added with a default of `Date.now`
-- ⚠️ If the AI added `@Transient` to `aiInsight` — discuss whether you want insights to sync. If the user switches devices, do they want to re-generate insights or see the original? There is no universal right answer
-- ❌ If the AI kept `@Attribute(.unique)` on `id` — reject. CloudKit manages its own record identifiers. A unique constraint on UUID will cause sync failures
-- ❌ If the AI added explicit `CKRecord` handling — reject. SwiftData abstracts this away. You should not be touching `CKRecord` directly
+Review the AI output against these criteria:
+
+- ✅ No `@Attribute(.unique)` on any property — CloudKit manages its own record identifiers via `CKRecord.ID`
+- ✅ All properties have default values — CloudKit requires this for new fields added in future schema versions
+- ✅ `aiInsight` remains optional, which is correct
+- ✅ `lastModified` property added with a default of `Date.now` for conflict debugging
+- ⚠️ If the AI added `@Transient` to `aiInsight` — discuss whether you want insights to sync. If the user switches devices, do they want to re-generate insights or see the original? There is no universal right answer, but the decision should be intentional
+- ❌ If the AI kept `@Attribute(.unique)` on `id` — reject. A unique constraint on UUID will cause sync failures with cryptic Core Data errors in the console
+- ❌ If the AI added explicit `CKRecord` handling — reject. SwiftData abstracts this entirely
 
 ### Step 2: Container Configuration
 
@@ -139,18 +144,18 @@ Requirements:
 Swift 6 strict concurrency. Zero warnings.
 ```
 
-### Analyzing the Output
+### Code Review
 
 - ✅ `ModelConfiguration` uses `cloudKitDatabase: .automatic`
 - ✅ Container identifier string matches the format `iCloud.com.yourname.moodbit`
 - ✅ Preview container uses `cloudKitDatabase: .none` and `isStoredInMemoryOnly: true`
 - ✅ No force unwrapping on container creation
-- ⚠️ If it does not handle the "not signed into iCloud" case — the app will still work (SwiftData falls back to local), but logging a warning helps with debugging
-- ❌ If it uses a hardcoded `cloudKitContainerIdentifier` that does not match the entitlements — sync will silently fail
+- ⚠️ If it does not handle the "not signed into iCloud" case — the app will still work (SwiftData falls back to local), but logging a warning helps debugging
+- ❌ If it uses a hardcoded `cloudKitContainerIdentifier` that does not match the entitlements — sync will silently fail with no user-visible error
 
-## Iteration
+## Iteration: Adding Sync Visibility
 
-After reviewing the generated code, tighten it:
+After reviewing the generated model and container code, we need a way to see what is happening. Silent sync is fine for users, but during development you need visibility:
 
 ```
 Good. Now add these improvements:
@@ -170,7 +175,20 @@ Keep it minimal. We are not building a full sync engine — just enough
 visibility to debug issues and inform the user.
 ```
 
-## Verify Phase
+Then add the UI component:
+
+```
+Create a small SyncStatusView that reads from SyncMonitor and shows:
+- A green checkmark.icloud icon when idle
+- A rotating arrow.triangle.2.circlepath.icloud when syncing
+- A red exclamationmark.icloud when there is an error
+- An icloud.slash icon when no iCloud account is available
+
+Use SF Symbols and keep it small enough to put in a toolbar or
+settings screen. Use .symbolEffect for the rotation animation.
+```
+
+## Verify Phase: Testing Sync End-to-End
 
 CloudKit sync requires careful testing because failures are often silent. Work through this verification plan:
 
@@ -211,6 +229,81 @@ CloudKit sync requires careful testing because failures are often silent. Work t
 
 ## Final Code
 
+### CloudKitConfiguration.swift
+
+This file centralizes all CloudKit-related configuration so the rest of the app does not need to know the details:
+
+```swift
+import Foundation
+import SwiftData
+import os
+
+/// Centralizes CloudKit and ModelContainer configuration for Moodbit.
+enum CloudKitConfiguration {
+    private static let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "CloudKit"
+    )
+
+    /// The iCloud container identifier. Must match the entitlements file.
+    static let containerIdentifier = "iCloud.com.yourname.moodbit"
+
+    /// Creates the production ModelContainer with CloudKit sync enabled.
+    ///
+    /// If the user is not signed into iCloud, SwiftData falls back to
+    /// local-only persistence automatically — no extra handling needed.
+    static func makeProductionContainer() -> ModelContainer {
+        do {
+            let configuration = ModelConfiguration(
+                "Moodbit",
+                schema: Schema([MoodEntry.self]),
+                cloudKitDatabase: .automatic
+            )
+            let container = try ModelContainer(
+                for: MoodEntry.self,
+                configurations: [configuration]
+            )
+            logger.info("ModelContainer created with CloudKit sync enabled.")
+            return container
+        } catch {
+            logger.fault(
+                "Failed to create ModelContainer: \(error.localizedDescription)"
+            )
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }
+
+    /// Creates an in-memory container for SwiftUI previews. No sync.
+    static func makePreviewContainer() -> ModelContainer {
+        let configuration = ModelConfiguration(
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        do {
+            return try ModelContainer(
+                for: MoodEntry.self,
+                configurations: [configuration]
+            )
+        } catch {
+            fatalError("Preview container failed: \(error)")
+        }
+    }
+
+    /// Checks whether the user has an active iCloud account.
+    ///
+    /// This does not guarantee sync will work — the user might have
+    /// disabled iCloud Drive for this app — but it catches the most
+    /// common case: not signed in at all.
+    static func isCloudAvailable() -> Bool {
+        let token = FileManager.default.ubiquityIdentityToken
+        if token == nil {
+            logger.warning("No iCloud account detected. Data is local only.")
+        }
+        return token != nil
+    }
+}
+```
+
 ### MoodEntry.swift (Updated for CloudKit)
 
 ```swift
@@ -218,9 +311,16 @@ import Foundation
 import SwiftData
 
 /// A single mood journal entry, synced across devices via CloudKit.
+///
+/// CloudKit compatibility rules enforced here:
+/// - No @Attribute(.unique) constraints
+/// - All non-optional properties have default values
+/// - @Transient properties are local-only and do not sync
 @Model
 final class MoodEntry {
     /// Stable identifier for the entry.
+    /// NOT marked @Attribute(.unique) — CloudKit manages its own
+    /// record IDs and unique constraints break sync.
     var id: UUID = UUID()
 
     /// Mood rating from 1 (lowest) to 5 (highest).
@@ -232,13 +332,18 @@ final class MoodEntry {
     /// When the entry was created.
     var date: Date = Date.now
 
-    /// When the entry was last modified (used for conflict debugging).
+    /// When the entry was last modified on any device.
+    /// Used for debugging conflict resolution — the entry with the
+    /// latest lastModified timestamp wins in a conflict.
     var lastModified: Date = Date.now
 
     /// AI-generated insight. Nil if not yet generated.
+    /// Syncs across devices so the user does not re-generate insights.
     var aiInsight: String?
 
-    /// Local-only flag for entries pending AI analysis. Not synced.
+    /// Local-only flag for entries pending AI analysis.
+    /// Not synced — Device A waiting for an API response does not
+    /// concern Device B.
     @Transient
     var isPendingAnalysis: Bool = false
 
@@ -277,7 +382,7 @@ struct MoodbitApp: App {
     let modelContainer: ModelContainer
 
     init() {
-        self.modelContainer = Self.makeModelContainer()
+        self.modelContainer = CloudKitConfiguration.makeProductionContainer()
     }
 
     var body: some Scene {
@@ -293,44 +398,6 @@ struct MoodbitApp: App {
         }
         .modelContainer(modelContainer)
     }
-
-    /// Creates the SwiftData container with CloudKit sync enabled.
-    private static func makeModelContainer() -> ModelContainer {
-        do {
-            let configuration = ModelConfiguration(
-                "Moodbit",
-                schema: Schema([MoodEntry.self]),
-                cloudKitDatabase: .automatic
-            )
-            let container = try ModelContainer(
-                for: MoodEntry.self,
-                configurations: [configuration]
-            )
-            logger.info("ModelContainer created with CloudKit sync.")
-            return container
-        } catch {
-            logger.fault(
-                "Failed to create ModelContainer: \(error.localizedDescription)"
-            )
-            fatalError("Failed to create ModelContainer: \(error)")
-        }
-    }
-
-    /// Creates an in-memory container for SwiftUI previews. No sync.
-    static func previewContainer() -> ModelContainer {
-        let configuration = ModelConfiguration(
-            isStoredInMemoryOnly: true,
-            cloudKitDatabase: .none
-        )
-        do {
-            return try ModelContainer(
-                for: MoodEntry.self,
-                configurations: [configuration]
-            )
-        } catch {
-            fatalError("Preview container failed: \(error)")
-        }
-    }
 }
 ```
 
@@ -342,6 +409,10 @@ import CoreData
 import os
 
 /// Observes CloudKit sync events and exposes status for the UI.
+///
+/// SyncMonitor listens to NSPersistentCloudKitContainer notifications
+/// (which SwiftData fires internally) and translates them into a
+/// simple status enum that views can observe.
 @MainActor
 @Observable
 final class SyncMonitor {
@@ -365,6 +436,10 @@ final class SyncMonitor {
     /// Whether iCloud is available on this device.
     private(set) var isCloudAvailable: Bool = false
 
+    /// The last time a sync export completed successfully.
+    /// Useful for displaying "Last synced: 2 minutes ago" in settings.
+    private(set) var lastSyncDate: Date?
+
     init() {
         checkCloudAvailability()
         startObserving()
@@ -372,17 +447,16 @@ final class SyncMonitor {
 
     /// Checks whether the user is signed into iCloud.
     private func checkCloudAvailability() {
-        let token = FileManager.default.ubiquityIdentityToken
-        isCloudAvailable = token != nil
+        isCloudAvailable = CloudKitConfiguration.isCloudAvailable()
         if !isCloudAvailable {
             status = .noAccount
-            logger.warning("iCloud account not available. Data is local only.")
-        } else {
-            logger.info("iCloud account detected. Sync enabled.")
         }
     }
 
     /// Subscribes to CloudKit sync event notifications.
+    ///
+    /// SwiftData uses NSPersistentCloudKitContainer internally, so these
+    /// notifications fire even though we never create the container ourselves.
     private func startObserving() {
         NotificationCenter.default.addObserver(
             forName: NSPersistentCloudKitContainer.eventChangedNotification,
@@ -407,7 +481,7 @@ final class SyncMonitor {
         if let error = event.error {
             status = .error
             logger.error(
-                "Sync error (\(event.type.description)): \(error.localizedDescription)"
+                "Sync error (\(event.type.label)): \(error.localizedDescription)"
             )
             return
         }
@@ -427,17 +501,20 @@ final class SyncMonitor {
                 logger.debug("Sync: unknown event type.")
             }
         } else {
-            // Event finished.
+            // Event finished successfully.
+            if event.type == .export {
+                lastSyncDate = Date.now
+            }
             status = .idle
-            logger.debug("Sync: \(event.type.description) completed.")
+            logger.debug("Sync: \(event.type.label) completed.")
         }
     }
 }
 
-// MARK: - Event Type Description
+// MARK: - Event Type Label
 
 extension NSPersistentCloudKitContainer.EventType {
-    var description: String {
+    var label: String {
         switch self {
         case .setup:  return "setup"
         case .import: return "import"
@@ -448,12 +525,15 @@ extension NSPersistentCloudKitContainer.EventType {
 }
 ```
 
-### SyncStatusView.swift (Optional UI Component)
+### SyncStatusView.swift
 
 ```swift
 import SwiftUI
 
 /// A small indicator showing the current CloudKit sync status.
+///
+/// Place this in a toolbar, settings screen, or anywhere you want
+/// a subtle indicator of sync health. It stays small and unobtrusive.
 struct SyncStatusView: View {
     @Environment(SyncMonitor.self) private var syncMonitor
 
@@ -487,6 +567,11 @@ struct SyncStatusView: View {
         }
     }
 }
+
+#Preview {
+    SyncStatusView()
+        .environment(SyncMonitor())
+}
 ```
 
 ### Key Design Decisions
@@ -495,67 +580,71 @@ struct SyncStatusView: View {
 
 **Why no `@Attribute(.unique)` on `id`?** CloudKit manages record identity internally using `CKRecord.ID`. Adding a unique constraint on your own `id` field causes the persistent store coordinator to throw merge errors during sync, because CloudKit's conflict resolution operates at the record level, not the field level. Your `id` is still useful as a stable application-level identifier — just do not enforce uniqueness at the database level.
 
-**Why last-write-wins?** SwiftData with CloudKit does not offer built-in field-level merge. The entire record is replaced by whichever device wrote last (by timestamp). For a mood journal, this is acceptable — users rarely edit the same entry on two devices simultaneously. For collaborative apps (shared documents, team task lists), you would need a custom merge strategy or a different sync backend.
+**Why last-write-wins?** SwiftData with CloudKit does not offer built-in field-level merge. The entire record is replaced by whichever device wrote last (by timestamp). For a mood journal, this is acceptable — users rarely edit the same entry on two devices simultaneously. For collaborative apps (shared documents, team task lists), you would need a custom merge strategy or a different sync backend entirely.
 
-**Why `@Transient` on `isPendingAnalysis`?** This flag is a local UI concern. If Device A is waiting for an AI response, Device B does not need to know. Syncing transient state creates unnecessary network traffic and confusing UX.
+**Why `@Transient` on `isPendingAnalysis`?** This flag is a local UI concern. If Device A is waiting for an AI response, Device B does not need to know. Syncing transient state creates unnecessary network traffic and confusing UX where one device shows a spinner for another device's network request.
 
 ## Checkpoint
 
 Before considering CloudKit sync complete, verify every item:
 
-- [ ] iCloud capability added in Xcode with CloudKit checked
-- [ ] Background Modes capability added with "Remote notifications"
-- [ ] Container identifier matches between Xcode entitlements and `ModelConfiguration`
-- [ ] `MoodEntry` has no `@Attribute(.unique)` constraints
-- [ ] All non-optional properties in `MoodEntry` have default values
-- [ ] App builds and runs with zero warnings under Swift 6 strict concurrency
-- [ ] CloudKit Dashboard shows the `MoodEntry` record type after first launch
-- [ ] Creating an entry on Device A appears on Device B within 60 seconds
-- [ ] Editing an entry on one device reflects on the other
-- [ ] Deleting an entry on one device removes it from the other
-- [ ] App works normally when iCloud is unavailable (local-only fallback)
-- [ ] `SyncMonitor` logs sync events in the Xcode console
-- [ ] Creating entries offline and then going online results in successful sync
+1. iCloud capability added in Xcode with CloudKit checked
+2. Background Modes capability added with "Remote notifications" enabled
+3. Container identifier matches between Xcode entitlements and `ModelConfiguration`
+4. `MoodEntry` has no `@Attribute(.unique)` constraints on any property
+5. All non-optional properties in `MoodEntry` have default values
+6. App builds and runs with zero warnings under Swift 6 strict concurrency
+7. CloudKit Dashboard shows the `MoodEntry` record type after first launch
+8. Creating an entry on Device A appears on Device B within 60 seconds
+9. Editing an entry on one device reflects on the other
+10. Deleting an entry on one device removes it from the other
+11. App works normally when iCloud is unavailable (local-only fallback)
+12. `SyncMonitor` logs sync events in the Xcode console
+13. Creating entries offline and then going online results in successful sync
 
 ## Challenge
 
 **Implement a manual sync status indicator in the Settings screen.**
 
-1. Add `SyncStatusView` to the Settings screen
-2. Below the status indicator, show the last successful sync time (store it in `SyncMonitor` when an export event completes)
-3. Add a "Sync Now" button that triggers a save on the `ModelContext` (this nudges the persistent store to attempt an export)
-4. If `isCloudAvailable` is false, show a message directing the user to sign into iCloud in Settings
+Add `SyncStatusView` to the Settings screen. Below the status indicator, show the last successful sync time. Add a "Sync Now" button that triggers a save on the `ModelContext` to nudge the persistent store into attempting an export. If `isCloudAvailable` is false, show a message directing the user to sign into iCloud in Settings.
 
 <details>
 <summary>Hint</summary>
 
-Store the last sync time in `SyncMonitor`:
+The last sync time is already tracked in `SyncMonitor.lastSyncDate`. Display it with a relative format:
 
 ```swift
-private(set) var lastSyncDate: Date?
-```
-
-Update it when an export event finishes:
-
-```swift
-if event.endDate != nil && event.type == .export {
-    status = .idle
-    lastSyncDate = Date.now
+if let lastSync = syncMonitor.lastSyncDate {
+    Text("Last synced: \(lastSync, format: .relative(presentation: .named))")
+        .font(.caption)
+        .foregroundStyle(.secondary)
 }
 ```
 
 The "Sync Now" button triggers a context save, which prompts the CloudKit integration to check for pending changes:
 
 ```swift
+@Environment(\.modelContext) private var modelContext
+
 Button("Sync Now") {
     try? modelContext.save()
 }
 .disabled(!syncMonitor.isCloudAvailable)
 ```
 
-This does not force an immediate sync — CloudKit decides the actual timing — but it ensures any unsaved local changes are flushed to the persistent store where the sync engine can pick them up.
+This does not force an immediate sync — CloudKit decides the actual timing — but it ensures any unsaved local changes are flushed to the persistent store where the sync engine can pick them up. For the "no account" state:
+
+```swift
+if !syncMonitor.isCloudAvailable {
+    ContentUnavailableView(
+        "iCloud Not Available",
+        systemImage: "icloud.slash",
+        description: Text("Sign into iCloud in Settings to sync your mood entries across devices.")
+    )
+}
+```
 </details>
 
 ---
 
-Next up: **Bonus Lesson B.2 — Share Extension & Beyond**, where we build a Share Extension for quick mood logging and chart your path forward as an AI-augmented iOS developer.
+Next up: **Bonus Lesson 9.2 — Share Extension & Beyond**, where we build a Share Extension for quick mood logging from any app and chart your path forward as an AI-augmented iOS developer.
