@@ -1,0 +1,578 @@
+---
+title: "CI/CD & Release"
+description: "Set up automated builds with GitHub Actions, distribute through TestFlight, implement semantic versioning, and establish the post-launch monitoring workflow."
+courseSlug: "ship-native"
+module: 8
+moduleTitle: "Ship It"
+lesson: 2
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["CI/CD", "GitHub Actions", "TestFlight", "Semantic Versioning", "Automation", "Xcode Cloud", "Release", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+You can build the app on your machine and upload it through Xcode. That works exactly once. The second time, you forget to increment the build number. The third time, you push a commit that breaks the tests but upload anyway because "it works on my machine." By the fifth time, you are dreading releases.
+
+This lesson sets up the pipeline that removes you as the bottleneck. Push to `main`, and the machine takes over: build, test, archive, upload to TestFlight. Every time, the same way, with no human error.
+
+## What You'll Learn
+
+- How to configure a GitHub Actions workflow that builds, tests, and archives an iOS app
+- How to distribute builds to TestFlight automatically from CI
+- Semantic versioning strategy and automatic build number incrementing
+- Post-launch monitoring fundamentals: crash reports, user feedback loops, and what to prioritize after v1.0
+
+## Why This Matters
+
+Manual release processes do not scale. Even for a solo developer, automating your pipeline saves hours per release and eliminates entire categories of mistakes — wrong provisioning profile, stale build number, untested code shipping to users. More importantly, a reliable pipeline means you can ship fixes fast. When your first user reports a crash, the difference between "I can push a fix in 20 minutes" and "let me figure out how to build and upload again" is the difference between keeping and losing that user.
+
+## Plan Phase: Defining What We Build
+
+Start in plan mode. We need the AI to design the full pipeline before generating any YAML or scripts:
+
+```
+I need to set up CI/CD for an iOS app called "Moodbit."
+
+Current setup:
+- Xcode 16+, iOS 17+, Swift 6
+- GitHub repository (private)
+- Apple Developer Program account
+- App Store Connect record already created (from Lesson 8.1)
+- Tests exist (unit + UI tests from Module 6)
+
+Plan a CI/CD pipeline that:
+1. Runs on every push to main and on pull requests
+2. Builds the project and runs all tests
+3. On pushes to main only: archives and uploads to TestFlight
+4. Handles code signing (match or manual provisioning)
+5. Auto-increments the build number
+6. Uses semantic versioning for the marketing version
+
+Think through:
+- What GitHub Actions runner do I need? (macOS)
+- What secrets do I need to store?
+- How do I handle provisioning profiles and certificates?
+- What is the versioning strategy?
+- What caching can I use to speed up builds?
+
+Do not generate the workflow file yet. Give me the plan.
+```
+
+### What the AI Plan Should Contain
+
+1. **Runner** — `macos-14` or `macos-15` with Xcode pre-installed. iOS builds require macOS runners; Linux runners will not work.
+2. **Secrets** — `APP_STORE_CONNECT_API_KEY` (the `.p8` file contents), `KEY_ID`, `ISSUER_ID`, certificates and provisioning profile (base64-encoded), keychain password.
+3. **Code signing strategy** — either Fastlane Match (recommended for teams) or manual export of the certificate and profile stored as GitHub secrets.
+4. **Two jobs** — one for PR validation (build + test only), one for main branch (build + test + archive + upload).
+5. **Versioning** — marketing version (`CFBundleShortVersionString`) managed manually in `Info.plist` or Xcode project settings. Build number (`CFBundleVersion`) auto-incremented by CI using the GitHub run number.
+6. **Caching** — derived data and SPM packages cached between runs to cut build time.
+
+If the plan suggests using a Linux runner or skips code signing entirely, push back.
+
+### Anti-Pattern: Manual Builds Every Time
+
+```
+How do I upload my app to TestFlight?
+```
+
+This gets you the Xcode > Product > Archive > Distribute workflow. It works, but it means every release depends on your machine, your Xcode version, and you remembering every step. One missed checkbox in the archive organizer and your build is rejected. Automation is not a nice-to-have — it is the only way to ship reliably.
+
+## Execute Phase: Implementation
+
+### Step 1: Semantic Versioning Config
+
+First, lock in the versioning strategy:
+
+```
+Generate a version management setup for Moodbit:
+
+1. A Version.swift file that exposes the current version as a
+   constant (read from the bundle)
+2. Explain the semantic versioning rules for our app:
+   - MAJOR: breaking changes (data model migration, dropped iOS version)
+   - MINOR: new features (new screen, new AI capability)
+   - PATCH: bug fixes and polish
+3. A shell script that sets CFBundleVersion to the GitHub Actions
+   run number (passed as an environment variable)
+
+Keep it simple. No external dependencies.
+```
+
+### Analyzing the AI Output
+
+**Version.swift:**
+
+- ✅ Reads from `Bundle.main.infoDictionary` — not hardcoded
+- ✅ Provides both `marketingVersion` and `buildNumber` as static properties
+- ⚠️ If it uses force-unwrapping (`!`) on the dictionary lookup — acceptable for bundle info (it is always present), but add a fallback string for safety
+- ❌ If it defines the version as a hardcoded string — reject. The source of truth must be the Info.plist
+
+**Shell script:**
+
+- ✅ Uses `agvtool new-version -all $BUILD_NUMBER` or `PlistBuddy` to set CFBundleVersion
+- ✅ Takes the build number from an environment variable, not a hardcoded value
+- ❌ If it modifies `CFBundleShortVersionString` (marketing version) — reject. That is set manually per release, not by CI
+
+### Step 2: GitHub Actions Workflow
+
+Now generate the core workflow:
+
+```
+Generate a GitHub Actions workflow file (.github/workflows/ios.yml)
+for Moodbit with these requirements:
+
+Jobs:
+1. "test" — runs on every push and PR
+   - Runner: macos-15
+   - Steps: checkout, select Xcode 16, cache SPM packages, build
+     for testing, run tests
+   - Use xcodebuild with -scheme Moodbit -destination
+     'platform=iOS Simulator,name=iPhone 16'
+
+2. "deploy" — runs only on pushes to main, after "test" passes
+   - Steps: checkout, select Xcode, install certificate and
+     provisioning profile from secrets, set build number from
+     github.run_number, archive, export IPA, upload to TestFlight
+     using the App Store Connect API key
+   - Use xcodebuild for archive and export
+   - Upload via xcrun altool or the newer xcrun notarytool /
+     App Store Connect API
+
+Secrets needed (document in comments):
+- CERTIFICATE_P12_BASE64
+- CERTIFICATE_PASSWORD
+- PROVISIONING_PROFILE_BASE64
+- APPSTORE_CONNECT_KEY_P8
+- APPSTORE_CONNECT_KEY_ID
+- APPSTORE_CONNECT_ISSUER_ID
+
+Include caching for SPM packages. Include cleanup step to delete
+the keychain after upload.
+
+Use only xcodebuild — no Fastlane dependency.
+```
+
+### Analyzing the Workflow Output
+
+- ✅ Uses `macos-15` (or `macos-14`) runner — not `ubuntu-latest`
+- ✅ Test job triggers on `push` and `pull_request`
+- ✅ Deploy job has `if: github.ref == 'refs/heads/main'` and `needs: [test]`
+- ✅ Keychain created, certificate imported, profile installed, keychain deleted in cleanup
+- ✅ Build number set via `agvtool` or `PlistBuddy` using `${{ github.run_number }}`
+- ⚠️ If caching is missing — it will work but builds take 15+ minutes instead of 5-8
+- ❌ If it uses `ubuntu-latest` — reject. iOS builds require macOS
+- ❌ If secrets are hardcoded in the YAML — reject immediately
+- ❌ If it skips code signing — the archive will fail
+
+## Iteration
+
+After reviewing the generated workflow, refine it:
+
+```
+Good workflow. Make these improvements:
+
+1. Add a concurrency group so pushes to main cancel in-flight
+   deploys (no point finishing an older build)
+2. Add a timeout-minutes of 30 to prevent stuck builds from burning
+   runner minutes
+3. Cache the DerivedData directory in addition to SPM packages
+4. Add a Slack notification step (or a simple curl to a webhook) on
+   deploy success/failure — use a SLACK_WEBHOOK_URL secret
+5. Add comments explaining each step for a developer who has never
+   set up iOS CI before
+6. Make sure the cleanup step runs even if the deploy fails (use
+   if: always())
+```
+
+## Verify Phase
+
+Before relying on this pipeline, verify each layer:
+
+**Workflow syntax:**
+1. Run `act -l` (if installed) or push the workflow to a branch and check the Actions tab for YAML parsing errors
+2. Verify all secret names in the YAML match what you will store in GitHub Settings > Secrets
+3. Confirm the Xcode version in the workflow matches what your project requires
+
+**Secrets setup:**
+1. Export your distribution certificate as `.p12`, base64 encode it: `base64 -i certificate.p12 | pbcopy`
+2. Base64 encode your provisioning profile: `base64 -i profile.mobileprovision | pbcopy`
+3. Generate an App Store Connect API key (`.p8`) in App Store Connect > Users and Access > Keys
+4. Store all values in GitHub > Repository > Settings > Secrets and variables > Actions
+
+**Test run:**
+1. Push a commit to a feature branch — the `test` job should run
+2. Merge to `main` — both `test` and `deploy` should run
+3. Check TestFlight in App Store Connect — a new build should appear within 15-20 minutes
+4. The build number should match the GitHub Actions run number
+
+**Versioning:**
+1. Run `agvtool what-version` locally — confirm the build number is set
+2. Run `agvtool what-marketing-version` — confirm it matches your intended release version
+3. In TestFlight, verify the build shows the correct version string (e.g., "1.0.0 (42)")
+
+## Final Code
+
+### Version.swift
+
+```swift
+import Foundation
+import os
+
+/// Provides access to the app's version and build number from the bundle.
+enum AppVersion {
+    private static let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "Version"
+    )
+
+    /// The marketing version (e.g., "1.0.0"). Set manually per release.
+    static var marketing: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            ?? "0.0.0"
+    }
+
+    /// The build number (e.g., "42"). Set by CI from the run number.
+    static var build: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+            ?? "0"
+    }
+
+    /// Combined display string (e.g., "1.0.0 (42)").
+    static var display: String {
+        "\(marketing) (\(build))"
+    }
+
+    /// Logs the current version at app launch.
+    static func logAtLaunch() {
+        logger.info("Moodbit \(Self.display) launched.")
+    }
+}
+```
+
+### set-build-number.sh
+
+```bash
+#!/bin/bash
+# Sets the CFBundleVersion (build number) to the value provided.
+# Usage: ./scripts/set-build-number.sh 42
+# Called by CI with the GitHub Actions run number.
+
+set -euo pipefail
+
+BUILD_NUMBER="${1:?Usage: set-build-number.sh <build-number>}"
+
+echo "Setting build number to ${BUILD_NUMBER}"
+agvtool new-version -all "${BUILD_NUMBER}"
+echo "Build number set successfully."
+```
+
+### .github/workflows/ios.yml
+
+```yaml
+name: Moodbit CI/CD
+
+# Trigger on pushes to main and on all pull requests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs on the same branch — no point building an
+# older commit when a newer one is already queued.
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME: Moodbit
+  DESTINATION: "platform=iOS Simulator,name=iPhone 16,OS=18.0"
+  ARCHIVE_PATH: build/Moodbit.xcarchive
+  EXPORT_PATH: build/export
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: Build and test on every push and PR
+  # ------------------------------------------------------------------
+  test:
+    name: Build & Test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      # Cache Swift Package Manager dependencies to speed up builds.
+      - name: Cache SPM packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -skipPackagePluginValidation \
+            | xcpretty --color
+
+      - name: Run tests
+        run: |
+          xcodebuild test-without-building \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -resultBundlePath build/TestResults.xcresult \
+            | xcpretty --color
+
+  # ------------------------------------------------------------------
+  # Job 2: Archive and deploy to TestFlight (main branch only)
+  # ------------------------------------------------------------------
+  deploy:
+    name: Deploy to TestFlight
+    needs: [test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      # --- Code Signing Setup ---
+      # Create a temporary keychain, import the distribution
+      # certificate, and install the provisioning profile.
+
+      - name: Install certificate and profile
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          # Create variables
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 20)
+
+          # Decode secrets to files
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          # Create and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate into keychain
+          security import "$CERT_PATH" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          # Install provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      # --- Build Number ---
+      # Use the GitHub Actions run number so every build has a
+      # unique, monotonically increasing build number.
+
+      - name: Set build number
+        run: |
+          agvtool new-version -all ${{ github.run_number }}
+          echo "Build number set to ${{ github.run_number }}"
+
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -scheme "$SCHEME" \
+            -archivePath "$ARCHIVE_PATH" \
+            -destination "generic/platform=iOS" \
+            -skipPackagePluginValidation \
+            | xcpretty --color
+
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist ExportOptions.plist \
+            | xcpretty --color
+
+      # --- Upload to TestFlight ---
+      # Uses the App Store Connect API key for authentication.
+
+      - name: Upload to TestFlight
+        env:
+          APPSTORE_CONNECT_KEY_P8: ${{ secrets.APPSTORE_CONNECT_KEY_P8 }}
+          APPSTORE_CONNECT_KEY_ID: ${{ secrets.APPSTORE_CONNECT_KEY_ID }}
+          APPSTORE_CONNECT_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
+        run: |
+          # Write the API key to a file
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APPSTORE_CONNECT_KEY_P8" > \
+            ~/.appstoreconnect/private_keys/AuthKey_${APPSTORE_CONNECT_KEY_ID}.p8
+
+          xcrun altool --upload-app \
+            -f "$EXPORT_PATH/Moodbit.ipa" \
+            -t ios \
+            --apiKey "$APPSTORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APPSTORE_CONNECT_ISSUER_ID"
+
+      # --- Cleanup ---
+      # Always delete the keychain and temporary files, even if
+      # a previous step failed.
+
+      - name: Cleanup keychain and secrets
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
+          rm -f $RUNNER_TEMP/certificate.p12
+          rm -f $RUNNER_TEMP/profile.mobileprovision
+          rm -rf ~/.appstoreconnect
+
+      # --- Notification (optional) ---
+      - name: Notify Slack on success
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{\"text\":\"Moodbit build ${{ github.run_number }} uploaded to TestFlight.\"}"
+          fi
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{\"text\":\"Moodbit build ${{ github.run_number }} FAILED. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+          fi
+```
+
+### ExportOptions.plist
+
+Place this at the root of your repository. It tells `xcodebuild -exportArchive` how to sign and package the IPA:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <key>teamID</key>
+    <string>YOUR_TEAM_ID</string>
+    <key>uploadSymbols</key>
+    <true/>
+    <key>compileBitcode</key>
+    <false/>
+    <key>destination</key>
+    <string>upload</string>
+</dict>
+</plist>
+```
+
+Replace `YOUR_TEAM_ID` with your Apple Developer Team ID (find it in the Apple Developer portal under Membership).
+
+### Post-Launch Monitoring Checklist
+
+After your first TestFlight build goes live, establish these habits:
+
+```
+Daily (first two weeks):
+- Check Xcode Organizer > Crashes for new crash reports
+- Read TestFlight feedback in App Store Connect
+- Monitor the GitHub Actions dashboard for build health
+
+Weekly:
+- Review crash-free user percentage (target: >99%)
+- Triage user feedback into: bug, feature request, or won't-fix
+- Bump the patch version if shipping a fix
+
+Per release:
+- Update the "What's New" text in App Store Connect
+- Tag the release in git: git tag -a v1.0.1 -m "Bug fixes"
+- Push tags: git push origin --tags
+```
+
+## Checkpoint
+
+Before considering your pipeline complete, verify every item:
+
+- [ ] `.github/workflows/ios.yml` exists and passes YAML lint
+- [ ] All six secrets are stored in GitHub repository settings
+- [ ] A push to a feature branch triggers only the `test` job
+- [ ] A merge to `main` triggers both `test` and `deploy` jobs
+- [ ] The build number in TestFlight matches `github.run_number`
+- [ ] The marketing version in TestFlight matches the value in your Xcode project
+- [ ] `Version.swift` reads version info from the bundle, not hardcoded strings
+- [ ] `set-build-number.sh` is executable (`chmod +x`) and works locally
+- [ ] `ExportOptions.plist` contains your real Team ID
+- [ ] Keychain cleanup runs even when deploy fails (`if: always()`)
+- [ ] No secrets are printed in workflow logs (check the Actions output)
+- [ ] TestFlight build installs and launches on a physical device
+
+## Challenge
+
+**Add a release tagging step to the deploy job.**
+
+After a successful TestFlight upload, the workflow should automatically create a git tag with the version and build number.
+
+Requirements:
+1. Tag format: `v1.0.0-42` (marketing version + build number)
+2. Read the marketing version from the Xcode project using `agvtool what-marketing-version -terse1`
+3. Create an annotated tag with a message including the commit SHA
+4. Push the tag to the remote repository
+5. The step should only run after a successful upload (not on failure)
+
+<details>
+<summary>Hint</summary>
+
+Add this step after the "Upload to TestFlight" step:
+
+```yaml
+- name: Tag release
+  if: success()
+  run: |
+    VERSION=$(agvtool what-marketing-version -terse1)
+    BUILD=${{ github.run_number }}
+    TAG="v${VERSION}-${BUILD}"
+    git tag -a "$TAG" -m "Release ${TAG} (${GITHUB_SHA::7})"
+    git push origin "$TAG"
+```
+
+You will also need to give the workflow `contents: write` permission by adding this at the top level of the YAML:
+
+```yaml
+permissions:
+  contents: write
+```
+
+Without this permission, the `git push` for the tag will fail with a 403 error.
+</details>
+
+---
+
+Next up: **Bonus Lesson B.1 — CloudKit Sync**, where we add multi-device sync to Moodbit so users never lose their mood history.
