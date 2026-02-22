@@ -1,0 +1,606 @@
+---
+title: "Navigation Architecture"
+description: "Implement a type-safe Router pattern with NavigationStack, enum-based routes, tab navigation, and sheet presentation for the mood entry flow."
+courseSlug: "ship-native"
+module: 2
+moduleTitle: "Core UI with SwiftUI"
+lesson: 4
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "NavigationStack", "Router Pattern", "TabView", "Sheet", "Type Safety", "Navigation", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your app has screens now. It has a data layer. But right now those screens are islands — isolated views with no way for users to move between them. Navigation is the connective tissue that turns a collection of views into an app.
+
+In this lesson we build the full navigation architecture for Moodbit: a central router, a type-safe route enum, tab navigation, and sheet presentation for the mood entry flow. We are going to do it the right way from the start so that deep linking, programmatic navigation, and future screens all slot in without refactoring.
+
+## What You'll Learn
+
+- How to define a `Route` enum that makes every destination in the app a compiler-checked value
+- How to build an `AppRouter` with `@Observable` that owns the navigation state
+- How to wire up `MainTabView` with independent `NavigationStack` instances per tab
+- How to present `MoodEntryView` as a sheet from a floating action button
+- How to use `.navigationDestination(for:)` for type-safe push navigation
+- How to trigger navigation programmatically from anywhere in the app
+
+## Why This Matters
+
+Navigation is one of the first things AI gets wrong at scale. It will happily generate a `NavigationLink(destination:)` inside every row, nest `NavigationStack` inside `NavigationStack`, or scatter boolean state across a dozen views to manage sheet presentation. It works for one screen. It falls apart at five.
+
+A centralized router solves this permanently. Every destination is an enum case. Every navigation action goes through one object. When you later add push notifications that open a specific mood detail, or a widget that jumps to the insights tab, the plumbing is already there. You parse the intent into a `Route` and hand it to the router. Done.
+
+This is also the pattern that scales when you ask AI to add new screens. Instead of the AI inventing a new navigation mechanism for each feature, you tell it: "Add a new case to Route and a new destination in the router." The architecture stays consistent no matter how many screens you add.
+
+## Plan Phase
+
+Before we touch code, let us get AI to think through the navigation architecture. Open Claude Code in the Moodbit project and send this:
+
+```
+I need to build the navigation architecture for Moodbit, a mood
+tracking app. Before writing any code, think through the design.
+
+The app has these screens:
+- Timeline (main tab) — shows a list of mood entries
+- MoodDetail — pushed from Timeline, shows a single MoodEntry
+- Insights (second tab) — charts and statistics
+- Settings (third tab) — user preferences
+- MoodEntryView — presented as a sheet (modal) for logging a new mood
+
+Requirements:
+1. A Route enum that is Hashable, with cases for each destination.
+   MoodDetail carries a MoodEntry as associated data.
+2. An AppRouter class using @Observable that owns a NavigationPath
+   and manages sheet presentation state.
+3. A MainTabView with three tabs, each with its own NavigationStack.
+4. The MoodEntryView is presented as a sheet triggered by a FAB
+   (floating action button) on the Timeline tab.
+5. Type-safe navigation using .navigationDestination(for:)
+6. Programmatic navigation via router.navigate(to:) for deep linking.
+
+Think through:
+- What the Route enum cases should be
+- How sheet presentation fits into the router
+- How each tab maintains independent navigation state
+- What the deep linking entry point looks like
+
+Give me the plan before any code.
+```
+
+Claude Code will outline the architecture — the Route enum with its cases, the AppRouter with `NavigationPath` and a `showMoodEntry` boolean, the MainTabView structure with three tabs, and a note about deep linking via `.onOpenURL`.
+
+Read the plan. Here is what you should verify:
+
+**The Route enum is flat, not nested.** You want `.moodDetail(MoodEntry)`, not `.timeline(.detail(MoodEntry))`. Flat enums are simpler and work directly with `NavigationPath`.
+
+**Sheet state lives in the router.** The `showMoodEntry` boolean should be on `AppRouter`, not on the individual tab view. This way any part of the app can trigger the sheet — a button, a notification handler, a deep link.
+
+**Each tab has its own NavigationStack.** If the AI proposes a single `NavigationStack` wrapping the `TabView`, stop it. That is the number one navigation bug in SwiftUI — it causes all tabs to share navigation state.
+
+### The Anti-Pattern
+
+Before we build the right thing, let us name the wrong thing so you recognize it when AI generates it:
+
+**Stringly-typed navigation.** Passing raw strings to identify destinations — `navigate(to: "moodDetail")` — gives you zero compiler safety, zero autocomplete, and runtime crashes when someone typos a string.
+
+**Deeply nested NavigationLinks.** Putting `NavigationLink(destination: MoodDetailView(entry: entry))` inside every row creates a tight coupling between the list and the detail. You cannot navigate to that detail from anywhere else — a notification, a deep link, a different tab. The destination is trapped inside the row.
+
+**No central router.** Scattering `@State var showSheet = false` across five views means five places to find and update when the presentation logic changes. A single router object is the source of truth for all navigation state.
+
+If you see any of these in the AI's output, refine before moving on.
+
+## Execute Phase
+
+Now we build. Send this prompt:
+
+```
+Build the navigation architecture for Moodbit. Create three files:
+
+1. Navigation/Route.swift — A Route enum conforming to Hashable
+   with cases:
+   - .timeline
+   - .moodDetail(MoodEntry)
+   - .insights
+   - .settings
+   MoodEntry must conform to Hashable for this to work.
+
+2. Navigation/AppRouter.swift — An @Observable class with:
+   - var path = NavigationPath()
+   - var selectedTab: Tab = .timeline (Tab is a nested enum with
+     cases: timeline, insights, settings — Int raw value)
+   - var showMoodEntry = false
+   - func navigate(to route: Route)
+   - func navigateToRoot()
+   - func presentMoodEntry()
+   - func dismissMoodEntry()
+
+3. Views/MainTabView.swift — A TabView with three tabs:
+   - Timeline tab with a NavigationStack bound to router.path
+   - Insights tab with its own NavigationStack
+   - Settings tab with its own NavigationStack
+   - Each stack registers .navigationDestination(for: Route.self)
+   - The Timeline tab has a toolbar button (plus icon) that calls
+     router.presentMoodEntry()
+   - A .sheet modifier on the root view bound to
+     router.showMoodEntry presenting MoodEntryView
+
+Use Swift 6 conventions. Use @Observable (not ObservableObject).
+Inject the router via .environment(). Use the Tab struct API
+for iOS 18+.
+```
+
+Here is what Claude Code generates. Let us review each file.
+
+### Route.swift
+
+```swift
+import Foundation
+
+enum Route: Hashable {
+    case timeline
+    case moodDetail(MoodEntry)
+    case insights
+    case settings
+}
+```
+
+Four lines. That is all a route enum needs to be. Each case is a destination. The `.moodDetail` case carries its associated data — the `MoodEntry` the detail view needs to display. Because `Route` conforms to `Hashable` and `MoodEntry` conforms to `Hashable`, the whole thing works with `NavigationPath` out of the box.
+
+Review checklist:
+
+- ✅ Conforms to `Hashable` — required for `NavigationPath`
+- ✅ Associated data on `.moodDetail` — the detail view gets its data from the route, not from a separate binding
+- ✅ No associated data on `.timeline`, `.insights`, `.settings` — these are root views that do not need parameters
+- ⚠️ Make sure your `MoodEntry` model conforms to `Hashable`. If it is a SwiftData `@Model`, it already conforms to `Identifiable`, but you may need to add `Hashable` explicitly. For a struct model, synthesized `Hashable` works automatically if all properties are hashable.
+
+### AppRouter.swift
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var path = NavigationPath()
+    var selectedTab: Tab = .timeline
+    var showMoodEntry = false
+
+    enum Tab: Int, CaseIterable, Hashable {
+        case timeline
+        case insights
+        case settings
+    }
+
+    func navigate(to route: Route) {
+        path.append(route)
+    }
+
+    func navigateToRoot() {
+        path = NavigationPath()
+    }
+
+    func presentMoodEntry() {
+        showMoodEntry = true
+    }
+
+    func dismissMoodEntry() {
+        showMoodEntry = false
+    }
+}
+```
+
+This is the nerve center of the app's navigation. Let us walk through it.
+
+**`@Observable` instead of `ObservableObject`.** This is the modern approach. No `@Published` wrappers needed — every stored property is automatically observed. Any view that reads `router.path` or `router.showMoodEntry` will re-render when those values change.
+
+**`NavigationPath` instead of `[Route]`.** You could use a typed array like `@State var path: [Route] = []`, but `NavigationPath` is Apple's type-erased navigation container. It works with multiple route types if you ever need them, and it supports Codable serialization for state restoration.
+
+**The `Tab` enum.** Nested inside the router because it is navigation state. The `Int` raw value is required by `TabView(selection:)`. `CaseIterable` gives us `Tab.allCases` if we ever need to iterate.
+
+**Explicit methods instead of direct property access.** You could let views set `router.showMoodEntry = true` directly. But methods like `presentMoodEntry()` are better because they name the intent, they are easier to find with search, and they give you a single place to add logic later — analytics, haptics, validation before presenting.
+
+Review checklist:
+
+- ✅ `@Observable` — modern observation
+- ✅ `NavigationPath` — type-erased, Codable-ready
+- ✅ Sheet state centralized — `showMoodEntry` lives here, not in a view
+- ✅ Named methods — `navigate(to:)`, `presentMoodEntry()`, `navigateToRoot()`
+- ⚠️ Check that `path` is only used by the Timeline tab's `NavigationStack`. If all three tabs share one path, navigation will break. We address this in `MainTabView`.
+
+### MainTabView.swift
+
+```swift
+import SwiftUI
+
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        @Bindable var router = router
+
+        TabView(selection: $router.selectedTab) {
+            Tab("Timeline", systemImage: "list.bullet", value: .timeline) {
+                NavigationStack(path: $router.path) {
+                    TimelineView()
+                        .navigationDestination(for: Route.self) { route in
+                            destinationView(for: route)
+                        }
+                        .toolbar {
+                            ToolbarItem(placement: .primaryAction) {
+                                Button {
+                                    router.presentMoodEntry()
+                                } label: {
+                                    Image(systemName: "plus")
+                                }
+                            }
+                        }
+                }
+            }
+
+            Tab("Insights", systemImage: "chart.bar", value: .insights) {
+                NavigationStack {
+                    InsightsView()
+                        .navigationDestination(for: Route.self) { route in
+                            destinationView(for: route)
+                        }
+                }
+            }
+
+            Tab("Settings", systemImage: "gearshape", value: .settings) {
+                NavigationStack {
+                    SettingsView()
+                        .navigationDestination(for: Route.self) { route in
+                            destinationView(for: route)
+                        }
+                }
+            }
+        }
+        .sheet(isPresented: $router.showMoodEntry) {
+            NavigationStack {
+                MoodEntryView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destinationView(for route: Route) -> some View {
+        switch route {
+        case .timeline:
+            TimelineView()
+        case .moodDetail(let entry):
+            MoodDetailView(entry: entry)
+        case .insights:
+            InsightsView()
+        case .settings:
+            SettingsView()
+        }
+    }
+}
+
+#Preview {
+    MainTabView()
+        .environment(AppRouter())
+}
+```
+
+This is the most important file. Let me break down every decision.
+
+**`@Bindable var router = router` inside the body.** This is a Swift 6 pattern. When you receive an `@Observable` object from the environment, you need to create a local `@Bindable` wrapper to get two-way bindings like `$router.selectedTab` and `$router.path`. Without this line, you cannot use the `$` prefix.
+
+**The `Tab` struct API.** This is the modern iOS 18+ syntax. Each `Tab` takes a title, SF Symbol, and a `value` that matches the selection type. The old `.tabItem { }` modifier approach still works but is less clean.
+
+**Only the Timeline tab binds to `router.path`.** The Insights and Settings tabs have their own `NavigationStack` instances with no shared path binding. This means pushing a screen in the Timeline tab has zero effect on the other tabs. This is critical — shared navigation state across tabs is one of the most common SwiftUI bugs.
+
+**The `.sheet` modifier on the `TabView`.** The sheet is attached at the root level, not inside a specific tab. This means it slides up over the entire tab bar, which is the correct iOS behavior for a modal. If you attach the sheet inside the Timeline tab's `NavigationStack`, it presents under the tab bar — visually broken.
+
+**`NavigationStack` inside the sheet.** Sheets are separate presentation contexts. They need their own `NavigationStack` if you want a navigation bar with a title and dismiss button inside the sheet. This is correct — do not confuse this with the nested-stacks bug that happens with push navigation.
+
+**The `destinationView(for:)` method.** Centralizes the mapping from route to view. Every tab's `.navigationDestination(for: Route.self)` calls the same method. When you add a new screen, you add one case to `Route`, one case to this switch, and you are done.
+
+Review checklist:
+
+- ✅ Each tab has its own `NavigationStack`
+- ✅ Only Timeline binds to `router.path` — independent navigation state
+- ✅ Sheet attached at root level — presents over the tab bar
+- ✅ Sheet has its own `NavigationStack` — correct for modals
+- ✅ `@Bindable` pattern for environment observation
+- ✅ Centralized `destinationView(for:)` mapping
+- ❌ Check: if AI put a `NavigationStack` around the `TabView` instead of inside each tab, that is wrong. Fix it immediately.
+
+## Iteration
+
+The core architecture is solid, but there are two refinements worth making.
+
+### Refinement 1 — Inject the router at the App level
+
+The router needs to be injected above `MainTabView` so it is available everywhere. Send this:
+
+```
+Update the App struct (MoodbitApp.swift) to create the AppRouter
+as @State and inject it via .environment() on the root view.
+Also add an .onOpenURL handler that parses incoming URLs into
+Route values and calls router.navigate(to:). Use a URL scheme
+like moodbit://mood/{id} for deep linking to a mood detail.
+```
+
+```swift
+import SwiftUI
+
+@main
+struct MoodbitApp: App {
+    @State private var router = AppRouter()
+
+    var body: some Scene {
+        WindowGroup {
+            MainTabView()
+                .environment(router)
+                .onOpenURL { url in
+                    handleDeepLink(url)
+                }
+        }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard let components = URLComponents(
+            url: url, resolvingAgainstBaseURL: false
+        ) else { return }
+
+        let pathComponents = components.path
+            .split(separator: "/")
+            .map(String.init)
+
+        switch pathComponents.first {
+        case "mood":
+            router.selectedTab = .timeline
+            // Fetch the MoodEntry by ID and navigate
+            // router.navigate(to: .moodDetail(entry))
+
+        case "insights":
+            router.selectedTab = .insights
+
+        case "settings":
+            router.selectedTab = .settings
+
+        default:
+            break
+        }
+    }
+}
+```
+
+The deep linking handler is a stub right now — we will flesh it out when we have a data layer that can fetch a `MoodEntry` by ID. The important thing is the foundation is here. Parsing a URL into a tab selection and a route push is trivial when your navigation is state-driven.
+
+### Refinement 2 — Replace the toolbar button with a FAB
+
+The toolbar plus button works, but the design calls for a floating action button. Let us refine:
+
+```
+Replace the toolbar plus button in MainTabView with a floating
+action button (FAB) overlaid on the Timeline tab. It should be
+a circular button with a plus icon, 56 points, using the app's
+accent color, with a subtle shadow. Position it at the bottom
+trailing corner with 16 points of padding. Use a ZStack overlay
+so it floats above the list content.
+```
+
+```swift
+Tab("Timeline", systemImage: "list.bullet", value: .timeline) {
+    NavigationStack(path: $router.path) {
+        ZStack(alignment: .bottomTrailing) {
+            TimelineView()
+                .navigationDestination(for: Route.self) { route in
+                    destinationView(for: route)
+                }
+
+            Button {
+                router.presentMoodEntry()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                    .frame(width: 56, height: 56)
+                    .background(Color.accentColor)
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+            }
+            .padding(16)
+        }
+    }
+}
+```
+
+The FAB floats above the timeline content using a `ZStack`. The `.bottomTrailing` alignment pins it to the bottom-right corner. The shadow gives it depth. This is a common mobile pattern — Material Design popularized it, and it works well in iOS apps for primary creation actions.
+
+## Verify Phase
+
+Build and run. Here is the verification checklist:
+
+1. **Tab switching works.** Tap each tab. The correct view appears. The tab bar highlights the selected tab.
+
+2. **Timeline navigation works.** If you have mood entries in your list, tap one. It should push to `MoodDetailView`. Tap the back button. You should return to the timeline.
+
+3. **Tab state is independent.** Navigate deep into Timeline (push to a detail), switch to Settings, switch back to Timeline. You should be exactly where you left off — on the detail view, not the root.
+
+4. **FAB presents the sheet.** Tap the floating plus button. `MoodEntryView` should slide up as a sheet over the tab bar. Dismiss it by swiping down.
+
+5. **Sheet has a navigation bar.** Inside the sheet, you should see a navigation title and (eventually) a cancel/save button. This confirms the sheet's own `NavigationStack` is working.
+
+6. **No double navigation bars.** If you see two navigation bars stacked on any screen, you have a nested `NavigationStack` bug. Check that child views do not create their own stacks.
+
+7. **Programmatic navigation.** Add a temporary button somewhere that calls `router.navigate(to: .settings)`. Verify it pushes the settings view onto the timeline's stack.
+
+If all seven checks pass, your navigation architecture is solid.
+
+## Final Code
+
+Here are the three files in their final form after both iterations.
+
+### Route.swift
+
+```swift
+import Foundation
+
+enum Route: Hashable {
+    case timeline
+    case moodDetail(MoodEntry)
+    case insights
+    case settings
+}
+```
+
+### AppRouter.swift
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var path = NavigationPath()
+    var selectedTab: Tab = .timeline
+    var showMoodEntry = false
+
+    enum Tab: Int, CaseIterable, Hashable {
+        case timeline
+        case insights
+        case settings
+    }
+
+    // MARK: - Push Navigation
+
+    func navigate(to route: Route) {
+        path.append(route)
+    }
+
+    func navigateToRoot() {
+        path = NavigationPath()
+    }
+
+    // MARK: - Sheet Presentation
+
+    func presentMoodEntry() {
+        showMoodEntry = true
+    }
+
+    func dismissMoodEntry() {
+        showMoodEntry = false
+    }
+}
+```
+
+### MainTabView.swift
+
+```swift
+import SwiftUI
+
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        @Bindable var router = router
+
+        TabView(selection: $router.selectedTab) {
+            Tab("Timeline", systemImage: "list.bullet", value: .timeline) {
+                NavigationStack(path: $router.path) {
+                    ZStack(alignment: .bottomTrailing) {
+                        TimelineView()
+                            .navigationDestination(for: Route.self) { route in
+                                destinationView(for: route)
+                            }
+
+                        Button {
+                            router.presentMoodEntry()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.white)
+                                .frame(width: 56, height: 56)
+                                .background(Color.accentColor)
+                                .clipShape(Circle())
+                                .shadow(
+                                    color: .black.opacity(0.15),
+                                    radius: 8, y: 4
+                                )
+                        }
+                        .padding(16)
+                    }
+                }
+            }
+
+            Tab("Insights", systemImage: "chart.bar", value: .insights) {
+                NavigationStack {
+                    InsightsView()
+                        .navigationDestination(for: Route.self) { route in
+                            destinationView(for: route)
+                        }
+                }
+            }
+
+            Tab("Settings", systemImage: "gearshape", value: .settings) {
+                NavigationStack {
+                    SettingsView()
+                        .navigationDestination(for: Route.self) { route in
+                            destinationView(for: route)
+                        }
+                }
+            }
+        }
+        .sheet(isPresented: $router.showMoodEntry) {
+            NavigationStack {
+                MoodEntryView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destinationView(for route: Route) -> some View {
+        switch route {
+        case .timeline:
+            TimelineView()
+        case .moodDetail(let entry):
+            MoodDetailView(entry: entry)
+        case .insights:
+            InsightsView()
+        case .settings:
+            SettingsView()
+        }
+    }
+}
+
+#Preview {
+    MainTabView()
+        .environment(AppRouter())
+}
+```
+
+## Checkpoint
+
+At this point you should have:
+
+- A `Route` enum with four cases, one carrying associated `MoodEntry` data
+- An `AppRouter` with `@Observable` managing path, tab selection, and sheet state
+- A `MainTabView` with three tabs, each with its own `NavigationStack`
+- A floating action button that presents `MoodEntryView` as a sheet
+- Type-safe navigation via `.navigationDestination(for: Route.self)`
+- A deep linking stub in the App struct ready to be connected to the data layer
+- Zero nested `NavigationStack` bugs, zero stringly-typed routes, zero scattered boolean state
+
+Your navigation is centralized, type-safe, and extensible. Adding a new screen to the app is now a three-step process: add a case to `Route`, add a case to `destinationView(for:)`, and build the view. That is it.
+
+---
+
+## Challenge
+
+**Extend the router with a second sheet type.**
+
+Moodbit will eventually need a "Quick Add" sheet — a simplified mood entry with just an emoji picker and a save button, no notes or tags. Implement this:
+
+1. Add a `var showQuickAdd = false` property to `AppRouter` with `presentQuickAdd()` and `dismissQuickAdd()` methods.
+2. Add a second `.sheet` modifier to `MainTabView` that presents a `QuickAddView` placeholder.
+3. Add a long-press gesture to the FAB: a normal tap presents the full `MoodEntryView`, a long press presents `QuickAddView`.
+
+This tests whether your architecture handles multiple modal presentations cleanly. If you find yourself adding boolean state outside the router, stop — that is a sign the architecture is not being used correctly. Everything goes through `AppRouter`.
+
+**Bonus:** SwiftUI does not allow two `.sheet` modifiers on the same view to be presented simultaneously. Refactor the sheet presentation to use a single `sheet(item:)` with an enum instead of two separate `isPresented` booleans. This is the production-grade pattern for apps with multiple sheet types.

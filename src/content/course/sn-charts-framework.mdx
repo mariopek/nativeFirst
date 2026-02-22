@@ -1,0 +1,553 @@
+---
+title: "Charts Framework"
+description: "Visualize mood trends with Swift Charts — line charts for patterns over time, bar charts for mood distribution, and weekly comparisons with custom styling that matches your design system."
+courseSlug: "ship-native"
+module: 5
+moduleTitle: "System Frameworks"
+lesson: 1
+duration: "22 min read"
+difficulty: "intermediate"
+topics: ["Swift Charts", "Data Visualization", "Line Chart", "Bar Chart", "Custom Styling", "Mood Trends", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your users have been logging moods for weeks. The data is sitting in SwiftData. But raw data is not insight — a list of mood entries is useless unless you can see the patterns. Did your mood improve this week compared to last? Are mornings consistently worse than evenings? What is the overall distribution?
+
+This is what Swift Charts is for. Apple shipped it in iOS 16, and it is the right way to build data visualizations in SwiftUI. No third-party libraries, no UIKit wrapping, no Core Graphics paths. Declarative chart building that fits naturally into your existing views.
+
+## What You'll Learn
+
+- Build a `LineMark` chart that shows mood trends over time with smooth interpolation
+- Build a `BarMark` chart that shows mood distribution across categories
+- Create a `ChartDataProvider` that aggregates raw mood entries into chart-ready data outside the view
+- Apply custom styling — brand colors, axis formatting, animations on data load — so your charts look intentional, not default
+
+## Why This Matters
+
+Every productivity, health, and journaling app ships with charts. Users expect them. But most AI-generated charts look like developer demos — default colors, no labels, no loading states, raw data dumped into a `Chart{}` block. That is not a feature; that is a prototype.
+
+Production charts need three things AI tends to skip: data aggregation before rendering, custom styling that matches your design system, and graceful handling of edge cases like empty data or single-day ranges. We are going to build all three.
+
+## Plan Phase: Defining What We Build
+
+We need three chart components: a line chart for mood trends over time, a bar chart for mood distribution, and a weekly comparison view. But before any chart renders, we need a data provider that transforms raw `MoodEntry` records into chart-friendly structures.
+
+Here is the prompt for the planning phase:
+
+```
+I'm building a mood tracking app called Moodbit using SwiftUI
+and SwiftData. I need to add data visualization for mood trends.
+
+Here's the context:
+- MoodEntry model has: id, mood (1-5 scale), date, note
+- Users log 1-3 entries per day
+- Target iOS 17+, Swift 6, @Observable pattern
+
+I need:
+1. A ChartDataProvider that aggregates MoodEntry data into
+   chart-ready structures (daily averages, mood distribution,
+   weekly summaries)
+2. A MoodTrendChart (LineMark) showing daily average mood
+   over the last 30 days
+3. A MoodDistributionChart (BarMark) showing count of each
+   mood level (1-5)
+4. A WeeklyComparisonChart showing this week vs last week
+5. A MoodChartView that composes all three with a picker
+
+Requirements:
+- Charts should animate on data load
+- Use brand colors (I'll define them), not defaults
+- Handle empty states — no data yet, single day only
+- Do NOT compute aggregations inside the view body
+- Use Swift Charts framework (import Charts)
+
+What's your implementation plan? List the types you'll create
+and their responsibilities before writing code.
+```
+
+**What to look for in the plan.** The AI should propose separate data types for chart data (not reusing MoodEntry directly), a provider class that does the aggregation, and individual chart views that receive pre-computed data. If the AI proposes doing `.filter()` and `.reduce()` inside the `Chart{}` body, that is wrong — push back immediately.
+
+**Anti-pattern: computing chart data in the view.** This is the most common mistake. AI will generate something like `Chart { ForEach(entries.filter { Calendar.current.isDate($0.date, equalTo: ...) }) }` directly in the view body. Every redraw re-filters and re-aggregates. The data provider pattern keeps computation out of the render path.
+
+## Execute Phase: Implementation
+
+Now we generate the actual code. Send this prompt:
+
+```
+Generate the ChartDataProvider and all chart views based on
+the plan. Use these specifics:
+
+- ChartDataProvider is @Observable, takes [MoodEntry] in
+  a refresh method
+- DailyMoodAverage struct: date (Date), averageMood (Double)
+- MoodDistribution struct: level (Int), count (Int),
+  label (String)
+- WeeklySummary struct: dayOfWeek (String), thisWeek (Double?),
+  lastWeek (Double?)
+- Brand colors: mood 1 = .red, 2 = .orange, 3 = .yellow,
+  4 = .mint, 5 = .green
+- LineMark with .interpolationMethod(.catmullRom) for smooth
+  curves
+- BarMark with cornerRadius and brand color per bar
+- Animate chart appearance with .opacity transition
+- Handle empty data with ContentUnavailableView
+
+Put ChartDataProvider in Services/ChartDataProvider.swift
+Put chart views in Views/Charts/
+```
+
+Review the AI output against this checklist:
+
+- **Data types are value types (structs), not classes.** Chart data is immutable once computed. If the AI made them classes, change to structs.
+- **ChartDataProvider.refresh() does the heavy lifting.** It should loop through entries once, compute all three aggregations, and store the results as published properties. Not three separate methods that each iterate the full dataset.
+- **LineMark uses `.interpolationMethod(.catmullRom)`.** If the AI used `.linear` or omitted interpolation, the line will look jagged. CatmullRom gives smooth curves through data points.
+- **BarMark has `.cornerRadius()`.** Default bars look flat and dated. Even 4 points of corner radius makes a visible difference.
+- **Empty state handling exists.** If `dailyAverages` is empty, the chart should show a `ContentUnavailableView`, not an empty axes frame.
+
+## Iteration
+
+The first pass usually gets the data flow right but misses styling details. Send this follow-up:
+
+```
+The charts work but need polish:
+
+1. The Y axis should show mood labels instead of numbers:
+   1 = "Awful", 2 = "Bad", 3 = "Okay", 4 = "Good", 5 = "Great"
+2. The X axis on the line chart should show abbreviated dates
+   (e.g., "Feb 3") not full timestamps
+3. Add a .chartYScale(domain: 1...5) so the axis doesn't auto-
+   scale and jump around when data changes
+4. Add an area gradient below the line chart (use
+   .foregroundStyle with a linear gradient from brand color
+   to clear)
+5. The weekly comparison should use grouped bars with a legend
+6. Add .animation(.easeInOut(duration: 0.4), value: data) to
+   each chart so data transitions are smooth
+```
+
+This iteration takes the charts from "works" to "ships." The fixed Y-axis domain is especially important — without it, a day where all moods are 4-5 will auto-scale to fill the chart, making it look like there is huge variation when there is not.
+
+## Verify Phase
+
+Build and run. Check these things manually:
+
+1. **Line chart with 30 days of data** — does the curve look smooth? Are the X-axis labels readable and not overlapping?
+2. **Line chart with 1 day of data** — does it show a single dot, not a broken line?
+3. **Line chart with 0 data** — does it show the empty state, not a blank chart frame?
+4. **Bar chart** — are the colors correct for each mood level? Does the count label show on or above each bar?
+5. **Weekly comparison** — do "this week" and "last week" bars appear side by side? Is the legend visible?
+6. **Animation** — navigate to the charts tab. Do the charts animate in, or do they pop?
+7. **Performance** — with 90 days of data (roughly 180 entries), does the chart view load without lag? If you see a hitch, check that `ChartDataProvider.refresh()` is not being called on every frame.
+
+## Final Code
+
+### ChartDataProvider
+
+```swift
+import Foundation
+
+struct DailyMoodAverage: Identifiable {
+    let id = UUID()
+    let date: Date
+    let averageMood: Double
+}
+
+struct MoodDistribution: Identifiable {
+    let id = UUID()
+    let level: Int
+    let count: Int
+
+    var label: String {
+        switch level {
+        case 1: "Awful"
+        case 2: "Bad"
+        case 3: "Okay"
+        case 4: "Good"
+        case 5: "Great"
+        default: "Unknown"
+        }
+    }
+}
+
+struct WeeklySummary: Identifiable {
+    let id = UUID()
+    let dayOfWeek: String
+    let thisWeek: Double?
+    let lastWeek: Double?
+}
+
+@Observable
+final class ChartDataProvider {
+    var dailyAverages: [DailyMoodAverage] = []
+    var moodDistribution: [MoodDistribution] = []
+    var weeklySummary: [WeeklySummary] = []
+    var hasData: Bool { !dailyAverages.isEmpty }
+
+    func refresh(from entries: [MoodEntry]) {
+        computeDailyAverages(entries)
+        computeMoodDistribution(entries)
+        computeWeeklySummary(entries)
+    }
+
+    private func computeDailyAverages(_ entries: [MoodEntry]) {
+        let calendar = Calendar.current
+        let cutoff = calendar.date(byAdding: .day, value: -30, to: .now) ?? .now
+
+        let recent = entries.filter { $0.date >= cutoff }
+        let grouped = Dictionary(grouping: recent) { entry in
+            calendar.startOfDay(for: entry.date)
+        }
+
+        dailyAverages = grouped.map { date, dayEntries in
+            let average = Double(dayEntries.reduce(0) { $0 + $1.mood }) / Double(dayEntries.count)
+            return DailyMoodAverage(date: date, averageMood: average)
+        }
+        .sorted { $0.date < $1.date }
+    }
+
+    private func computeMoodDistribution(_ entries: [MoodEntry]) {
+        let counts = Dictionary(grouping: entries) { $0.mood }
+        moodDistribution = (1...5).map { level in
+            MoodDistribution(level: level, count: counts[level]?.count ?? 0)
+        }
+    }
+
+    private func computeWeeklySummary(_ entries: [MoodEntry]) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: .now)
+        let weekday = calendar.component(.weekday, from: today)
+        let startOfThisWeek = calendar.date(byAdding: .day, value: -(weekday - 1), to: today) ?? today
+        let startOfLastWeek = calendar.date(byAdding: .day, value: -7, to: startOfThisWeek) ?? today
+
+        let daySymbols = calendar.shortWeekdaySymbols
+
+        weeklySummary = (0..<7).map { offset in
+            let thisWeekDay = calendar.date(byAdding: .day, value: offset, to: startOfThisWeek)!
+            let lastWeekDay = calendar.date(byAdding: .day, value: offset, to: startOfLastWeek)!
+
+            let thisWeekEntries = entries.filter { calendar.isDate($0.date, inSameDayAs: thisWeekDay) }
+            let lastWeekEntries = entries.filter { calendar.isDate($0.date, inSameDayAs: lastWeekDay) }
+
+            let thisWeekAvg: Double? = thisWeekEntries.isEmpty ? nil :
+                Double(thisWeekEntries.reduce(0) { $0 + $1.mood }) / Double(thisWeekEntries.count)
+            let lastWeekAvg: Double? = lastWeekEntries.isEmpty ? nil :
+                Double(lastWeekEntries.reduce(0) { $0 + $1.mood }) / Double(lastWeekEntries.count)
+
+            return WeeklySummary(
+                dayOfWeek: daySymbols[(offset + 1) % 7],
+                thisWeek: thisWeekAvg,
+                lastWeek: lastWeekAvg
+            )
+        }
+    }
+}
+```
+
+### MoodTrendChart
+
+```swift
+import SwiftUI
+import Charts
+
+struct MoodTrendChart: View {
+    let data: [DailyMoodAverage]
+
+    @State private var isVisible = false
+
+    var body: some View {
+        if data.isEmpty {
+            ContentUnavailableView(
+                "No Mood Data Yet",
+                systemImage: "chart.line.downtrend.xyaxis",
+                description: Text("Log a few moods to see your trends over time.")
+            )
+            .frame(height: 240)
+        } else {
+            Chart(data) { entry in
+                LineMark(
+                    x: .value("Date", entry.date, unit: .day),
+                    y: .value("Mood", entry.averageMood)
+                )
+                .interpolationMethod(.catmullRom)
+                .foregroundStyle(Color.green.gradient)
+                .lineStyle(StrokeStyle(lineWidth: 2.5))
+
+                AreaMark(
+                    x: .value("Date", entry.date, unit: .day),
+                    y: .value("Mood", entry.averageMood)
+                )
+                .interpolationMethod(.catmullRom)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.green.opacity(0.3), .green.opacity(0.0)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                PointMark(
+                    x: .value("Date", entry.date, unit: .day),
+                    y: .value("Mood", entry.averageMood)
+                )
+                .symbolSize(24)
+                .foregroundStyle(.green)
+            }
+            .chartYScale(domain: 1...5)
+            .chartYAxis {
+                AxisMarks(values: [1, 2, 3, 4, 5]) { value in
+                    AxisGridLine()
+                    AxisValueLabel {
+                        if let intValue = value.as(Int.self) {
+                            Text(moodLabel(for: intValue))
+                                .font(.caption2)
+                        }
+                    }
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day, count: 7)) { _ in
+                    AxisGridLine()
+                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                }
+            }
+            .frame(height: 240)
+            .opacity(isVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.5), value: isVisible)
+            .onAppear { isVisible = true }
+        }
+    }
+
+    private func moodLabel(for value: Int) -> String {
+        switch value {
+        case 1: "Awful"
+        case 2: "Bad"
+        case 3: "Okay"
+        case 4: "Good"
+        case 5: "Great"
+        default: ""
+        }
+    }
+}
+```
+
+### MoodDistributionChart
+
+```swift
+import SwiftUI
+import Charts
+
+struct MoodDistributionChart: View {
+    let data: [MoodDistribution]
+
+    @State private var isVisible = false
+
+    private func barColor(for level: Int) -> Color {
+        switch level {
+        case 1: .red
+        case 2: .orange
+        case 3: .yellow
+        case 4: .mint
+        case 5: .green
+        default: .gray
+        }
+    }
+
+    var body: some View {
+        if data.allSatisfy({ $0.count == 0 }) {
+            ContentUnavailableView(
+                "No Mood Data Yet",
+                systemImage: "chart.bar",
+                description: Text("Start logging moods to see your distribution.")
+            )
+            .frame(height: 240)
+        } else {
+            Chart(data) { item in
+                BarMark(
+                    x: .value("Mood", item.label),
+                    y: .value("Count", item.count)
+                )
+                .foregroundStyle(barColor(for: item.level))
+                .cornerRadius(6)
+                .annotation(position: .top) {
+                    if item.count > 0 {
+                        Text("\(item.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .chartYAxis {
+                AxisMarks(values: .automatic(desiredCount: 5))
+            }
+            .frame(height: 240)
+            .opacity(isVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.5), value: isVisible)
+            .onAppear { isVisible = true }
+        }
+    }
+}
+```
+
+### WeeklyComparisonChart
+
+```swift
+import SwiftUI
+import Charts
+
+struct WeeklyComparisonChart: View {
+    let data: [WeeklySummary]
+
+    @State private var isVisible = false
+
+    var body: some View {
+        let hasAnyData = data.contains { $0.thisWeek != nil || $0.lastWeek != nil }
+
+        if !hasAnyData {
+            ContentUnavailableView(
+                "Not Enough Data",
+                systemImage: "calendar",
+                description: Text("Log moods for two weeks to compare trends.")
+            )
+            .frame(height: 240)
+        } else {
+            Chart {
+                ForEach(data) { summary in
+                    if let thisWeek = summary.thisWeek {
+                        BarMark(
+                            x: .value("Day", summary.dayOfWeek),
+                            y: .value("Mood", thisWeek)
+                        )
+                        .foregroundStyle(by: .value("Week", "This Week"))
+                        .cornerRadius(4)
+                        .position(by: .value("Week", "This Week"))
+                    }
+
+                    if let lastWeek = summary.lastWeek {
+                        BarMark(
+                            x: .value("Day", summary.dayOfWeek),
+                            y: .value("Mood", lastWeek)
+                        )
+                        .foregroundStyle(by: .value("Week", "Last Week"))
+                        .cornerRadius(4)
+                        .position(by: .value("Week", "Last Week"))
+                    }
+                }
+            }
+            .chartYScale(domain: 1...5)
+            .chartForegroundStyleScale([
+                "This Week": Color.green,
+                "Last Week": Color.green.opacity(0.4)
+            ])
+            .chartLegend(position: .top, alignment: .leading)
+            .chartYAxis {
+                AxisMarks(values: [1, 2, 3, 4, 5]) { value in
+                    AxisGridLine()
+                    AxisValueLabel {
+                        if let intValue = value.as(Int.self) {
+                            Text(moodLabel(for: intValue))
+                                .font(.caption2)
+                        }
+                    }
+                }
+            }
+            .frame(height: 240)
+            .opacity(isVisible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.5), value: isVisible)
+            .onAppear { isVisible = true }
+        }
+    }
+
+    private func moodLabel(for value: Int) -> String {
+        switch value {
+        case 1: "Awful"
+        case 2: "Bad"
+        case 3: "Okay"
+        case 4: "Good"
+        case 5: "Great"
+        default: ""
+        }
+    }
+}
+```
+
+### MoodChartView (Composed Container)
+
+```swift
+import SwiftUI
+
+struct MoodChartView: View {
+    @State private var chartProvider = ChartDataProvider()
+    @State private var selectedChart: ChartType = .trend
+
+    let entries: [MoodEntry]
+
+    enum ChartType: String, CaseIterable {
+        case trend = "Trend"
+        case distribution = "Distribution"
+        case weekly = "Weekly"
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                Picker("Chart", selection: $selectedChart) {
+                    ForEach(ChartType.allCases, id: \.self) { type in
+                        Text(type.rawValue).tag(type)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+
+                Group {
+                    switch selectedChart {
+                    case .trend:
+                        MoodTrendChart(data: chartProvider.dailyAverages)
+                    case .distribution:
+                        MoodDistributionChart(data: chartProvider.moodDistribution)
+                    case .weekly:
+                        WeeklyComparisonChart(data: chartProvider.weeklySummary)
+                    }
+                }
+                .padding(.horizontal)
+
+                Spacer()
+            }
+            .navigationTitle("Insights")
+            .onAppear {
+                chartProvider.refresh(from: entries)
+            }
+            .onChange(of: entries.count) {
+                chartProvider.refresh(from: entries)
+            }
+        }
+    }
+}
+
+#Preview {
+    MoodChartView(entries: [])
+}
+```
+
+## Checkpoint
+
+Before moving on, verify each of these:
+
+- [ ] `ChartDataProvider` computes daily averages, distribution, and weekly summaries in its `refresh()` method — not inside any view body
+- [ ] The line chart uses `.chartYScale(domain: 1...5)` so the Y axis does not jump around
+- [ ] Y-axis labels show mood words ("Awful" through "Great"), not just numbers
+- [ ] Each chart handles the empty data case with `ContentUnavailableView`
+- [ ] Bar chart colors match the mood level: red for 1, orange for 2, yellow for 3, mint for 4, green for 5
+- [ ] Weekly comparison chart shows grouped bars with a visible legend
+- [ ] All three charts animate in with an opacity transition on appear
+- [ ] The `MoodChartView` uses a segmented picker to switch between charts
+- [ ] No filtering, grouping, or averaging happens inside a `Chart{}` block or view body
+
+## Challenge
+
+**Add an interactive selection to the line chart.**
+
+When the user taps or drags on the line chart, show an overlay that highlights the selected day and displays the exact average mood value in a floating label above the data point. Use the `.chartOverlay` modifier with a `DragGesture` to detect the X position, then convert it to a date using `ChartProxy.value(atX:)`.
+
+**Hint:** The `chartOverlay` modifier gives you a `ChartProxy` in its closure. Call `proxy.value(atX: location.x, as: Date.self)` to convert the gesture's X coordinate to a date value. Then find the closest `DailyMoodAverage` entry to that date and render a `RuleMark` at that position with an annotation showing the value. Store the selected date in a `@State` property and clear it when the gesture ends.
