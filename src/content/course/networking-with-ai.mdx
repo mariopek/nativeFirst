@@ -1,0 +1,814 @@
+---
+title: "Networking & API Integration"
+description: "Build a production networking layer with async/await and error handling using AI — and why ABNetworking is the better choice for real apps."
+module: 4
+moduleTitle: "Real-World Patterns"
+lesson: 1
+duration: "18 min read"
+difficulty: "intermediate"
+topics: ["Networking", "async/await", "API", "URLSession", "ABNetworking", "HTTP Client", "Error Handling", "Service Layer"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+In Module 3 you built a complete Todo app. It works, it persists data locally with SwiftData, and it follows clean MVVM architecture. But here is the thing — almost every real app talks to a server. Your Todo app lives in isolation. Real apps fetch data from APIs, send user actions to backends, and sync state across devices.
+
+Networking is where a lot of iOS developers lose hours. Not because URLSession is hard — it is actually quite good these days with async/await — but because there are dozens of decisions to make. How do you structure your service layer? How do you decode responses? How do you handle errors gracefully? How do you avoid duplicating code across every endpoint?
+
+This is where AI shines. Not because it writes networking code you could not write yourself, but because it writes it in two minutes instead of forty. And if you prompt it correctly, the code is clean, testable, and production-ready.
+
+But here is the honest take: you do not need to build a networking layer from scratch. We already built one. It is called [ABNetworking](https://github.com/mariopek/ABNetworking) — an open-source, production-ready networking layer that we use across all of our apps, including banking applications handling thousands of API calls daily. It handles async/await, automatic retry with exponential backoff, certificate pinning, typed errors, and it is protocol-oriented so you can mock it in tests.
+
+I am going to teach you both approaches in this lesson. First, we will build a simple networking layer from scratch so you understand what is under the hood — because understanding your tools matters. Then I will show you how ABNetworking does all of this and more, and why you should use it (or something like it) instead of rolling your own for production apps.
+
+## The Prompt Chain
+
+Here is the strategy. You do not ask AI to "add networking" in one giant prompt. You break it into a chain of focused prompts, each building on the last. This is the refinement ladder from Module 2, applied to a real feature.
+
+The chain looks like this:
+
+```
+1. NetworkService (generic, reusable HTTP client)
+2. API models (Codable structs matching the API response)
+3. Endpoint-specific service methods
+4. ViewModel integration
+5. View layer
+```
+
+Each step is one prompt. Each prompt produces code you review before moving on. If step 2 looks wrong, you fix it before step 3 depends on it. This is how professionals use AI — incrementally, not all at once.
+
+## Step 1: The Generic NetworkService
+
+Let us start with the foundation. Here is the prompt I would give Claude Code:
+
+```
+Create a NetworkService class for our SwiftUI app. Requirements:
+
+- Generic async/await methods for GET, POST, PUT, DELETE
+- Uses URLSession.shared
+- Accepts a base URL configured at init time
+- Returns decoded Codable types
+- Throws typed errors (NetworkError enum) for:
+  - invalidURL
+  - requestFailed(statusCode: Int)
+  - decodingFailed(Error)
+  - noData
+  - unauthorized
+- Includes a method to add default headers (like API keys)
+- Uses JSONDecoder with .convertFromSnakeCase key strategy
+- Add os.Logger for debug logging
+
+Put it in Services/NetworkService.swift
+```
+
+Notice how specific this is. I am not saying "add networking." I am telling it exactly what I want — the error types, the decoding strategy, the logging approach. This is the difference between getting code you can use and code you have to rewrite.
+
+Here is what Claude Code generates:
+
+```swift
+import Foundation
+import os
+
+enum NetworkError: LocalizedError {
+    case invalidURL
+    case requestFailed(statusCode: Int)
+    case decodingFailed(Error)
+    case noData
+    case unauthorized
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "The URL is invalid."
+        case .requestFailed(let statusCode):
+            return "Request failed with status code \(statusCode)."
+        case .decodingFailed(let error):
+            return "Failed to decode response: \(error.localizedDescription)"
+        case .noData:
+            return "No data received from the server."
+        case .unauthorized:
+            return "You are not authorized. Please check your API key."
+        }
+    }
+}
+
+final class NetworkService {
+    private let baseURL: String
+    private let session: URLSession
+    private var defaultHeaders: [String: String] = [:]
+    private let decoder: JSONDecoder
+    private let logger = Logger(subsystem: "com.app.networking", category: "NetworkService")
+
+    init(baseURL: String, session: URLSession = .shared) {
+        self.baseURL = baseURL
+        self.session = session
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
+    }
+
+    func addDefaultHeader(key: String, value: String) {
+        defaultHeaders[key] = value
+    }
+
+    func get<T: Decodable>(_ path: String, queryItems: [URLQueryItem]? = nil) async throws -> T {
+        let request = try buildRequest(path: path, method: "GET", queryItems: queryItems)
+        return try await execute(request)
+    }
+
+    func post<T: Decodable>(_ path: String, body: some Encodable) async throws -> T {
+        var request = try buildRequest(path: path, method: "POST")
+        request.httpBody = try JSONEncoder().encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await execute(request)
+    }
+
+    func put<T: Decodable>(_ path: String, body: some Encodable) async throws -> T {
+        var request = try buildRequest(path: path, method: "PUT")
+        request.httpBody = try JSONEncoder().encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await execute(request)
+    }
+
+    func delete(_ path: String) async throws {
+        let request = try buildRequest(path: path, method: "DELETE")
+        let (_, response) = try await session.data(for: request)
+        try validateResponse(response)
+    }
+
+    // MARK: - Private
+
+    private func buildRequest(
+        path: String,
+        method: String,
+        queryItems: [URLQueryItem]? = nil
+    ) throws -> URLRequest {
+        guard var components = URLComponents(string: baseURL + path) else {
+            logger.error("Invalid URL: \(self.baseURL + path)")
+            throw NetworkError.invalidURL
+        }
+
+        if let queryItems {
+            components.queryItems = queryItems
+        }
+
+        guard let url = components.url else {
+            logger.error("Could not construct URL from components")
+            throw NetworkError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+
+        for (key, value) in defaultHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        return request
+    }
+
+    private func execute<T: Decodable>(_ request: URLRequest) async throws -> T {
+        logger.debug("Requesting: \(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?")")
+
+        let (data, response) = try await session.data(for: request)
+        try validateResponse(response)
+
+        do {
+            let decoded = try decoder.decode(T.self, from: data)
+            logger.debug("Successfully decoded \(String(describing: T.self))")
+            return decoded
+        } catch {
+            logger.error("Decoding failed: \(error.localizedDescription)")
+            throw NetworkError.decodingFailed(error)
+        }
+    }
+
+    private func validateResponse(_ response: URLResponse) throws {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.requestFailed(statusCode: -1)
+        }
+
+        logger.debug("Response status: \(httpResponse.statusCode)")
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            return
+        case 401:
+            throw NetworkError.unauthorized
+        default:
+            throw NetworkError.requestFailed(statusCode: httpResponse.statusCode)
+        }
+    }
+}
+```
+
+Look at what we got. A clean, generic networking service with typed errors, logging, configurable headers, and proper async/await. This would take you 30 to 45 minutes to write by hand. Claude Code produced it in seconds.
+
+But — and this matters — you need to read it. Check that the error cases make sense for your app. Check that the decoder strategy matches your API. Check that the logging is using os.Logger, not print statements. The AI wrote a great draft. Your job is to verify it.
+
+## Step 2: The API Response Models
+
+Now we need models that match the actual API. Let us use the OpenWeatherMap API as our example — it is free, well-documented, and a realistic integration scenario.
+
+Here is the prompt:
+
+```
+I am integrating the OpenWeatherMap Current Weather API.
+Here is a sample JSON response:
+
+{
+  "coord": { "lon": -122.08, "lat": 37.39 },
+  "weather": [{ "id": 800, "main": "Clear", "description": "clear sky", "icon": "01d" }],
+  "main": { "temp": 282.55, "feels_like": 281.86, "temp_min": 280.37, "temp_max": 284.26, "humidity": 100 },
+  "wind": { "speed": 1.5, "deg": 350 },
+  "name": "Mountain View"
+}
+
+Create Codable model structs that match this response.
+Use nested structs. Include CodingKeys only where needed.
+Put them in Models/WeatherResponse.swift.
+
+Also create a simpler Weather model that our views will actually use
+(not the raw API model) — with just the fields we need for display.
+Put it in Models/Weather.swift.
+```
+
+Notice the key technique here: I gave Claude Code the actual JSON. Do not describe the API in words — paste the real response. AI is excellent at generating Codable models when it can see the exact JSON shape.
+
+```swift
+// Models/WeatherResponse.swift
+
+struct WeatherResponse: Decodable {
+    let coord: Coordinate
+    let weather: [WeatherInfo]
+    let main: MainWeather
+    let wind: Wind
+    let name: String
+
+    struct Coordinate: Decodable {
+        let lon: Double
+        let lat: Double
+    }
+
+    struct WeatherInfo: Decodable {
+        let id: Int
+        let main: String
+        let description: String
+        let icon: String
+    }
+
+    struct MainWeather: Decodable {
+        let temp: Double
+        let feelsLike: Double
+        let tempMin: Double
+        let tempMax: Double
+        let humidity: Int
+    }
+
+    struct Wind: Decodable {
+        let speed: Double
+        let deg: Int
+    }
+}
+```
+
+```swift
+// Models/Weather.swift
+
+struct Weather: Identifiable {
+    let id = UUID()
+    let cityName: String
+    let temperature: Double
+    let feelsLike: Double
+    let description: String
+    let iconCode: String
+    let humidity: Int
+    let windSpeed: Double
+    let tempMin: Double
+    let tempMax: Double
+
+    var temperatureCelsius: String {
+        let celsius = temperature - 273.15
+        return String(format: "%.0f", celsius)
+    }
+
+    var feelsLikeCelsius: String {
+        let celsius = feelsLike - 273.15
+        return String(format: "%.0f", celsius)
+    }
+
+    var iconURL: URL? {
+        URL(string: "https://openweathermap.org/img/wn/\(iconCode)@2x.png")
+    }
+}
+
+extension Weather {
+    init(from response: WeatherResponse) {
+        self.cityName = response.name
+        self.temperature = response.main.temp
+        self.feelsLike = response.main.feelsLike
+        self.description = response.weather.first?.description.capitalized ?? "Unknown"
+        self.iconCode = response.weather.first?.icon ?? "01d"
+        self.humidity = response.main.humidity
+        self.windSpeed = response.wind.speed
+        self.tempMin = response.main.tempMin
+        self.tempMax = response.main.tempMax
+    }
+}
+```
+
+Two models — one raw API model, one clean display model. The raw model matches the API exactly (so decoding never fails). The display model has only what the UI needs, with computed properties for formatting. This separation is a pattern you will use in every app that talks to an API.
+
+## Step 3: The Weather Service
+
+Now we connect the NetworkService to actual API calls:
+
+```
+Create a WeatherService that uses our NetworkService to fetch
+weather data from OpenWeatherMap. Requirements:
+
+- Method: fetchWeather(for city: String) async throws -> Weather
+- Uses the /data/2.5/weather endpoint
+- Passes the city as a "q" query parameter
+- Passes the API key as an "appid" query parameter
+- Converts the WeatherResponse to our Weather display model
+- The API key should come from a configuration (not hardcoded)
+
+Put it in Services/WeatherService.swift
+```
+
+```swift
+import Foundation
+
+final class WeatherService {
+    private let networkService: NetworkService
+    private let apiKey: String
+
+    init(apiKey: String) {
+        self.networkService = NetworkService(baseURL: "https://api.openweathermap.org")
+        self.apiKey = apiKey
+    }
+
+    func fetchWeather(for city: String) async throws -> Weather {
+        let queryItems = [
+            URLQueryItem(name: "q", value: city),
+            URLQueryItem(name: "appid", value: apiKey)
+        ]
+
+        let response: WeatherResponse = try await networkService.get(
+            "/data/2.5/weather",
+            queryItems: queryItems
+        )
+
+        return Weather(from: response)
+    }
+}
+```
+
+Clean. Focused. One method, one responsibility. The service does not know about views or view models. It takes a city name, returns a Weather object. That is it.
+
+## Step 4: The ViewModel
+
+```
+Create a WeatherViewModel using @Observable for our weather feature.
+
+- Has a published weather property (optional Weather)
+- Has a searchText property bound to a TextField
+- Has a fetchWeather() async method that calls WeatherService
+- Handles loading state (isLoading bool)
+- Handles errors (errorMessage optional string, showError bool)
+- Uses the WeatherService we already created
+- Debounce is not needed — user will tap a search button
+
+Put it in ViewModels/WeatherViewModel.swift
+```
+
+```swift
+import Foundation
+import os
+
+@Observable
+final class WeatherViewModel {
+    var weather: Weather?
+    var searchText = ""
+    var isLoading = false
+    var errorMessage: String?
+    var showError = false
+
+    private let weatherService: WeatherService
+    private let logger = Logger(subsystem: "com.app", category: "WeatherViewModel")
+
+    init(weatherService: WeatherService) {
+        self.weatherService = weatherService
+    }
+
+    var hasWeather: Bool {
+        weather != nil
+    }
+
+    func fetchWeather() async {
+        let city = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !city.isEmpty else {
+            errorMessage = "Please enter a city name."
+            showError = true
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            weather = try await weatherService.fetchWeather(for: city)
+            logger.debug("Fetched weather for \(city)")
+        } catch let error as NetworkError {
+            errorMessage = error.errorDescription
+            showError = true
+            logger.error("Network error: \(error.localizedDescription)")
+        } catch {
+            errorMessage = "Something went wrong. Please try again."
+            showError = true
+            logger.error("Unexpected error: \(error.localizedDescription)")
+        }
+
+        isLoading = false
+    }
+}
+```
+
+Notice the error handling. The ViewModel catches `NetworkError` specifically so it can show a user-friendly message, then has a generic catch for anything unexpected. It sets `isLoading` at the start, clears it at the end regardless of success or failure. These are the patterns that separate amateur apps from professional ones.
+
+## Step 5: The View
+
+The final piece:
+
+```
+Create a WeatherView in SwiftUI that:
+
+- Has a search bar at the top (TextField with a magnifying glass icon)
+- A "Search" button next to it
+- Shows a loading indicator (ProgressView) while fetching
+- Displays the weather data in a nice card layout when loaded:
+  - City name (large title)
+  - Temperature in Celsius (very large, bold)
+  - "Feels like" temperature
+  - Weather description
+  - Humidity and wind speed in an HStack
+  - High/low temperatures
+- Shows an empty state when no search has been performed
+- Uses our WeatherViewModel
+- Shows errors via .alert modifier
+- Include a #Preview
+
+Put it in Views/WeatherView.swift
+```
+
+```swift
+import SwiftUI
+
+struct WeatherView: View {
+    @State private var viewModel: WeatherViewModel
+
+    init(weatherService: WeatherService) {
+        self._viewModel = State(
+            initialValue: WeatherViewModel(weatherService: weatherService)
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                searchBar
+                    .padding()
+
+                if viewModel.isLoading {
+                    Spacer()
+                    ProgressView("Fetching weather...")
+                    Spacer()
+                } else if let weather = viewModel.weather {
+                    weatherCard(weather)
+                        .padding()
+                    Spacer()
+                } else {
+                    emptyState
+                }
+            }
+            .navigationTitle("Weather")
+            .alert("Error", isPresented: $viewModel.showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.errorMessage ?? "An unknown error occurred.")
+            }
+        }
+    }
+
+    // MARK: - Search Bar
+
+    private var searchBar: some View {
+        HStack(spacing: 12) {
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Enter city name", text: $viewModel.searchText)
+                    .textFieldStyle(.plain)
+                    .submitLabel(.search)
+                    .onSubmit {
+                        Task { await viewModel.fetchWeather() }
+                    }
+            }
+            .padding(10)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+
+            Button {
+                Task { await viewModel.fetchWeather() }
+            } label: {
+                Text("Search")
+                    .fontWeight(.medium)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(viewModel.searchText.isEmpty)
+        }
+    }
+
+    // MARK: - Weather Card
+
+    private func weatherCard(_ weather: Weather) -> some View {
+        VStack(spacing: 16) {
+            Text(weather.cityName)
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            Text("\(weather.temperatureCelsius)\u{00B0}")
+                .font(.system(size: 72, weight: .thin, design: .rounded))
+
+            Text(weather.description)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+
+            Text("Feels like \(weather.feelsLikeCelsius)\u{00B0}")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Divider()
+                .padding(.horizontal, 40)
+
+            HStack(spacing: 32) {
+                weatherDetail(
+                    icon: "humidity",
+                    label: "Humidity",
+                    value: "\(weather.humidity)%"
+                )
+                weatherDetail(
+                    icon: "wind",
+                    label: "Wind",
+                    value: String(format: "%.1f m/s", weather.windSpeed)
+                )
+            }
+
+            HStack(spacing: 24) {
+                Label {
+                    let celsius = weather.tempMin - 273.15
+                    Text("L: \(String(format: "%.0f", celsius))\u{00B0}")
+                } icon: {
+                    Image(systemName: "thermometer.low")
+                }
+                .foregroundStyle(.blue)
+
+                Label {
+                    let celsius = weather.tempMax - 273.15
+                    Text("H: \(String(format: "%.0f", celsius))\u{00B0}")
+                } icon: {
+                    Image(systemName: "thermometer.high")
+                }
+                .foregroundStyle(.red)
+            }
+            .font(.subheadline)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    // MARK: - Detail Cell
+
+    private func weatherDetail(icon: String, label: String, value: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Empty State
+
+    private var emptyState: some View {
+        ContentUnavailableView(
+            "Search for a City",
+            systemImage: "cloud.sun",
+            description: Text("Enter a city name above to see the current weather.")
+        )
+    }
+}
+
+#Preview {
+    let service = WeatherService(apiKey: "preview-key")
+    WeatherView(weatherService: service)
+}
+```
+
+Five prompts. Five files. A complete networking feature from generic HTTP client to finished UI. The entire chain took maybe ten minutes, and most of that was reading and reviewing the code.
+
+## The Art of Describing API Endpoints
+
+Let me share a technique that saves enormous time. When you need to integrate an API, do not describe it in words. Give Claude Code the raw material.
+
+**Bad prompt:**
+```
+Integrate the weather API. It returns temperature and stuff.
+```
+
+**Good prompt:**
+```
+Here is the API documentation for the endpoint I need:
+
+GET https://api.openweathermap.org/data/2.5/weather
+Query params: q (city name), appid (API key)
+Sample response: { paste actual JSON here }
+
+Create the Codable models to decode this response.
+```
+
+The difference is enormous. When you paste actual JSON, the AI generates models that match exactly. When you describe it vaguely, it guesses — and it guesses wrong.
+
+For APIs you do not control, I recommend this workflow:
+
+1. Hit the API once with curl or a tool like Postman
+2. Copy the real JSON response
+3. Paste it directly into your prompt
+
+Thirty seconds of preparation saves ten minutes of fixing incorrect model definitions.
+
+## Error Handling at the Network Layer
+
+One thing I want to call out specifically — the error handling pattern we built here is a two-layer approach:
+
+**Layer 1: NetworkService** throws typed `NetworkError` values. These are technical — status codes, decoding failures, URL issues.
+
+**Layer 2: ViewModel** catches those errors and translates them into user-facing messages. The user never sees "decodingFailed" — they see "Something went wrong. Please try again."
+
+This separation matters. Your networking layer should throw precise, technical errors. Your ViewModel should translate those into human language. If you let AI mix these layers (and it will try), push back.
+
+Here is a prompt you can use when AI gives you sloppy error handling:
+
+```
+The error messages in the ViewModel should be user-friendly, not technical.
+"decodingFailed" means nothing to a user. Map every NetworkError case
+to a human-readable message. Technical details should go to os.Logger,
+not to the UI.
+```
+
+## Common AI Mistakes in Networking Code
+
+After building dozens of networking layers with AI, here are the patterns I see go wrong most often:
+
+**1. Using Alamofire or other third-party libraries.** Unless your CLAUDE.md says otherwise, AI will sometimes import Alamofire. You do not need it. URLSession with async/await is excellent. Push back.
+
+**2. Hardcoding API keys.** AI loves to put API keys directly in source code. Always prompt for configuration-based approaches — environment variables, a Config.plist, or at minimum a separate constants file that is in .gitignore.
+
+**3. Not handling the empty response case.** Some DELETE endpoints return 204 No Content. If your generic execute method always tries to decode, it will crash on empty responses. That is why our `delete` method above has a separate implementation.
+
+**4. Ignoring response codes.** AI sometimes checks only for 200 and treats everything else as an error. Real APIs return 201 Created, 204 No Content, 301 redirects. Make sure your validation handles the 200-299 range.
+
+**5. Synchronous error state updates.** If the AI updates `isLoading` or `errorMessage` from a background thread without MainActor, you will get runtime warnings. Check that your ViewModel is updating state correctly — @Observable handles this well, but double-check.
+
+## The Production Approach: ABNetworking
+
+Everything we built above works. For a learning exercise or a small personal project, it is perfectly fine. But if you are building an app that goes to the App Store — especially one that handles real user data — you need more than a basic URLSession wrapper.
+
+Here is what our hand-built NetworkService is missing:
+
+- **Automatic retry with exponential backoff.** Network requests fail. Cellular connections drop. Servers return 503. A production networking layer handles transient failures gracefully without the caller needing to think about it.
+- **Certificate pinning.** For any app that handles sensitive data (banking, health, finance), you need to validate the server's certificate. Our basic service does not do this.
+- **Proper testability.** Our NetworkService is tightly coupled to URLSession. You cannot easily mock it in tests without passing a custom URLSession, which is clunky.
+- **Thread safety guarantees.** Our service works fine in simple cases, but under heavy concurrent use, there are no guarantees about thread safety.
+
+This is exactly why we built [ABNetworking](https://github.com/mariopek/ABNetworking). It is the networking layer we use across all of our apps — including banking applications handling thousands of API calls daily. We open-sourced it because every team ends up building the same thing from scratch, and most implementations miss critical production requirements.
+
+### Setting Up ABNetworking
+
+Install via Swift Package Manager:
+
+```
+https://github.com/mariopek/ABNetworking
+```
+
+ABNetworking requires iOS 12.0+ and Swift 5.7+. Zero external dependencies — just pure Swift on top of URLSession.
+
+### How ABNetworking Compares to Our Hand-Built Service
+
+Here is the same weather API integration using ABNetworking:
+
+```swift
+import ABNetworking
+
+let httpClient = URLSessionHTTPClient()
+let service = NetworkingService(httpClient: httpClient)
+
+do {
+    let request = try ABURLRequestBuilder(
+        baseURL: "https://api.openweathermap.org",
+        path: "/data/2.5/weather",
+        method: .get,
+        queryItems: [
+            URLQueryItem(name: "q", value: "London"),
+            URLQueryItem(name: "appid", value: apiKey)
+        ]
+    ).build()
+
+    let response: WeatherResponse = try await service.request(request)
+    let weather = Weather(from: response)
+} catch let error as NetworkingError {
+    switch error {
+    case .noConnection:
+        // User is offline
+    case .serverError(let code):
+        // Server returned an error
+    case .decodingError:
+        // Response did not match our model
+    default:
+        break
+    }
+}
+```
+
+Notice what you get for free:
+- **Typed errors** — `NetworkingError` gives you specific cases like `.noConnection`, `.serverError`, `.decodingError`. No more guessing what went wrong.
+- **Automatic retry** — transient failures (timeouts, 503s) are retried with exponential backoff. A 401 is not retried because your token is invalid and retrying will not help. This is smart retry logic you do not have to write.
+- **Certificate pinning** — three lines to set up:
+
+```swift
+guard let certURL = Bundle.main.url(forResource: "server", withExtension: "der"),
+      let certData = try? Data(contentsOf: certURL) else { return }
+
+let httpClient = URLSessionHTTPClient(pinnedCertificates: [certData])
+let service = NetworkingService(httpClient: httpClient)
+```
+
+- **Protocol-oriented testability** — `HTTPClient` is a protocol. In your tests, you create a mock that conforms to `HTTPClient`, return whatever responses you need, and test your business logic without making real network calls. No more fighting with URLProtocol mocks.
+- **Configurable logging** — four levels (debug, info, warning, error). In development you see everything, in production you only see what matters.
+
+### When to Use ABNetworking vs. Rolling Your Own
+
+Use ABNetworking (or a similar production library) when:
+- Your app talks to a backend API
+- You need retry logic, certificate pinning, or proper error handling
+- You want testable networking code with clean mocking
+- You are building something that goes on the App Store
+
+Roll your own when:
+- You are learning and want to understand how networking works under the hood (which is what we did earlier in this lesson)
+- You have very specific requirements that no library covers
+- You are building a library yourself and cannot take dependencies
+
+For the vast majority of apps, ABNetworking handles everything you need. The whole point of this course is to work smarter — and that means not rebuilding solved problems from scratch every time.
+
+## Key Takeaways
+
+1. **Use a prompt chain, not one giant prompt** — NetworkService, then models, then service, then ViewModel, then view. Each step builds on the last.
+2. **Paste real JSON** into your prompts instead of describing API responses in words. AI generates perfect Codable models when it can see the actual data.
+3. **Separate raw API models from display models** — one for decoding, one for UI. This protects your views from API changes.
+4. **Two-layer error handling** — technical errors at the network layer, user-friendly messages at the ViewModel layer. Never show raw error types to users.
+5. **Watch for common AI mistakes** — third-party imports, hardcoded keys, missing empty-response handling, narrow status code checks.
+6. **Use ABNetworking for production apps** — it handles retry, certificate pinning, typed errors, and testability out of the box. Do not rebuild this from scratch for every project.
+7. **Understanding the fundamentals still matters** — even when using a library, knowing how URLSession, async/await, and Codable work makes you better at debugging and prompting AI.
+
+## Homework
+
+**Build a complete API integration (45 minutes):**
+
+Pick a free public API. Good options:
+
+- [JSONPlaceholder](https://jsonplaceholder.typicode.com) — fake REST API with posts, users, comments
+- [PokeAPI](https://pokeapi.co) — Pokemon data (surprisingly well-structured)
+- [Open-Meteo](https://open-meteo.com) — weather data, no API key needed
+
+Then build the full chain using Claude Code:
+
+1. Add [ABNetworking](https://github.com/mariopek/ABNetworking) to your project via Swift Package Manager
+2. Hit the API once with curl, copy the JSON response
+3. Prompt Claude Code with the real JSON to create Codable models
+4. Create a display model separate from the API model
+5. Build a service class that uses ABNetworking's `NetworkingService` to make the API calls
+6. Create a ViewModel with loading state and error handling
+7. Build a SwiftUI view that displays the data
+
+Time yourself. My bet: under 20 minutes for the whole thing. Try to imagine doing it without AI, and appreciate the difference.
+
+**Bonus:** Try writing a unit test for your service class using ABNetworking's `HTTPClient` protocol to create a mock. You will see how much easier protocol-oriented networking makes testing.

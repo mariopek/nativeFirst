@@ -1,0 +1,286 @@
+---
+title: "CLAUDE.md — Your AI Playbook"
+description: "How to write a CLAUDE.md configuration file that enforces your architecture, coding standards, and design rules — with a real-world example from the Invoize app."
+module: 2
+moduleTitle: "Prompting for Swift & SwiftUI"
+lesson: 2
+duration: "15 min read"
+difficulty: "intermediate"
+topics: ["CLAUDE.md", "Architecture", "Configuration", "Code Standards", "Project Setup", "Best Practices", "AI Configuration", "Developer Workflow"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+In the last lesson, we talked about the four-part prompt framework — Context, Task, Constraints, Format. Now imagine if two of those parts — Context and Constraints — were automatic. Every single prompt you write already knows your project's architecture, coding standards, and design patterns. No repetition. No forgetting.
+
+That is what CLAUDE.md does.
+
+## What Is CLAUDE.md?
+
+CLAUDE.md is a markdown file you place in your project's root directory. When Claude Code starts a session, it reads this file first — before it reads any of your code. Every prompt you send during that session is processed through the lens of your CLAUDE.md rules.
+
+Think of it like this:
+
+```
+Your Prompt + CLAUDE.md Rules + Project Code = AI Output
+```
+
+Without CLAUDE.md:
+```
+"Add a settings screen"  →  AI guesses architecture, patterns, API choices
+```
+
+With CLAUDE.md:
+```
+"Add a settings screen"  →  AI uses MVVM, @Observable, SwiftData,
+                             follows your naming conventions, targets iOS 17+
+```
+
+The difference is not subtle. It is the difference between getting code you can use and getting code you have to rewrite.
+
+## Anatomy of a Production CLAUDE.md
+
+Let us build a production-quality CLAUDE.md from scratch. I am going to walk through every section and explain why it matters.
+
+### Section 1: Project Overview
+
+```markdown
+# VibeCourseDemo
+
+iOS app for [brief description]. Built with SwiftUI and SwiftData.
+
+## Tech Stack
+- Language: Swift 5.9+
+- UI Framework: SwiftUI
+- Persistence: SwiftData
+- Minimum Target: iOS 17.0
+- Architecture: MVVM
+```
+
+Why this matters: it immediately grounds the AI. No more generating UIKit code. No more targeting iOS 15 APIs. No more Core Data when you want SwiftData.
+
+### Section 2: Architecture Rules
+
+```markdown
+## Architecture
+
+### MVVM Pattern
+- Every screen has a View and a ViewModel
+- ViewModels are `@Observable` classes (NOT ObservableObject)
+- Views own ViewModels via `@State private var viewModel = SomeViewModel()`
+- Views are purely declarative — no business logic, no direct data access
+- ViewModels handle all business logic and data transformation
+
+### File Organization
+- Views go in `Views/` directory, grouped by feature
+- ViewModels go in `ViewModels/` directory
+- Models go in `Models/` directory
+- Services go in `Services/` directory
+- Extensions go in `Extensions/` directory
+```
+
+This section prevents architectural drift. Without it, AI might put logic in views, create god objects, or use inconsistent patterns across different prompts.
+
+### Section 3: Coding Standards
+
+```markdown
+## Coding Standards
+
+### Naming
+- Types: PascalCase (UserProfileView, InvoiceViewModel)
+- Properties/methods: camelCase (userName, fetchInvoices())
+- Constants: camelCase (maxRetryCount, defaultTimeout)
+- Enums: PascalCase type, camelCase cases
+- Boolean properties: use "is", "has", "should" prefix (isLoading, hasError)
+
+### SwiftUI Specifics
+- Prefer smaller, composable views over monolithic ones
+- Extract reusable modifiers into ViewModifier structs
+- Use custom view extensions for repeated styling patterns
+- Always include #Preview for every view
+- Use .task {} for async work, not .onAppear with Task {}
+
+### Error Handling
+- Use Swift's typed throws where appropriate
+- User-facing errors should be human-readable
+- Log technical errors with os.Logger, not print()
+- Show errors using .alert modifier, not custom error views
+```
+
+These standards ensure consistency across every piece of generated code. Without them, the AI might use `print()` for logging in one file and `os.Logger` in another.
+
+### Section 4: Data Layer
+
+```markdown
+## Data Layer
+
+### SwiftData
+- Define models with @Model macro
+- Use ModelContainer configured in App struct
+- Query data with @Query in views or fetch in ViewModels
+- Handle migrations explicitly — never delete and recreate
+
+### Networking (if applicable)
+- Use async/await for all network calls
+- Central NetworkService class handles all HTTP requests
+- Map API responses to local model types immediately
+- Handle all errors: network, decoding, server errors
+- Include retry logic for transient failures
+```
+
+### Section 5: UI/UX Rules
+
+```markdown
+## UI/UX Guidelines
+
+### Design
+- Follow Apple Human Interface Guidelines
+- Use system colors (Color.primary, Color.secondary) for text
+- Use SF Symbols for all icons — no custom icon assets unless necessary
+- Support Dynamic Type — never hardcode font sizes
+- Support Dark Mode — use semantic colors only
+
+### Navigation
+- Use NavigationStack (not deprecated NavigationView)
+- Use navigationDestination(for:) for type-safe navigation
+- Prefer programmatic navigation via path state in ViewModel
+
+### Accessibility
+- All interactive elements must have accessibility labels
+- Images must have accessibility descriptions
+- Support VoiceOver navigation order
+- Minimum tap target: 44x44 points
+```
+
+This section is crucial. It means every UI the AI generates will be accessible, follow Apple's guidelines, and support system features like Dynamic Type and Dark Mode.
+
+### Section 6: Things To Avoid
+
+```markdown
+## Do NOT
+- Use UIKit components wrapped in UIViewRepresentable (unless absolutely necessary)
+- Use third-party UI libraries (no SnapKit, no Kingfisher — use native equivalents)
+- Hardcode strings — use String Catalogs for localization
+- Store sensitive data in UserDefaults — use Keychain
+- Use singletons for state management — use SwiftUI's environment
+- Force unwrap optionals — always use safe unwrapping
+- Use AnyView — prefer concrete types or @ViewBuilder
+```
+
+The "Do NOT" section is arguably the most valuable. AI models have been trained on millions of codebases, many of which use patterns you do not want. Explicit exclusions prevent the AI from importing its bad habits into your project.
+
+## Real-World Example: Invoize
+
+Let me show you what a real production CLAUDE.md looks like. This is based on the rules we use for Invoize, our invoicing app:
+
+```markdown
+# Invoize
+
+Professional invoicing app for macOS. Native SwiftUI, local-first,
+privacy-focused.
+
+## Architecture
+- MVVM with Service layer
+- SwiftData for all persistence
+- No network calls — everything is local
+- PDF generation via custom rendering pipeline
+
+## Critical Rules
+- ALL data stays on device. No analytics. No telemetry. No cloud sync.
+- Every user-facing string must be localizable
+- Support macOS 14.0+
+- Keyboard shortcuts for all primary actions
+- Document-based app architecture for invoice files
+
+## PDF Generation
+- Use custom PDFRenderer service (do not modify the rendering pipeline
+  without explicit instruction)
+- Invoice templates are defined in InvoiceTemplate protocol
+- Support A4 and US Letter page sizes
+- All measurements in points (72 points per inch)
+
+## Testing
+- Unit tests for all ViewModel logic
+- Test file naming: [ClassName]Tests.swift
+- Use Swift Testing framework, not XCTest
+- Mock data goes in TestHelpers/MockData.swift
+```
+
+Notice how specific this is to Invoize. The privacy rules ("ALL data stays on device"), the PDF generation constraints, the keyboard shortcut requirement — these are project-specific rules that the AI needs to know.
+
+Your CLAUDE.md should be just as specific. Generic rules are a start, but project-specific rules are where the real value is.
+
+## Common Mistakes
+
+Here are the mistakes I see most often:
+
+**1. Too vague**
+```markdown
+## Rules
+- Write good code
+- Follow best practices
+```
+This tells the AI nothing. What is "good code"? Which "best practices"? Be specific.
+
+**2. Too long**
+If your CLAUDE.md is 500 lines, the AI may lose important rules in the noise. Aim for 50-150 lines of high-signal content.
+
+**3. Contradictory rules**
+```markdown
+- Use @Observable macro
+- All ViewModels should conform to ObservableObject
+```
+These contradict each other. The AI will guess, and it will guess wrong half the time.
+
+**4. Never updating it**
+Your CLAUDE.md should evolve with your project. If you adopt a new pattern, add it. If you abandon a library, remove it. Treat it like a living document.
+
+**5. Missing the "Do NOT" section**
+Telling the AI what to do is important. Telling it what NOT to do is equally important. Skip the negative constraints at your own risk.
+
+## How To Evolve Your CLAUDE.md
+
+Here is my workflow for keeping CLAUDE.md current:
+
+1. **Start minimal** — 20-30 lines covering architecture, target, and coding standards
+2. **Add rules when AI gets it wrong** — if AI generates UIKit code, add "Do not use UIKit"
+3. **Remove rules that are redundant** — if the AI consistently gets something right without being told, you do not need the rule
+4. **Review monthly** — as your project and the AI models evolve, your rules should too
+
+You can even ask Claude Code to help:
+
+```
+Review our CLAUDE.md and suggest improvements based on the
+patterns you see in our current codebase.
+```
+
+The AI will identify inconsistencies between your rules and your actual code. It is like a code review for your configuration.
+
+## Closing
+
+CLAUDE.md is the single highest-leverage file in your vibe coding workflow. Ten minutes spent writing a good one saves hours of correcting bad AI output.
+
+In the next lesson, we are going to talk about what happens after the first response — iterative prompting. Because the first answer is almost never the final answer, and knowing how to refine is a skill.
+
+## Key Takeaways
+
+1. **CLAUDE.md is read first** — before your code, before your prompt. It sets the rules for every interaction
+2. **Six essential sections**: Project Overview, Architecture, Coding Standards, Data Layer, UI/UX, Do NOTs
+3. **Be specific, not generic** — "Use @Observable" beats "use modern patterns"
+4. **The Do NOT section is critical** — prevents AI from importing bad habits from training data
+5. **Keep it 50-150 lines** — enough to be comprehensive, short enough to be fully processed
+6. **Evolve it** — add rules when AI fails, remove rules that are unnecessary, review monthly
+
+## Homework
+
+**Build your own CLAUDE.md (20 minutes):**
+
+1. Take the template from the `code-examples/sample-claude-md/` directory
+2. Customize it for your own project (or a project you want to build)
+3. Include at least:
+   - Tech stack and targets
+   - Architecture pattern with specific rules
+   - 5+ coding standards
+   - 5+ "Do NOT" rules
+4. Test it: run Claude Code in your project and ask it to generate a simple feature. Does the output follow your rules?

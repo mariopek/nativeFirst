@@ -1,0 +1,619 @@
+---
+title: "Error Handling & Loading States"
+description: "Build robust loading, empty, and error states using LoadingState enum, ContentUnavailableView, retry logic, and skeleton views for native iOS."
+module: 4
+moduleTitle: "Real-World Patterns"
+lesson: 2
+duration: "14 min read"
+difficulty: "intermediate"
+topics: ["Error Handling", "Loading States", "UX Patterns", "State Management", "Retry Logic", "Skeleton Views", "Pull-to-Refresh", "User Experience"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Here is something I notice constantly when reviewing apps built with AI: the happy path works perfectly. Data loads, the list renders, everything looks great. Then you turn on airplane mode and the app shows a blank screen. Or the API returns an error and the user stares at an infinite spinner. Or there is no data yet and the view is just... empty.
+
+These are the states that separate amateur apps from professional ones. And the irony is — they are easy to get right if you build them into your architecture from the start. Most developers (and most AI outputs) treat error and loading states as afterthoughts. We are going to treat them as first-class citizens.
+
+## The Three States Every Async View Needs
+
+Every view that loads data asynchronously has exactly three possible states:
+
+1. **Loading** — data is being fetched
+2. **Loaded** — data arrived successfully (could be empty or populated)
+3. **Error** — something went wrong
+
+That is it. Every async view. No exceptions. If your view does not handle all three, it has bugs — you just have not noticed them yet.
+
+Let us encode this in Swift with a generic enum.
+
+## The LoadingState Enum
+
+Here is the prompt:
+
+```
+Create a generic LoadingState enum that represents the three states
+of any async operation: idle, loading, loaded (with associated data),
+and error (with associated error message). Include computed properties
+for convenience: isLoading, data (optional), errorMessage (optional).
+Put it in Models/LoadingState.swift.
+```
+
+```swift
+import Foundation
+
+enum LoadingState<T> {
+    case idle
+    case loading
+    case loaded(T)
+    case error(String)
+
+    var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+
+    var data: T? {
+        if case .loaded(let data) = self { return data }
+        return nil
+    }
+
+    var errorMessage: String? {
+        if case .error(let message) = self { return message }
+        return nil
+    }
+
+    var isIdle: Bool {
+        if case .idle = self { return true }
+        return false
+    }
+
+    var hasError: Bool {
+        if case .error = self { return true }
+        return false
+    }
+}
+```
+
+I added `idle` as a fourth state because in practice you need it. When the user first opens a screen, nothing has been requested yet. That is different from "loading." The idle state lets you show a prompt or default content before the first load.
+
+Now — notice this enum is generic over `T`. That means you can use it for anything:
+
+```swift
+var weatherState: LoadingState<Weather> = .idle
+var postsState: LoadingState<[Post]> = .idle
+var profileState: LoadingState<UserProfile> = .idle
+```
+
+One enum. Every screen. Every data type. This is the kind of reusable pattern that AI helps you build once and use everywhere.
+
+## Using LoadingState in a ViewModel
+
+Let me show you what a ViewModel looks like when it uses LoadingState properly:
+
+```swift
+import Foundation
+import os
+
+@Observable
+final class PostListViewModel {
+    var state: LoadingState<[Post]> = .idle
+    private let postService: PostService
+    private let logger = Logger(subsystem: "com.app", category: "PostListViewModel")
+
+    init(postService: PostService) {
+        self.postService = postService
+    }
+
+    func loadPosts() async {
+        state = .loading
+
+        do {
+            let posts = try await postService.fetchPosts()
+            state = .loaded(posts)
+            logger.debug("Loaded \(posts.count) posts")
+        } catch let error as NetworkError {
+            state = .error(error.errorDescription ?? "Failed to load posts.")
+            logger.error("Network error: \(error.localizedDescription)")
+        } catch {
+            state = .error("Something went wrong. Please try again.")
+            logger.error("Unexpected error: \(error.localizedDescription)")
+        }
+    }
+
+    func refresh() async {
+        await loadPosts()
+    }
+}
+```
+
+Compare this to the ViewModel from the previous lesson where we had separate `isLoading`, `errorMessage`, `showError`, and `weather` properties. Four separate pieces of state that can get out of sync. With LoadingState, it is one property. One source of truth. The state machine cannot be in an impossible state — you cannot be both loading and showing an error simultaneously.
+
+This is a case where AI will happily generate either pattern. It is your job to choose the better one. If you have LoadingState in your codebase, tell Claude Code to use it:
+
+```
+Use our LoadingState<T> enum for managing the loading/error/loaded states.
+Do not create separate isLoading and errorMessage properties.
+```
+
+## Building the View Layer
+
+Now the view. This is where SwiftUI really shines — switching on an enum to render different states is natural and clean.
+
+```swift
+import SwiftUI
+
+struct PostListView: View {
+    @State private var viewModel: PostListViewModel
+
+    init(postService: PostService) {
+        self._viewModel = State(
+            initialValue: PostListViewModel(postService: postService)
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch viewModel.state {
+                case .idle:
+                    idleView
+
+                case .loading:
+                    loadingView
+
+                case .loaded(let posts):
+                    if posts.isEmpty {
+                        emptyView
+                    } else {
+                        postList(posts)
+                    }
+
+                case .error(let message):
+                    errorView(message)
+                }
+            }
+            .navigationTitle("Posts")
+            .task {
+                if viewModel.state.isIdle {
+                    await viewModel.loadPosts()
+                }
+            }
+        }
+    }
+
+    // MARK: - Idle State
+
+    private var idleView: some View {
+        ContentUnavailableView(
+            "Ready to Load",
+            systemImage: "arrow.down.circle",
+            description: Text("Pull down to load posts.")
+        )
+    }
+
+    // MARK: - Loading State
+
+    private var loadingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Loading posts...")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Post List
+
+    private func postList(_ posts: [Post]) -> some View {
+        List(posts) { post in
+            VStack(alignment: .leading, spacing: 6) {
+                Text(post.title)
+                    .font(.headline)
+                Text(post.body)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.vertical, 4)
+        }
+        .refreshable {
+            await viewModel.refresh()
+        }
+    }
+
+    // MARK: - Empty State
+
+    private var emptyView: some View {
+        ContentUnavailableView(
+            "No Posts Yet",
+            systemImage: "text.page",
+            description: Text("There are no posts to display. Check back later.")
+        )
+    }
+
+    // MARK: - Error State
+
+    private func errorView(_ message: String) -> some View {
+        ContentUnavailableView {
+            Label("Something Went Wrong", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try Again") {
+                Task { await viewModel.loadPosts() }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+#Preview {
+    PostListView(postService: PostService())
+}
+```
+
+Every state is handled. Every state looks intentional. The user always knows what is happening — they are never staring at a blank screen wondering if the app is broken.
+
+## ContentUnavailableView: Your New Best Friend
+
+`ContentUnavailableView` was introduced in iOS 17, and it is exactly what Apple intended for empty states, error states, and search-with-no-results states. It gives you an icon, a title, a description, and optional action buttons — all styled consistently with the system.
+
+Before iOS 17, you had to build custom empty state views. Now it is built in, and AI knows about it. But you need to tell AI to use it:
+
+```
+For the empty state, use ContentUnavailableView with an appropriate
+SF Symbol. Include a description and an action button if relevant.
+Do not build a custom empty state view.
+```
+
+Without this instruction, Claude Code will sometimes generate a custom VStack with an Image and Text. It works, but it does not match the system style and it is more code to maintain.
+
+## Pull-to-Refresh
+
+Adding pull-to-refresh in SwiftUI is trivial — it is the `.refreshable` modifier. But there is a subtlety that AI often gets wrong.
+
+The correct way:
+
+```swift
+.refreshable {
+    await viewModel.refresh()
+}
+```
+
+What AI sometimes generates:
+
+```swift
+.refreshable {
+    Task {
+        await viewModel.refresh()
+    }
+}
+```
+
+The second version wraps the async call in an unnecessary `Task`. The `.refreshable` closure is already async — wrapping it in `Task` means SwiftUI cannot track when the refresh finishes, so the spinner might dismiss too early. It is a small mistake, but it produces a noticeable UX bug.
+
+If you see this pattern in AI-generated code, fix it. It is one of those things that compiles fine but behaves incorrectly.
+
+## Retry Logic
+
+For transient network errors, you want to retry automatically before showing an error to the user. Here is a reusable retry function:
+
+```
+Add a retry utility function that:
+- Takes an async throwing closure
+- Retries up to maxRetries times (default 3)
+- Waits between retries with exponential backoff
+- Only retries on network errors, not on decoding errors
+- Returns the result if any attempt succeeds
+- Throws the last error if all attempts fail
+
+Put it in Utilities/RetryUtility.swift.
+```
+
+```swift
+import Foundation
+import os
+
+func withRetry<T>(
+    maxRetries: Int = 3,
+    initialDelay: TimeInterval = 1.0,
+    operation: () async throws -> T
+) async throws -> T {
+    let logger = Logger(subsystem: "com.app", category: "Retry")
+    var lastError: Error?
+
+    for attempt in 0..<maxRetries {
+        do {
+            return try await operation()
+        } catch let error as NetworkError {
+            lastError = error
+
+            switch error {
+            case .decodingFailed, .unauthorized:
+                logger.debug("Non-retryable error on attempt \(attempt + 1): \(error.localizedDescription)")
+                throw error
+
+            case .requestFailed, .noData, .invalidURL:
+                logger.debug("Retryable error on attempt \(attempt + 1): \(error.localizedDescription)")
+
+                if attempt < maxRetries - 1 {
+                    let delay = initialDelay * pow(2.0, Double(attempt))
+                    logger.debug("Waiting \(delay)s before retry...")
+                    try await Task.sleep(for: .seconds(delay))
+                }
+            }
+        } catch {
+            lastError = error
+            logger.debug("Unknown error on attempt \(attempt + 1): \(error.localizedDescription)")
+
+            if attempt < maxRetries - 1 {
+                let delay = initialDelay * pow(2.0, Double(attempt))
+                try await Task.sleep(for: .seconds(delay))
+            }
+        }
+    }
+
+    throw lastError ?? NetworkError.requestFailed(statusCode: -1)
+}
+```
+
+Now use it in your ViewModel:
+
+```swift
+func loadPosts() async {
+    state = .loading
+
+    do {
+        let posts = try await withRetry {
+            try await postService.fetchPosts()
+        }
+        state = .loaded(posts)
+    } catch {
+        state = .error("Failed to load posts. Please check your connection.")
+    }
+}
+```
+
+The retry logic is invisible to the user. If the network hiccups, the app retries silently. Only if all attempts fail does the user see an error. This is the kind of resilience that makes an app feel solid.
+
+Notice the key design decision: decoding errors and unauthorized errors do NOT retry. If the JSON is malformed, retrying will not fix it. If the user's API key is invalid, hammering the server three times is pointless. Only transient failures get retried.
+
+## Alert-Based Error Presentation
+
+Sometimes you want to show errors as alerts instead of replacing the entire view. This is appropriate when the user is already looking at data and an action fails — like a delete or update.
+
+```swift
+@Observable
+final class PostDetailViewModel {
+    var post: Post
+    var alertError: String?
+    var showAlert = false
+
+    private let postService: PostService
+
+    init(post: Post, postService: PostService) {
+        self.post = post
+        self.postService = postService
+    }
+
+    func deletePost() async -> Bool {
+        do {
+            try await postService.deletePost(id: post.id)
+            return true
+        } catch {
+            alertError = "Could not delete this post. Please try again."
+            showAlert = true
+            return false
+        }
+    }
+}
+```
+
+```swift
+struct PostDetailView: View {
+    @State private var viewModel: PostDetailViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    init(post: Post, postService: PostService) {
+        self._viewModel = State(
+            initialValue: PostDetailViewModel(post: post, postService: postService)
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(viewModel.post.title)
+                .font(.title)
+                .fontWeight(.bold)
+
+            Text(viewModel.post.body)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+        }
+        .padding()
+        .navigationTitle("Post")
+        .toolbar {
+            ToolbarItem(placement: .destructiveAction) {
+                Button("Delete", role: .destructive) {
+                    Task {
+                        if await viewModel.deletePost() {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+        }
+        .alert("Error", isPresented: $viewModel.showAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.alertError ?? "An unknown error occurred.")
+        }
+    }
+}
+```
+
+The pattern: use the full-screen error state (ContentUnavailableView) when there is nothing else to show. Use alerts when the user is in the middle of something and you need to inform them without destroying context.
+
+## Skeleton Loading Views
+
+Skeleton views — those gray placeholder shapes that pulse while content loads — feel more polished than a plain spinner. Apple uses them in their own apps. Let me show you how to build them.
+
+```
+Create a reusable ShimmerModifier ViewModifier that adds a
+shimmering loading effect to any view. Use a gradient animation
+that moves from left to right. Also create a SkeletonRow view
+that looks like a placeholder for a list row — a rounded rectangle
+for a title and a shorter one for a subtitle.
+```
+
+```swift
+import SwiftUI
+
+struct ShimmerModifier: ViewModifier {
+    @State private var phase: CGFloat = -1
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                GeometryReader { geometry in
+                    LinearGradient(
+                        colors: [
+                            .clear,
+                            .white.opacity(0.4),
+                            .clear
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: geometry.size.width * 0.6)
+                    .offset(x: geometry.size.width * phase)
+                    .animation(
+                        .linear(duration: 1.5)
+                        .repeatForever(autoreverses: false),
+                        value: phase
+                    )
+                }
+                .clipped()
+            }
+            .onAppear {
+                phase = 2
+            }
+    }
+}
+
+extension View {
+    func shimmer() -> some View {
+        modifier(ShimmerModifier())
+    }
+}
+```
+
+```swift
+struct SkeletonRow: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.gray.opacity(0.2))
+                .frame(height: 16)
+                .frame(maxWidth: .infinity)
+                .shimmer()
+
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.gray.opacity(0.2))
+                .frame(height: 12)
+                .frame(width: 200)
+                .shimmer()
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+struct SkeletonListView: View {
+    let rowCount: Int
+
+    init(rowCount: Int = 8) {
+        self.rowCount = rowCount
+    }
+
+    var body: some View {
+        List {
+            ForEach(0..<rowCount, id: \.self) { _ in
+                SkeletonRow()
+                    .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.plain)
+        .disabled(true)
+    }
+}
+
+#Preview {
+    SkeletonListView()
+}
+```
+
+Now update your loading state in the PostListView to use skeletons instead of a spinner:
+
+```swift
+case .loading:
+    SkeletonListView()
+```
+
+One line change. The view goes from a generic spinner to a polished skeleton loading experience. This is the kind of detail that makes users feel like they are using a premium app.
+
+## When to Prompt for Which Pattern
+
+Here is a quick decision guide:
+
+| Scenario | Pattern |
+|---|---|
+| First load, no data yet | Full-screen loading (ProgressView or skeleton) |
+| Data loaded, pulling to refresh | `.refreshable` — keep existing data visible |
+| Action failed (delete, save, update) | Alert |
+| No data exists (empty list, no results) | `ContentUnavailableView` |
+| Network error on first load | Full-screen error with retry button |
+| Network error during refresh | Alert — do not hide the existing data |
+| Transient failure | Retry silently, show error only after all retries fail |
+
+When you are prompting AI, be explicit about which pattern you want:
+
+```
+When the network call fails during a refresh, show an alert but keep
+the existing data visible. Do not replace the list with an error view.
+```
+
+Without this specificity, AI will default to whatever pattern it has seen most in training data — which is often replacing the entire view with an error, even when the user was already looking at valid data. That is a terrible UX.
+
+## Key Takeaways
+
+1. **Every async view needs four states**: idle, loading, loaded (empty or populated), and error. Use a generic `LoadingState<T>` enum to encode this.
+2. **One state property beats four booleans** — `LoadingState` prevents impossible state combinations and makes your ViewModel cleaner.
+3. **Use ContentUnavailableView** for empty and error states. It is built into iOS 17, matches the system style, and supports action buttons.
+4. **Pull-to-refresh is one modifier** — `.refreshable { await viewModel.refresh() }`. Do not wrap it in an extra `Task`.
+5. **Retry transient errors silently** with exponential backoff. Only show errors to the user after all retries fail. Do not retry decoding or auth errors.
+6. **Choose your error presentation wisely** — full-screen errors when there is no data to show, alerts when you need to preserve existing context.
+7. **Skeleton views beat spinners** — they set expectations about the content layout and feel more polished.
+
+## Homework
+
+**Build a robust data loading screen (30 minutes):**
+
+1. Take the API integration you built in the previous lesson's homework (or use JSONPlaceholder)
+2. Implement `LoadingState<T>` in your project
+3. Refactor your ViewModel to use it instead of separate state properties
+4. Build a view that handles all four states:
+   - **Idle**: ContentUnavailableView with a prompt
+   - **Loading**: Use a SkeletonListView, not a ProgressView
+   - **Loaded (empty)**: ContentUnavailableView with an appropriate message
+   - **Loaded (with data)**: The actual list with `.refreshable`
+   - **Error**: ContentUnavailableView with a retry button
+5. Add the `withRetry` utility and wrap your network call in it
+6. Test by temporarily pointing your API URL to a nonexistent server to see the error state
+7. Test the empty state by making the API return an empty array (or filter results to nothing)
+
+The goal: no matter what happens — slow network, dead server, empty data, successful load — your app always shows something intentional. No blank screens. No infinite spinners. No mystery states.

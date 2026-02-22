@@ -1,0 +1,541 @@
+---
+title: "Debugging with AI"
+description: "Three types of iOS bugs and how to fix them with AI — compiler errors, runtime crashes, and logic errors. Plus when to reach for Instruments."
+module: 5
+moduleTitle: "Testing & Quality"
+lesson: 2
+duration: "14 min read"
+difficulty: "intermediate"
+topics: ["Debugging", "Compiler Errors", "Runtime Issues", "SwiftUI", "Logic Errors", "Instruments", "Troubleshooting", "Error Fixing"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Every developer debugs. The question is how long it takes. I have spent entire afternoons staring at a SwiftUI view that refused to update, only to discover I was using `@State` where I needed `@Binding`. That is four hours of my life I am never getting back.
+
+AI does not eliminate bugs. But it compresses debugging time from hours to minutes for the vast majority of issues. And it does this by being the one thing you cannot be when you are stuck: objective.
+
+## The Three Types of Bugs
+
+Before we talk about how AI helps, let us categorize what we are dealing with. Every bug in iOS development falls into one of three categories, and the debugging approach is different for each.
+
+**Type 1: Compiler Errors** — The code does not build. Xcode screams at you with red. These are the easiest bugs because the error message tells you exactly where the problem is (even if it does not always tell you why).
+
+**Type 2: Runtime Crashes** — The code builds and runs, then crashes. You get a stack trace, a signal (SIGABRT, EXC_BAD_ACCESS), and hopefully a meaningful error message. These are harder because the crash might happen far from the actual bug.
+
+**Type 3: Logic Errors** — The code builds, runs, and does not crash. It just does the wrong thing. The view shows stale data. The calculation is off by one. The animation plays backward. These are the hardest because there is no error message at all — just wrong behavior.
+
+AI handles each type differently. Let us go through them.
+
+## Type 1: Compiler Errors
+
+This is where AI shines the brightest. Compiler errors are structured data — there is an error code, a file, a line number, and a message. AI can parse all of that and give you a fix in seconds.
+
+Here is the workflow. You hit Build in Xcode, you get an error, you copy it and paste it into Claude Code:
+
+```
+Xcode gives me this error in ContentView.swift line 34:
+
+"Cannot convert value of type 'Binding<String?>' to expected
+argument type 'Binding<String>'"
+
+Here is the relevant code:
+
+@State private var searchText: String?
+
+TextField("Search...", text: $searchText)
+```
+
+Claude Code will immediately tell you:
+
+```swift
+// The issue: TextField requires Binding<String>, not Binding<String?>.
+// searchText is optional but TextField needs a non-optional binding.
+
+// Fix: Make searchText non-optional with a default value
+@State private var searchText: String = ""
+
+TextField("Search...", text: $searchText)
+```
+
+Or if you genuinely need the optional:
+
+```swift
+// Alternative: Use a computed binding that handles the optional
+@State private var searchText: String?
+
+TextField("Search...", text: Binding(
+    get: { searchText ?? "" },
+    set: { searchText = $0.isEmpty ? nil : $0 }
+))
+```
+
+This took the AI three seconds. It would have taken you... honestly, probably about the same time if you are experienced with SwiftUI bindings. But what about this one?
+
+```
+Xcode error in InvoiceListView.swift:
+
+"Type 'InvoiceListView' does not conform to protocol 'View'"
+
+But I have a body property. Here is my code:
+
+struct InvoiceListView: View {
+    @Query var invoices: [Invoice]
+    @State private var viewModel = InvoiceListViewModel()
+
+    var body: some View {
+        NavigationStack {
+            List(invoices) { invoice in
+                InvoiceRow(invoice: invoice)
+            }
+            .navigationTitle("Invoices")
+            .toolbar {
+                Button("New") {
+                    viewModel.createInvoice()
+                }
+            }
+            .sheet(isPresented: $viewModel.showingNewInvoice) {
+                NewInvoiceView()
+            }
+        }
+    }
+}
+```
+
+This one is trickier. The "does not conform to View" error in SwiftUI almost never means you are missing the body property. It usually means something inside the body fails to type-check, and the compiler gives up and reports the error at the struct level instead.
+
+Claude Code will diagnose this by checking each component — and it will likely find that `InvoiceRow` expects a binding, or `NewInvoiceView` has a required initializer parameter, or `Invoice` does not conform to `Identifiable`. Whatever the actual root cause is buried inside the body, AI traces it.
+
+**The pattern:** Copy the error message and the surrounding code. Do not just paste the error message alone — the AI needs context to diagnose, not just the symptom.
+
+## Type 2: Runtime Crashes
+
+Runtime crashes are harder because the error is in the behavior, not the syntax. But AI is still remarkably good here.
+
+```
+My app crashes when I try to delete an expense. Here is the
+crash log:
+
+Thread 1: Fatal error: Index out of range
+
+It crashes on this line in ExpenseListView.swift:
+
+ForEach(viewModel.expenses) { expense in
+    ExpenseRow(expense: expense)
+}
+.onDelete { indexSet in
+    for index in indexSet {
+        viewModel.deleteExpense(viewModel.expenses[index])
+    }
+}
+```
+
+The AI will spot it immediately:
+
+```swift
+// The issue: After deleting from the data source, the array
+// has changed but you are still iterating with the original
+// indices. If you delete index 2 first, then try index 3,
+// the array may have shifted.
+
+// Fix: Delete in reverse order, or better yet, map to objects first
+.onDelete { indexSet in
+    let expensesToDelete = indexSet.map { viewModel.expenses[$0] }
+    for expense in expensesToDelete {
+        viewModel.deleteExpense(expense)
+    }
+}
+```
+
+For more complex crashes, give the AI the full stack trace:
+
+```
+My app crashes with EXC_BAD_ACCESS when navigating back from
+DetailView. Here is the stack trace:
+
+#0 0x... in DetailViewModel.deinit
+#1 0x... in NavigationStack.pop
+#2 0x... in SwiftUI.NavigationStackHosting
+
+The DetailViewModel has a timer that fires every second to
+update a countdown.
+```
+
+AI will immediately suspect the issue — a strong reference cycle or a timer that is not invalidated:
+
+```swift
+// The problem: The Timer holds a strong reference to self,
+// preventing deallocation. When the view pops, the ViewModel
+// tries to access deallocated SwiftUI state.
+
+// Before (broken):
+class DetailViewModel {
+    var timer: Timer?
+
+    func startCountdown() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            self.updateCountdown()  // strong reference to self
+        }
+    }
+}
+
+// After (fixed):
+@Observable
+class DetailViewModel {
+    var timer: Timer?
+
+    func startCountdown() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateCountdown()
+        }
+    }
+
+    func stopCountdown() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    deinit {
+        stopCountdown()
+    }
+}
+```
+
+**The pattern for runtime crashes:** Describe three things — what you were doing when it crashed, the exact error message or signal, and the relevant code. The more context, the faster the fix.
+
+## Type 3: Logic Errors
+
+This is where debugging gets genuinely difficult, and it is also where AI as a "rubber duck" is transformative.
+
+Rubber duck debugging is a well-known technique: you explain your problem out loud to an inanimate object (traditionally a rubber duck), and the act of articulating the problem often reveals the solution. AI is the world's best rubber duck because it actually listens and responds.
+
+```
+My expense tracker shows the wrong monthly total. It should
+show $450 for January but it is showing $1,350. I think it
+might be summing all expenses instead of filtering by month.
+
+Here is my ViewModel:
+
+var monthlyTotal: Decimal {
+    expenses
+        .filter { Calendar.current.isDate($0.date, equalTo: selectedDate, toGranularity: .month) }
+        .reduce(0) { $0 + $1.amount }
+}
+```
+
+The AI reads the code and asks the right question: what is `selectedDate`? Is it being set correctly? Is it the first of the month, or a specific day? Is the calendar using the right time zone?
+
+```swift
+// Potential issue: Time zone mismatch. Calendar.current
+// uses the device's time zone, but if dates are stored in
+// UTC (common with server APIs), the month boundary shifts.
+
+// A workout logged at 11pm EST on January 31 is stored as
+// February 1 in UTC. Your filter excludes it from January.
+
+// Fix: Use a consistent calendar with explicit time zone
+private let calendar: Calendar = {
+    var cal = Calendar.current
+    cal.timeZone = TimeZone(identifier: "UTC")!
+    return cal
+}()
+
+var monthlyTotal: Decimal {
+    expenses
+        .filter { calendar.isDate($0.date, equalTo: selectedDate, toGranularity: .month) }
+        .reduce(0) { $0 + $1.amount }
+}
+```
+
+This is the kind of bug that takes hours to find on your own because the code looks correct. The filter is right. The reduce is right. The logic is right. The time zone is wrong, and you would never think to check it because you are not looking at the Calendar — you are looking at the math.
+
+**The pattern for logic errors:** Describe the expected behavior and the actual behavior. Include the relevant code. Be specific about the discrepancy — "shows $1,350 instead of $450" is infinitely more useful than "the total is wrong."
+
+## SwiftUI-Specific Debugging
+
+SwiftUI has its own category of bugs that deserve special attention because they are some of the most frustrating issues in iOS development. Here are the ones AI helps with most.
+
+### Views Not Updating
+
+The number one SwiftUI frustration. You change a value, and the view does not reflect it.
+
+```
+I update the user's name in ProfileViewModel but the
+ProfileView still shows the old name. The view just does
+not refresh.
+
+@Observable
+class ProfileViewModel {
+    var user: User
+
+    func updateName(_ newName: String) {
+        user.name = newName
+        // I confirmed this runs — the name IS changing
+    }
+}
+```
+
+AI will check the observation chain. Common causes:
+
+```swift
+// Cause 1: User is a struct but you are replacing a property
+// on a nested object that is not observed
+// Fix: Make sure User is either an @Observable class or
+// the entire user property is replaced (not a sub-property)
+
+// Cause 2: The view is holding a stale copy
+// Wrong:
+struct ProfileView: View {
+    let viewModel: ProfileViewModel  // 'let' = no observation
+    // ...
+}
+
+// Right:
+struct ProfileView: View {
+    @State var viewModel: ProfileViewModel  // @State enables observation
+    // or
+    @Bindable var viewModel: ProfileViewModel  // if passed from parent
+    // ...
+}
+
+// Cause 3: The property is not accessed in body
+// @Observable only tracks properties that are READ in body.
+// If you read user.name in a separate function called
+// outside the body's evaluation, changes will not trigger
+// a view update.
+```
+
+### State Management Confusion
+
+```
+My sheet dismisses itself every time I type in a TextField
+inside it. Here is the code:
+
+struct ParentView: View {
+    @State private var showingSheet = false
+    @State private var inputText = ""
+
+    var body: some View {
+        Button("Show Sheet") { showingSheet = true }
+            .sheet(isPresented: $showingSheet) {
+                VStack {
+                    TextField("Enter text", text: $inputText)
+                    Button("Save") { showingSheet = false }
+                }
+            }
+    }
+}
+```
+
+AI catches this immediately:
+
+```swift
+// The issue: @State var inputText lives in ParentView.
+// When inputText changes (each keystroke), ParentView's
+// body re-evaluates. This can cause the sheet to dismiss
+// because SwiftUI recreates the sheet content.
+
+// Fix: Move the state into the sheet's own view
+struct ParentView: View {
+    @State private var showingSheet = false
+
+    var body: some View {
+        Button("Show Sheet") { showingSheet = true }
+            .sheet(isPresented: $showingSheet) {
+                SheetContentView()
+            }
+    }
+}
+
+struct SheetContentView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var inputText = ""
+
+    var body: some View {
+        VStack {
+            TextField("Enter text", text: $inputText)
+            Button("Save") { dismiss() }
+        }
+    }
+}
+```
+
+### Animation Glitches
+
+```
+My list items are supposed to animate in from the right
+when they appear, but they all animate at the same time
+instead of staggering. Here is my code:
+
+ForEach(items) { item in
+    ItemRow(item: item)
+        .transition(.move(edge: .trailing))
+}
+.animation(.easeInOut, value: items)
+```
+
+AI knows the fix:
+
+```swift
+// The issue: All items share the same animation trigger
+// (the items array). They all animate simultaneously.
+
+// Fix: Use a staggered delay based on index
+ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+    ItemRow(item: item)
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .animation(
+            .easeInOut(duration: 0.3).delay(Double(index) * 0.05),
+            value: items
+        )
+}
+```
+
+These SwiftUI-specific bugs are where AI debugging provides the most value per minute spent. The fixes are well-documented across Apple's developer forums, WWDC sessions, and community posts — exactly the kind of distributed knowledge that AI consolidates for you.
+
+## When AI Cannot Help: Knowing the Limits
+
+I need to be honest here. There are entire categories of bugs where AI debugging is either useless or actively misleading. Knowing when to stop asking AI and start using other tools is a critical skill.
+
+**Performance issues.** If your app is dropping frames during scrolling, AI can guess at causes — maybe the images are too large, maybe you are doing work on the main thread. But guessing is not profiling. Open Instruments. Use the Time Profiler. Look at the actual flame graph. AI cannot see your flame graph.
+
+**Memory leaks.** AI can spot obvious retain cycles in code (like the timer example above). But subtle leaks — a closure capturing self three levels deep, a notification observer that is never removed, a combine subscription that outlives its view — require the Memory Graph Debugger in Xcode or the Leaks instrument. Ask AI to review your code for potential leaks, absolutely. But do not skip Instruments.
+
+**Concurrency bugs.** Race conditions, data races, deadlocks — these are timing-dependent. The code looks correct at rest. The bug only manifests under specific threading conditions. Swift's strict concurrency checking (enabled in Swift 6) catches many of these at compile time, and AI is great at fixing those compiler warnings. But runtime concurrency bugs need the Thread Sanitizer.
+
+**Layout issues.** "Why is this view 3 pixels to the left?" AI cannot see your screen. You can describe the issue, and AI might guess a padding or alignment fix, but for precise layout debugging, use Xcode's view hierarchy debugger (Debug > View Debugging > Capture View Hierarchy). You can see every frame, every constraint, every layer.
+
+**The rule:** If the bug requires seeing runtime data that exists only when the app is running — performance metrics, memory graphs, thread state, visual layout — AI cannot observe it. Use Xcode's debugging tools. AI is for bugs in the code. Xcode is for bugs in the execution.
+
+## Memory Leak Detection with AI
+
+While I just said AI cannot replace Instruments for memory leaks, there is a valuable middle ground: using AI to audit code for common leak patterns before they become runtime problems.
+
+```
+Review these files for potential memory leaks, retain cycles,
+and reference management issues:
+- ViewModels/ChatViewModel.swift
+- Services/WebSocketService.swift
+- Views/ChatView.swift
+
+Look specifically for:
+- Closures capturing self strongly
+- Delegates not declared as weak
+- Timers or observers not cleaned up
+- Combine subscriptions without cancellation
+```
+
+AI will go through each file and flag patterns like:
+
+```swift
+// FLAGGED: Strong delegate reference — potential retain cycle
+protocol WebSocketDelegate: AnyObject { }
+
+class WebSocketService {
+    var delegate: WebSocketDelegate?  // Should be weak
+    // ...
+}
+
+// FIX:
+class WebSocketService {
+    weak var delegate: WebSocketDelegate?
+    // ...
+}
+
+// FLAGGED: Combine subscription never cancelled
+class ChatViewModel {
+    var cancellable: AnyCancellable?
+
+    func connect() {
+        cancellable = websocket.messagePublisher
+            .sink { [weak self] message in
+                self?.handleMessage(message)
+            }
+    }
+    // Missing: cancel in deinit or when view disappears
+}
+
+// FIX:
+@Observable
+class ChatViewModel {
+    private var cancellables = Set<AnyCancellable>()
+
+    func connect() {
+        websocket.messagePublisher
+            .sink { [weak self] message in
+                self?.handleMessage(message)
+            }
+            .store(in: &cancellables)
+    }
+
+    deinit {
+        cancellables.removeAll()
+    }
+}
+```
+
+This is preventive debugging — catching leaks before they leak. It is not a substitute for profiling, but it catches the low-hanging fruit that accounts for most real-world memory issues.
+
+## Common SwiftUI Gotchas AI Catches
+
+Let me give you a quick reference of the SwiftUI issues I see AI catch most frequently. These are the things that trip up even experienced developers.
+
+**1. Using `@ObservedObject` instead of `@StateObject` (or the modern equivalents)**
+The view does not own the object, so it gets recreated on parent re-renders.
+
+**2. Forgetting `.id()` on views that need to reset**
+A TextField in a sheet keeps its old text because SwiftUI reuses the view identity.
+
+**3. Putting `NavigationStack` inside a `TabView` instead of the other way around**
+Each tab should have its own NavigationStack — do not wrap the whole TabView in one.
+
+**4. Using `.onAppear` for one-time setup**
+It fires every time the view appears, not just the first time. Use `.task` or a flag.
+
+**5. Modifying `@State` during view body evaluation**
+Causes "Modifying state during view update" warnings and unpredictable behavior.
+
+**6. Missing `Equatable` conformance on large data models used in lists**
+SwiftUI cannot diff efficiently, causing the entire list to re-render on any change.
+
+Every one of these is something AI catches in seconds because they are well-documented patterns. If you paste your code and say "why is this view behaving strangely," AI checks for these gotchas first.
+
+## Closing
+
+Debugging with AI is not about replacing your debugging skills. It is about applying the right tool to each type of bug. Compiler errors? Paste and fix. Runtime crashes? Describe and diagnose. Logic errors? Rubber duck with AI. SwiftUI weirdness? AI has seen every variant. Performance and memory? Use Instruments.
+
+The next lesson is the final one in this module — we are going to talk about code review. How to use AI to review code, how to review AI-generated code, and how to build a quality culture where AI makes you more rigorous, not less.
+
+---
+
+## Key Takeaways
+
+1. **Three types of bugs** — compiler errors, runtime crashes, logic errors. AI handles each differently
+2. **Compiler errors are easiest** — paste the error and surrounding code, get a fix in seconds
+3. **Runtime crashes need context** — describe what you were doing, the error message, and the relevant code
+4. **Logic errors need the gap** — describe expected vs. actual behavior, be specific about the discrepancy
+5. **SwiftUI has its own bug category** — views not updating, state management confusion, animation glitches. AI knows the patterns
+6. **AI cannot replace Instruments** — performance profiling, memory graphs, and thread debugging need Xcode's tools
+7. **Preventive debugging works** — ask AI to audit code for memory leaks, retain cycles, and common gotchas before they become runtime problems
+8. **AI is the best rubber duck** — explaining the problem to AI often reveals the solution, and AI responds with actual diagnostic questions
+
+---
+
+## Homework
+
+**Debugging exercise (25 minutes):**
+
+1. Take your app from Module 3 or 4 and intentionally introduce three bugs:
+   - A compiler error (change a type, remove a required parameter)
+   - A runtime crash (force unwrap a nil optional, access an out-of-bounds index)
+   - A logic error (swap a sort order, use the wrong filter predicate)
+2. For each bug, describe it to Claude Code as if you discovered it naturally (do not say "I added this bug")
+3. Evaluate: How quickly did AI diagnose each one? Did it find the root cause or just suggest a workaround?
+
+**SwiftUI audit (15 minutes):**
+
+1. Ask Claude Code to review your main views for common SwiftUI gotchas
+2. Prompt: "Review [YourView].swift for SwiftUI anti-patterns — check state management, view lifecycle, observation, and navigation patterns"
+3. Fix any issues it identifies
+4. Run the app and verify the fixes did not change existing behavior

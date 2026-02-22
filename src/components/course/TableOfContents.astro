@@ -1,0 +1,75 @@
+---
+interface Props {
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const { headings } = Astro.props;
+const filteredHeadings = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+---
+
+{filteredHeadings.length > 0 && (
+  <div class="mb-6">
+    <h4 class="text-xs font-semibold text-slate-500 dark:text-slate-500 uppercase tracking-wider mb-3">
+      On this page
+    </h4>
+    <nav aria-label="Table of contents">
+      <ul class="space-y-1 text-sm" id="toc-list">
+        {filteredHeadings.map((heading) => (
+          <li>
+            <a
+              href={`#${heading.slug}`}
+              class:list={[
+                'block py-1 transition-colors hover:text-purple-600 dark:hover:text-purple-400 toc-link',
+                heading.depth === 3 ? 'pl-4 text-xs text-slate-400 dark:text-slate-500' : 'text-slate-600 dark:text-slate-400',
+              ]}
+              data-heading-slug={heading.slug}
+            >
+              {heading.text}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  </div>
+)}
+
+<script>
+  function initTocScrollSpy() {
+    const tocLinks = document.querySelectorAll('.toc-link');
+    if (tocLinks.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const slug = entry.target.id;
+            tocLinks.forEach((link) => {
+              const el = link as HTMLElement;
+              if (el.dataset.headingSlug === slug) {
+                el.classList.add('text-purple-600', 'dark:text-purple-400', 'font-medium');
+                el.classList.remove('text-slate-600', 'dark:text-slate-400', 'text-slate-400', 'dark:text-slate-500');
+              } else {
+                el.classList.remove('text-purple-600', 'dark:text-purple-400', 'font-medium');
+                if (el.classList.contains('pl-4')) {
+                  el.classList.add('text-slate-400', 'dark:text-slate-500');
+                } else {
+                  el.classList.add('text-slate-600', 'dark:text-slate-400');
+                }
+              }
+            });
+          }
+        }
+      },
+      { rootMargin: '-80px 0px -70% 0px', threshold: 0 }
+    );
+
+    const headingIds = Array.from(tocLinks).map((link) => (link as HTMLElement).dataset.headingSlug);
+    headingIds.forEach((id) => {
+      const el = id && document.getElementById(id);
+      if (el) observer.observe(el);
+    });
+  }
+
+  initTocScrollSpy();
+  document.addEventListener('astro:page-load', initTocScrollSpy);
+</script>

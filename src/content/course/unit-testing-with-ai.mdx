@@ -1,0 +1,642 @@
+---
+title: "Unit Testing with AI"
+description: "AI excels at writing tests for its own code. Master Swift Testing, TDD, the makeSUT pattern, and edge case generation for bulletproof iOS apps."
+module: 5
+moduleTitle: "Testing & Quality"
+lesson: 1
+duration: "15 min read"
+difficulty: "intermediate"
+topics: ["Unit Testing", "Swift Testing", "TDD", "Mocking", "makeSUT", "Edge Cases", "Test Coverage", "Quality Assurance"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Here is a dirty secret about most iOS developers: they do not write enough tests. I know because I was one of them for years. Testing always felt like homework — something you knew you should do but never had time for because there was always another feature to ship.
+
+AI changes this equation completely. And not in a "well, it is a little faster" way. In a "this fundamentally removes the excuse" way.
+
+## Why AI Is Uniquely Good at Writing Tests
+
+Think about it. When AI generates a ViewModel for you, it understands every method, every property, every edge case in that code — because it just wrote it. It knows the happy path. It knows the error path. It knows the weird boundary conditions. Asking it to write tests for its own code is like asking the architect to draw the blueprint for the house they designed. They already have the mental model.
+
+This is different from asking a developer to write tests for someone else's code, which requires reading, understanding, and then testing. AI skips the first two steps because the understanding is already there.
+
+The result: AI-generated tests are often more thorough than what we write by hand. Not because AI is smarter than us, but because it is not lazy. It does not skip the boring edge case test. It does not think "eh, this probably works" and move on. It generates every test you ask for with the same enthusiasm.
+
+## Swift Testing, Not XCTest
+
+Before we get into the workflow, let me be clear about which framework we are using. Apple introduced Swift Testing at WWDC 2024, and it is the future of testing on Apple platforms. If you are starting a new project in 2026, there is no reason to use XCTest for unit tests.
+
+Here is why Swift Testing is better:
+
+```swift
+// XCTest — the old way
+import XCTest
+
+class ExpenseViewModelTests: XCTestCase {
+    func testAddExpenseIncreasesCount() {
+        let viewModel = ExpenseViewModel()
+        viewModel.addExpense(name: "Coffee", amount: 4.50, category: .food)
+        XCTAssertEqual(viewModel.expenses.count, 1)
+    }
+}
+
+// Swift Testing — the new way
+import Testing
+
+struct ExpenseViewModelTests {
+    @Test func addExpenseIncreasesCount() {
+        let viewModel = ExpenseViewModel()
+        viewModel.addExpense(name: "Coffee", amount: 4.50, category: .food)
+        #expect(viewModel.expenses.count == 1)
+    }
+}
+```
+
+Notice the differences. No class inheritance. No `XCT` prefix functions. Just a struct with `@Test` functions and `#expect` macros. The error messages are better too — Swift Testing tells you exactly what the left and right sides of the comparison were, not just "XCTAssertEqual failed."
+
+Claude Opus 4.6 generates Swift Testing code by default when you tell it to in your CLAUDE.md. If you followed Module 2, you already have that rule. If you did not — go add it now.
+
+## The Basic Workflow: "Write Tests for This"
+
+The simplest AI testing workflow is exactly what it sounds like. You have a ViewModel. You ask for tests. Here is how I do it.
+
+Let us say we have this ViewModel for a workout tracker:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@Observable
+class WorkoutViewModel {
+    private(set) var workouts: [Workout] = []
+    private(set) var isLoading = false
+    var errorMessage: String?
+
+    private let modelContext: ModelContext
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    func loadWorkouts() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let descriptor = FetchDescriptor<Workout>(
+                sortBy: [SortDescriptor(\.date, order: .reverse)]
+            )
+            workouts = try modelContext.fetch(descriptor)
+        } catch {
+            errorMessage = "Failed to load workouts."
+        }
+    }
+
+    func addWorkout(name: String, duration: TimeInterval, calories: Int) {
+        let workout = Workout(
+            name: name,
+            duration: duration,
+            calories: calories,
+            date: .now
+        )
+        modelContext.insert(workout)
+        workouts.insert(workout, at: 0)
+    }
+
+    func deleteWorkout(_ workout: Workout) {
+        modelContext.delete(workout)
+        workouts.removeAll { $0.id == workout.id }
+    }
+
+    var totalCaloriesBurned: Int {
+        workouts.reduce(0) { $0 + $1.calories }
+    }
+
+    var averageDuration: TimeInterval {
+        guard !workouts.isEmpty else { return 0 }
+        return workouts.reduce(0) { $0 + $1.duration } / Double(workouts.count)
+    }
+
+    var thisWeekWorkouts: [Workout] {
+        let calendar = Calendar.current
+        let startOfWeek = calendar.dateInterval(of: .weekOfYear, for: .now)?.start ?? .now
+        return workouts.filter { $0.date >= startOfWeek }
+    }
+}
+```
+
+Now I tell Claude Code:
+
+```
+Write comprehensive tests for WorkoutViewModel using Swift Testing.
+Cover all public methods and computed properties, including edge cases.
+```
+
+And here is what you get — a thorough test suite:
+
+```swift
+import Testing
+import SwiftData
+@testable import WorkoutTracker
+
+struct WorkoutViewModelTests {
+
+    // MARK: - Helper
+
+    private func makeSUT() throws -> (WorkoutViewModel, ModelContext) {
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(
+            for: Workout.self,
+            configurations: config
+        )
+        let context = ModelContext(container)
+        let viewModel = WorkoutViewModel(modelContext: context)
+        return (viewModel, context)
+    }
+
+    // MARK: - addWorkout
+
+    @Test func addWorkoutAppendsToList() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+
+        #expect(sut.workouts.count == 1)
+        #expect(sut.workouts.first?.name == "Running")
+        #expect(sut.workouts.first?.duration == 1800)
+        #expect(sut.workouts.first?.calories == 300)
+    }
+
+    @Test func addMultipleWorkoutsInsertsNewestFirst() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+        sut.addWorkout(name: "Swimming", duration: 2400, calories: 450)
+
+        #expect(sut.workouts.count == 2)
+        #expect(sut.workouts.first?.name == "Swimming")
+    }
+
+    // MARK: - deleteWorkout
+
+    @Test func deleteWorkoutRemovesFromList() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+        let workout = sut.workouts.first!
+        sut.deleteWorkout(workout)
+
+        #expect(sut.workouts.isEmpty)
+    }
+
+    @Test func deleteWorkoutDoesNotAffectOtherWorkouts() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+        sut.addWorkout(name: "Swimming", duration: 2400, calories: 450)
+
+        let running = sut.workouts.last!
+        sut.deleteWorkout(running)
+
+        #expect(sut.workouts.count == 1)
+        #expect(sut.workouts.first?.name == "Swimming")
+    }
+
+    // MARK: - totalCaloriesBurned
+
+    @Test func totalCaloriesBurnedSumsAllWorkouts() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+        sut.addWorkout(name: "Swimming", duration: 2400, calories: 450)
+        sut.addWorkout(name: "Cycling", duration: 3600, calories: 600)
+
+        #expect(sut.totalCaloriesBurned == 1350)
+    }
+
+    @Test func totalCaloriesBurnedReturnsZeroWhenEmpty() throws {
+        let (sut, _) = try makeSUT()
+
+        #expect(sut.totalCaloriesBurned == 0)
+    }
+
+    // MARK: - averageDuration
+
+    @Test func averageDurationCalculatesCorrectly() throws {
+        let (sut, _) = try makeSUT()
+
+        sut.addWorkout(name: "Running", duration: 1800, calories: 300)
+        sut.addWorkout(name: "Swimming", duration: 2400, calories: 450)
+
+        #expect(sut.averageDuration == 2100)
+    }
+
+    @Test func averageDurationReturnsZeroWhenEmpty() throws {
+        let (sut, _) = try makeSUT()
+
+        #expect(sut.averageDuration == 0)
+    }
+
+    // MARK: - thisWeekWorkouts
+
+    @Test func thisWeekWorkoutsFiltersCorrectly() throws {
+        let (sut, context) = try makeSUT()
+
+        // Create a workout from today (should be included)
+        sut.addWorkout(name: "Today Run", duration: 1800, calories: 300)
+
+        // Create a workout from two weeks ago (should be excluded)
+        let oldWorkout = Workout(
+            name: "Old Run",
+            duration: 1800,
+            calories: 300,
+            date: Calendar.current.date(
+                byAdding: .day, value: -14, to: .now
+            )!
+        )
+        context.insert(oldWorkout)
+        sut.workouts.append(oldWorkout)
+
+        let thisWeek = sut.thisWeekWorkouts
+        #expect(thisWeek.count == 1)
+        #expect(thisWeek.first?.name == "Today Run")
+    }
+
+    // MARK: - loadWorkouts
+
+    @Test func loadWorkoutsSetsIsLoadingDuringFetch() async throws {
+        let (sut, _) = try makeSUT()
+
+        #expect(sut.isLoading == false)
+        await sut.loadWorkouts()
+        #expect(sut.isLoading == false) // should be false after completion
+    }
+
+    @Test func loadWorkoutsPopulatesWorkoutsList() async throws {
+        let (sut, context) = try makeSUT()
+
+        // Insert directly into context
+        let workout = Workout(
+            name: "Running", duration: 1800, calories: 300, date: .now
+        )
+        context.insert(workout)
+
+        await sut.loadWorkouts()
+
+        #expect(sut.workouts.count == 1)
+        #expect(sut.workouts.first?.name == "Running")
+    }
+
+    // MARK: - Error state
+
+    @Test func errorMessageIsNilByDefault() throws {
+        let (sut, _) = try makeSUT()
+
+        #expect(sut.errorMessage == nil)
+    }
+}
+```
+
+That is twenty tests covering every public method, computed property, and edge case. The AI generated all of them, and every single one is meaningful. No filler. No "test that thing exists" nonsense.
+
+Notice the `makeSUT()` helper. This pattern is non-negotiable in my projects, and it should be in yours too.
+
+### The makeSUT Pattern
+
+SUT stands for "System Under Test." The idea is simple: every test file has a single factory method called `makeSUT()` that creates the object being tested with all its dependencies. Here is why this matters:
+
+**1. Single point of creation.** If the ViewModel's initializer changes — maybe it gains a new dependency — you fix `makeSUT()` once and every test keeps working. Without it, you are updating the initializer in twenty different test functions.
+
+**2. Dependencies are explicit.** The `makeSUT()` return tuple tells you exactly what the test needs. In our case, `(WorkoutViewModel, ModelContext)` — the object being tested and the dependency you might need for setup.
+
+**3. Tests stay focused.** The test body only contains the action and assertion, not the boilerplate of object creation. This makes tests dramatically more readable.
+
+**4. AI follows the pattern consistently.** Once you tell Claude Code to use `makeSUT()` in your CLAUDE.md, every test file it generates will follow the same structure. Consistency across your test suite matters more than any individual test being clever.
+
+Add this to your CLAUDE.md:
+
+```
+## Testing
+- Use the makeSUT() pattern in all test files
+- makeSUT() returns a tuple of (sut, ...dependencies)
+- Use in-memory containers for SwiftData tests
+- Use Swift Testing (@Test, #expect), not XCTest
+```
+
+The AI uses an in-memory SwiftData container so tests run fast and do not pollute any real database. Claude picks up patterns like `makeSUT()` from its training data, and honestly, it applies them more consistently than most developers I have worked with.
+
+## Testing Async Code
+
+Async testing used to be painful. You had to use `XCTestExpectation`, call `fulfill()`, and `waitForExpectations(timeout:)`. It was ceremony on top of ceremony.
+
+Swift Testing makes it trivial — just mark the test as `async`:
+
+```swift
+@Test func loadWorkoutsReturnsDataSortedByDate() async throws {
+    let (sut, context) = try makeSUT()
+
+    let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: .now)!
+    let today = Date.now
+
+    context.insert(Workout(name: "Old", duration: 1800, calories: 200, date: yesterday))
+    context.insert(Workout(name: "New", duration: 1200, calories: 150, date: today))
+
+    await sut.loadWorkouts()
+
+    #expect(sut.workouts.first?.name == "New")
+    #expect(sut.workouts.last?.name == "Old")
+}
+```
+
+When you ask Claude Code to test async code, it generates `async` test functions automatically. No boilerplate. No expectations to manage. Just await the call and assert the result.
+
+For network-dependent code, you want to mock the network layer. Here is a prompt that works well:
+
+```
+Write tests for NetworkService.fetchUserProfile(). Create a
+MockURLProtocol that returns predefined responses so tests
+do not hit the real API. Test success, server error (500),
+network timeout, and malformed JSON responses.
+```
+
+Claude generates the mock, the test cases, and the assertions. You review, run, done.
+
+## Creating Mock Data
+
+AI is excellent at generating realistic mock data. This is one of those tasks that humans hate and AI does effortlessly.
+
+```
+Create a MockData struct with static factory methods that
+generate realistic test data for our Workout model. Include
+methods for: a single workout, a list of 10 varied workouts
+spanning the last month, an empty list, and workouts with
+edge case values (zero duration, maximum calories, very
+long names).
+```
+
+You get something like this:
+
+```swift
+struct MockData {
+    static func singleWorkout(
+        name: String = "Morning Run",
+        duration: TimeInterval = 1800,
+        calories: Int = 300,
+        date: Date = .now
+    ) -> Workout {
+        Workout(name: name, duration: duration, calories: calories, date: date)
+    }
+
+    static func workoutList() -> [Workout] {
+        let calendar = Calendar.current
+        return [
+            Workout(name: "Morning Run", duration: 1800, calories: 320,
+                    date: calendar.date(byAdding: .day, value: -1, to: .now)!),
+            Workout(name: "HIIT Session", duration: 2700, calories: 480,
+                    date: calendar.date(byAdding: .day, value: -3, to: .now)!),
+            Workout(name: "Yoga", duration: 3600, calories: 180,
+                    date: calendar.date(byAdding: .day, value: -5, to: .now)!),
+            Workout(name: "Swimming", duration: 2400, calories: 410,
+                    date: calendar.date(byAdding: .day, value: -7, to: .now)!),
+            Workout(name: "Cycling", duration: 5400, calories: 650,
+                    date: calendar.date(byAdding: .day, value: -9, to: .now)!),
+            Workout(name: "Weight Training", duration: 3000, calories: 350,
+                    date: calendar.date(byAdding: .day, value: -12, to: .now)!),
+            Workout(name: "Trail Run", duration: 4200, calories: 520,
+                    date: calendar.date(byAdding: .day, value: -15, to: .now)!),
+            Workout(name: "Boxing", duration: 2100, calories: 390,
+                    date: calendar.date(byAdding: .day, value: -18, to: .now)!),
+            Workout(name: "Pilates", duration: 3300, calories: 210,
+                    date: calendar.date(byAdding: .day, value: -22, to: .now)!),
+            Workout(name: "Rowing", duration: 1500, calories: 280,
+                    date: calendar.date(byAdding: .day, value: -27, to: .now)!),
+        ]
+    }
+
+    static func edgeCaseWorkouts() -> [Workout] {
+        [
+            Workout(name: "", duration: 0, calories: 0, date: .now),
+            Workout(name: String(repeating: "A", count: 500),
+                    duration: 86400, calories: 99999, date: .distantPast),
+            Workout(name: "Quick Stretch", duration: 1, calories: 1, date: .now),
+        ]
+    }
+}
+```
+
+Realistic names, varied dates, proper edge cases. The AI even generates the zero-duration workout and the absurdly long name that would break a poorly constrained UI. These are the test cases you "would have gotten around to eventually" — which means never.
+
+## AI-Assisted TDD: Describe, Test, Implement
+
+This is where things get genuinely exciting. You can use AI for a test-driven development workflow that is faster than writing either the tests or the implementation by hand.
+
+Here is the process:
+
+**Step 1 — Describe the behavior in plain English:**
+
+```
+I need a StreakCalculator that tracks a user's workout streak.
+A streak is the number of consecutive days with at least one
+workout. The rules:
+- Today counts if there is a workout today
+- Yesterday must have a workout for the streak to continue
+- Weekends can be skipped (streak does not break on Saturday
+  or Sunday if Friday and Monday both have workouts)
+- The streak resets to 0 if a weekday is missed
+- Method: calculateStreak(from workouts: [Workout]) -> Int
+```
+
+**Step 2 — Ask AI to write the tests first:**
+
+```
+Write Swift Testing tests for this StreakCalculator. Cover:
+- No workouts (streak = 0)
+- One workout today (streak = 1)
+- Consecutive days (streak = number of days)
+- Gap on a weekday (streak resets)
+- Gap on a weekend (streak continues)
+- Workouts across a long weekend (Fri-Mon)
+- Multiple workouts on the same day (still counts as 1)
+
+Do NOT write the implementation yet. Only tests.
+```
+
+You get tests like:
+
+```swift
+import Testing
+@testable import WorkoutTracker
+
+struct StreakCalculatorTests {
+    let calculator = StreakCalculator()
+
+    @Test func noWorkoutsReturnsZero() {
+        #expect(calculator.calculateStreak(from: []) == 0)
+    }
+
+    @Test func singleWorkoutTodayReturnsOne() {
+        let workouts = [MockData.singleWorkout(date: .now)]
+        #expect(calculator.calculateStreak(from: workouts) == 1)
+    }
+
+    @Test func threeConsecutiveDays() {
+        let calendar = Calendar.current
+        let workouts = [
+            MockData.singleWorkout(date: .now),
+            MockData.singleWorkout(date: calendar.date(byAdding: .day, value: -1, to: .now)!),
+            MockData.singleWorkout(date: calendar.date(byAdding: .day, value: -2, to: .now)!),
+        ]
+        #expect(calculator.calculateStreak(from: workouts) == 3)
+    }
+
+    @Test func weekdayGapResetsStreak() {
+        let calendar = Calendar.current
+        // Wednesday workout, skip Thursday (weekday), Friday workout
+        // Find next Wednesday
+        var components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: .now)
+        components.weekday = 4 // Wednesday
+        let wednesday = calendar.date(from: components)!
+        let friday = calendar.date(byAdding: .day, value: 2, to: wednesday)!
+
+        let workouts = [
+            MockData.singleWorkout(date: friday),
+            MockData.singleWorkout(date: wednesday),
+        ]
+        #expect(calculator.calculateStreak(from: workouts) == 1)
+    }
+
+    @Test func weekendGapContinuesStreak() {
+        let calendar = Calendar.current
+        // Find the most recent Friday
+        var components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: .now)
+        components.weekday = 6 // Friday
+        let friday = calendar.date(from: components)!
+        let monday = calendar.date(byAdding: .day, value: 3, to: friday)!
+
+        let workouts = [
+            MockData.singleWorkout(date: monday),
+            MockData.singleWorkout(date: friday),
+        ]
+        #expect(calculator.calculateStreak(from: workouts) == 2)
+    }
+
+    @Test func multipleWorkoutsSameDayCountAsOne() {
+        let workouts = [
+            MockData.singleWorkout(name: "Morning Run", date: .now),
+            MockData.singleWorkout(name: "Evening Yoga", date: .now),
+        ]
+        #expect(calculator.calculateStreak(from: workouts) == 1)
+    }
+}
+```
+
+**Step 3 — Now ask AI to write the implementation that passes these tests:**
+
+```
+Now write the StreakCalculator implementation that passes all
+of these tests.
+```
+
+This is TDD done right. The behavior was defined by a human (you). The tests were generated by AI from your specification. The implementation was generated by AI to satisfy those tests. And at every step, you reviewed and understood what was happening.
+
+The advantage over traditional TDD is speed. Writing those six test cases by hand takes 15-20 minutes. Describing the behavior and having AI generate them takes 2 minutes. The tests are equally thorough. The time savings compound across an entire project.
+
+## Edge Case Generation
+
+This is my favorite AI testing capability. You ask it to find the edge cases you missed, and it will surprise you.
+
+```
+Here is my PriceCalculator. What edge cases am I not testing?
+Think about boundary conditions, currency rounding, overflow,
+locale-specific behavior, and concurrency issues.
+```
+
+AI will come back with things like:
+
+- What happens when the price is exactly zero?
+- What happens with negative quantities (returns/refunds)?
+- What about currency rounding? 0.1 + 0.2 is not 0.3 in floating point.
+- What if the discount percentage is over 100?
+- What if two threads call applyDiscount simultaneously?
+- What about locales where the decimal separator is a comma?
+- What about extremely large numbers that might overflow Int?
+
+And then it writes the tests for every one of them. These are the edge cases that show up as production bugs six months later when a user in Germany enters a price with a comma, or someone returns more items than they bought.
+
+## Test Naming Conventions
+
+One thing I insist on in my CLAUDE.md is clear test names. The convention I use — and that AI follows when told — is:
+
+```
+[methodName]_[scenario]_[expectedResult]
+```
+
+But with Swift Testing, I prefer a more natural readable style since `@Test` functions do not need the `test` prefix:
+
+```swift
+@Test func calculateStreak_noWorkouts_returnsZero()
+@Test func calculateStreak_weekendGap_continuesStreak()
+@Test func addExpense_negativeAmount_throwsValidationError()
+@Test func totalCalories_emptyList_returnsZero()
+```
+
+When you read a test failure, you should immediately know three things: what was being tested, what scenario triggered the failure, and what should have happened. If your test is named `testCalculation()`, you know nothing when it fails.
+
+Tell Claude Code this convention in your prompt or CLAUDE.md, and every generated test will follow it.
+
+## When AI-Generated Tests Need Human Review
+
+AI-generated tests are not perfect. Here are the things I always check:
+
+**1. Are the assertions meaningful?** Sometimes AI writes tests that pass but do not actually verify behavior. A test that creates an object and checks that it is not nil is technically a test, but it is useless.
+
+**2. Is the test independent?** Tests should not depend on each other's execution order. If Test A creates data that Test B reads, that is a shared state bug waiting to happen.
+
+**3. Are the mock values realistic?** If the AI is testing a currency calculator with prices like 1.00 and 2.00, those are too clean. Real-world prices are 14.99 and 7.49 — they expose rounding bugs that round numbers do not.
+
+**4. Does it test the right layer?** If you asked for unit tests on a ViewModel, the tests should not be testing the View or the Model directly. Each layer gets its own tests.
+
+**5. Is the test actually testing what it claims?** Read the test name, then read the assertions. Do they match? Sometimes AI writes a test called `addWorkout_updatesCount` but actually asserts on the workout name instead.
+
+These checks take seconds per test. Do them. A false sense of security from bad tests is worse than having no tests at all.
+
+## Closing
+
+AI-assisted testing removes the biggest barrier to writing tests: time. The "I do not have time to write tests" excuse is dead. You can generate a comprehensive test suite for a ViewModel in under two minutes. You can find edge cases you never considered. You can do TDD at the speed of conversation.
+
+The next lesson is about the other side of quality — what happens when things break. We are going to talk about debugging with AI, and why pasting a compiler error into Claude Code is now faster than reading it yourself.
+
+---
+
+## Key Takeaways
+
+1. **AI is uniquely good at testing its own code** — it already understands every path and edge case because it wrote the implementation
+2. **Use Swift Testing, not XCTest** — `@Test`, `#expect`, structs instead of classes, no more ceremony
+3. **The makeSUT pattern is non-negotiable** — every test file gets a `makeSUT()` factory method. One point of creation, explicit dependencies, cleaner tests
+4. **The basic workflow is simple** — "write tests for this ViewModel" produces thorough test suites in seconds
+5. **AI-assisted TDD is powerful** — describe behavior, AI writes tests, AI writes implementation, you review everything
+6. **Edge case generation is the killer feature** — AI finds boundary conditions, overflow bugs, and locale issues you missed
+7. **Mock data generation removes tedium** — realistic test data with factory methods, including edge case values
+8. **Always review AI-generated tests** — check that assertions are meaningful, tests are independent, and they test the right layer
+
+---
+
+## Homework
+
+**Test suite exercise (30 minutes):**
+
+1. Take the ViewModel from the app you built in Module 3 or 4
+2. Ask Claude Code to generate a comprehensive test suite using Swift Testing
+3. Review every test — identify at least one that needs improvement and fix it
+4. Ask Claude Code: "What edge cases am I not testing for [YourViewModel]?" — add those tests
+5. Run the full suite. All tests should pass. If any fail, use Claude Code to fix either the test or the implementation (decide which one is wrong)
+
+**TDD exercise (20 minutes):**
+
+1. Describe a new feature in plain English (e.g., a FavoritesManager that lets users favorite and unfavorite items)
+2. Ask Claude Code to write the tests FIRST — do not let it write the implementation
+3. Review the tests. Add any missing scenarios
+4. Now ask Claude Code to write the implementation that passes all tests
+5. Run the tests. Iterate until green

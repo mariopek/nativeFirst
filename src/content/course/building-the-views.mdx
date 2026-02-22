@@ -1,0 +1,762 @@
+---
+title: "Building the Views"
+description: "Build every view in your Todo app with AI — from the main list to the detail editor — using iterative prompting and the refinement ladder."
+module: 3
+moduleTitle: "Your First App — Todo App with AI"
+lesson: 3
+duration: "18 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "Views", "Navigation", "Todo App", "UI Development", "Component Design", "List Views", "Forms"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+The data layer is done. Models are defined, relationships are wired, CRUD operations work. Now we build the part users actually see.
+
+This lesson is the longest in the module because views are where the most code lives — and where the iterative prompting techniques from Module 2 pay off the most. We are going to build every screen in the app, and I am going to show you the full process: initial prompt, review, refinement, and final result.
+
+Here is what we are building:
+- **ContentView** — TabView with two tabs
+- **TodoListView** — the main list with Today, Upcoming, Unscheduled, and Completed sections
+- **TodoRowView** — a reusable row component for each todo
+- **AddTodoView** — a sheet for creating new todos
+- **TodoDetailView** — a full-screen view for editing an existing todo
+- **CategoryPickerView** — a reusable picker for selecting categories
+
+Six views. Let us build them.
+
+## ContentView — The Tab Structure
+
+We start with the shell. The ContentView sets up the tab-based navigation that holds everything together.
+
+```
+Create ContentView.swift with a TabView containing two tabs:
+1. "Todos" tab with a checklist icon (SF Symbol: checklist)
+   that shows TodoListView
+2. "Settings" tab with a gear icon (SF Symbol: gearshape)
+   that shows a placeholder Text("Settings") for now
+
+Use the new TabView syntax for iOS 17+ with Tab structs.
+Pass the modelContext from the environment to views that need it.
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
+
+    var body: some View {
+        TabView {
+            Tab("Todos", systemImage: "checklist") {
+                TodoListView(modelContext: modelContext)
+            }
+
+            Tab("Settings", systemImage: "gearshape") {
+                NavigationStack {
+                    Text("Settings coming soon")
+                        .foregroundStyle(.secondary)
+                        .navigationTitle("Settings")
+                }
+            }
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+        .modelContainer(for: [TodoItem.self, Category.self], inMemory: true)
+}
+```
+
+Simple and clean. The preview uses an `inMemory: true` container so it does not interfere with your real data. Notice the new `Tab` struct syntax instead of the old `tabItem` modifier — our CLAUDE.md specified iOS 17+, and the AI respects that.
+
+## TodoListView — The Main Screen
+
+This is the centerpiece of the app. It shows todos organized into sections. This is also where we are going to use the refinement ladder from Module 2.
+
+### Iteration 1 — The Skeleton
+
+```
+Create TodoListView.swift. It takes a ModelContext parameter and
+creates a TodoListViewModel from it.
+
+Show a List with four sections:
+1. "Today" — shows todayTodos from the ViewModel
+2. "Upcoming" — shows upcomingTodos
+3. "Unscheduled" — shows unscheduledTodos
+4. "Completed" — shows completedTodos
+
+Each section should only appear if it has items.
+For now, just show the todo title as Text in each row.
+
+Add a toolbar button (plus icon) that will present the
+AddTodoView as a sheet.
+
+Wrap it in a NavigationStack with the title "Todos".
+```
+
+Claude Code generates the basic structure. It works, but it is bare — just text in rows, no styling, no interactions. That is fine. We have the skeleton.
+
+### Iteration 2 — The Row Component
+
+Before we refine the list, let us build a proper row component. This is a key pattern: build reusable components separately, then integrate them.
+
+```
+Create TodoRowView.swift — a reusable row component for displaying
+a single TodoItem.
+
+Layout:
+- Left side: a circular button that toggles completion. Show a
+  circle when incomplete (circle SF Symbol) and a filled checkmark
+  circle when complete (checkmark.circle.fill). Use the priority
+  color for incomplete, and .secondary for completed.
+- Center: VStack with the title (body font, strikethrough if
+  completed) and below it the due date formatted as relative
+  (e.g., "Today", "Tomorrow", "Feb 28") in caption font,
+  secondary color. Only show due date if it exists.
+- Right side: the category icon (if category exists) in caption
+  size, secondary color.
+
+The completion toggle button should call a closure passed in
+as a parameter: onToggleCompleted: () -> Void
+
+Make the completed todo title use .secondary foreground color.
+If the todo is overdue, show the due date in red.
+```
+
+```swift
+import SwiftUI
+
+struct TodoRowView: View {
+    let todo: TodoItem
+    var onToggleCompleted: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button {
+                onToggleCompleted()
+            } label: {
+                Image(systemName: todo.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(todo.isCompleted ? .secondary : todo.priority.color)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title)
+                    .font(.body)
+                    .strikethrough(todo.isCompleted)
+                    .foregroundStyle(todo.isCompleted ? .secondary : .primary)
+
+                if let dueDate = todo.dueDate {
+                    Text(dueDate, format: .dateTime.month(.abbreviated).day())
+                        .font(.caption)
+                        .foregroundStyle(todo.isOverdue ? .red : .secondary)
+                }
+            }
+
+            Spacer()
+
+            if let category = todo.category {
+                Image(systemName: category.systemIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+#Preview {
+    let todo = TodoItem(
+        title: "Buy groceries",
+        dueDate: Date.now,
+        priority: .high
+    )
+    return List {
+        TodoRowView(todo: todo, onToggleCompleted: {})
+    }
+}
+```
+
+Let me highlight a few details:
+
+**`.buttonStyle(.plain)`** on the completion toggle. Without this, tapping anywhere on the row triggers the button. With `.plain`, only the circle itself is tappable. This is critical for rows that are also navigable — you need the tap targets to be distinct.
+
+**`.contentShape(Rectangle())`** at the bottom. This makes the entire row tappable for navigation, even the empty space. Without it, you can only tap on the text or icon to navigate.
+
+**The date format** uses `.dateTime.month(.abbreviated).day()` which gives clean output like "Feb 28". You could also use a `RelativeDateTimeFormatter` for "Today" and "Tomorrow" — that would be a good refinement to ask for in a follow-up prompt.
+
+**The preview** creates an inline `TodoItem` without SwiftData context. This works because we are not saving it to the database — we are just displaying it. This is a common pattern for previewing views that take model objects.
+
+### Iteration 3 — Integrating the Row
+
+Now we refine TodoListView to use our row component and add navigation:
+
+```
+Update TodoListView to:
+1. Use TodoRowView for each todo instead of plain Text
+2. Pass the ViewModel's toggleCompleted method as the closure
+3. Add NavigationLink to each row that navigates to
+   TodoDetailView (we will create it next — for now use a
+   placeholder destination)
+4. Add swipe-to-delete on each row using .onDelete
+5. Add a .refreshable modifier that calls fetchTodos
+6. Show the section headers with a count badge like
+   "Today (3)"
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct TodoListView: View {
+    @State private var viewModel: TodoListViewModel
+    @State private var showingAddTodo = false
+
+    init(modelContext: ModelContext) {
+        _viewModel = State(initialValue: TodoListViewModel(modelContext: modelContext))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !viewModel.todayTodos.isEmpty {
+                    Section("Today (\(viewModel.todayTodos.count))") {
+                        ForEach(viewModel.todayTodos) { todo in
+                            NavigationLink(value: todo) {
+                                TodoRowView(todo: todo) {
+                                    viewModel.toggleCompleted(todo)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            viewModel.deleteTodos(at: offsets, from: viewModel.todayTodos)
+                        }
+                    }
+                }
+
+                if !viewModel.upcomingTodos.isEmpty {
+                    Section("Upcoming (\(viewModel.upcomingTodos.count))") {
+                        ForEach(viewModel.upcomingTodos) { todo in
+                            NavigationLink(value: todo) {
+                                TodoRowView(todo: todo) {
+                                    viewModel.toggleCompleted(todo)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            viewModel.deleteTodos(at: offsets, from: viewModel.upcomingTodos)
+                        }
+                    }
+                }
+
+                if !viewModel.unscheduledTodos.isEmpty {
+                    Section("Unscheduled (\(viewModel.unscheduledTodos.count))") {
+                        ForEach(viewModel.unscheduledTodos) { todo in
+                            NavigationLink(value: todo) {
+                                TodoRowView(todo: todo) {
+                                    viewModel.toggleCompleted(todo)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            viewModel.deleteTodos(at: offsets, from: viewModel.unscheduledTodos)
+                        }
+                    }
+                }
+
+                if !viewModel.completedTodos.isEmpty {
+                    Section("Completed (\(viewModel.completedTodos.count))") {
+                        ForEach(viewModel.completedTodos) { todo in
+                            NavigationLink(value: todo) {
+                                TodoRowView(todo: todo) {
+                                    viewModel.toggleCompleted(todo)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            viewModel.deleteTodos(at: offsets, from: viewModel.completedTodos)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Todos")
+            .navigationDestination(for: TodoItem.self) { todo in
+                TodoDetailView(todo: todo, modelContext: viewModel.modelContext)
+            }
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingAddTodo = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingAddTodo) {
+                AddTodoView(modelContext: viewModel.modelContext) {
+                    viewModel.fetchTodos()
+                }
+            }
+            .refreshable {
+                viewModel.fetchTodos()
+            }
+        }
+    }
+}
+
+#Preview {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try! ModelContainer(
+        for: TodoItem.self, Category.self,
+        configurations: config
+    )
+    return TodoListView(modelContext: container.mainContext)
+}
+```
+
+Now we have a fully functional main screen. Sections only show when they have items. Each row has a completion toggle, navigation, and swipe-to-delete. The toolbar has an add button that presents a sheet.
+
+One thing you will notice: there is repetition in the section code. Each section follows the same pattern — check if the array is empty, show a section header, ForEach with NavigationLink and TodoRowView, onDelete. You could extract this into a helper view or a `@ViewBuilder` function. That would be a great "yes, but..." refinement:
+
+```
+The section code is repetitive. Extract a reusable
+todoSection(title:todos:) helper method that takes a section
+title and array of todos, and returns the Section view.
+```
+
+This is the refinement ladder in action. We do not try to get everything perfect in one prompt. We build the working version, then polish.
+
+## AddTodoView — Creating New Todos
+
+The add form is presented as a sheet. Here is the prompt:
+
+```
+Create AddTodoView.swift as a form for creating a new todo.
+It takes a ModelContext and an onSave closure.
+
+Fields:
+- Title: TextField, required (disable Save if empty)
+- Notes: TextField, optional, multiline
+- Due Date: Optional DatePicker (show a toggle to enable/disable
+  the date picker)
+- Priority: Picker with segmented style showing all Priority cases
+- Category: CategoryPickerView (we will build this next — for now
+  use a simple Picker that shows category names)
+
+Navigation:
+- Wrap in a NavigationStack
+- Show "New Todo" as the title, inline display mode
+- Cancel button on leading side that dismisses
+- Save button on trailing side that creates the todo and dismisses
+- Save button is disabled when title is empty
+
+Use @Environment(\.dismiss) for dismissal.
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct AddTodoView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let modelContext: ModelContext
+    var onSave: () -> Void
+
+    @State private var title = ""
+    @State private var notes = ""
+    @State private var hasDueDate = false
+    @State private var dueDate = Date.now
+    @State private var priority: Priority = .medium
+    @State private var selectedCategory: Category?
+
+    @Query private var categories: [Category]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Title", text: $title)
+
+                    TextField("Notes", text: $notes, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+
+                Section {
+                    Toggle("Due Date", isOn: $hasDueDate.animation())
+
+                    if hasDueDate {
+                        DatePicker(
+                            "Date",
+                            selection: $dueDate,
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                    }
+                }
+
+                Section {
+                    Picker("Priority", selection: $priority) {
+                        ForEach(Priority.allCases, id: \.self) { priority in
+                            Label(priority.displayName, systemImage: priority.iconName)
+                                .tag(priority)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Section {
+                    Picker("Category", selection: $selectedCategory) {
+                        Text("None")
+                            .tag(nil as Category?)
+
+                        ForEach(categories) { category in
+                            Label(category.name, systemImage: category.systemIcon)
+                                .tag(category as Category?)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("New Todo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saveTodo()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func saveTodo() {
+        let todo = TodoItem(
+            title: title.trimmingCharacters(in: .whitespaces),
+            notes: notes,
+            dueDate: hasDueDate ? dueDate : nil,
+            priority: priority,
+            category: selectedCategory
+        )
+        modelContext.insert(todo)
+        try? modelContext.save()
+        onSave()
+        dismiss()
+    }
+}
+
+#Preview {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try! ModelContainer(
+        for: TodoItem.self, Category.self,
+        configurations: config
+    )
+    return AddTodoView(modelContext: container.mainContext, onSave: {})
+        .modelContainer(container)
+}
+```
+
+This is well-structured. A few things worth noting:
+
+**The `hasDueDate` toggle pattern.** Instead of making the date picker always visible, we use a Toggle to show/hide it. The `.animation()` modifier on the binding makes the date picker slide in and out smoothly. This is a common iOS pattern — the Reminders app does the same thing.
+
+**`TextField` with `axis: .vertical`** for the notes field. This gives us a multiline text field that expands as the user types, constrained to 3-6 lines. This is the modern SwiftUI approach — no need for `TextEditor`.
+
+**Title trimming.** The save button is disabled if the title is only whitespace, and the title is trimmed before saving. This is a detail that AI sometimes misses but got right here.
+
+**The `@Query` for categories.** This fetches categories directly in the view. You might wonder why we did not put this in a ViewModel. For a simple data fetch with no logic, `@Query` directly in the view is fine — and it is how Apple intends SwiftData to be used. Not everything needs a ViewModel.
+
+**The category `Picker` tag trick.** Notice `.tag(category as Category?)` — the explicit cast to optional is necessary because `selectedCategory` is `Category?`. Without the cast, the tag type does not match the selection type, and the picker will not work. This is a notorious SwiftUI gotcha, and I am genuinely impressed when AI gets it right.
+
+## TodoDetailView — Editing Existing Todos
+
+The detail view allows editing an existing todo. This is similar to AddTodoView but pre-populated:
+
+```
+Create TodoDetailView.swift for viewing and editing an existing
+TodoItem. It takes a TodoItem and a ModelContext.
+
+Show a Form with the same fields as AddTodoView but pre-populated
+with the todo's current values. Changes should be saved
+automatically when the user navigates back (not requiring a save
+button).
+
+Additional features:
+- Show the created date at the bottom in a footer
+- Add a "Delete Todo" button at the bottom in red
+- Use @Environment(\.dismiss) to navigate back after deletion
+- Show a confirmation dialog before deletion
+
+Use @State properties initialized from the todo, and save
+changes back to the todo object on disappear.
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct TodoDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @Bindable var todo: TodoItem
+    let modelContext: ModelContext
+
+    @State private var showingDeleteConfirmation = false
+
+    @Query private var categories: [Category]
+
+    init(todo: TodoItem, modelContext: ModelContext) {
+        self.todo = todo
+        self.modelContext = modelContext
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Title", text: $todo.title)
+
+                TextField("Notes", text: $todo.notes, axis: .vertical)
+                    .lineLimit(3...6)
+            }
+
+            Section {
+                Toggle("Completed", isOn: $todo.isCompleted)
+            }
+
+            Section {
+                DatePicker(
+                    "Due Date",
+                    selection: Binding(
+                        get: { todo.dueDate ?? Date.now },
+                        set: { todo.dueDate = $0 }
+                    ),
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+
+                if todo.dueDate != nil {
+                    Button("Remove Due Date", role: .destructive) {
+                        todo.dueDate = nil
+                    }
+                }
+            }
+
+            Section {
+                Picker("Priority", selection: $todo.priority) {
+                    ForEach(Priority.allCases, id: \.self) { priority in
+                        Label(priority.displayName, systemImage: priority.iconName)
+                            .tag(priority)
+                    }
+                }
+            }
+
+            Section {
+                Picker("Category", selection: $todo.category) {
+                    Text("None")
+                        .tag(nil as Category?)
+
+                    ForEach(categories) { category in
+                        Label(category.name, systemImage: category.systemIcon)
+                            .tag(category as Category?)
+                    }
+                }
+            }
+
+            Section {
+                Button("Delete Todo", role: .destructive) {
+                    showingDeleteConfirmation = true
+                }
+            }
+
+            Section {
+                Text("Created \(todo.createdAt, format: .dateTime.month(.wide).day().year())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Details")
+        .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog(
+            "Delete this todo?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                modelContext.delete(todo)
+                try? modelContext.save()
+                dismiss()
+            }
+        } message: {
+            Text("This action cannot be undone.")
+        }
+    }
+}
+
+#Preview {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try! ModelContainer(
+        for: TodoItem.self, Category.self,
+        configurations: config
+    )
+    let todo = TodoItem(title: "Sample Todo", notes: "Some notes", priority: .high)
+    container.mainContext.insert(todo)
+    return NavigationStack {
+        TodoDetailView(todo: todo, modelContext: container.mainContext)
+    }
+    .modelContainer(container)
+}
+```
+
+The key difference from AddTodoView: **`@Bindable var todo`**.
+
+This is a powerful SwiftData feature. Because `TodoItem` is an `@Model` (which implies `@Observable`), we can use `@Bindable` to create two-way bindings directly to the model's properties. Changes are written directly to the model object, and SwiftData automatically persists them. No save button needed — changes are saved when the context is next saved or when the app backgrounds.
+
+**The DatePicker binding for optional dates** is interesting. Since `dueDate` is `Date?` but `DatePicker` requires a non-optional `Date` binding, we create a custom `Binding` that provides `Date.now` as the default when `dueDate` is nil. The "Remove Due Date" button sets it back to nil. This is a clean pattern for optional date editing.
+
+**The confirmation dialog.** Always confirm destructive actions. The `.confirmationDialog` modifier with `role: .destructive` on the delete button ensures it appears in red on the action sheet. This follows Apple's Human Interface Guidelines.
+
+## CategoryPickerView — A Reusable Component
+
+For completeness, let us build a dedicated category picker that could be reused across the app:
+
+```
+Create CategoryPickerView.swift — a reusable view for selecting
+a category. It shows a horizontal scroll of category chips.
+Each chip shows the category icon and name. The selected category
+has a highlighted background. Tapping a selected category
+deselects it (sets to nil).
+
+It takes a @Binding to an optional Category.
+Fetch categories using @Query.
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct CategoryPickerView: View {
+    @Binding var selection: Category?
+    @Query private var categories: [Category]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(categories) { category in
+                    CategoryChip(
+                        name: category.name,
+                        icon: category.systemIcon,
+                        isSelected: selection?.persistentModelID == category.persistentModelID
+                    )
+                    .onTapGesture {
+                        if selection?.persistentModelID == category.persistentModelID {
+                            selection = nil
+                        } else {
+                            selection = category
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+}
+
+struct CategoryChip: View {
+    let name: String
+    let icon: String
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+            Text(name)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(isSelected ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
+        .foregroundStyle(isSelected ? Color.accentColor : .primary)
+        .clipShape(Capsule())
+    }
+}
+
+#Preview {
+    @Previewable @State var selected: Category?
+
+    CategoryPickerView(selection: $selected)
+        .modelContainer(for: [Category.self], inMemory: true)
+}
+```
+
+This is a nice, self-contained component. The `CategoryChip` is extracted into its own struct — clean composition. The comparison uses `persistentModelID` instead of simple equality because SwiftData model identity is based on the persistent identifier, not the object reference.
+
+You could swap the `Picker` in AddTodoView and TodoDetailView with this `CategoryPickerView` for a more visual experience. That would be a good refinement exercise.
+
+## The Iterative Process — What Actually Happened
+
+I want to be honest about something. The code I showed you above is not exactly what Claude Code generated on the first try. It is the result of 2-3 iterations per view.
+
+Here is what the actual process looked like:
+
+**TodoListView, first attempt:** The AI created the sections but did not extract the row into a separate component. The code was 120 lines of inline row layout repeated four times. I said "extract the row into a reusable TodoRowView component" and it did.
+
+**AddTodoView, first attempt:** The category picker used a `NavigationLink` to a separate selection screen instead of an inline picker. I said "use an inline Picker instead of a separate navigation screen — keep it simple" and it fixed it.
+
+**TodoDetailView, first attempt:** It used `@State` properties copied from the todo, with an `onDisappear` that wrote the values back. I said "use @Bindable instead — bind directly to the SwiftData model" and it simplified the entire view.
+
+This is normal. This is the workflow. The first attempt is a draft. The refinements take 10 seconds each and produce exactly what you want. Do not expect perfection on the first prompt — expect a good starting point and iterate.
+
+## Closing
+
+We now have a complete set of views:
+
+- **ContentView** with tab navigation
+- **TodoListView** with four sections, swipe-to-delete, and navigation
+- **TodoRowView** with completion toggle, priority colors, and date display
+- **AddTodoView** with a full form, validation, and dismissal
+- **TodoDetailView** with direct model editing and deletion
+- **CategoryPickerView** as a reusable chip-based selector
+
+The app is functional. You can create todos, edit them, complete them, delete them, assign categories, and set due dates. All views follow MVVM, use modern SwiftUI patterns, and respect our CLAUDE.md rules.
+
+But functional is not finished. In the next and final lesson of this module, we add the polish that makes it feel like a real app — animations, haptics, empty states, dark mode, accessibility, and more.
+
+---
+
+## Key Takeaways
+
+1. **Build views bottom-up** — start with reusable components (TodoRowView), then compose them into screens (TodoListView)
+2. **Use the refinement ladder** — skeleton first, then structure, then behavior, then integration
+3. **Extract reusable components** — if AI generates inline code, ask it to extract components
+4. **`@Bindable` for SwiftData editing** — bind directly to model properties instead of copying to @State
+5. **Always check the optional Picker tag** — `.tag(value as Type?)` is required when the selection is optional
+6. **Expect 2-3 iterations per view** — the first prompt is a draft. Refinements are fast and cumulative
+
+---
+
+## Homework
+
+**Build along (45 minutes):**
+
+1. Generate each view using the prompts from this lesson
+2. After each view, build and run in the simulator — fix any compilation errors immediately
+3. Test the full flow: create a todo, view it in the list, tap to edit, change the priority, go back, verify the change persisted
+4. Try creating a todo with no due date — does it appear in the Unscheduled section?
+5. Complete a todo — does it move to the Completed section?
+
+**Refinement exercise:**
+Pick one view and apply three "yes, but..." refinements:
+1. Ask for a visual improvement (icons, colors, spacing)
+2. Ask for a behavioral improvement (validation, edge case)
+3. Ask for an integration improvement (connecting to another view or data source)
+
+Time how long each refinement takes. I bet it is under 30 seconds per prompt.

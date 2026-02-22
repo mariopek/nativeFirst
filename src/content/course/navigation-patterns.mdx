@@ -1,0 +1,564 @@
+---
+title: "Navigation Patterns"
+description: "Master modern SwiftUI navigation — NavigationStack, TabView, sheets, programmatic navigation, and the common bugs AI generates that you need to fix."
+module: 4
+moduleTitle: "Real-World Patterns"
+lesson: 3
+duration: "14 min read"
+difficulty: "intermediate"
+topics: ["Navigation", "TabView", "NavigationStack", "Deep Linking", "SwiftUI Routing", "Sheets", "Programmatic Navigation", "UI Patterns"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Navigation is one of those things that seems simple until you actually try to build a real app. One screen pushes to another — how hard can it be? Then you need tabs. Then one tab needs its own navigation stack. Then you need to present a sheet from a ViewModel. Then someone asks for deep linking. And suddenly your navigation code is a tangled mess of state, bindings, and mystery bugs.
+
+This is also, frankly, one of the areas where AI generates the most bugs. Not because the code is wrong syntactically — it compiles fine. But it often uses deprecated APIs, mixes old and new navigation paradigms, or creates state management issues that only show up when you actually navigate back and forth in the app.
+
+Let us get this right.
+
+## NavigationStack: The Foundation
+
+First, let us be clear: `NavigationView` is deprecated. If you see AI generating `NavigationView`, stop it immediately. The replacement is `NavigationStack`, and it is significantly better.
+
+Here is the basic pattern:
+
+```swift
+struct ContentView: View {
+    var body: some View {
+        NavigationStack {
+            List {
+                NavigationLink("Settings", value: Route.settings)
+                NavigationLink("Profile", value: Route.profile)
+            }
+            .navigationTitle("Home")
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .settings:
+                    SettingsView()
+                case .profile:
+                    ProfileView()
+                }
+            }
+        }
+    }
+}
+```
+
+The key difference from the old `NavigationView` + `NavigationLink(destination:)` approach: destinations are defined by **values**, not by views. You pass a value to `NavigationLink`, and `.navigationDestination(for:)` maps that value to a view. This is called value-based navigation, and it is what makes programmatic navigation and deep linking possible.
+
+## Type-Safe Routes
+
+The `Route` type in the example above is something you define. Here is a prompt that gets Claude Code to build it correctly:
+
+```
+Create a Route enum for our app's navigation. Requirements:
+
+- Conforms to Hashable
+- Cases for: home, settings, profile, postDetail(Post),
+  userProfile(userId: String)
+- Some cases carry associated data (like a Post or user ID)
+- This enum will be used with NavigationStack and
+  navigationDestination(for:)
+
+Put it in Navigation/Route.swift
+```
+
+```swift
+import Foundation
+
+enum Route: Hashable {
+    case home
+    case settings
+    case profile
+    case postDetail(Post)
+    case userProfile(userId: String)
+}
+```
+
+For this to work, your `Post` model needs to conform to `Hashable`. If it already conforms to `Identifiable` with an `id` property (which it should), making it `Hashable` is usually straightforward:
+
+```swift
+struct Post: Identifiable, Hashable {
+    let id: Int
+    let title: String
+    let body: String
+    let userId: Int
+}
+```
+
+Now your navigation is type-safe. You cannot navigate to `postDetail` without providing a `Post`. The compiler enforces it. No more runtime crashes from missing data.
+
+## Programmatic Navigation from ViewModels
+
+Here is where it gets interesting — and where most AI-generated code falls short. You need your ViewModel to be able to trigger navigation. Not just the view. The ViewModel might receive a push notification, complete a save operation, or finish onboarding — and it needs to navigate in response.
+
+The pattern is a navigation path managed by the ViewModel:
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppNavigationViewModel {
+    var path = NavigationPath()
+    var selectedTab: Tab = .home
+
+    enum Tab: Int, CaseIterable {
+        case home
+        case search
+        case profile
+    }
+
+    func navigateTo(_ route: Route) {
+        path.append(route)
+    }
+
+    func navigateToRoot() {
+        path = NavigationPath()
+    }
+
+    func goBack() {
+        if !path.isEmpty {
+            path.removeLast()
+        }
+    }
+}
+```
+
+And the view that uses it:
+
+```swift
+struct MainNavigationView: View {
+    @State private var navigationViewModel = AppNavigationViewModel()
+
+    var body: some View {
+        NavigationStack(path: $navigationViewModel.path) {
+            HomeView()
+                .navigationDestination(for: Route.self) { route in
+                    destinationView(for: route)
+                }
+        }
+        .environment(navigationViewModel)
+    }
+
+    @ViewBuilder
+    private func destinationView(for route: Route) -> some View {
+        switch route {
+        case .home:
+            HomeView()
+        case .settings:
+            SettingsView()
+        case .profile:
+            ProfileView()
+        case .postDetail(let post):
+            PostDetailView(post: post)
+        case .userProfile(let userId):
+            UserProfileView(userId: userId)
+        }
+    }
+}
+```
+
+Now any child view or ViewModel can navigate by accessing the environment:
+
+```swift
+struct PostRowView: View {
+    let post: Post
+    @Environment(AppNavigationViewModel.self) private var navigation
+
+    var body: some View {
+        Button {
+            navigation.navigateTo(.postDetail(post))
+        } label: {
+            VStack(alignment: .leading) {
+                Text(post.title)
+                    .font(.headline)
+                Text(post.body)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+This is powerful. Navigation is no longer tied to the view hierarchy. Your ViewModel can call `navigation.navigateTo(.settings)` from anywhere — after an async operation completes, after an error, after a timer fires. The view reacts automatically.
+
+## TabView with Proper State
+
+Most real apps have tabs. Here is the pattern I recommend, and the prompt to get it right:
+
+```
+Create a TabView-based root view for our app with three tabs:
+Home, Search, and Profile. Requirements:
+
+- Each tab has its own NavigationStack
+- Use SF Symbols for tab icons
+- Badge on the Home tab showing unread count
+- Tab selection is managed by the AppNavigationViewModel
+- Switching tabs does not reset navigation state within each tab
+- Use the new Tab API if targeting iOS 18+, otherwise use
+  the tag-based approach for iOS 17
+
+Put it in Views/RootTabView.swift
+```
+
+```swift
+import SwiftUI
+
+struct RootTabView: View {
+    @State private var navigationViewModel = AppNavigationViewModel()
+    @State private var homePath = NavigationPath()
+    @State private var searchPath = NavigationPath()
+    @State private var profilePath = NavigationPath()
+
+    var body: some View {
+        TabView(selection: $navigationViewModel.selectedTab) {
+            homeTab
+                .tag(AppNavigationViewModel.Tab.home)
+                .tabItem {
+                    Label("Home", systemImage: "house")
+                }
+                .badge(3)
+
+            searchTab
+                .tag(AppNavigationViewModel.Tab.search)
+                .tabItem {
+                    Label("Search", systemImage: "magnifyingglass")
+                }
+
+            profileTab
+                .tag(AppNavigationViewModel.Tab.profile)
+                .tabItem {
+                    Label("Profile", systemImage: "person")
+                }
+        }
+        .environment(navigationViewModel)
+    }
+
+    // MARK: - Tabs
+
+    private var homeTab: some View {
+        NavigationStack(path: $homePath) {
+            HomeView()
+                .navigationDestination(for: Route.self) { route in
+                    destinationView(for: route)
+                }
+        }
+    }
+
+    private var searchTab: some View {
+        NavigationStack(path: $searchPath) {
+            SearchView()
+                .navigationDestination(for: Route.self) { route in
+                    destinationView(for: route)
+                }
+        }
+    }
+
+    private var profileTab: some View {
+        NavigationStack(path: $profilePath) {
+            ProfileView()
+                .navigationDestination(for: Route.self) { route in
+                    destinationView(for: route)
+                }
+        }
+    }
+
+    // MARK: - Destinations
+
+    @ViewBuilder
+    private func destinationView(for route: Route) -> some View {
+        switch route {
+        case .home:
+            HomeView()
+        case .settings:
+            SettingsView()
+        case .profile:
+            ProfileView()
+        case .postDetail(let post):
+            PostDetailView(post: post)
+        case .userProfile(let userId):
+            UserProfileView(userId: userId)
+        }
+    }
+}
+
+#Preview {
+    RootTabView()
+}
+```
+
+The critical detail here: each tab has its own `NavigationPath`. This means when you switch from Home (which might be three screens deep) to Profile and back to Home, your navigation state is preserved. You are exactly where you left off.
+
+AI frequently gets this wrong. The most common mistake is putting one `NavigationStack` around the entire `TabView`, which means all tabs share one navigation stack. That produces bizarre behavior — pushing a screen in one tab affects navigation in all tabs.
+
+## Sheets and Full Screen Covers
+
+Modal presentations — sheets and full-screen covers — use a different mechanism. Here is the clean pattern:
+
+```swift
+@Observable
+final class HomeViewModel {
+    var showNewPostSheet = false
+    var showSettings = false
+    var selectedPost: Post?
+
+    func createPostTapped() {
+        showNewPostSheet = true
+    }
+
+    func settingsTapped() {
+        showSettings = true
+    }
+
+    func postTapped(_ post: Post) {
+        selectedPost = post
+    }
+}
+```
+
+```swift
+struct HomeView: View {
+    @State private var viewModel = HomeViewModel()
+
+    var body: some View {
+        List {
+            ForEach(samplePosts) { post in
+                Button(post.title) {
+                    viewModel.postTapped(post)
+                }
+            }
+        }
+        .navigationTitle("Home")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    viewModel.createPostTapped()
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    viewModel.settingsTapped()
+                } label: {
+                    Image(systemName: "gear")
+                }
+            }
+        }
+        .sheet(isPresented: $viewModel.showNewPostSheet) {
+            NewPostView()
+        }
+        .fullScreenCover(isPresented: $viewModel.showSettings) {
+            SettingsView()
+        }
+        .sheet(item: $viewModel.selectedPost) { post in
+            PostDetailView(post: post)
+        }
+    }
+}
+```
+
+Notice the two different sheet patterns:
+
+1. `sheet(isPresented:)` — for presenting a view that does not depend on specific data (like "New Post")
+2. `sheet(item:)` — for presenting a view based on a selected item. When `selectedPost` is set to a non-nil value, the sheet appears. When it is dismissed, it is automatically set back to nil.
+
+For `sheet(item:)` to work, your model must conform to `Identifiable`. This is another thing AI sometimes misses — it will use `sheet(isPresented:)` and pass the selected item separately, which creates a race condition where the sheet might appear before the item is set. Use `sheet(item:)` to avoid this entirely.
+
+## When NavigationLink vs. Programmatic Navigation
+
+This is a decision point that confuses a lot of developers. Here is my rule of thumb:
+
+**Use `NavigationLink(value:)` when:**
+- The navigation is triggered by tapping a visible element in the UI
+- It is a simple list-to-detail push
+- You do not need to do any work before navigating
+
+```swift
+// Simple, declarative — perfect for lists
+NavigationLink(value: Route.postDetail(post)) {
+    PostRowView(post: post)
+}
+```
+
+**Use programmatic navigation when:**
+- Navigation happens after an async operation
+- Navigation is triggered by a ViewModel (not a direct user tap)
+- You need conditional logic before navigating
+- You are implementing deep linking
+
+```swift
+// ViewModel decides when and where to navigate
+func onSaveComplete() async {
+    await savePost()
+    navigation.navigateTo(.postDetail(savedPost))
+}
+```
+
+The common mistake I see AI make: using programmatic navigation for everything. It works, but it is unnecessary complexity for simple push navigation. Use `NavigationLink(value:)` for the straightforward cases and reserve programmatic navigation for the cases that actually need it.
+
+## Common AI Navigation Bugs
+
+Let me catalog the bugs I see most often in AI-generated navigation code, because you will encounter them:
+
+**1. Using deprecated NavigationView.**
+
+```swift
+// AI sometimes generates this — it is deprecated
+NavigationView {
+    // ...
+}
+.navigationViewStyle(.stack)
+```
+
+Fix: replace with `NavigationStack`.
+
+**2. Nested NavigationStacks.**
+
+```swift
+// This creates double navigation bars
+NavigationStack {
+    NavigationStack { // BUG: nested stack
+        DetailView()
+    }
+}
+```
+
+AI generates this when a child view has its own `NavigationStack`. The rule: only the root of each tab (or the root of the app if no tabs) should have a `NavigationStack`. Child views should never create their own.
+
+**3. Putting NavigationStack inside a sheet.**
+
+```swift
+.sheet(isPresented: $showSheet) {
+    // Sheets often DO need their own NavigationStack
+    NavigationStack {
+        SheetContentView()
+    }
+}
+```
+
+This one is actually correct. Unlike push navigation, sheets are separate presentation contexts and DO need their own `NavigationStack` if you want a navigation bar (with a title and buttons) inside the sheet. The confusion arises because nested stacks in push navigation are a bug, but in sheets they are correct.
+
+**4. Not handling the back navigation state.**
+
+When the user navigates back, any state in the detail view is lost. If you need to preserve it, you need to lift that state up to the parent ViewModel or use a coordinator pattern. AI rarely accounts for this unless you explicitly ask.
+
+**5. Multiple .navigationDestination modifiers for the same type.**
+
+```swift
+// BUG: Two destinations for the same type
+.navigationDestination(for: String.self) { value in
+    DetailView(id: value)
+}
+.navigationDestination(for: String.self) { value in
+    OtherView(name: value)
+}
+```
+
+Only one `.navigationDestination(for:)` per type per `NavigationStack`. If you have multiple destination types, use a proper Route enum.
+
+## Deep Linking Basics
+
+Deep linking means opening your app to a specific screen from an external source — a URL, a push notification, or a widget tap. The foundation is already in place if you are using programmatic navigation with a Route enum.
+
+Here is the basic setup:
+
+```swift
+@main
+struct MyApp: App {
+    @State private var navigationViewModel = AppNavigationViewModel()
+
+    var body: some Scene {
+        WindowGroup {
+            RootTabView()
+                .environment(navigationViewModel)
+                .onOpenURL { url in
+                    handleDeepLink(url)
+                }
+        }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return
+        }
+
+        // myapp://post/123
+        let pathComponents = components.path.split(separator: "/")
+
+        switch pathComponents.first {
+        case "post":
+            if let idString = pathComponents.dropFirst().first,
+               let id = Int(idString) {
+                // You would fetch the post here, then navigate
+                navigationViewModel.navigateTo(.userProfile(userId: String(id)))
+            }
+
+        case "settings":
+            navigationViewModel.selectedTab = .profile
+            navigationViewModel.navigateTo(.settings)
+
+        default:
+            break
+        }
+    }
+}
+```
+
+The `.onOpenURL` modifier receives URLs when your app is opened via a custom URL scheme or universal link. You parse the URL into a Route and push it onto the navigation path. Because your entire navigation is state-driven, deep linking is just "set the right state."
+
+To register your custom URL scheme, add it to your Info.plist or in Xcode's target settings under URL Types. The scheme is something like `myapp://`.
+
+Deep linking is a topic that could fill its own lesson. The point here is that by using NavigationStack with programmatic navigation from the start, you have already done the hard part. Adding deep linking later is a matter of parsing URLs into routes — not refactoring your navigation architecture.
+
+## Prompting for Navigation
+
+When asking Claude Code to build navigation, be very specific about the paradigm you want. Here is a prompt template:
+
+```
+Build navigation for [feature/screen]. Requirements:
+
+- Use NavigationStack (NOT NavigationView)
+- Use value-based NavigationLink with navigationDestination(for:)
+- Define a Route enum for all possible destinations
+- [If tabs] Each tab gets its own NavigationStack
+- [If sheets] Use .sheet(item:) for item-dependent sheets
+- [If programmatic] Manage NavigationPath in the ViewModel
+- [If deep linking] Handle .onOpenURL at the app root
+
+Do not nest NavigationStacks. Do not use the deprecated
+NavigationView or NavigationLink(destination:) APIs.
+```
+
+The "Do not" lines are critical. Without them, Claude Code has a meaningful chance of generating deprecated navigation patterns — it has seen millions of lines of old SwiftUI code in training, and NavigationView was the standard for years.
+
+## Key Takeaways
+
+1. **NavigationStack replaces NavigationView** — if AI generates NavigationView, that is deprecated code. Stop and correct it.
+2. **Use a Route enum** for type-safe, value-based navigation. It is the foundation for programmatic navigation and deep linking.
+3. **Each tab needs its own NavigationStack** — never wrap TabView in a single NavigationStack. Each tab maintains independent navigation state.
+4. **Use NavigationLink(value:) for simple pushes**, programmatic navigation for async or ViewModel-driven navigation. Do not over-engineer the simple cases.
+5. **sheet(item:) is safer than sheet(isPresented:)** when the sheet depends on a selected item. It avoids race conditions between setting the boolean and setting the data.
+6. **Watch for nested NavigationStacks** in AI output — the most common navigation bug. Only root-level views should create stacks (exception: sheets).
+7. **Deep linking is just "set the right state"** when your navigation is already state-driven. Build it right from the start and deep linking comes almost for free.
+
+## Homework
+
+**Build a multi-tab app with proper navigation (40 minutes):**
+
+1. Create a `RootTabView` with three tabs: Feed, Explore, Profile
+2. Define a `Route` enum with at least 5 destinations (including some with associated data)
+3. Each tab gets its own `NavigationStack` with a shared `navigationDestination(for: Route.self)`
+4. Build an `AppNavigationViewModel` with a `NavigationPath` and helper methods
+5. In the Feed tab, show a list of items. Tapping an item pushes a detail view using `NavigationLink(value:)`
+6. In the detail view, add a button that programmatically navigates to another screen (e.g., "View Author Profile")
+7. Add a sheet presentation — tapping a "compose" button in the toolbar presents a sheet with its own NavigationStack
+8. Bonus: Add `.onOpenURL` handling that deep links to a specific item detail
+
+Test thoroughly: navigate deep into one tab, switch tabs, switch back. Is your state preserved? Push to a detail, present a sheet from it, dismiss the sheet. Does the detail view still work? These are the scenarios where navigation bugs hide.

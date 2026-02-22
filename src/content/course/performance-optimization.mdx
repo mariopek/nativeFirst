@@ -1,0 +1,421 @@
+---
+title: "Performance Optimization"
+description: "Use AI to find and fix iOS performance bottlenecks — SwiftUI redraws, memory management, lazy loading — and when to reach for Instruments."
+module: 6
+moduleTitle: "Ship It — From Code to App Store"
+lesson: 1
+duration: "14 min read"
+difficulty: "advanced"
+topics: ["Performance", "Optimization", "Instruments", "SwiftUI", "Memory Management", "Lazy Loading", "Profiling", "App Speed"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your app works. It compiles. It passes tests. The features are all there. So why does it feel sluggish when you scroll through a list of 500 items? Why does the memory graph climb every time you navigate back and forth between screens? Why does the UI hitch when loading images?
+
+Welcome to the performance chapter. This is where we talk about making your app not just correct, but fast. And more importantly, this is where we get honest about what AI can and cannot do for performance work.
+
+## The Uncomfortable Truth About AI and Performance
+
+Let me be direct. Performance optimization is one of the areas where AI assistance is genuinely limited. Not useless — limited. Here is why.
+
+AI is excellent at pattern recognition. It knows that `LazyVStack` is faster than `VStack` for long lists. It knows that `@State` triggers redraws and that you should minimize them. It knows common performance patterns because it has been trained on millions of code examples.
+
+But performance problems are not about patterns. They are about measurement. Your app is slow on a specific device, with a specific dataset, under specific conditions. No AI can tell you that your `ForEach` is the bottleneck unless it can profile your running app — and it cannot. That is what Instruments is for.
+
+So here is how I think about it:
+
+**AI helps with:** suggesting optimizations, reviewing code for common performance anti-patterns, rewriting inefficient algorithms, explaining why something is slow when you describe the symptom.
+
+**AI does not help with:** profiling, measuring actual performance on device, identifying which specific line is the bottleneck in a complex view hierarchy, or telling you whether an optimization actually made a difference.
+
+Use both. Let AI suggest. Let Instruments verify.
+
+## SwiftUI Performance: The Big Three
+
+Most SwiftUI performance issues fall into three categories. Let us go through each one, because these are the things you are most likely to hit before shipping.
+
+### 1. Unnecessary View Redraws
+
+This is the number one performance killer in SwiftUI apps. A view redraws when its state changes — but if your state is structured poorly, views redraw when they should not.
+
+Here is a classic example. You have a list of items, and a timer that updates every second to show "last updated" somewhere on the screen:
+
+```swift
+struct ContentView: View {
+    @State private var items: [Item] = []
+    @State private var lastUpdated: Date = .now
+
+    var body: some View {
+        VStack {
+            Text("Updated: \(lastUpdated.formatted())")
+
+            ForEach(items) { item in
+                ItemRow(item: item) // This redraws EVERY SECOND
+            }
+        }
+        .task {
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                lastUpdated = .now
+            }
+        }
+    }
+}
+```
+
+Every time `lastUpdated` changes, the entire `body` re-evaluates. That means every single `ItemRow` gets checked for redraw. With 500 items, that is a problem.
+
+The fix is to isolate the changing state:
+
+```swift
+struct ContentView: View {
+    @State private var items: [Item] = []
+
+    var body: some View {
+        VStack {
+            LastUpdatedView() // Isolated — only this redraws
+
+            ForEach(items) { item in
+                ItemRow(item: item) // Never redraws from timer
+            }
+        }
+    }
+}
+
+struct LastUpdatedView: View {
+    @State private var lastUpdated: Date = .now
+
+    var body: some View {
+        Text("Updated: \(lastUpdated.formatted())")
+            .task {
+                Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                    lastUpdated = .now
+                }
+            }
+    }
+}
+```
+
+This is exactly the kind of optimization you can ask AI for. Here is a prompt that works:
+
+```
+Review ContentView.swift for unnecessary SwiftUI redraws.
+Identify any @State or @Observable properties that cause
+views to redraw when they should not. Suggest how to isolate
+changing state into child views.
+```
+
+AI is good at this because it is pattern-based. It can scan your view hierarchy and spot state that is too broadly scoped.
+
+### 2. Lazy Loading
+
+If you are showing a list of more than a few dozen items, you need lazy loading. This is basic, but I still see apps that use `VStack` inside `ScrollView` for lists of hundreds of items.
+
+```swift
+// Bad — loads ALL items into memory at once
+ScrollView {
+    VStack {
+        ForEach(items) { item in
+            ItemRow(item: item)
+        }
+    }
+}
+
+// Good — only loads visible items
+ScrollView {
+    LazyVStack {
+        ForEach(items) { item in
+            ItemRow(item: item)
+        }
+    }
+}
+```
+
+The difference is not subtle. With 1,000 items, `VStack` creates all 1,000 views immediately. `LazyVStack` creates only the ones on screen — maybe 15. That is a 98.5% reduction in initial work.
+
+But here is the nuance that AI sometimes misses: `LazyVStack` has different layout behavior. Items do not all have a known size upfront, which means scroll position estimation can be imprecise. For most apps this is fine. For apps where you need pixel-perfect scroll position (like a chat app that scrolls to the bottom), you may need to handle this explicitly.
+
+Ask AI about it:
+
+```
+I have a chat view using LazyVStack with 2000+ messages.
+When I scroll to the bottom programmatically, the position
+is slightly off. How do I handle scroll position accurately
+with lazy loading in SwiftUI?
+```
+
+AI will suggest approaches — `ScrollViewReader`, explicit IDs, `.scrollPosition` modifier in iOS 17+. But you will need to test which one actually works for your specific layout.
+
+### 3. Heavy View Bodies
+
+Every SwiftUI view body should be fast. If your `body` property is doing work — sorting arrays, filtering data, formatting dates — that work happens on every redraw.
+
+```swift
+// Bad — sorting happens on every redraw
+var body: some View {
+    List(items.sorted(by: { $0.date > $1.date })) { item in
+        ItemRow(item: item)
+    }
+}
+
+// Better — sort in the ViewModel, body just displays
+var body: some View {
+    List(viewModel.sortedItems) { item in
+        ItemRow(item: item)
+    }
+}
+```
+
+Even better, use `@Query` with a sort descriptor if you are using SwiftData:
+
+```swift
+@Query(sort: \Item.date, order: .reverse) private var items: [Item]
+```
+
+Now the database does the sorting. No work in the view body at all.
+
+This is a great candidate for an AI review prompt:
+
+```
+Review the body properties of all views in the Views/ directory.
+Flag any computation happening inside body that should be moved
+to the ViewModel or handled by @Query sort descriptors.
+```
+
+## Image Optimization
+
+Images are the second most common performance issue I see in apps built with vibe coding. AI generates `AsyncImage` calls, which is correct, but it often does not think about the details.
+
+Here are the things that matter:
+
+**1. Image sizing.** If you load a 4000x3000 photo from the network and display it in a 100x100 thumbnail, you are wasting memory. Massive amounts of memory.
+
+```swift
+// Bad — full resolution image in a small frame
+AsyncImage(url: photo.url) { image in
+    image.resizable().frame(width: 100, height: 100)
+} placeholder: {
+    ProgressView()
+}
+
+// Better — request a resized version if the API supports it
+AsyncImage(url: photo.thumbnailURL) { image in
+    image.resizable().frame(width: 100, height: 100)
+} placeholder: {
+    ProgressView()
+}
+```
+
+If you are loading local images, use `.resizable()` with `.interpolation(.medium)` for thumbnails:
+
+```swift
+Image(uiImage: fullSizeImage)
+    .resizable()
+    .interpolation(.medium)
+    .frame(width: 100, height: 100)
+```
+
+**2. Image caching.** `AsyncImage` has no built-in disk cache. It caches in memory for the session, but when your app relaunches, it redownloads everything. For a production app, you want proper caching.
+
+Ask AI to help:
+
+```
+AsyncImage does not cache to disk. I need a solution for
+caching downloaded images to the app's caches directory.
+I do not want to use any third-party libraries. Build a
+CachedAsyncImage view that checks the disk cache before
+making a network request.
+```
+
+AI will generate a solid `CachedAsyncImage` component with `URLCache` or a custom file-based cache. Review it carefully — the caching logic is where bugs love to hide.
+
+**3. Image decoding on background threads.** Large images should be decoded off the main thread. SwiftUI handles this automatically in most cases, but if you are doing manual image processing (resizing, filtering), make sure it happens in a `Task`:
+
+```swift
+.task {
+    let processed = await ImageProcessor.resize(image, to: targetSize)
+    self.displayImage = processed
+}
+```
+
+## Memory Management
+
+Memory issues are harder to spot than UI jank because they do not always cause visible problems — until they do. Your app gets killed by the system, or it starts stuttering because the garbage collector (well, ARC) is working overtime.
+
+**The most common memory issue in SwiftUI apps: strong reference cycles in closures.**
+
+```swift
+// Potential retain cycle
+class ItemViewModel: Observable {
+    var onDelete: (() -> Void)?
+
+    func setupActions() {
+        onDelete = {
+            self.deleteFromDatabase() // Strong capture of self
+        }
+    }
+}
+```
+
+AI is genuinely good at catching these. Use this prompt:
+
+```
+Review all ViewModels in the ViewModels/ directory for
+potential retain cycles. Look for closures that capture
+self strongly, especially in callbacks, timers, and
+notification observers. Suggest fixes using [weak self]
+or restructuring.
+```
+
+**The second most common issue: not releasing resources when views disappear.**
+
+If a view starts a timer, opens a file handle, or subscribes to notifications, it needs to clean up. In SwiftUI, use `.onDisappear` or `.task` (which automatically cancels on disappear):
+
+```swift
+// .task automatically cancels when the view disappears
+.task {
+    for await notification in NotificationCenter.default.notifications(named: .dataChanged) {
+        await viewModel.refresh()
+    }
+}
+```
+
+## AI-Assisted Performance Review
+
+Here is my workflow for performance optimization before shipping:
+
+**Step 1 — AI code review.** Ask Claude Code to review your codebase for performance issues:
+
+```
+Review the entire project for performance issues. Focus on:
+1. SwiftUI views with state that causes unnecessary redraws
+2. Lists that are not using lazy loading
+3. Heavy computation in view body properties
+4. Image loading without proper caching or sizing
+5. Potential memory leaks from strong reference cycles
+6. Any use of synchronous I/O on the main thread
+```
+
+This will catch the pattern-based issues. In my experience, it catches about 60-70% of real performance problems.
+
+**Step 2 — Instruments profiling.** For the other 30-40%, you need Instruments. Run your app in the simulator or on a real device with:
+
+- **Time Profiler** — shows where CPU time is spent. If your main thread is busy during scrolling, this tells you exactly which method is responsible.
+- **Allocations** — shows memory usage over time. If memory keeps climbing as you navigate, you have a leak.
+- **SwiftUI Instrument** — shows view body evaluations, which views are redrawing and how often.
+
+I cannot overstate how important real-device profiling is. The simulator runs on your Mac's CPU, which is dramatically faster than an iPhone SE's A15. Something that feels smooth in the simulator can stutter on a real device.
+
+**Step 3 — Describe findings to AI.** Once Instruments tells you what the problem is, describe it to AI for the fix:
+
+```
+Instruments Time Profiler shows that ExpenseListView.body
+is taking 16ms per evaluation when the list has 500+ items.
+The hot path is the date formatting in each row — it calls
+DateFormatter.string(from:) for every item on every redraw.
+How do I optimize this?
+```
+
+This is the sweet spot. Instruments tells you the what. AI tells you the how. In this case, AI would suggest caching the DateFormatter (creating one is expensive), pre-formatting dates in the ViewModel, or using `Text(date, format:)` which SwiftUI optimizes internally.
+
+## How To Describe Performance Issues to AI
+
+This is a skill. The better you describe the problem, the better the AI's suggestion.
+
+**Bad:**
+```
+My app is slow.
+```
+
+**Better:**
+```
+The expense list scrolls slowly when there are 500+ items.
+```
+
+**Best:**
+```
+ExpenseListView scrolls at roughly 45fps (should be 60fps)
+when displaying 500+ items. Each row contains an AsyncImage,
+two Text views, and a category color indicator. The issue is
+worse when scrolling quickly. I suspect the AsyncImage loading
+is the bottleneck but Instruments shows the main thread is
+busy with layout calculations.
+```
+
+Give AI the symptoms, the scale (how many items), the components involved, and any profiling data you have. The more specific you are, the more targeted the optimization.
+
+## The Premature Optimization Trap
+
+I need to talk about this because I see it constantly with vibe-coded apps. Developers spend hours optimizing code that does not need it.
+
+Here is my rule: **if the app feels smooth on the oldest device you support, do not optimize.** Period.
+
+If you are targeting iOS 17+, your oldest device is probably an iPhone XS or SE (3rd gen). Run your app on that device (or simulate its performance characteristics). If it feels good, ship it. Move on to the next feature.
+
+The time you spend optimizing a view from 8ms to 4ms body evaluation is time you could spend adding features, fixing bugs, or polishing the UI. Users will notice a missing feature. They will not notice that your view body is 4ms faster.
+
+That said, there is an equally dangerous opposite: **shipping an app that is genuinely slow.** If your list stutters, if transitions are janky, if the app takes 3 seconds to launch — fix it. Users absolutely notice that, and they leave one-star reviews about it.
+
+The balance is simple: optimize what users can feel. Ignore what they cannot.
+
+## Pre-Ship Performance Checklist
+
+Before you submit to the App Store, run through this:
+
+| Check | How to Verify |
+|-------|---------------|
+| Lists with 100+ items use LazyVStack/LazyHGrid | Code review or grep for `VStack` inside `ScrollView` with `ForEach` |
+| No heavy computation in view body | AI code review |
+| Images are properly sized for display | Check AsyncImage usage, verify thumbnail URLs |
+| No retain cycles in ViewModels | AI review for `[weak self]` patterns |
+| App launch time under 2 seconds | Test on oldest supported device |
+| Scrolling at 60fps for typical data sets | Test on oldest supported device |
+| Memory does not grow unbounded during navigation | Instruments Allocations, navigate back and forth 10 times |
+| No synchronous network calls on main thread | AI code review, check for `URLSession` without async/await |
+
+You can even ask AI to generate this checklist customized for your specific app:
+
+```
+Generate a performance checklist specific to our app.
+Consider our use of SwiftData, AsyncImage, MapKit, and
+the fact that some users will have 1000+ records.
+What should I verify before submitting to the App Store?
+```
+
+## Closing
+
+Performance optimization is where the AI-assisted workflow gets a reality check. AI helps you write fast code from the start — lazy loading, efficient state management, proper caching patterns. But when something is actually slow, you need Instruments to tell you why, and then AI to help you fix it.
+
+The developers who ship the best apps are the ones who measure before optimizing and optimize what users can feel. Do not chase microseconds. Chase smooth scrolling, fast launches, and responsive interactions.
+
+In the next lesson, we are going to cover something that most developers skip and should not — accessibility and localization. These are not nice-to-haves. They are requirements. And AI makes them dramatically easier than they used to be.
+
+---
+
+## Key Takeaways
+
+1. **AI suggests, Instruments verifies** — use AI for pattern-based optimization, Instruments for measurement-based profiling
+2. **The Big Three in SwiftUI performance**: unnecessary redraws, missing lazy loading, heavy view body computation
+3. **Isolate changing state** into child views to prevent entire hierarchies from redrawing
+4. **LazyVStack over VStack** for any list with more than a few dozen items
+5. **Image optimization matters** — proper sizing, disk caching, background decoding
+6. **Strong reference cycles** are the most common memory issue — AI catches these well
+7. **Describe symptoms precisely** when asking AI about performance — include scale, components, and profiling data
+8. **Optimize what users can feel** — do not waste time on invisible improvements, but do not ship a slow app either
+9. **Test on real devices** — the simulator lies about performance
+10. **Run the pre-ship checklist** before every App Store submission
+
+---
+
+## Homework
+
+**Performance audit exercise (45 minutes):**
+
+1. Take the app you have been building throughout this course
+2. Ask Claude Code to perform a full performance review using the prompt from the "AI-Assisted Performance Review" section
+3. Implement at least three of the suggested optimizations
+4. If you have access to a physical device, run the app with Instruments (Time Profiler and Allocations) and note any issues the AI missed
+5. Write down: what did AI catch? What did it miss? What required Instruments to find?
+
+**Stretch goal:** Add 500+ items of test data to your app and verify that scrolling stays smooth. If it does not, use the describe-to-AI technique to get optimization suggestions.
