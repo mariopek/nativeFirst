@@ -1,0 +1,561 @@
+---
+title: "Code Review Workflow"
+description: "How to use AI as a code reviewer, how to review AI-generated code yourself, and how to build a quality culture where AI makes your codebase better — not just bigger."
+module: 5
+moduleTitle: "Testing & Quality"
+lesson: 3
+duration: "12 min read"
+difficulty: "intermediate"
+topics: ["Code Review", "Quality", "Refactoring", "Best Practices"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+There is an irony at the heart of AI-assisted development. AI lets you generate code faster than ever before. But faster code generation without quality checks just means you produce technical debt faster than ever before.
+
+This lesson is about the quality side of the equation. How to review what AI generates. How to use AI to review your own code. And how to build a workflow where AI makes your codebase genuinely better, not just bigger.
+
+## Two Directions of Review
+
+Code review with AI works in two directions, and both matter.
+
+**Direction 1: You reviewing AI-generated code.** This is what most people think of. AI wrote a ViewModel — is it correct? Is the architecture sound? Does it handle edge cases? You need to know what to look for.
+
+**Direction 2: AI reviewing your code.** This is the underused superpower. You wrote a feature by hand, or you have legacy code that has been accumulating cruft. AI can audit it for issues you stopped seeing because you look at it every day.
+
+Let us cover both.
+
+## Reviewing AI-Generated Code: The Checklist
+
+When Claude Code generates code for you, here is what I check, in order. This is not theoretical — this is the actual checklist I follow on every piece of generated code.
+
+### 1. State Management
+
+This is the single most important thing to verify in SwiftUI code. If the state management is wrong, everything else is irrelevant.
+
+```swift
+// Check: Is the ViewModel owned correctly?
+@State private var viewModel = ExpenseViewModel()  // Correct: @State owns it
+
+// NOT this:
+let viewModel = ExpenseViewModel()  // Wrong: recreated on every body call
+@ObservedObject var viewModel: ExpenseViewModel  // Old API, does not own
+
+// Check: Are bindings going the right direction?
+struct ParentView: View {
+    @State private var selectedTab = 0
+
+    var body: some View {
+        ChildView(selectedTab: $selectedTab)  // Binding down
+    }
+}
+
+struct ChildView: View {
+    @Binding var selectedTab: Int  // Receives binding
+}
+
+// Check: Is @Environment used for shared state?
+@Environment(\.modelContext) private var modelContext
+@Environment(AuthService.self) private var authService
+```
+
+Questions to ask yourself:
+- Who owns this state? Is it the right owner?
+- Will this state survive view re-renders?
+- Are bindings flowing in the right direction (parent to child)?
+- Is shared state in the environment, not passed through ten layers of views?
+
+### 2. Optionals and Unwrapping
+
+Force unwraps are the number one source of crashes in Swift. AI sometimes generates them, especially for convenience.
+
+```swift
+// REJECT this:
+let user = users.first!
+let name = jsonDict["name"] as! String
+let image = UIImage(named: "hero")!
+
+// ACCEPT this:
+guard let user = users.first else {
+    errorMessage = "No users found."
+    return
+}
+
+if let name = jsonDict["name"] as? String {
+    self.name = name
+}
+
+let image = UIImage(named: "hero") ?? UIImage(systemName: "photo")!
+// system SF Symbols are guaranteed to exist, so this force unwrap is safe
+```
+
+The rule: every `!` in generated code should have a justification. SF Symbols existing is a valid justification. "The array is never empty" is not — because someday it will be.
+
+### 3. Memory Management
+
+Look for closures that capture `self` strongly:
+
+```swift
+// REVIEW carefully:
+Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+    self.updateCountdown()  // strong capture — potential leak
+}
+
+URLSession.shared.dataTask(with: url) { data, response, error in
+    self.handleResponse(data)  // strong capture in long-lived closure
+}
+
+NotificationCenter.default.addObserver(
+    forName: .someNotification, object: nil, queue: .main
+) { _ in
+    self.refresh()  // never removed = never deallocated
+}
+
+// PREFER:
+Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    self?.updateCountdown()
+}
+```
+
+AI gets this right most of the time, especially if your CLAUDE.md specifies it. But "most of the time" is not good enough for memory management. Check every closure.
+
+### 4. API Usage
+
+Is the AI using current APIs? Or deprecated ones it learned from training data?
+
+```swift
+// REJECT (deprecated):
+NavigationView { }                    // Use NavigationStack
+.onChange(of: value) { newValue in }   // Use two-parameter or zero-parameter version
+List { ForEach(items) { } }           // Use List(items) { } directly when possible
+@ObservableObject class VM { }        // Use @Observable
+
+// ACCEPT (modern):
+NavigationStack { }
+.onChange(of: value) { oldValue, newValue in }
+// or
+.onChange(of: value) { }
+@Observable class VM { }
+```
+
+This is less of an issue with Claude Opus 4.6 than it was a year ago, but it still happens. The model was trained on codebases spanning many years, and sometimes older patterns surface.
+
+### 5. Accessibility
+
+This is the one most developers skip during review. Do not be most developers.
+
+```swift
+// Check: Do interactive elements have labels?
+Button(action: { viewModel.delete(expense) }) {
+    Image(systemName: "trash")
+}
+.accessibilityLabel("Delete expense: \(expense.name)")
+
+// Check: Do images have descriptions?
+Image("heroImage")
+    .accessibilityLabel("Mountain landscape at sunset")
+
+// Or if decorative:
+Image("backgroundPattern")
+    .accessibilityHidden(true)
+
+// Check: Is VoiceOver navigation logical?
+// Elements should be read in the order a user would expect
+VStack {
+    Text(expense.name)
+    Text(expense.amount, format: .currency(code: "USD"))
+}
+.accessibilityElement(children: .combine)
+.accessibilityLabel("\(expense.name), \(expense.amount.formatted(.currency(code: "USD")))")
+```
+
+When you ask Claude Code to generate a view, it often includes basic accessibility. But "basic" is not enough. Check that labels are descriptive, that the reading order makes sense, and that decorative elements are hidden.
+
+## Using AI to Review Your Code
+
+Now let us flip it. You have code — either code you wrote or code that has been in the project for months — and you want AI to review it.
+
+Here is the prompt pattern that works best:
+
+```
+Review [filename] for potential issues. Check specifically for:
+- State management correctness
+- Optional handling and force unwraps
+- Memory management (retain cycles, leaked observers)
+- Deprecated API usage
+- Accessibility gaps
+- Performance concerns (work on main thread, unnecessary redraws)
+
+Be direct. Tell me what is wrong, not what is right.
+```
+
+That last line matters. Without it, AI tends to be polite. "The code looks good overall, with a few minor suggestions..." That is useless. You want it to be blunt. Tell it to be blunt.
+
+Here is what a real AI code review looks like. I once asked Claude Code to review a settings screen I wrote by hand:
+
+```swift
+// What I wrote:
+struct SettingsView: View {
+    @State var viewModel = SettingsViewModel()
+    @AppStorage("notifications") var notificationsEnabled = true
+    @AppStorage("theme") var selectedTheme = "system"
+    @State var showingDeleteConfirmation = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Notifications") {
+                    Toggle("Enable Notifications", isOn: $notificationsEnabled)
+                    if notificationsEnabled {
+                        Picker("Frequency", selection: $viewModel.notificationFrequency) {
+                            Text("Daily").tag("daily")
+                            Text("Weekly").tag("weekly")
+                            Text("Monthly").tag("monthly")
+                        }
+                    }
+                }
+
+                Section("Appearance") {
+                    Picker("Theme", selection: $selectedTheme) {
+                        Text("System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                }
+
+                Section {
+                    Button("Delete All Data", role: .destructive) {
+                        showingDeleteConfirmation = true
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .alert("Delete All Data?", isPresented: $showingDeleteConfirmation) {
+                Button("Delete", role: .destructive) {
+                    viewModel.deleteAllData()
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This action cannot be undone.")
+            }
+        }
+    }
+}
+```
+
+The AI came back with five specific issues:
+
+**Issue 1:** `notificationsEnabled` and `selectedTheme` use `@AppStorage` with string keys but no type safety. If you typo the key in another file, you silently read the wrong value. Recommendation: define keys as static constants on a `StorageKeys` enum.
+
+**Issue 2:** The notification frequency is stored in the ViewModel but the notification toggle is in `@AppStorage`. This splits related state across two owners. Either move everything to the ViewModel or everything to `@AppStorage`.
+
+**Issue 3:** The `Picker` tags are raw strings. If you change "daily" to "Daily" somewhere, the picker breaks silently. Use an enum with `RawRepresentable` conformance.
+
+**Issue 4:** The delete button has no accessibility hint explaining what gets deleted. Add `.accessibilityHint("Deletes all expenses and categories permanently")`.
+
+**Issue 5:** `showingDeleteConfirmation` should be `private`. It is internal by default, which means any parent view could accidentally modify it.
+
+Every single one of these was legitimate. I had looked at this code dozens of times and missed all five. That is the value of a fresh perspective — even an artificial one.
+
+## Using AI to Refactor
+
+Refactoring is where AI as a code reviewer becomes AI as a code improver. And there are specific refactoring tasks where AI excels.
+
+### Extracting Subviews
+
+Large SwiftUI views are hard to read, hard to debug, and hard to reuse. AI is excellent at splitting them.
+
+```
+This ContentView is 200 lines long. Extract logical sections
+into separate subviews. Each subview should be self-contained
+with clear inputs (via init parameters or bindings). Keep the
+parent view as a composition of subviews.
+```
+
+AI will identify natural boundaries — the header, the list section, the action buttons, the empty state — and extract each into its own struct. It handles the binding plumbing automatically, which is the tedious part humans hate.
+
+### Reducing Complexity
+
+```
+This ViewModel has a processOrder() method that is 80 lines
+long with deeply nested if/else blocks. Refactor it into
+smaller, well-named methods. Each method should have a single
+responsibility.
+```
+
+AI breaks `processOrder()` into `validateOrder()`, `calculateTotal()`, `applyDiscounts()`, `processPayment()`, and `sendConfirmation()`. Each method is 10-15 lines. The logic is identical, but now you can read it, test it, and modify individual steps without understanding the entire pipeline.
+
+### Improving Naming
+
+This one is subtle but impactful:
+
+```
+Review the naming in Models/Expense.swift and
+ViewModels/ExpenseViewModel.swift. Suggest better names
+for any properties or methods where the current name does
+not clearly communicate the purpose. Explain each suggestion.
+```
+
+AI might suggest:
+
+```swift
+// Before:
+var data: [Expense]
+func process()
+var flag: Bool
+func handle(_ item: Expense)
+
+// After:
+var expenses: [Expense]           // what data?
+func refreshExpenseList()         // process what?
+var isFilterApplied: Bool         // what flag?
+func deleteExpense(_ expense: Expense)  // handle how?
+```
+
+Naming is one of the hardest problems in software development, and getting an outside perspective — even from an AI — consistently improves clarity.
+
+### A Full Refactoring Example
+
+Let me show you a realistic before-and-after. This is a ViewModel that grew organically and needs cleanup:
+
+```swift
+// BEFORE: Everything in one place, mixed concerns
+@Observable
+class DashboardViewModel {
+    var workouts: [Workout] = []
+    var meals: [Meal] = []
+    var isLoadingWorkouts = false
+    var isLoadingMeals = false
+    var workoutError: String?
+    var mealError: String?
+    var selectedDate = Date.now
+    var showingAddWorkout = false
+    var showingAddMeal = false
+
+    private let modelContext: ModelContext
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    func loadAll() async {
+        await loadWorkouts()
+        await loadMeals()
+    }
+
+    func loadWorkouts() async {
+        isLoadingWorkouts = true
+        // ... 20 lines of fetch logic
+        isLoadingWorkouts = false
+    }
+
+    func loadMeals() async {
+        isLoadingMeals = true
+        // ... 20 lines of fetch logic
+        isLoadingMeals = false
+    }
+
+    var totalCalories: Int { /* ... */ }
+    var totalWorkoutMinutes: Int { /* ... */ }
+    var calorieBalance: Int { /* ... */ }
+    // ... 15 more computed properties and methods
+}
+```
+
+Prompt:
+
+```
+Refactor DashboardViewModel. It is doing too much — it manages
+workouts, meals, loading states, and presentation state all in
+one class. Split it into focused pieces while keeping the
+DashboardView API simple.
+```
+
+```swift
+// AFTER: Separated concerns
+
+@Observable
+class WorkoutManager {
+    private(set) var workouts: [Workout] = []
+    private(set) var isLoading = false
+    var errorMessage: String?
+
+    private let modelContext: ModelContext
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    func load(for date: Date) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let calendar = Calendar.current
+            let start = calendar.startOfDay(for: date)
+            let end = calendar.date(byAdding: .day, value: 1, to: start)!
+
+            let descriptor = FetchDescriptor<Workout>(
+                predicate: #Predicate { $0.date >= start && $0.date < end },
+                sortBy: [SortDescriptor(\.date)]
+            )
+            workouts = try modelContext.fetch(descriptor)
+        } catch {
+            errorMessage = "Failed to load workouts."
+        }
+    }
+
+    var totalMinutes: Int {
+        workouts.reduce(0) { $0 + Int($1.duration / 60) }
+    }
+
+    var totalCaloriesBurned: Int {
+        workouts.reduce(0) { $0 + $1.calories }
+    }
+}
+
+@Observable
+class MealManager {
+    private(set) var meals: [Meal] = []
+    private(set) var isLoading = false
+    var errorMessage: String?
+
+    private let modelContext: ModelContext
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    func load(for date: Date) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let calendar = Calendar.current
+            let start = calendar.startOfDay(for: date)
+            let end = calendar.date(byAdding: .day, value: 1, to: start)!
+
+            let descriptor = FetchDescriptor<Meal>(
+                predicate: #Predicate { $0.date >= start && $0.date < end },
+                sortBy: [SortDescriptor(\.date)]
+            )
+            meals = try modelContext.fetch(descriptor)
+        } catch {
+            errorMessage = "Failed to load meals."
+        }
+    }
+
+    var totalCaloriesConsumed: Int {
+        meals.reduce(0) { $0 + $1.calories }
+    }
+}
+
+@Observable
+class DashboardViewModel {
+    let workoutManager: WorkoutManager
+    let mealManager: MealManager
+    var selectedDate = Date.now
+    var showingAddWorkout = false
+    var showingAddMeal = false
+
+    init(modelContext: ModelContext) {
+        self.workoutManager = WorkoutManager(modelContext: modelContext)
+        self.mealManager = MealManager(modelContext: modelContext)
+    }
+
+    func loadAll() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.workoutManager.load(for: self.selectedDate) }
+            group.addTask { await self.mealManager.load(for: self.selectedDate) }
+        }
+    }
+
+    var calorieBalance: Int {
+        mealManager.totalCaloriesConsumed - workoutManager.totalCaloriesBurned
+    }
+
+    var isLoading: Bool {
+        workoutManager.isLoading || mealManager.isLoading
+    }
+}
+```
+
+The DashboardViewModel went from a god object to a coordinator. Each manager is independently testable. The loading states are per-domain. And the `loadAll()` method now runs both fetches concurrently with `TaskGroup` instead of sequentially. The AI even improved the performance as a side effect of the refactoring.
+
+## When to Trust Refactoring Suggestions (and When to Push Back)
+
+AI refactoring suggestions are not always improvements. Here is my framework for evaluating them.
+
+**Trust the suggestion when:**
+- It reduces the number of responsibilities per class or struct
+- It makes the code more testable (fewer dependencies, clearer inputs/outputs)
+- It replaces deprecated APIs with modern equivalents
+- It improves naming clarity without changing behavior
+- It extracts duplicated code into shared utilities
+
+**Push back when:**
+- It introduces abstraction for abstraction's sake (a protocol with only one conforming type is not useful yet)
+- It splits code into so many small files that navigation becomes harder than understanding
+- It changes working code purely for style reasons (reformatting, reordering properties)
+- It suggests patterns that are standard in web development but unusual in iOS (e.g., repository pattern for simple SwiftData queries)
+- It adds complexity now for flexibility you might need later — YAGNI (You Ain't Gonna Need It) applies to AI suggestions too
+
+The litmus test: will this refactoring make the next developer (including future you) understand this code faster? If yes, accept it. If it just moves complexity around, reject it.
+
+## Building a Quality Culture with AI
+
+Let me close with something that goes beyond individual techniques. The real value of AI in quality is not any single review or test. It is the habit it enables.
+
+Before AI, code review was expensive. You had to find another developer, wait for their availability, explain the context, and iterate on feedback. For solo developers and small teams, this often meant no review at all.
+
+AI makes review essentially free. Zero wait time, zero context-switching for teammates, available at any hour. This means you can review everything — not just the critical paths, but the utility functions, the extensions, the test helpers, the stuff that "does not need review."
+
+Here is the workflow I use now:
+
+1. **Generate code** with Claude Code
+2. **Review it** using the checklist (state, optionals, memory, APIs, accessibility)
+3. **Write tests** with AI assistance (Lesson 5.1)
+4. **Run the tests** and fix any failures
+5. **Ask AI to review the final version** — "review this file for anything I missed"
+6. **Commit**
+
+Steps 2-5 add maybe three minutes to each feature. In exchange, I catch bugs before they ship, I maintain consistent code quality, and I sleep better at night.
+
+That is the quality culture. Not perfection — diligence. AI just makes diligence fast enough to be practical.
+
+---
+
+## Key Takeaways
+
+1. **Review works in two directions** — you reviewing AI code, and AI reviewing your code. Both are valuable
+2. **The review checklist** — state management, optionals, memory management, API usage, accessibility. Check them in that order
+3. **Tell AI to be blunt** — "tell me what is wrong, not what is right" produces better reviews
+4. **AI excels at specific refactoring tasks** — extracting subviews, reducing method complexity, improving naming, splitting god objects
+5. **Not all refactoring suggestions are improvements** — push back on unnecessary abstraction, premature flexibility, and style-only changes
+6. **The litmus test for refactoring** — will the next developer understand this code faster? If not, reject the change
+7. **Quality culture = review everything** — AI makes review fast enough to be practical for every piece of code, not just the critical paths
+
+---
+
+## Homework
+
+**Code review exercise (20 minutes):**
+
+1. Take the most complex view or ViewModel in your app
+2. Ask Claude Code: "Review this file for potential issues. Check state management, optionals, memory management, deprecated APIs, and accessibility. Be direct — tell me what is wrong, not what is right."
+3. Evaluate each suggestion — accept or reject with a reason
+4. Apply the accepted fixes and verify the app still works
+
+**Refactoring exercise (20 minutes):**
+
+1. Find your largest SwiftUI view (the one with the most lines of code)
+2. Ask Claude Code: "Refactor this view by extracting logical sections into separate subviews. Each subview should have clear inputs. Keep the parent view as a clean composition."
+3. Review the refactored code. Does it reduce complexity or just move it?
+4. If acceptable, apply the refactoring. Run your tests to confirm nothing broke.
+
+**Quality workflow exercise (10 minutes):**
+
+1. Build one small feature using the full quality workflow: generate, review (checklist), test, AI review, commit
+2. Time yourself. Compare with your workflow before this module
+3. Write down which step caught the most issues — that is the step you were skipping before

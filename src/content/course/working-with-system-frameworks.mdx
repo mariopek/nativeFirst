@@ -1,0 +1,837 @@
+---
+title: "Working with System Frameworks"
+description: "Integrate Apple system frameworks with AI — PhotosPicker, MapKit, local notifications, ShareLink, and the permission flows that make them work correctly."
+module: 4
+moduleTitle: "Real-World Patterns"
+lesson: 4
+duration: "15 min read"
+difficulty: "intermediate"
+topics: ["PhotosPicker", "MapKit", "Notifications", "System Frameworks"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Apple gives you an enormous number of system frameworks. Photos, Maps, Notifications, Camera, HealthKit, CoreLocation, Contacts, Calendar — the list is long. These frameworks are what make native apps feel native. They are also where AI stumbles the most, because many of them require specific permissions, specific Info.plist keys, specific lifecycle handling, and specific UI patterns that have changed significantly across iOS versions.
+
+The good news: once you learn how to prompt for framework integration correctly, the pattern is the same for almost every framework. Tell AI which framework, which specific API, what iOS version you target, and how to handle the permission flow. Let us work through the most common ones.
+
+## PhotosPicker: Image Selection Done Right
+
+PhotosPicker is the modern way to let users select photos in SwiftUI. It replaced the old UIImagePickerController (which required UIViewControllerRepresentable wrapping) and the PHPickerViewController pattern. If AI generates either of those, correct it.
+
+Here is the prompt:
+
+```
+Add photo selection to our app using SwiftUI's PhotosPicker.
+Requirements:
+
+- Use PhotosPicker from PhotosUI framework
+- Allow selecting a single photo
+- Convert the selected photo to a UIImage for display
+- Show the selected image in the view
+- Handle the loading state while the photo is being processed
+- Handle errors if the photo cannot be loaded
+- Use @Observable ViewModel pattern
+- Target iOS 17+
+
+Do NOT use UIImagePickerController or PHPickerViewController.
+Use the native SwiftUI PhotosPicker.
+```
+
+```swift
+import SwiftUI
+import PhotosUI
+
+@Observable
+final class PhotoPickerViewModel {
+    var selectedItem: PhotosPickerItem?
+    var selectedImage: UIImage?
+    var isLoading = false
+    var errorMessage: String?
+
+    func loadImage() async {
+        guard let item = selectedItem else { return }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            if let data = try await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                selectedImage = image
+            } else {
+                errorMessage = "Could not load the selected photo."
+            }
+        } catch {
+            errorMessage = "Failed to load photo: \(error.localizedDescription)"
+        }
+
+        isLoading = false
+    }
+}
+```
+
+```swift
+import SwiftUI
+import PhotosUI
+
+struct PhotoPickerView: View {
+    @State private var viewModel = PhotoPickerViewModel()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                if viewModel.isLoading {
+                    ProgressView("Loading photo...")
+                        .frame(width: 300, height: 300)
+                } else if let image = viewModel.selectedImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 300, maxHeight: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .shadow(radius: 4)
+                } else {
+                    placeholderView
+                }
+
+                PhotosPicker(
+                    selection: $viewModel.selectedItem,
+                    matching: .images,
+                    photoLibrary: .shared()
+                ) {
+                    Label("Select Photo", systemImage: "photo.on.rectangle")
+                        .font(.headline)
+                }
+                .buttonStyle(.borderedProminent)
+                .onChange(of: viewModel.selectedItem) {
+                    Task { await viewModel.loadImage() }
+                }
+
+                if let error = viewModel.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Photo Picker")
+        }
+    }
+
+    private var placeholderView: some View {
+        RoundedRectangle(cornerRadius: 16)
+            .fill(.quaternary)
+            .frame(width: 300, height: 300)
+            .overlay {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text("No photo selected")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+    }
+}
+
+#Preview {
+    PhotoPickerView()
+}
+```
+
+A few things to notice. First, `PhotosPicker` does not require any permissions. Apple designed it so the user selects photos in a system-provided UI, and only the selected photos are shared with your app. No privacy prompt, no Info.plist key. This is a huge advantage over the old approaches.
+
+Second, the `loadTransferable(type:)` method is async. Photo loading can take time, especially for large images or Live Photos. That is why we have a loading state. AI sometimes forgets this and tries to load the photo synchronously, which either blocks the UI or crashes.
+
+Third, the `.onChange(of: selectedItem)` modifier triggers the load when the user makes a selection. This is the SwiftUI-native way to respond to the picker's output.
+
+## Multiple Photo Selection
+
+For selecting multiple photos, the change is minimal:
+
+```swift
+@Observable
+final class MultiPhotoViewModel {
+    var selectedItems: [PhotosPickerItem] = []
+    var selectedImages: [UIImage] = []
+    var isLoading = false
+
+    func loadImages() async {
+        isLoading = true
+        selectedImages = []
+
+        for item in selectedItems {
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                selectedImages.append(image)
+            }
+        }
+
+        isLoading = false
+    }
+}
+```
+
+```swift
+PhotosPicker(
+    selection: $viewModel.selectedItems,
+    maxSelectionCount: 5,
+    matching: .images
+) {
+    Label("Select Photos", systemImage: "photo.on.rectangle.angled")
+}
+.onChange(of: viewModel.selectedItems) {
+    Task { await viewModel.loadImages() }
+}
+```
+
+The only differences: the binding is to an array, and you specify `maxSelectionCount`. Everything else is the same pattern.
+
+## MapKit: SwiftUI Maps
+
+MapKit in SwiftUI has improved dramatically. The modern `Map` view is powerful, but AI often generates the old MKMapView wrapper or the deprecated Map initializer. Be specific:
+
+```
+Add a map view using SwiftUI's native Map view (iOS 17+ API).
+Requirements:
+
+- Show a map centered on a specific coordinate
+- Display annotation markers for a list of locations
+- Tapping a marker shows the location name
+- Allow the user to change map style (standard, satellite, hybrid)
+- Use MapCameraPosition for camera control
+- Do NOT use MKMapView or UIViewRepresentable
+- Target iOS 17+
+
+Put it in Views/LocationMapView.swift
+```
+
+```swift
+import SwiftUI
+import MapKit
+
+struct Location: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let coordinate: CLLocationCoordinate2D
+
+    static func == (lhs: Location, rhs: Location) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+@Observable
+final class MapViewModel {
+    var cameraPosition: MapCameraPosition = .region(
+        MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+            span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+        )
+    )
+
+    var selectedMapStyle: MapStyleOption = .standard
+    var selectedLocation: Location?
+
+    enum MapStyleOption: String, CaseIterable {
+        case standard = "Standard"
+        case satellite = "Satellite"
+        case hybrid = "Hybrid"
+
+        var mapStyle: MapStyle {
+            switch self {
+            case .standard: return .standard
+            case .satellite: return .imagery
+            case .hybrid: return .hybrid
+            }
+        }
+    }
+
+    let locations: [Location] = [
+        Location(name: "Ferry Building", coordinate: CLLocationCoordinate2D(latitude: 37.7956, longitude: -122.3933)),
+        Location(name: "Golden Gate Park", coordinate: CLLocationCoordinate2D(latitude: 37.7694, longitude: -122.4862)),
+        Location(name: "Fisherman's Wharf", coordinate: CLLocationCoordinate2D(latitude: 37.8080, longitude: -122.4177)),
+        Location(name: "Twin Peaks", coordinate: CLLocationCoordinate2D(latitude: 37.7544, longitude: -122.4477)),
+    ]
+}
+```
+
+```swift
+import SwiftUI
+import MapKit
+
+struct LocationMapView: View {
+    @State private var viewModel = MapViewModel()
+
+    var body: some View {
+        NavigationStack {
+            ZStack(alignment: .topTrailing) {
+                Map(position: $viewModel.cameraPosition, selection: $viewModel.selectedLocation) {
+                    ForEach(viewModel.locations) { location in
+                        Marker(location.name, coordinate: location.coordinate)
+                            .tint(.red)
+                            .tag(location)
+                    }
+                }
+                .mapStyle(viewModel.selectedMapStyle.mapStyle)
+                .mapControls {
+                    MapCompass()
+                    MapScaleView()
+                    MapUserLocationButton()
+                }
+
+                mapStylePicker
+                    .padding()
+            }
+            .navigationTitle("Locations")
+            .navigationBarTitleDisplayMode(.inline)
+            .sheet(item: $viewModel.selectedLocation) { location in
+                locationDetailSheet(location)
+                    .presentationDetents([.fraction(0.25)])
+            }
+        }
+    }
+
+    private var mapStylePicker: some View {
+        Picker("Map Style", selection: $viewModel.selectedMapStyle) {
+            ForEach(MapViewModel.MapStyleOption.allCases, id: \.self) { style in
+                Text(style.rawValue).tag(style)
+            }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 240)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func locationDetailSheet(_ location: Location) -> some View {
+        VStack(spacing: 12) {
+            Text(location.name)
+                .font(.title2)
+                .fontWeight(.bold)
+
+            Text("Lat: \(location.coordinate.latitude, specifier: "%.4f"), Lon: \(location.coordinate.longitude, specifier: "%.4f")")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button("Get Directions") {
+                let mapItem = MKMapItem(placemark: MKPlacemark(coordinate: location.coordinate))
+                mapItem.name = location.name
+                mapItem.openInMaps(launchOptions: [
+                    MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving
+                ])
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding()
+    }
+}
+
+#Preview {
+    LocationMapView()
+}
+```
+
+Key things to note about the modern Map API. `MapCameraPosition` controls what the map shows — you bind it, and the map follows. The `Marker` type replaces the old annotation approach. The `selection` binding on `Map` lets you detect when a user taps a marker. And `.mapStyle()` is how you change the visual appearance.
+
+If you want the user's location on the map, you need two things: the `MapUserLocationButton()` map control (which we included), and the proper Info.plist key. This brings us to permissions.
+
+## The Permission Flow: Getting It Right
+
+Whenever you integrate a framework that accesses user data — location, camera, photos library (for full access, not PhotosPicker), contacts, health data, notifications — you need to handle permissions. This is a three-step flow:
+
+1. Add the Info.plist key with a usage description
+2. Request permission in code
+3. Handle all three outcomes: granted, denied, not determined
+
+Here is a prompt that gets AI to handle this correctly:
+
+```
+Add location permission handling to our map feature. Requirements:
+
+- Create a LocationManager class using CLLocationManager
+- Use the @Observable macro
+- Request "when in use" authorization
+- Handle all authorization states: notDetermined, restricted,
+  denied, authorizedWhenInUse, authorizedAlways
+- If denied, show a message directing the user to Settings
+- Provide the user's current location when authorized
+- Include the required Info.plist key:
+  NSLocationWhenInUseUsageDescription
+
+Put it in Services/LocationManager.swift
+```
+
+```swift
+import CoreLocation
+import os
+
+@Observable
+final class LocationManager: NSObject, CLLocationManagerDelegate {
+    var authorizationStatus: CLAuthorizationStatus = .notDetermined
+    var userLocation: CLLocationCoordinate2D?
+    var isAuthorized: Bool {
+        authorizationStatus == .authorizedWhenInUse || authorizationStatus == .authorizedAlways
+    }
+    var isDenied: Bool {
+        authorizationStatus == .denied || authorizationStatus == .restricted
+    }
+
+    private let manager = CLLocationManager()
+    private let logger = Logger(subsystem: "com.app", category: "LocationManager")
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        authorizationStatus = manager.authorizationStatus
+    }
+
+    func requestPermission() {
+        logger.debug("Requesting location permission")
+        manager.requestWhenInUseAuthorization()
+    }
+
+    func startUpdatingLocation() {
+        guard isAuthorized else {
+            logger.warning("Cannot start location updates — not authorized")
+            return
+        }
+        manager.startUpdatingLocation()
+    }
+
+    func stopUpdatingLocation() {
+        manager.stopUpdatingLocation()
+    }
+
+    // MARK: - CLLocationManagerDelegate
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        authorizationStatus = manager.authorizationStatus
+        logger.debug("Authorization status changed to: \(String(describing: manager.authorizationStatus))")
+
+        if isAuthorized {
+            manager.startUpdatingLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        userLocation = location.coordinate
+        logger.debug("Updated location: \(location.coordinate.latitude), \(location.coordinate.longitude)")
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        logger.error("Location error: \(error.localizedDescription)")
+    }
+}
+```
+
+And the view that handles the permission state:
+
+```swift
+struct LocationPermissionView: View {
+    @State private var locationManager = LocationManager()
+
+    var body: some View {
+        Group {
+            if locationManager.isAuthorized {
+                LocationMapView()
+            } else if locationManager.isDenied {
+                deniedView
+            } else {
+                requestPermissionView
+            }
+        }
+        .onAppear {
+            if locationManager.authorizationStatus == .notDetermined {
+                // Do not auto-request — wait for user action
+            }
+        }
+    }
+
+    private var requestPermissionView: some View {
+        ContentUnavailableView {
+            Label("Location Access", systemImage: "location.circle")
+        } description: {
+            Text("We need your location to show nearby places on the map.")
+        } actions: {
+            Button("Allow Location Access") {
+                locationManager.requestPermission()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var deniedView: some View {
+        ContentUnavailableView {
+            Label("Location Access Denied", systemImage: "location.slash")
+        } description: {
+            Text("Location access was denied. You can enable it in Settings to see nearby places.")
+        } actions: {
+            Button("Open Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+}
+```
+
+The Info.plist entry you need:
+
+```xml
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>We use your location to show nearby places on the map.</string>
+```
+
+This is a critical detail that AI often forgets. If you do not include the Info.plist key, the app will crash when requesting permission. Not fail gracefully — crash. Always verify that AI includes the necessary Info.plist keys when it generates permission-requiring code.
+
+Here is a reference of common Info.plist keys you will need:
+
+| Framework | Info.plist Key | When Required |
+|---|---|---|
+| Location (when in use) | `NSLocationWhenInUseUsageDescription` | Always for location |
+| Location (always) | `NSLocationAlwaysAndWhenInUseUsageDescription` | Background location |
+| Camera | `NSCameraUsageDescription` | Camera access |
+| Photo Library (full) | `NSPhotoLibraryUsageDescription` | Full library access (not needed for PhotosPicker) |
+| Microphone | `NSMicrophoneUsageDescription` | Audio recording |
+| Contacts | `NSContactsUsageDescription` | Reading contacts |
+| Calendar | `NSCalendarsUsageDescription` | Calendar access |
+| Face ID | `NSFaceIDUsageDescription` | Biometric auth |
+
+Keep this table handy. When AI generates code that uses one of these frameworks, check that it also mentions the corresponding Info.plist key.
+
+## Local Notifications
+
+Push notifications require a server. Local notifications do not — they are scheduled entirely on device. They are perfect for reminders, timers, and time-based features.
+
+```
+Create a NotificationManager that handles local notifications.
+Requirements:
+
+- Request notification permission (alert, badge, sound)
+- Schedule a notification for a specific date/time
+- Schedule a repeating daily notification
+- Cancel a specific notification by identifier
+- Cancel all pending notifications
+- Check current authorization status
+- Use @Observable
+- Use UNUserNotificationCenter
+
+Put it in Services/NotificationManager.swift
+```
+
+```swift
+import UserNotifications
+import os
+
+@Observable
+final class NotificationManager {
+    var isAuthorized = false
+    var authorizationStatus: UNAuthorizationStatus = .notDetermined
+
+    private let center = UNUserNotificationCenter.current()
+    private let logger = Logger(subsystem: "com.app", category: "NotificationManager")
+
+    func checkAuthorization() async {
+        let settings = await center.notificationSettings()
+        authorizationStatus = settings.authorizationStatus
+        isAuthorized = settings.authorizationStatus == .authorized
+    }
+
+    func requestPermission() async -> Bool {
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+            isAuthorized = granted
+            authorizationStatus = granted ? .authorized : .denied
+            logger.debug("Notification permission granted: \(granted)")
+            return granted
+        } catch {
+            logger.error("Failed to request notification permission: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func scheduleNotification(
+        id: String,
+        title: String,
+        body: String,
+        at date: Date
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        let components = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: date
+        )
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+
+        center.add(request) { [weak self] error in
+            if let error {
+                self?.logger.error("Failed to schedule notification: \(error.localizedDescription)")
+            } else {
+                self?.logger.debug("Scheduled notification '\(id)' for \(date)")
+            }
+        }
+    }
+
+    func scheduleDailyNotification(
+        id: String,
+        title: String,
+        body: String,
+        hour: Int,
+        minute: Int
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+
+        var dateComponents = DateComponents()
+        dateComponents.hour = hour
+        dateComponents.minute = minute
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+
+        center.add(request) { [weak self] error in
+            if let error {
+                self?.logger.error("Failed to schedule daily notification: \(error.localizedDescription)")
+            } else {
+                self?.logger.debug("Scheduled daily notification '\(id)' at \(hour):\(minute)")
+            }
+        }
+    }
+
+    func cancelNotification(id: String) {
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+        logger.debug("Cancelled notification: \(id)")
+    }
+
+    func cancelAllNotifications() {
+        center.removeAllPendingNotificationRequests()
+        logger.debug("Cancelled all pending notifications")
+    }
+}
+```
+
+And a view that lets the user schedule a reminder:
+
+```swift
+import SwiftUI
+
+struct ReminderView: View {
+    @State private var notificationManager = NotificationManager()
+    @State private var reminderDate = Date()
+    @State private var reminderTitle = ""
+    @State private var showConfirmation = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Permission") {
+                    if notificationManager.isAuthorized {
+                        Label("Notifications enabled", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Button("Enable Notifications") {
+                            Task {
+                                await notificationManager.requestPermission()
+                            }
+                        }
+                    }
+                }
+
+                if notificationManager.isAuthorized {
+                    Section("New Reminder") {
+                        TextField("Reminder title", text: $reminderTitle)
+
+                        DatePicker(
+                            "When",
+                            selection: $reminderDate,
+                            in: Date()...,
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                    }
+
+                    Section {
+                        Button("Schedule Reminder") {
+                            let id = UUID().uuidString
+                            notificationManager.scheduleNotification(
+                                id: id,
+                                title: reminderTitle.isEmpty ? "Reminder" : reminderTitle,
+                                body: "You set this reminder earlier.",
+                                at: reminderDate
+                            )
+                            reminderTitle = ""
+                            showConfirmation = true
+                        }
+                        .disabled(reminderTitle.isEmpty)
+                    }
+                }
+            }
+            .navigationTitle("Reminders")
+            .task {
+                await notificationManager.checkAuthorization()
+            }
+            .alert("Reminder Set", isPresented: $showConfirmation) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("You will be notified at the scheduled time.")
+            }
+        }
+    }
+}
+
+#Preview {
+    ReminderView()
+}
+```
+
+The permission flow follows the same pattern as location: check status, request if not determined, handle denial. One gotcha with notifications: unlike location, you cannot re-request notification permission once the user denies it. The system only shows the permission dialog once. If denied, you must direct users to Settings.
+
+## ShareLink: Sharing Made Simple
+
+Sharing used to require `UIActivityViewController` wrapped in a representable. In iOS 16+, SwiftUI has `ShareLink`:
+
+```swift
+struct ShareablePost: Identifiable {
+    let id = UUID()
+    let title: String
+    let url: URL
+}
+
+struct PostCardView: View {
+    let post: ShareablePost
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(post.title)
+                .font(.headline)
+
+            HStack {
+                ShareLink(item: post.url, subject: Text(post.title)) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+
+                Spacer()
+
+                ShareLink(
+                    item: post.url,
+                    preview: SharePreview(post.title, image: Image(systemName: "doc.text"))
+                )
+            }
+        }
+        .padding()
+    }
+}
+```
+
+ShareLink takes an item (any `Transferable` — URLs, strings, images, custom types) and an optional preview. No permissions needed, no wrapping UIKit views, no presentation management. It is one of those APIs where SwiftUI genuinely makes things simpler than UIKit.
+
+You can also share custom types by conforming to `Transferable`:
+
+```swift
+struct ArticleContent: Transferable {
+    let title: String
+    let body: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        ProxyRepresentation { article in
+            "\(article.title)\n\n\(article.body)"
+        }
+    }
+}
+```
+
+Now you can use `ShareLink(item: articleContent)` directly.
+
+## How to Prompt for Framework Integration
+
+After working with dozens of Apple frameworks through AI, here is my template for getting good results:
+
+```
+Integrate [FrameworkName] into our SwiftUI app. Requirements:
+
+- Use the [specific API name] (not the deprecated [old API name])
+- Target iOS [version]+
+- Handle permission flow if required:
+  - Check current authorization status on appear
+  - Request permission when user taps a button (not automatically)
+  - Handle denied state with a link to Settings
+  - Include the required Info.plist key: [key name]
+- Use @Observable ViewModel pattern
+- Include error handling for all failure cases
+- Include a #Preview
+
+Do NOT use UIViewRepresentable wrappers unless there is
+no SwiftUI equivalent.
+
+Info.plist key needed: [key] with description: "[description]"
+```
+
+The "Do NOT use UIViewRepresentable" line is important. AI has been trained on years of code where wrapping UIKit was the only option. For many frameworks, SwiftUI now has native equivalents. But AI does not always know which ones are available at your target iOS version. Telling it explicitly prevents a lot of unnecessary wrapping code.
+
+## Common Gotchas with System Frameworks
+
+**1. Forgetting Info.plist keys.** Your app will crash at runtime, not at compile time. AI often generates perfect code but forgets the plist entry. Always ask: "Does this require an Info.plist key?"
+
+**2. Requesting permission too early.** Do not request location or notification permission the moment the app launches. Users will deny it because they do not understand why you need it. Request it in context — when they tap a "Show nearby places" button, then ask for location. Apple's Human Interface Guidelines are explicit about this.
+
+**3. Not handling the "denied" state.** AI generates the happy path beautifully. It rarely generates the "user denied permission" path unless you ask. Always prompt for it.
+
+**4. Using the wrong API generation.** MapKit alone has had three different SwiftUI APIs: the original Map(coordinateRegion:), the iOS 17 Map with MapContentBuilder, and various annotation approaches. Be specific about your iOS target, or AI will mix APIs from different versions.
+
+**5. Not testing on a real device.** Many framework features — camera, push notifications, certain HealthKit features — do not work in the simulator. If AI-generated code seems correct but does not work, try a real device before debugging.
+
+## Key Takeaways
+
+1. **PhotosPicker is the modern way** to select photos. No permissions needed, no UIKit wrapping. Use `loadTransferable(type:)` for async image loading.
+2. **The iOS 17+ Map API** uses `MapCameraPosition`, `Marker`, and `MapContentBuilder`. Do not let AI generate the deprecated `Map(coordinateRegion:)` initializer.
+3. **Every permission flow has three states**: not determined, authorized, denied. Always handle all three. Always provide a path to Settings for the denied state.
+4. **Info.plist keys are required** for location, camera, microphone, contacts, calendar, Face ID, and full photo library access. Missing keys cause runtime crashes.
+5. **ShareLink replaces UIActivityViewController** in SwiftUI. It works with any `Transferable` type — URLs, strings, images, and custom types.
+6. **Request permissions in context**, not at launch. The user should understand why you need access before you ask.
+7. **Be explicit about your iOS target** when prompting AI. Framework APIs change significantly between iOS versions, and AI will mix them if you are not specific.
+
+## Homework
+
+**Build an app that integrates three system frameworks (45 minutes):**
+
+Create a "Places" app with the following features:
+
+1. **Map with locations** — Show a map using the iOS 17+ Map API. Display at least 5 markers for interesting places. Tapping a marker shows a detail sheet with the place name, a description, and a "Get Directions" button.
+
+2. **Photo for each place** — Add a PhotosPicker that lets the user attach a photo to each place. Display the photo in the detail sheet. Handle the loading state while the photo processes.
+
+3. **Reminder notification** — In the detail sheet, add a "Remind me to visit" button that schedules a local notification for a user-selected date/time. Handle the notification permission flow properly — request in context, handle denial.
+
+4. **Share a place** — Add a ShareLink that shares the place name and coordinates as text.
+
+5. **Permission handling** — For both location and notifications, handle the denied state with a message directing users to Settings.
+
+Use Claude Code for the entire build. Pay special attention to:
+- Are all Info.plist keys included?
+- Does AI use the modern SwiftUI APIs or deprecated ones?
+- Is the permission flow complete (not just the happy path)?
+- Does the PhotosPicker work without any permissions?
+
+This exercise combines everything from this module — networking patterns, loading states, navigation, and system framework integration. It is the kind of app you will build in the real world, and the kind of app AI can help you build in under an hour.

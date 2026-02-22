@@ -81,7 +81,7 @@ export const COURSE = {
   subtitle: 'Build Real iOS Apps with AI',
   description: 'A free, comprehensive course teaching iOS developers how to leverage AI tools — especially Claude Code — to build production-quality native apps faster.',
   author: 'Mario',
-  totalLessons: 7,
+  totalLessons: 21,
   modules: [
     {
       number: 1,
@@ -94,6 +94,30 @@ export const COURSE = {
       title: 'Prompting for Swift & SwiftUI',
       description: 'Master the art of writing effective prompts, configure CLAUDE.md, and avoid the most common mistakes.',
       lessonCount: 4,
+    },
+    {
+      number: 3,
+      title: 'Your First App — Todo App with AI',
+      description: 'Put everything into practice by building a complete Todo app from scratch — planning, data layer, views, and polish.',
+      lessonCount: 4,
+    },
+    {
+      number: 4,
+      title: 'Real-World Patterns',
+      description: 'Networking, error handling, navigation, and system framework integration — the patterns every real app needs.',
+      lessonCount: 4,
+    },
+    {
+      number: 5,
+      title: 'Testing & Quality',
+      description: 'Unit testing with AI, debugging techniques, and code review workflows that catch bugs before your users do.',
+      lessonCount: 3,
+    },
+    {
+      number: 6,
+      title: 'Ship It — From Code to App Store',
+      description: 'Performance optimization, accessibility, localization, and everything you need to launch on the App Store.',
+      lessonCount: 3,
     },
   ],
 };

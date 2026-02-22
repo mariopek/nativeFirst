@@ -1,0 +1,556 @@
+---
+title: "Polish & Ship"
+description: "Add animations, haptic feedback, empty states, swipe actions, search, dark mode, and accessibility to the Todo app — then step back and see what AI-assisted development actually looks like."
+module: 3
+moduleTitle: "Your First App — Todo App with AI"
+lesson: 4
+duration: "15 min read"
+difficulty: "intermediate"
+topics: ["Polish", "Animations", "App Store", "Todo App"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+The app works. You can create todos, edit them, complete them, delete them, assign categories, and set due dates. If this were a hackathon, you could demo it right now.
+
+But "works" is not "finished." The difference between an app that works and an app that feels good is polish — the small details that most users never consciously notice but immediately feel when they are missing. Animations, haptics, empty states, accessibility, dark mode.
+
+Here is the thing about polish: it used to take days. Implementing animations, building empty states, adding haptic feedback, testing dark mode, auditing accessibility — each one is a small task, but they add up. With AI, we can do all of it in about 30 minutes.
+
+This is the final lesson of Module 3. Let us finish the app.
+
+## Animations
+
+Animations make the app feel alive. We are going to add three specific animations that follow Apple's design language.
+
+### Completion Animation
+
+When a user taps the completion circle, we want a satisfying visual response. Send this to Claude Code:
+
+```
+Add an animation to TodoRowView when the completion button is
+tapped. When toggling to completed:
+- The checkmark circle should scale from 1.0 to 1.3 then back
+  to 1.0 (a "pop" effect)
+- The title should animate to strikethrough with a short delay
+- Use withAnimation(.spring(response: 0.3, dampingFraction: 0.6))
+
+When toggling to incomplete, just animate normally without the pop.
+```
+
+```swift
+struct TodoRowView: View {
+    let todo: TodoItem
+    var onToggleCompleted: () -> Void
+
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button {
+                if !todo.isCompleted {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                        isAnimating = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        isAnimating = false
+                    }
+                }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    onToggleCompleted()
+                }
+            } label: {
+                Image(systemName: todo.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(todo.isCompleted ? .secondary : todo.priority.color)
+                    .scaleEffect(isAnimating ? 1.3 : 1.0)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title)
+                    .font(.body)
+                    .strikethrough(todo.isCompleted)
+                    .foregroundStyle(todo.isCompleted ? .secondary : .primary)
+
+                if let dueDate = todo.dueDate {
+                    Text(dueDate, format: .dateTime.month(.abbreviated).day())
+                        .font(.caption)
+                        .foregroundStyle(todo.isOverdue ? .red : .secondary)
+                }
+            }
+
+            Spacer()
+
+            if let category = todo.category {
+                Image(systemName: category.systemIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+```
+
+That "pop" effect — scale up to 1.3 then back to 1.0 with spring damping — is subtle but satisfying. It gives the user instant feedback that their tap registered. Apple uses this pattern extensively in their own apps.
+
+### List Transition Animation
+
+When todos move between sections (e.g., from Today to Completed), we want a smooth transition instead of an abrupt snap:
+
+```
+Add a .animation(.default, value: viewModel.todayTodos.count)
+modifier to the List in TodoListView so that section changes
+animate smoothly. Also add .transition(.opacity.combined(with: .move(edge: .top)))
+to each section.
+```
+
+This is a one-liner refinement that makes section changes feel fluid. The todo slides out of one section and fades into another instead of just teleporting.
+
+### Sheet Presentation Animation
+
+The add todo sheet already animates by default (SwiftUI handles this), but we can make it feel better:
+
+```
+In AddTodoView, add a subtle entrance animation: when the view
+appears, the form sections should fade in with a slight upward
+slide, staggered by 0.05 seconds each.
+```
+
+I will be honest — this one is optional. Sheet presentation already looks fine in SwiftUI. But if you want that extra touch of craft, staggered entrance animations on form sections look polished. The AI will handle the implementation, and you can decide if you like the result.
+
+## Haptic Feedback
+
+Haptics are one of the easiest ways to make an app feel premium. They take almost no code but add a tactile dimension to interactions.
+
+```
+Add haptic feedback to these interactions in the Todo app:
+
+1. When a todo is marked as completed — use
+   UINotificationFeedbackGenerator with .success
+2. When a todo is deleted (swipe) — use
+   UIImpactFeedbackGenerator with .medium
+3. When the "Save" button is tapped in AddTodoView — use
+   UINotificationFeedbackGenerator with .success
+4. When the priority picker changes — use
+   UISelectionFeedbackGenerator
+
+Create a small HapticManager utility so we do not repeat the
+feedback generator code everywhere.
+```
+
+```swift
+import UIKit
+
+enum HapticManager {
+    static func success() {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+    }
+
+    static func impact(_ style: UIImpactFeedbackGenerator.FeedbackStyle = .medium) {
+        let generator = UIImpactFeedbackGenerator(style: style)
+        generator.impactOccurred()
+    }
+
+    static func selection() {
+        let generator = UISelectionFeedbackGenerator()
+        generator.selectionChanged()
+    }
+}
+```
+
+Then in TodoRowView, add `HapticManager.success()` when toggling to completed. In TodoListView, add `HapticManager.impact()` in the delete action. In AddTodoView, add `HapticManager.success()` in the save function and `HapticManager.selection()` on the priority picker's `onChange`.
+
+Yes, we are using UIKit's haptic generators in a SwiftUI app. There is no pure SwiftUI equivalent yet, and the `sensoryFeedback` modifier introduced in iOS 17 covers some cases but not all. Our CLAUDE.md says "do not use UIKit," but feedback generators are the exception — this is the only way to trigger haptics. Constraints should be practical, not dogmatic.
+
+## Empty States
+
+An app with no data should not show a blank screen. Empty states tell the user what to do next.
+
+```
+Add empty states to TodoListView:
+
+1. When there are no todos at all — show a
+   ContentUnavailableView with a checklist icon,
+   title "No Todos Yet", description "Tap the + button
+   to create your first todo", and a button that opens
+   the add sheet.
+
+2. When there are todos but all sections are empty after
+   filtering (all completed and older than 7 days) — show
+   a ContentUnavailableView with a party.popper icon,
+   title "All Done!", description "You have completed
+   all your todos. Nice work."
+```
+
+```swift
+// Add this to TodoListView, after the List
+var hasAnyTodos: Bool {
+    !viewModel.todayTodos.isEmpty ||
+    !viewModel.upcomingTodos.isEmpty ||
+    !viewModel.unscheduledTodos.isEmpty ||
+    !viewModel.completedTodos.isEmpty
+}
+
+var hasAnyTodosAtAll: Bool {
+    !viewModel.allTodos.isEmpty
+}
+
+// In the body, replace the plain List with:
+if !hasAnyTodosAtAll {
+    ContentUnavailableView {
+        Label("No Todos Yet", systemImage: "checklist")
+    } description: {
+        Text("Tap the + button to create your first todo.")
+    } actions: {
+        Button("Add Todo") {
+            showingAddTodo = true
+        }
+        .buttonStyle(.bordered)
+    }
+} else if !hasAnyTodos {
+    ContentUnavailableView {
+        Label("All Done!", systemImage: "party.popper")
+    } description: {
+        Text("You have completed all your todos. Nice work.")
+    }
+} else {
+    List {
+        // ... existing sections
+    }
+}
+```
+
+`ContentUnavailableView` is Apple's built-in component for empty states, introduced in iOS 17. It handles the layout, typography, and styling automatically — and it looks native because it IS native. Do not build custom empty states when Apple gives you one for free.
+
+## Swipe Actions
+
+We already have swipe-to-delete via `.onDelete`. Let us add more swipe actions:
+
+```
+Add leading swipe actions to each todo row in TodoListView:
+
+1. A "Complete" / "Undo" button that toggles completion.
+   Use checkmark for incomplete todos (tint: .green) and
+   arrow.uturn.backward for completed todos (tint: .orange).
+
+2. Add a trailing swipe action for "Delete" with a
+   trash icon (tint: .red) as an alternative to the
+   existing onDelete.
+
+Also add a trailing swipe action for "Flag" with
+flag.fill icon (tint: .yellow) — we will not implement
+flagging yet, but having the action there shows the pattern.
+```
+
+```swift
+ForEach(viewModel.todayTodos) { todo in
+    NavigationLink(value: todo) {
+        TodoRowView(todo: todo) {
+            viewModel.toggleCompleted(todo)
+        }
+    }
+    .swipeActions(edge: .leading) {
+        Button {
+            HapticManager.success()
+            viewModel.toggleCompleted(todo)
+        } label: {
+            Label(
+                todo.isCompleted ? "Undo" : "Complete",
+                systemImage: todo.isCompleted ? "arrow.uturn.backward" : "checkmark"
+            )
+        }
+        .tint(todo.isCompleted ? .orange : .green)
+    }
+    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        Button(role: .destructive) {
+            HapticManager.impact()
+            viewModel.deleteTodo(todo)
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+
+        Button {
+            // Flag functionality — future feature
+        } label: {
+            Label("Flag", systemImage: "flag.fill")
+        }
+        .tint(.yellow)
+    }
+}
+```
+
+Swipe actions are one of those features that make an app feel complete. Users expect them — Apple's Reminders app has them, Mail has them, Messages has them. And they take about 30 seconds to prompt and generate.
+
+## Search
+
+Search is table stakes for any list-based app. Let us add it:
+
+```
+Add search functionality to TodoListView:
+- Use the .searchable modifier with a @State searchText property
+- Filter all sections by the search text (case-insensitive,
+  contains matching on todo title and notes)
+- When search is active and has no results, show a
+  ContentUnavailableView.search
+- When search is active, show all matching todos in a single
+  flat list instead of sections
+```
+
+```swift
+// Add to TodoListView
+@State private var searchText = ""
+
+var filteredTodos: [TodoItem] {
+    guard !searchText.isEmpty else { return [] }
+    return viewModel.allTodos.filter { todo in
+        todo.title.localizedCaseInsensitiveContains(searchText) ||
+        todo.notes.localizedCaseInsensitiveContains(searchText)
+    }
+}
+
+// In the body, add .searchable to the List:
+.searchable(text: $searchText, prompt: "Search todos")
+.overlay {
+    if !searchText.isEmpty && filteredTodos.isEmpty {
+        ContentUnavailableView.search(text: searchText)
+    }
+}
+```
+
+Then, inside the List, add a conditional: if `searchText` is not empty, show a flat list of `filteredTodos` instead of the sections. If `searchText` is empty, show the normal sectioned layout.
+
+`ContentUnavailableView.search` is a pre-built search empty state that says "No Results for [query]". Apple provides it out of the box. Use it.
+
+## Dark Mode Verification
+
+If you have been using semantic colors (which our CLAUDE.md enforced), dark mode should just work. But "should" and "does" are different things. Here is how to verify:
+
+```
+Review all views in the Todo app and verify dark mode compatibility:
+1. Are there any hardcoded colors? (e.g., Color.white, Color.black,
+   Color(.systemBackground))
+2. Are there any hardcoded background colors that should be semantic?
+3. Do all custom views use Color.primary, Color.secondary, and
+   system materials?
+
+List any issues you find.
+```
+
+This is a great use of AI — code review for a specific concern. Claude Code will scan every view and flag any hardcoded colors that would look wrong in dark mode. In our case, the `CategoryChip` uses `Color(.systemGray6)` for the unselected state, which is fine — it adapts to dark mode automatically. But if the AI had used `Color.gray.opacity(0.1)`, that would look wrong in dark mode, and this review would catch it.
+
+Run the app in the simulator. Toggle Appearance between Light and Dark in the Environment Overrides panel (the button at the bottom of the simulator). Every screen should look correct in both modes.
+
+## Accessibility Audit
+
+Accessibility is not optional. One in seven people has some form of disability. And beyond ethics, Apple reviews accessibility when featuring apps on the App Store.
+
+```
+Audit the Todo app for accessibility:
+
+1. Do all interactive elements have accessibility labels?
+2. Do the completion toggle buttons have proper accessibility
+   traits and labels? (e.g., "Mark Buy groceries as completed"
+   or "Mark Buy groceries as incomplete")
+3. Is VoiceOver navigation order logical?
+4. Do all images have accessibility descriptions?
+5. Does the app support Dynamic Type? Are there any hardcoded
+   font sizes?
+6. Are tap targets at least 44x44 points?
+
+Fix any issues you find.
+```
+
+```swift
+// Example fix for the completion button in TodoRowView:
+Button {
+    onToggleCompleted()
+} label: {
+    Image(systemName: todo.isCompleted ? "checkmark.circle.fill" : "circle")
+        .font(.title3)
+        .foregroundStyle(todo.isCompleted ? .secondary : todo.priority.color)
+        .scaleEffect(isAnimating ? 1.3 : 1.0)
+}
+.buttonStyle(.plain)
+.accessibilityLabel(todo.isCompleted ? "Mark \(todo.title) as incomplete" : "Mark \(todo.title) as completed")
+.accessibilityHint("Double tap to toggle")
+```
+
+The accessibility label is contextual — it includes the todo's title and the action that will happen. A VoiceOver user hears "Mark Buy groceries as completed. Double tap to toggle." That is meaningful information.
+
+AI is genuinely excellent at accessibility audits. It catches missing labels, incorrect traits, and hardcoded sizes faster than most manual reviews. Use this capability on every app you build.
+
+## Sort Options
+
+Let us add the ability to sort the todo list:
+
+```
+Add a sort option to TodoListView. In the toolbar, add a Menu
+with a "Sort" label and arrow.up.arrow.down icon. Options:
+- Sort by Priority (high first) — default
+- Sort by Due Date (soonest first)
+- Sort by Created Date (newest first)
+- Sort by Name (alphabetical)
+
+Store the selection in a @State property with a SortOption enum.
+Apply the sort to all sections.
+```
+
+```swift
+enum SortOption: String, CaseIterable {
+    case priority = "Priority"
+    case dueDate = "Due Date"
+    case createdDate = "Created Date"
+    case name = "Name"
+
+    var icon: String {
+        switch self {
+        case .priority: "arrow.up.arrow.down"
+        case .dueDate: "calendar"
+        case .createdDate: "clock"
+        case .name: "textformat.abc"
+        }
+    }
+}
+
+// In TodoListView:
+@State private var sortOption: SortOption = .priority
+
+// In the toolbar:
+ToolbarItem(placement: .topBarLeading) {
+    Menu {
+        ForEach(SortOption.allCases, id: \.self) { option in
+            Button {
+                sortOption = option
+            } label: {
+                Label(option.rawValue, systemImage: option.icon)
+            }
+        }
+    } label: {
+        Image(systemName: "arrow.up.arrow.down")
+    }
+}
+```
+
+Then apply the sort to the ViewModel's section arrays. You can either add a `sortOption` parameter to the ViewModel's computed properties, or sort in the view. For a Todo app, sorting in the view is fine.
+
+## The Final Result
+
+Step back for a moment and look at what we have:
+
+- A complete Todo app with create, edit, delete, and complete operations
+- SwiftData persistence that survives app restarts
+- Sections: Today, Upcoming, Unscheduled, Completed
+- Categories with predefined options
+- Priority levels with color coding
+- Tab-based navigation
+- Swipe actions for completion and deletion
+- Search with empty states
+- Sort options
+- Animations on completion
+- Haptic feedback on key interactions
+- Empty states for no data and all-done scenarios
+- Dark mode compatible
+- Accessibility audited
+- All views with previews
+
+This is not a tutorial exercise. This is a shippable app.
+
+## Time Comparison
+
+Let me be transparent about how long this took.
+
+**With AI (this module):**
+- Planning: ~15 minutes
+- Data layer: ~15 minutes
+- Views: ~30 minutes
+- Polish: ~30 minutes
+- **Total: roughly 1.5 hours**
+
+**Without AI (my estimate for the same scope):**
+- Planning: ~30 minutes
+- Data layer: ~2 hours
+- Views: ~4 hours
+- Polish: ~3 hours
+- **Total: roughly 9-10 hours**
+
+That is a 6-7x speedup. And this is a simple app. For complex apps with more screens, networking, and business logic, the multiplier gets bigger because the tedious parts — boilerplate, CRUD, standard UI patterns — are where AI saves the most time.
+
+But I want to be clear about what DID NOT change: the thinking time. You still need to decide what to build. You still need to review what AI generates. You still need to test it. AI compresses the typing and boilerplate, not the decision-making.
+
+## App Icon Ideas
+
+One thing AI cannot do well (yet) is generate actual App Store assets inside Xcode. But it can help you plan:
+
+```
+Suggest 5 app icon concepts for a Todo app. Describe each one
+in detail — colors, shapes, symbols — so I can communicate
+the concept to a designer or use an image generation tool.
+```
+
+Claude Code will give you detailed descriptions. You can then use those descriptions with an image generation tool (DALL-E, Midjourney, or Apple's own App Icon generator in Xcode 16) to create the actual assets.
+
+For a Todo app, a simple checkmark on a clean background works. Do not overthink it.
+
+## Module 3 Wrap-Up
+
+Let us recap what you accomplished in this module:
+
+**Lesson 1 (Planning):** You learned the planning prompt technique, scoped an MVP, and created a CLAUDE.md that guided the entire build.
+
+**Lesson 2 (Data Layer):** You built SwiftData models, set up relationships, configured persistence, and created CRUD operations — all generated by AI.
+
+**Lesson 3 (Views):** You built six views using iterative prompting, learned to extract reusable components, and used `@Bindable` for direct model editing.
+
+**Lesson 4 (Polish):** You added animations, haptics, empty states, swipe actions, search, sort, dark mode, and accessibility — turning a functional app into a polished one.
+
+The entire app was built with AI assistance. You described what you wanted, the AI wrote the code, you reviewed and refined. That is vibe coding for native iOS.
+
+## What is Next
+
+Module 4 takes everything to the next level. We are going to build a more complex app — one with networking, async data loading, authentication, and real-world architecture challenges. The Todo app taught you the workflow. Module 4 teaches you to handle the hard parts.
+
+You now have the skills to build real apps with AI. The planning technique. The prompting framework. The iterative refinement. The review discipline. These are transferable — they work for any app, any feature, any complexity level.
+
+Go build something.
+
+---
+
+## Key Takeaways
+
+1. **Polish is what separates "works" from "finished"** — animations, haptics, empty states, and accessibility take an app from prototype to product
+2. **AI handles polish tasks quickly** — each polish feature is a focused prompt that takes seconds to write and generates correct code
+3. **Use Apple's built-in components** — `ContentUnavailableView` for empty states, `.searchable` for search, `.swipeActions` for gestures
+4. **Always verify dark mode** — use AI to audit for hardcoded colors, then visually check in the simulator
+5. **Accessibility is not optional** — AI excels at accessibility audits. Use this capability on every app
+6. **The time savings are real** — 1.5 hours vs. 9-10 hours for a complete Todo app. The multiplier grows with complexity
+7. **AI compresses typing, not thinking** — you still make the decisions. AI handles the implementation
+
+---
+
+## Homework
+
+**Final polish (30 minutes):**
+
+1. If you have not already, add all the polish features from this lesson to your Todo app
+2. Run the app in both light and dark mode — screenshot both
+3. Turn on VoiceOver (Settings > Accessibility > VoiceOver) and navigate through the entire app using only voice. Fix anything that does not make sense
+4. Show the app to someone who is not a developer. Watch what they do. Note what confuses them
+
+**Module 3 completion exercise:**
+
+Go back to the workflow reflection from Lesson 1.1. You wrote down your process for adding a feature to an iOS app. Now write the updated workflow:
+
+1. How do you plan a feature?
+2. How do you write the data layer?
+3. How do you build the views?
+4. How do you add polish?
+5. How long does each step take compared to before?
+
+Keep this updated workflow. It is your personal playbook for AI-assisted native development.
+
+**Stretch goal:**
+Publish the Todo app on TestFlight. Even if nobody else uses it, going through the App Store Connect submission process with an AI-built app is a valuable experience. Ask Claude Code to help you write the App Store description and keywords.
