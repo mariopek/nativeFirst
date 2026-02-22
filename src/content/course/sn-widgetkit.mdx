@@ -1,0 +1,565 @@
+---
+title: "WidgetKit — Home Screen Widget"
+description: "Create a home screen widget that shows today's mood at a glance — with a timeline provider, App Groups for data sharing, and support for small, medium, and large widget families."
+courseSlug: "ship-native"
+module: 5
+moduleTitle: "System Frameworks"
+lesson: 2
+duration: "24 min read"
+difficulty: "advanced"
+topics: ["WidgetKit", "Timeline Provider", "App Groups", "Widget Family", "Home Screen", "Extension", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+A home screen widget turns your app from something users open into something users glance at. No launch, no navigation, no waiting. The current mood, right there on the home screen, always up to date.
+
+WidgetKit is how you build this on iOS. It is not a mini version of your app — it is a completely separate target with its own lifecycle, its own rendering model, and its own data access constraints. Widgets are SwiftUI views rendered ahead of time from a timeline of snapshots. They cannot run arbitrary code on demand. They cannot access your main app's data directly. And if you do not understand these constraints, you will build a widget that shows stale data and frustrates your users.
+
+This lesson covers the full path: creating the widget extension, sharing data through App Groups, building the timeline provider, and designing views for small, medium, and large widget families.
+
+## What You'll Learn
+
+- Set up a WidgetKit extension target and configure App Groups for data sharing between the main app and the widget
+- Build a `TimelineProvider` that serves mood data snapshots on a schedule
+- Design three widget layouts — small (today's mood emoji), medium (mood with note), large (weekly trend) — using `WidgetFamily`
+- Configure a refresh policy that keeps the widget current without draining battery
+
+## Why This Matters
+
+Widgets are the most visible integration point on iOS. They appear on the home screen, the lock screen, and StandBy mode. Apple promotes widget-capable apps in the App Store. Users who add your widget engage with your app 2-3x more frequently than users who do not — not because they open it more, but because they see it more.
+
+But widgets are also the feature most likely to show stale or placeholder data in production. The architecture is unintuitive: you provide a timeline of future states, the system renders them at the right time, and you have almost no control over when your code actually runs. Getting this right requires understanding the timeline model, and that is something AI consistently gets wrong on the first pass.
+
+## Plan Phase: Defining What We Build
+
+We need a widget extension that reads from the same SwiftData store as the main app. The bridge between them is App Groups — a shared container that both the main app and the widget extension can access.
+
+Here is the planning prompt:
+
+```
+I'm adding a home screen widget to Moodbit, my SwiftUI mood
+tracking app. The app uses SwiftData with a MoodEntry model
+(id, mood 1-5, date, note).
+
+I need:
+1. A Widget extension target with a TimelineProvider
+2. App Groups configuration so the widget can read from the
+   same SwiftData store as the main app
+3. Three widget sizes:
+   - Small: shows today's mood as an emoji + the mood label
+   - Medium: shows today's mood emoji, label, and the latest
+     note (truncated)
+   - Large: shows today's mood plus a mini bar chart of the
+     last 7 days
+4. A timeline that refreshes every 2 hours, or whenever the
+   user logs a new mood (via WidgetCenter.shared.reloadTimelines)
+5. A placeholder view and snapshot for the widget gallery
+
+Technical constraints:
+- Target iOS 17+, Swift 6
+- Use the same MoodEntry model in both targets
+- The SwiftData ModelContainer must use the App Group container
+  URL for its storage path
+- Do NOT hardcode any mood data — read from the real store
+
+What is the implementation plan? List every file, every target
+membership change, and every capability I need to enable.
+```
+
+**What to look for in the plan.** The AI should mention: creating a new Widget Extension target in Xcode, enabling the App Groups capability on both the main app target and the widget target with the same group identifier, moving the `ModelConfiguration` to use a shared container URL, and putting the `MoodEntry` model file into both targets. If the AI skips any of these, the widget will compile but show no data.
+
+**Anti-pattern: skipping App Groups.** This is the number one widget bug. The main app stores data in its default container. The widget extension is a separate process with its own sandbox. Without App Groups, the widget literally cannot see the main app's database. AI will sometimes generate a widget that creates its own `ModelContainer` without a shared URL, and you end up with two separate databases — the main app writes to one, the widget reads from an empty one.
+
+## Execute Phase: Implementation
+
+```
+Generate the complete widget implementation based on the plan.
+Use these specifics:
+
+- App Group identifier: group.com.moodbit.shared
+- The shared ModelContainer helper should be in a file that
+  belongs to both targets: SharedModelContainer.swift
+- MoodWidgetEntry has: date (Date), currentMood (Int?),
+  currentNote (String?), weeklyMoods ([DailyMood]) where
+  DailyMood is (dayLetter: String, mood: Int?)
+- Emoji mapping: 1="😣", 2="😕", 3="😐", 4="🙂", 5="😄"
+- The timeline provider should fetch the latest MoodEntry for
+  today and the last 7 days of daily averages
+- Use @ViewBuilder to switch on widget family
+- The placeholder should show a generic "Moodbit" label with
+  redacted content
+- Include WidgetBundle if we plan to add more widgets later
+
+Put widget files in MoodbitWidget/ directory.
+```
+
+Review the AI output for these specific issues:
+
+- **SharedModelContainer uses the App Group URL.** The code should call `FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.moodbit.shared")` and pass that to `ModelConfiguration(url:)`. If it uses the default `ModelConfiguration()`, data sharing is broken.
+- **MoodEntry.swift has both target memberships.** The model file must compile in both the main app and the widget extension. If it only belongs to one target, the other cannot decode the data.
+- **TimelineProvider.getTimeline() creates a ModelContainer, fetches, and builds entries.** Widget providers run in a limited environment. The provider must create its own container, fetch what it needs, build timeline entries, and return them. It cannot hold long-lived references.
+- **The snapshot uses sample data, not a real fetch.** The `getSnapshot()` method is called for the widget gallery preview. It must return immediately with representative data. If the AI does a database fetch here, the widget gallery will be slow or show empty content.
+
+## Iteration
+
+The first pass usually nails the data flow but produces bland widget views. Send this:
+
+```
+The widget data works but the views need improvement:
+
+1. Small widget: center the emoji vertically and horizontally,
+   show the mood label below it in caption font, add a subtle
+   background gradient based on the mood color (same color
+   scheme as charts: red through green)
+2. Medium widget: left-align the emoji and label, right-align
+   the note text in secondary color. Add a divider between them.
+   Show "No entry yet" if there is no mood logged today.
+3. Large widget: keep the top section like medium, add a row
+   of 7 small circles below, each colored by that day's mood
+   (gray if no entry). Label each circle with the day letter
+   (M, T, W, etc.)
+4. All sizes: use .containerBackground for the gradient,
+   not a background modifier (required for iOS 17 widgets)
+5. Add .contentMarginsDisabled() if we want edge-to-edge
+   backgrounds
+```
+
+The `.containerBackground` point is important. iOS 17 changed how widget backgrounds work. The old `.background()` modifier no longer reaches the edges of the widget. Apple introduced `.containerBackground(for: .widget)` as the replacement. AI trained on older code will use the deprecated approach, and your widget will have visible padding around its background.
+
+## Verify Phase
+
+Widget testing is harder than regular view testing because you cannot see the widget in a normal preview run. Here is what to verify:
+
+1. **Add the widget to the home screen** in the simulator. Long-press, tap the "+" button, find Moodbit, and add each size.
+2. **Log a mood in the main app.** Does the widget update within a few minutes? If you added `WidgetCenter.shared.reloadAllTimelines()` after saving a mood entry, it should update almost immediately.
+3. **Check the small widget.** Does the emoji match today's logged mood? Is the background gradient the right color?
+4. **Check the medium widget.** Does the note text appear? Is it truncated properly for long notes?
+5. **Check the large widget.** Do the 7 day circles show the correct colors? Are days with no entry shown in gray?
+6. **Remove all mood entries** (or test on a fresh simulator). Does the widget show a "No entry yet" state, or is it blank?
+7. **Widget gallery preview.** Long-press and edit the widget. Does the preview in the gallery show sample data, not an empty or loading state?
+8. **Check the console for errors.** Widget extensions fail silently. If the `ModelContainer` cannot be created (wrong App Group ID, missing entitlement), the widget shows the placeholder forever with no visible error.
+
+## Final Code
+
+### SharedModelContainer
+
+This file belongs to both the main app target and the widget target.
+
+```swift
+import Foundation
+import SwiftData
+
+enum SharedModelContainer {
+    static let appGroupIdentifier = "group.com.moodbit.shared"
+
+    static func create() throws -> ModelContainer {
+        let schema = Schema([MoodEntry.self])
+
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupIdentifier
+        ) else {
+            fatalError("App Group container not found. Verify the App Group entitlement is configured.")
+        }
+
+        let storeURL = containerURL.appendingPathComponent("Moodbit.store")
+
+        let configuration = ModelConfiguration(
+            "Moodbit",
+            schema: schema,
+            url: storeURL
+        )
+
+        return try ModelContainer(for: schema, configurations: [configuration])
+    }
+}
+```
+
+### MoodWidgetEntry and Provider
+
+```swift
+import WidgetKit
+import SwiftData
+
+struct DailyMood {
+    let dayLetter: String
+    let mood: Int?
+}
+
+struct MoodWidgetEntry: TimelineEntry {
+    let date: Date
+    let currentMood: Int?
+    let currentNote: String?
+    let weeklyMoods: [DailyMood]
+
+    var moodEmoji: String {
+        guard let mood = currentMood else { return "---" }
+        switch mood {
+        case 1: return "😣"
+        case 2: return "😕"
+        case 3: return "😐"
+        case 4: return "🙂"
+        case 5: return "😄"
+        default: return "😐"
+        }
+    }
+
+    var moodLabel: String {
+        guard let mood = currentMood else { return "No entry" }
+        switch mood {
+        case 1: return "Awful"
+        case 2: return "Bad"
+        case 3: return "Okay"
+        case 4: return "Good"
+        case 5: return "Great"
+        default: return "Unknown"
+        }
+    }
+
+    static var placeholder: MoodWidgetEntry {
+        MoodWidgetEntry(
+            date: .now,
+            currentMood: 4,
+            currentNote: "Feeling pretty good today",
+            weeklyMoods: ["M", "T", "W", "T", "F", "S", "S"].map {
+                DailyMood(dayLetter: $0, mood: Int.random(in: 2...5))
+            }
+        )
+    }
+
+    static var empty: MoodWidgetEntry {
+        MoodWidgetEntry(
+            date: .now,
+            currentMood: nil,
+            currentNote: nil,
+            weeklyMoods: ["M", "T", "W", "T", "F", "S", "S"].map {
+                DailyMood(dayLetter: $0, mood: nil)
+            }
+        )
+    }
+}
+```
+
+```swift
+import WidgetKit
+import SwiftData
+
+struct MoodWidgetProvider: TimelineProvider {
+    func placeholder(in context: Context) -> MoodWidgetEntry {
+        .placeholder
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (MoodWidgetEntry) -> Void) {
+        if context.isPreview {
+            completion(.placeholder)
+            return
+        }
+        let entry = fetchCurrentEntry()
+        completion(entry)
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<MoodWidgetEntry>) -> Void) {
+        let entry = fetchCurrentEntry()
+
+        let nextUpdate = Calendar.current.date(byAdding: .hour, value: 2, to: .now) ?? .now
+        let timeline = Timeline(entries: [entry], policy: .after(nextUpdate))
+        completion(timeline)
+    }
+
+    private func fetchCurrentEntry() -> MoodWidgetEntry {
+        guard let container = try? SharedModelContainer.create() else {
+            return .empty
+        }
+
+        let context = ModelContext(container)
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: .now)
+
+        let todayPredicate = #Predicate<MoodEntry> { entry in
+            entry.date >= todayStart
+        }
+
+        var todayDescriptor = FetchDescriptor<MoodEntry>(
+            predicate: todayPredicate,
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        todayDescriptor.fetchLimit = 1
+
+        let todayEntry = try? context.fetch(todayDescriptor).first
+
+        let sevenDaysAgo = calendar.date(byAdding: .day, value: -6, to: todayStart) ?? todayStart
+        let weekPredicate = #Predicate<MoodEntry> { entry in
+            entry.date >= sevenDaysAgo
+        }
+        let weekDescriptor = FetchDescriptor<MoodEntry>(
+            predicate: weekPredicate,
+            sortBy: [SortDescriptor(\.date)]
+        )
+        let weekEntries = (try? context.fetch(weekDescriptor)) ?? []
+
+        let dayLetters = calendar.veryShortWeekdaySymbols
+        let weeklyMoods: [DailyMood] = (0..<7).map { offset in
+            let day = calendar.date(byAdding: .day, value: offset, to: sevenDaysAgo)!
+            let dayEntries = weekEntries.filter { calendar.isDate($0.date, inSameDayAs: day) }
+            let weekdayIndex = (calendar.component(.weekday, from: day) - 1) % 7
+            let avg: Int? = dayEntries.isEmpty ? nil :
+                dayEntries.reduce(0) { $0 + $1.mood } / dayEntries.count
+            return DailyMood(dayLetter: dayLetters[weekdayIndex], mood: avg)
+        }
+
+        return MoodWidgetEntry(
+            date: .now,
+            currentMood: todayEntry?.mood,
+            currentNote: todayEntry?.note,
+            weeklyMoods: weeklyMoods
+        )
+    }
+}
+```
+
+### Widget Views
+
+```swift
+import SwiftUI
+import WidgetKit
+
+struct MoodWidgetView: View {
+    @Environment(\.widgetFamily) var family
+    let entry: MoodWidgetEntry
+
+    var body: some View {
+        switch family {
+        case .systemSmall:
+            SmallMoodWidget(entry: entry)
+        case .systemMedium:
+            MediumMoodWidget(entry: entry)
+        case .systemLarge:
+            LargeMoodWidget(entry: entry)
+        default:
+            SmallMoodWidget(entry: entry)
+        }
+    }
+}
+
+// MARK: - Small Widget
+
+struct SmallMoodWidget: View {
+    let entry: MoodWidgetEntry
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(entry.moodEmoji)
+                .font(.system(size: 48))
+
+            Text(entry.moodLabel)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .containerBackground(for: .widget) {
+            moodGradient(for: entry.currentMood)
+        }
+    }
+}
+
+// MARK: - Medium Widget
+
+struct MediumMoodWidget: View {
+    let entry: MoodWidgetEntry
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.moodEmoji)
+                    .font(.system(size: 40))
+
+                Text(entry.moodLabel)
+                    .font(.headline)
+
+                Text("Today")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+                .padding(.horizontal, 8)
+
+            VStack(alignment: .leading) {
+                if let note = entry.currentNote, !note.isEmpty {
+                    Text(note)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                } else {
+                    Text("No note yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .italic()
+                }
+
+                Spacer()
+            }
+
+            Spacer()
+        }
+        .padding(4)
+        .containerBackground(for: .widget) {
+            moodGradient(for: entry.currentMood)
+        }
+    }
+}
+
+// MARK: - Large Widget
+
+struct LargeMoodWidget: View {
+    let entry: MoodWidgetEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.moodEmoji)
+                        .font(.system(size: 40))
+
+                    Text(entry.moodLabel)
+                        .font(.headline)
+                }
+
+                Spacer()
+
+                if let note = entry.currentNote, !note.isEmpty {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 160)
+                }
+            }
+
+            Divider()
+
+            Text("Last 7 Days")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 0) {
+                ForEach(Array(entry.weeklyMoods.enumerated()), id: \.offset) { _, dailyMood in
+                    VStack(spacing: 6) {
+                        Circle()
+                            .fill(moodColor(for: dailyMood.mood))
+                            .frame(width: 28, height: 28)
+                            .overlay {
+                                if let mood = dailyMood.mood {
+                                    Text("\(mood)")
+                                        .font(.caption2)
+                                        .fontWeight(.bold)
+                                        .foregroundStyle(.white)
+                                }
+                            }
+
+                        Text(dailyMood.dayLetter)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(4)
+        .containerBackground(for: .widget) {
+            moodGradient(for: entry.currentMood)
+        }
+    }
+}
+
+// MARK: - Shared Helpers
+
+func moodColor(for mood: Int?) -> Color {
+    guard let mood else { return .gray.opacity(0.3) }
+    switch mood {
+    case 1: return .red
+    case 2: return .orange
+    case 3: return .yellow
+    case 4: return .mint
+    case 5: return .green
+    default: return .gray
+    }
+}
+
+func moodGradient(for mood: Int?) -> some View {
+    let baseColor = moodColor(for: mood)
+    return LinearGradient(
+        colors: [baseColor.opacity(0.15), baseColor.opacity(0.05)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+}
+```
+
+### Widget Bundle and Configuration
+
+```swift
+import SwiftUI
+import WidgetKit
+
+struct MoodWidget: Widget {
+    let kind = "MoodWidget"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: MoodWidgetProvider()) { entry in
+            MoodWidgetView(entry: entry)
+        }
+        .configurationDisplayName("Today's Mood")
+        .description("See your current mood at a glance.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+    }
+}
+
+@main
+struct MoodbitWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        MoodWidget()
+    }
+}
+```
+
+### Triggering Widget Refresh from the Main App
+
+Add this call wherever you save a new mood entry in the main app:
+
+```swift
+import WidgetKit
+
+// Call after saving a MoodEntry in the main app
+func notifyWidgetOfUpdate() {
+    WidgetCenter.shared.reloadAllTimelines()
+}
+```
+
+## Checkpoint
+
+Verify each of these before moving on:
+
+- [ ] The App Group identifier (`group.com.moodbit.shared`) is enabled in both the main app target's entitlements and the widget extension target's entitlements
+- [ ] `SharedModelContainer` uses the App Group container URL — not the default storage location
+- [ ] The `MoodEntry.swift` model file has target membership in both the main app and the widget extension
+- [ ] `getSnapshot()` returns sample data when `context.isPreview` is true, so the widget gallery looks good
+- [ ] `getTimeline()` fetches real data and sets a `.after(nextUpdate)` policy for 2-hour refresh
+- [ ] The main app calls `WidgetCenter.shared.reloadAllTimelines()` after saving a new mood entry
+- [ ] All three widget sizes render correctly — small shows emoji, medium shows emoji + note, large shows emoji + weekly dots
+- [ ] Widget views use `.containerBackground(for: .widget)` for backgrounds, not the `.background()` modifier
+- [ ] The widget handles the "no data" case gracefully — showing "No entry" text, not a blank or crashed widget
+
+## Challenge
+
+**Add a lock screen widget.**
+
+iOS 17 supports lock screen widgets using the `.accessoryCircular`, `.accessoryRectangular`, and `.accessoryInline` widget families. Add support for `.accessoryCircular` that shows today's mood emoji inside a `Gauge` ring (where the gauge value represents the mood on a 1-5 scale), and `.accessoryInline` that shows the emoji followed by the mood label as text.
+
+**Hint:** Lock screen widgets use a restricted color space — they render in a tinted monochrome style. Your mood colors will not be visible. Instead, focus on layout: use `Gauge(value: Double(mood), in: 1...5) { } currentValueLabel: { Text(emoji) }` with `.gaugeStyle(.accessoryCircularCapacity)` for the circular widget. Add the new families to `supportedFamilies` and handle them in your `@ViewBuilder` switch. Test in the simulator by adding the widget to the lock screen — long press the lock screen, tap "Customize," and look for your widget.

@@ -1,0 +1,1553 @@
+---
+title: "Mood Entry Flow"
+description: "Create the multi-step mood logging experience with a custom mood slider, emoji picker, text input, and tag selection — complete with haptic feedback and smooth animations."
+courseSlug: "ship-native"
+module: 2
+moduleTitle: "Core UI with SwiftUI"
+lesson: 3
+duration: "26 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "Multi-Step Form", "Custom Slider", "Haptic Feedback", "Animation", "User Input", "UX Design", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+The timeline shows existing moods. The design system makes them look consistent. Now we build the screen where users actually create a mood entry — the single most important interaction in Moodbit.
+
+This is not a simple form. A mood entry is an emotional moment. The user is pausing their day to check in with themselves. The UX needs to respect that. It should feel smooth, guided, and satisfying — not like filling out a survey. We are going to build a multi-step flow with a custom slider, emoji picker, free-text input, tag selection, haptic feedback at every transition, and animations that make each step feel intentional.
+
+## What You'll Learn
+
+- How to architect a multi-step form with discrete steps and animated transitions
+- Building a custom `MoodSlider` with a gradient track and haptic feedback on each level
+- Creating an `EmojiPicker` grid for quick mood association
+- Managing form state and validation with a dedicated ViewModel
+- Handling keyboard appearance with the `.focused` modifier
+- Wiring the save action through the repository pattern
+- Prompting AI for complex, multi-file features using the Plan-Execute-Verify workflow
+
+## Why This Matters
+
+Most mood tracking apps use a single screen with a basic slider and a text field. It works, but it feels clinical. Users log one entry and never come back.
+
+The multi-step approach solves this. Each step is focused — one decision at a time. The user never feels overwhelmed. The haptic feedback and animations create a tactile loop that makes the interaction feel rewarding. And the tag selection at the end gives structure to the entry without requiring effort.
+
+This pattern applies far beyond mood tracking. Onboarding flows, checkout processes, survey experiences — any time you need to collect multiple pieces of input from a user, a stepped flow with transitions and feedback will outperform a single monolithic form.
+
+## Plan Phase: Defining What We Build
+
+Before we touch any code, we need a plan. Open Claude Code in the Moodbit project and send this:
+
+```
+I need to build the mood entry flow for Moodbit — a multi-step
+form that lets users log their mood. Before writing code, help me
+plan the architecture.
+
+The flow has four steps:
+1. Mood Level — a custom slider from 1 (very low) to 5 (great),
+   with a gradient track and haptic feedback when the value changes
+2. Emoji — a grid of emoji options that map to mood categories
+   (happy, sad, anxious, calm, energized, tired, etc.)
+3. Note — a free-text field where the user can write about their
+   mood, with keyboard handling
+4. Tags — a selectable grid of predefined tags like "Work",
+   "Exercise", "Family", "Weather", "Sleep", "Social"
+
+Requirements:
+- Each step has a "Next" button and a "Back" button
+- Step 4 has a "Save" button instead of "Next"
+- Smooth horizontal slide transition between steps
+- The flow is presented as a sheet from the timeline
+- State is managed by a MoodEntryViewModel (@Observable)
+- Save goes through the MoodRepository
+
+Think through:
+1. What files do we need?
+2. What state does the ViewModel manage?
+3. How do we handle step transitions and validation?
+4. What are the edge cases?
+
+Give me the plan, no code yet.
+```
+
+Claude Code will come back with a file breakdown and architecture sketch. Review it. The pieces we need are:
+
+- **MoodEntryView.swift** — the container that manages step transitions
+- **MoodEntryViewModel.swift** — all form state, validation, and save logic
+- **MoodSlider.swift** — the custom slider component for step 1
+- **EmojiPicker.swift** — the emoji grid component for step 2
+
+Steps 3 and 4 are simple enough to live inside `MoodEntryView` as inline sections. No need to extract them into separate files unless they grow.
+
+### The Anti-Pattern: One Giant Form
+
+Here is what happens when you skip the planning step and just prompt "build a mood entry form":
+
+```swift
+// What AI generates without guidance — do NOT do this
+struct MoodEntryView: View {
+    @State private var moodLevel: Double = 3
+    @State private var emoji = ""
+    @State private var note = ""
+    @State private var tags: [String] = []
+
+    var body: some View {
+        Form {
+            Section("Mood Level") {
+                Slider(value: $moodLevel, in: 1...5, step: 1)
+            }
+            Section("Emoji") {
+                TextField("Pick an emoji", text: $emoji)
+            }
+            Section("Note") {
+                TextEditor(text: $note)
+            }
+            Section("Tags") {
+                // 15 toggles in a row...
+            }
+            Button("Save") { /* save everything */ }
+        }
+    }
+}
+```
+
+This is the default AI output for "build a form." It is a single scrolling view with every input crammed together. No steps. No transitions. No haptic feedback. The slider is a stock `Slider` — no gradient, no personality. The emoji input is a `TextField` where the user has to type an emoji. The keyboard covers the note field. There is no validation.
+
+It compiles. It "works." But no user would enjoy using it, and no one would come back to it a second time.
+
+The difference between this and what we are going to build is the plan. Let us execute it.
+
+## Execute Phase: Implementation
+
+Now we build. We are going to send one focused prompt per file, review the output, and iterate where needed.
+
+### MoodEntryViewModel
+
+The ViewModel comes first. It owns all the state, so every view depends on it.
+
+```
+Create MoodEntryViewModel.swift for the Moodbit mood entry flow.
+
+This is an @Observable class that manages a 4-step mood entry form.
+
+State:
+- currentStep: Int (1 through 4)
+- moodLevel: Int (1 through 5, default 3)
+- selectedEmoji: String? (optional, a single emoji character)
+- noteText: String (default empty)
+- selectedTags: Set<String>
+- isSaving: Bool (default false)
+
+Available tags (static let):
+["Work", "Exercise", "Family", "Weather", "Sleep", "Social",
+ "Food", "Health", "Travel", "Creative", "Relax", "Stress"]
+
+Computed:
+- canAdvance: Bool — step 1 always true, step 2 requires an emoji,
+  step 3 always true, step 4 always true
+- isFirstStep: Bool
+- isLastStep: Bool
+- stepTitle: String — "How are you feeling?", "Pick an emoji",
+  "Add a note", "Add tags"
+- stepSubtitle: String — short description for each step
+
+Methods:
+- advance() — go to next step if canAdvance
+- goBack() — go to previous step
+- save(using repository: MoodRepository) async — creates a
+  MoodEntry from the current state and saves via repository.
+  Sets isSaving during the operation.
+- reset() — clears all state back to defaults
+
+Use Swift 6 conventions. Do not import UIKit.
+```
+
+Here is what Claude Code generates. Let me walk through the review.
+
+```swift
+import Foundation
+import os
+
+@Observable
+final class MoodEntryViewModel {
+    // MARK: - Step State
+
+    var currentStep = 1
+    let totalSteps = 4
+
+    // MARK: - Form State
+
+    var moodLevel = 3
+    var selectedEmoji: String?
+    var noteText = ""
+    var selectedTags: Set<String> = []
+    var isSaving = false
+
+    // MARK: - Constants
+
+    static let availableTags = [
+        "Work", "Exercise", "Family", "Weather", "Sleep", "Social",
+        "Food", "Health", "Travel", "Creative", "Relax", "Stress"
+    ]
+
+    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+
+    // MARK: - Computed Properties
+
+    var canAdvance: Bool {
+        switch currentStep {
+        case 1: true
+        case 2: selectedEmoji != nil
+        case 3: true
+        case 4: true
+        default: false
+        }
+    }
+
+    var isFirstStep: Bool { currentStep == 1 }
+    var isLastStep: Bool { currentStep == totalSteps }
+
+    var stepTitle: String {
+        switch currentStep {
+        case 1: "How are you feeling?"
+        case 2: "Pick an emoji"
+        case 3: "Add a note"
+        case 4: "Add tags"
+        default: ""
+        }
+    }
+
+    var stepSubtitle: String {
+        switch currentStep {
+        case 1: "Slide to match your mood"
+        case 2: "Choose one that fits"
+        case 3: "Optional — write anything"
+        case 4: "Optional — what's on your mind?"
+        default: ""
+        }
+    }
+
+    // MARK: - Actions
+
+    func advance() {
+        guard canAdvance, currentStep < totalSteps else { return }
+        currentStep += 1
+    }
+
+    func goBack() {
+        guard currentStep > 1 else { return }
+        currentStep -= 1
+    }
+
+    func save(using repository: MoodRepository) async {
+        isSaving = true
+        defer { isSaving = false }
+
+        let entry = MoodEntry(
+            moodLevel: moodLevel,
+            emoji: selectedEmoji ?? "😐",
+            note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
+            tags: Array(selectedTags),
+            createdAt: .now
+        )
+
+        do {
+            try await repository.save(entry)
+            logger.info("Mood entry saved: level \(self.moodLevel)")
+        } catch {
+            logger.error("Failed to save mood entry: \(error.localizedDescription)")
+        }
+    }
+
+    func reset() {
+        currentStep = 1
+        moodLevel = 3
+        selectedEmoji = nil
+        noteText = ""
+        selectedTags = []
+        isSaving = false
+    }
+}
+```
+
+**Review:**
+
+- ✅ `@Observable` with `final class` — correct modern pattern, not `ObservableObject`
+- ✅ `Logger` instead of `print()` — follows our CLAUDE.md
+- ✅ `canAdvance` uses a clean switch — step 2 requires emoji selection, others are permissive
+- ✅ `save` is async with `defer` for `isSaving` — ensures the flag resets even on error
+- ✅ `reset()` clears everything — we call this after a successful save or on dismiss
+- ✅ Note text is trimmed before saving — good defensive code
+- ⚠️ The fallback emoji `"😐"` in `save` is a reasonable default, but we should ensure the UI prevents reaching save without an emoji. Our `canAdvance` on step 2 handles this, so the fallback is just a safety net. Acceptable.
+
+This ViewModel is clean. No iteration needed. Let us move to the custom slider.
+
+### MoodSlider
+
+This is the centerpiece of step 1. A stock `Slider` will not do — we need a gradient track that shifts color based on the mood level and haptic feedback on each discrete stop.
+
+```
+Create MoodSlider.swift — a custom SwiftUI slider for selecting
+a mood level from 1 to 5.
+
+Requirements:
+- Horizontal track with rounded ends
+- Track fills with a gradient that shifts based on the current value:
+  level 1 = deep blue/indigo, level 3 = yellow, level 5 = green
+- A circular thumb that shows the current level number
+- The thumb snaps to discrete values (1, 2, 3, 4, 5) — no
+  in-between values
+- Trigger UIImpactFeedbackGenerator (.light) when the value
+  changes to a new level
+- A row of labels below the track: "Awful", "Low", "Okay",
+  "Good", "Great"
+- Use a DragGesture for the interaction, not a Slider view
+- Binding to an Int value
+
+The component should be self-contained and reusable.
+Target iOS 17+. Use GeometryReader for track width calculation.
+```
+
+```swift
+import SwiftUI
+import UIKit
+
+struct MoodSlider: View {
+    @Binding var value: Int
+
+    private let range = 1...5
+    private let labels = ["Awful", "Low", "Okay", "Good", "Great"]
+    private let thumbSize: CGFloat = 44
+
+    @State private var isDragging = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            GeometryReader { geometry in
+                let trackWidth = geometry.size.width - thumbSize
+                let stepWidth = trackWidth / CGFloat(range.count - 1)
+                let thumbOffset = CGFloat(value - range.lowerBound) * stepWidth
+
+                ZStack(alignment: .leading) {
+                    // Background track
+                    Capsule()
+                        .fill(Color(.systemGray5))
+                        .frame(height: 8)
+                        .padding(.horizontal, thumbSize / 2)
+
+                    // Filled track with gradient
+                    Capsule()
+                        .fill(trackGradient)
+                        .frame(width: thumbOffset + thumbSize / 2, height: 8)
+                        .padding(.leading, thumbSize / 2)
+
+                    // Thumb
+                    Circle()
+                        .fill(.white)
+                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                        .frame(width: thumbSize, height: thumbSize)
+                        .overlay {
+                            Text("\(value)")
+                                .font(.system(.title3, design: .rounded, weight: .bold))
+                                .foregroundStyle(thumbColor)
+                        }
+                        .scaleEffect(isDragging ? 1.1 : 1.0)
+                        .offset(x: thumbOffset)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { gesture in
+                                    isDragging = true
+                                    let newValue = calculateValue(
+                                        from: gesture.location.x,
+                                        trackWidth: trackWidth,
+                                        stepWidth: stepWidth
+                                    )
+                                    if newValue != value {
+                                        value = newValue
+                                        triggerHaptic()
+                                    }
+                                }
+                                .onEnded { _ in
+                                    isDragging = false
+                                }
+                        )
+                }
+                .frame(height: thumbSize)
+            }
+            .frame(height: thumbSize)
+
+            // Labels
+            HStack {
+                ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
+                    Text(label)
+                        .font(.caption2)
+                        .fontWeight(index + 1 == value ? .semibold : .regular)
+                        .foregroundStyle(index + 1 == value ? thumbColor : .secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: value)
+        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isDragging)
+    }
+
+    // MARK: - Gradient
+
+    private var trackGradient: LinearGradient {
+        LinearGradient(
+            colors: [.indigo, .blue, .yellow, .orange, .green],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private var thumbColor: Color {
+        switch value {
+        case 1: .indigo
+        case 2: .blue
+        case 3: .yellow.opacity(0.9)
+        case 4: .orange
+        case 5: .green
+        default: .gray
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func calculateValue(
+        from locationX: CGFloat,
+        trackWidth: CGFloat,
+        stepWidth: CGFloat
+    ) -> Int {
+        let clamped = min(max(locationX - thumbSize / 2, 0), trackWidth)
+        let rawValue = Int(round(clamped / stepWidth)) + range.lowerBound
+        return min(max(rawValue, range.lowerBound), range.upperBound)
+    }
+
+    private func triggerHaptic() {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
+    }
+}
+
+#Preview {
+    @Previewable @State var mood = 3
+    MoodSlider(value: $mood)
+        .padding(32)
+}
+```
+
+**Review:**
+
+- ✅ Uses `DragGesture` instead of stock `Slider` — full control over appearance and behavior
+- ✅ Discrete snapping — `calculateValue` rounds to the nearest integer, no in-between values
+- ✅ Haptic feedback on every level change — `triggerHaptic()` fires only when `newValue != value`
+- ✅ Gradient track fills proportionally — the `Capsule` width grows with the thumb offset
+- ✅ Labels highlight the current selection with matching color and weight
+- ✅ Spring animations on thumb scale and position — satisfying feel
+- ✅ Thumb meets the 44pt minimum tap target
+- ⚠️ We import `UIKit` for `UIImpactFeedbackGenerator`. There is no pure SwiftUI haptic API that covers this use case. The iOS 17 `.sensoryFeedback` modifier is tied to value changes on views, not programmatic triggers during gestures. UIKit is the right call here.
+
+### EmojiPicker
+
+Step 2 needs a grid of emojis the user can tap to associate with their mood.
+
+```
+Create EmojiPicker.swift — a grid of emoji options for the Moodbit
+mood entry flow.
+
+Requirements:
+- Display a grid of emojis in a LazyVGrid with 4 columns
+- Emojis: 😊 😔 😰 😌 ⚡ 😴 😡 🥰 😂 🤔 😢 🎉
+- Each emoji is a tappable circle that highlights when selected
+- Only one emoji can be selected at a time
+- Binding to an optional String
+- Selected state: emoji scales up slightly and gets a colored
+  background ring
+- Trigger UISelectionFeedbackGenerator when selection changes
+- The component should be self-contained and reusable
+
+Target iOS 17+.
+```
+
+```swift
+import SwiftUI
+import UIKit
+
+struct EmojiPicker: View {
+    @Binding var selection: String?
+
+    private let emojis = [
+        "😊", "😔", "😰", "😌",
+        "⚡", "😴", "😡", "🥰",
+        "😂", "🤔", "😢", "🎉"
+    ]
+
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 12),
+        count: 4
+    )
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(emojis, id: \.self) { emoji in
+                let isSelected = selection == emoji
+
+                Button {
+                    if selection == emoji {
+                        selection = nil
+                    } else {
+                        selection = emoji
+                        triggerHaptic()
+                    }
+                } label: {
+                    Text(emoji)
+                        .font(.system(size: 36))
+                        .frame(width: 64, height: 64)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
+                        )
+                        .overlay(
+                            Circle()
+                                .strokeBorder(
+                                    isSelected ? Color.accentColor : .clear,
+                                    lineWidth: 2.5
+                                )
+                        )
+                        .scaleEffect(isSelected ? 1.1 : 1.0)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(accessibilityName(for: emoji))
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selection)
+    }
+
+    private func triggerHaptic() {
+        let generator = UISelectionFeedbackGenerator()
+        generator.selectionChanged()
+    }
+
+    private func accessibilityName(for emoji: String) -> String {
+        switch emoji {
+        case "😊": "Happy"
+        case "😔": "Sad"
+        case "😰": "Anxious"
+        case "😌": "Calm"
+        case "⚡": "Energized"
+        case "😴": "Tired"
+        case "😡": "Angry"
+        case "🥰": "Loved"
+        case "😂": "Amused"
+        case "🤔": "Thoughtful"
+        case "😢": "Tearful"
+        case "🎉": "Excited"
+        default: emoji
+        }
+    }
+}
+
+#Preview {
+    @Previewable @State var selected: String?
+    EmojiPicker(selection: $selected)
+        .padding()
+}
+```
+
+**Review:**
+
+- ✅ `LazyVGrid` with 4 columns — clean grid layout
+- ✅ Single selection with toggle-off — tapping a selected emoji deselects it
+- ✅ Accessibility labels — VoiceOver reads "Happy" instead of a raw emoji codepoint
+- ✅ `UISelectionFeedbackGenerator` — the lighter, "tick" haptic that matches selection actions
+- ✅ Spring animation on selection — the scale and ring feel responsive
+- ✅ 64pt tap targets — exceeds the 44pt minimum
+- ❌ Missing: the accessibility label should include the selected state. A VoiceOver user should hear "Happy, selected" when an emoji is chosen.
+
+That last point is worth an iteration.
+
+## Iteration
+
+```
+In EmojiPicker.swift, update the accessibility so that VoiceOver
+announces "Happy, selected" when an emoji is chosen. Add
+.accessibilityAddTraits(.isSelected) when isSelected is true.
+```
+
+The fix is two lines inside the `Button` label:
+
+```swift
+.accessibilityLabel(accessibilityName(for: emoji))
+.accessibilityAddTraits(isSelected ? .isSelected : [])
+```
+
+Small change, big impact for accessibility. This is the kind of detail that AI misses in the first pass but handles perfectly when you point it out.
+
+### MoodEntryView — The Container
+
+Now we assemble everything. This is the view that manages the step transitions and calls into the ViewModel.
+
+```
+Create MoodEntryView.swift — the container for the Moodbit mood
+entry flow. It is presented as a sheet.
+
+Requirements:
+- Takes a MoodRepository as a parameter for saving
+- Creates a @State MoodEntryViewModel
+- Shows a navigation bar with "X" dismiss button, step indicator
+  (e.g., "Step 2 of 4"), and the step title
+- Content area switches between 4 steps based on
+  viewModel.currentStep:
+  Step 1: MoodSlider bound to viewModel.moodLevel
+  Step 2: EmojiPicker bound to viewModel.selectedEmoji
+  Step 3: TextEditor for viewModel.noteText with placeholder,
+          using @FocusState for keyboard management
+  Step 4: Tag grid — a LazyVGrid of toggleable capsule buttons
+          from MoodEntryViewModel.availableTags, binding to
+          viewModel.selectedTags
+- Footer with Back and Next/Save buttons
+- Step transitions use .asymmetric transition: slide in from
+  trailing, slide out to leading (forward), reverse for back
+- Animate transitions with .easeInOut(duration: 0.25)
+- "Save" button calls viewModel.save and dismisses on success
+- Disable "Next" when viewModel.canAdvance is false
+- Show a ProgressView overlay when viewModel.isSaving
+
+Use @Environment(\.dismiss). Use .focused modifier for the
+note text field. Trigger a success haptic on save.
+```
+
+```swift
+import SwiftUI
+import UIKit
+
+struct MoodEntryView: View {
+    let repository: MoodRepository
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var viewModel = MoodEntryViewModel()
+    @FocusState private var isNoteFieldFocused: Bool
+    @State private var direction: NavigationDirection = .forward
+
+    enum NavigationDirection {
+        case forward, backward
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Step indicator
+                stepHeader
+
+                // Content
+                ZStack {
+                    stepContent
+                        .id(viewModel.currentStep)
+                        .transition(stepTransition)
+                }
+                .frame(maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
+
+                // Footer buttons
+                footerButtons
+            }
+            .navigationTitle(viewModel.stepTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                            .font(.title3)
+                    }
+                }
+
+                ToolbarItem(placement: .principal) {
+                    Text("Step \(viewModel.currentStep) of \(viewModel.totalSteps)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .overlay {
+                if viewModel.isSaving {
+                    Color.black.opacity(0.2)
+                        .ignoresSafeArea()
+                        .overlay { ProgressView() }
+                }
+            }
+            .interactiveDismissDisabled(viewModel.isSaving)
+        }
+    }
+
+    // MARK: - Step Header
+
+    private var stepHeader: some View {
+        VStack(spacing: 4) {
+            // Progress bar
+            GeometryReader { geometry in
+                let progress = CGFloat(viewModel.currentStep) / CGFloat(viewModel.totalSteps)
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(.systemGray5))
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: geometry.size.width * progress)
+                }
+            }
+            .frame(height: 4)
+            .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
+
+            Text(viewModel.stepSubtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Step Content
+
+    @ViewBuilder
+    private var stepContent: some View {
+        switch viewModel.currentStep {
+        case 1:
+            moodLevelStep
+        case 2:
+            emojiStep
+        case 3:
+            noteStep
+        case 4:
+            tagsStep
+        default:
+            EmptyView()
+        }
+    }
+
+    private var moodLevelStep: some View {
+        VStack {
+            Spacer()
+            MoodSlider(value: $viewModel.moodLevel)
+                .padding(.horizontal, 32)
+            Spacer()
+        }
+    }
+
+    private var emojiStep: some View {
+        VStack {
+            Spacer()
+            EmojiPicker(selection: $viewModel.selectedEmoji)
+                .padding(.horizontal, 24)
+            Spacer()
+        }
+    }
+
+    private var noteStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack(alignment: .topLeading) {
+                if viewModel.noteText.isEmpty {
+                    Text("What's on your mind?")
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 8)
+                        .padding(.leading, 5)
+                }
+
+                TextEditor(text: $viewModel.noteText)
+                    .focused($isNoteFieldFocused)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 120)
+            }
+            .padding()
+            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+
+            Text("\(viewModel.noteText.count)/280")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 24)
+        .onAppear { isNoteFieldFocused = true }
+        .onDisappear { isNoteFieldFocused = false }
+    }
+
+    private var tagsStep: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+
+        return ScrollView {
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(MoodEntryViewModel.availableTags, id: \.self) { tag in
+                    let isSelected = viewModel.selectedTags.contains(tag)
+
+                    Button {
+                        if isSelected {
+                            viewModel.selectedTags.remove(tag)
+                        } else {
+                            viewModel.selectedTags.insert(tag)
+                            triggerSelectionHaptic()
+                        }
+                    } label: {
+                        Text(tag)
+                            .font(.subheadline)
+                            .fontWeight(isSelected ? .semibold : .regular)
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(
+                                isSelected ? Color.accentColor : Color(.systemGray6),
+                                in: Capsule()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: viewModel.selectedTags)
+    }
+
+    // MARK: - Transition
+
+    private var stepTransition: AnyTransition {
+        switch direction {
+        case .forward:
+            .asymmetric(
+                insertion: .move(edge: .trailing).combined(with: .opacity),
+                removal: .move(edge: .leading).combined(with: .opacity)
+            )
+        case .backward:
+            .asymmetric(
+                insertion: .move(edge: .leading).combined(with: .opacity),
+                removal: .move(edge: .trailing).combined(with: .opacity)
+            )
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footerButtons: some View {
+        HStack(spacing: 16) {
+            if !viewModel.isFirstStep {
+                Button {
+                    direction = .backward
+                    isNoteFieldFocused = false
+                    viewModel.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.bordered)
+                .tint(.secondary)
+            }
+
+            Button {
+                if viewModel.isLastStep {
+                    saveEntry()
+                } else {
+                    direction = .forward
+                    isNoteFieldFocused = false
+                    viewModel.advance()
+                }
+            } label: {
+                Group {
+                    if viewModel.isLastStep {
+                        Label("Save", systemImage: "checkmark")
+                    } else {
+                        Label("Next", systemImage: "chevron.right")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewModel.canAdvance || viewModel.isSaving)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(.bar)
+    }
+
+    // MARK: - Actions
+
+    private func saveEntry() {
+        Task {
+            await viewModel.save(using: repository)
+            if !viewModel.isSaving {
+                triggerSuccessHaptic()
+                dismiss()
+            }
+        }
+    }
+
+    private func triggerSelectionHaptic() {
+        let generator = UISelectionFeedbackGenerator()
+        generator.selectionChanged()
+    }
+
+    private func triggerSuccessHaptic() {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+    }
+}
+
+#Preview {
+    MoodEntryView(repository: PreviewMoodRepository())
+}
+```
+
+**Review:**
+
+- ✅ Step transitions use `.asymmetric` with direction tracking — sliding forward goes left-to-right, backward goes right-to-left
+- ✅ `.id(viewModel.currentStep)` forces SwiftUI to re-render the content area, which triggers the transition
+- ✅ `@FocusState` for keyboard management — the note field auto-focuses on appear and dismisses on navigation
+- ✅ `.interactiveDismissDisabled` during save — prevents accidental swipe-dismiss while saving
+- ✅ Progress bar at the top gives spatial awareness of where the user is in the flow
+- ✅ Back button only appears after step 1 — no confusion on the first step
+- ✅ Footer has `.background(.bar)` — the system material that adapts to light/dark mode and provides the translucent bar effect
+- ✅ Tags use `Set<String>` for O(1) lookups on selection state
+- ⚠️ The note step auto-focuses the keyboard. On step transition back from step 4, the keyboard will flash briefly. We should add a short delay or only focus when the step is fully visible. This is a polish item we can address later.
+
+## Verify Phase
+
+Build the project. Run it in the simulator and verify each step:
+
+1. **Step 1 — Mood Slider.** Drag the thumb across all five levels. You should feel a light haptic tap at each stop. The gradient track should fill proportionally. The label below should highlight the current level.
+
+2. **Step 2 — Emoji Picker.** Tap an emoji. It should scale up and show a colored ring. Tap it again to deselect. The "Next" button should be disabled until an emoji is selected.
+
+3. **Step 3 — Note.** The keyboard should appear automatically. Type a few words. Tap "Next" — the keyboard should dismiss. Tap "Back" — the keyboard should reappear. The character count should update in real time.
+
+4. **Step 4 — Tags.** Tap several tags. They should toggle between filled and outlined. Tap "Save" — you should feel a success haptic and the sheet should dismiss.
+
+5. **Transitions.** Tap "Next" and "Back" repeatedly. The content should slide horizontally. Forward slides left-to-right out, right-to-left in. Backward is the reverse. No visual glitches.
+
+6. **Edge cases.** Dismiss the sheet mid-flow. Present it again — the state should be fresh (the ViewModel is recreated as `@State`). Try saving with an empty note — it should work. Try saving with no tags — it should work.
+
+If any step fails, the ViewModel is the first place to look. Every piece of state flows through it, so bugs in display or behavior almost always trace back to a state issue.
+
+## Final Code
+
+Here is the complete set of files we built. Each file is self-contained and follows our architecture.
+
+### MoodEntryViewModel.swift
+
+```swift
+import Foundation
+import os
+
+@Observable
+final class MoodEntryViewModel {
+    var currentStep = 1
+    let totalSteps = 4
+
+    var moodLevel = 3
+    var selectedEmoji: String?
+    var noteText = ""
+    var selectedTags: Set<String> = []
+    var isSaving = false
+
+    static let availableTags = [
+        "Work", "Exercise", "Family", "Weather", "Sleep", "Social",
+        "Food", "Health", "Travel", "Creative", "Relax", "Stress"
+    ]
+
+    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+
+    var canAdvance: Bool {
+        switch currentStep {
+        case 1: true
+        case 2: selectedEmoji != nil
+        case 3: true
+        case 4: true
+        default: false
+        }
+    }
+
+    var isFirstStep: Bool { currentStep == 1 }
+    var isLastStep: Bool { currentStep == totalSteps }
+
+    var stepTitle: String {
+        switch currentStep {
+        case 1: "How are you feeling?"
+        case 2: "Pick an emoji"
+        case 3: "Add a note"
+        case 4: "Add tags"
+        default: ""
+        }
+    }
+
+    var stepSubtitle: String {
+        switch currentStep {
+        case 1: "Slide to match your mood"
+        case 2: "Choose one that fits"
+        case 3: "Optional — write anything"
+        case 4: "Optional — what's on your mind?"
+        default: ""
+        }
+    }
+
+    func advance() {
+        guard canAdvance, currentStep < totalSteps else { return }
+        currentStep += 1
+    }
+
+    func goBack() {
+        guard currentStep > 1 else { return }
+        currentStep -= 1
+    }
+
+    func save(using repository: MoodRepository) async {
+        isSaving = true
+        defer { isSaving = false }
+
+        let entry = MoodEntry(
+            moodLevel: moodLevel,
+            emoji: selectedEmoji ?? "😐",
+            note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
+            tags: Array(selectedTags),
+            createdAt: .now
+        )
+
+        do {
+            try await repository.save(entry)
+            logger.info("Mood entry saved: level \(self.moodLevel)")
+        } catch {
+            logger.error("Failed to save mood entry: \(error.localizedDescription)")
+        }
+    }
+
+    func reset() {
+        currentStep = 1
+        moodLevel = 3
+        selectedEmoji = nil
+        noteText = ""
+        selectedTags = []
+        isSaving = false
+    }
+}
+```
+
+### MoodSlider.swift
+
+```swift
+import SwiftUI
+import UIKit
+
+struct MoodSlider: View {
+    @Binding var value: Int
+
+    private let range = 1...5
+    private let labels = ["Awful", "Low", "Okay", "Good", "Great"]
+    private let thumbSize: CGFloat = 44
+
+    @State private var isDragging = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            GeometryReader { geometry in
+                let trackWidth = geometry.size.width - thumbSize
+                let stepWidth = trackWidth / CGFloat(range.count - 1)
+                let thumbOffset = CGFloat(value - range.lowerBound) * stepWidth
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(.systemGray5))
+                        .frame(height: 8)
+                        .padding(.horizontal, thumbSize / 2)
+
+                    Capsule()
+                        .fill(trackGradient)
+                        .frame(width: thumbOffset + thumbSize / 2, height: 8)
+                        .padding(.leading, thumbSize / 2)
+
+                    Circle()
+                        .fill(.white)
+                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                        .frame(width: thumbSize, height: thumbSize)
+                        .overlay {
+                            Text("\(value)")
+                                .font(.system(.title3, design: .rounded, weight: .bold))
+                                .foregroundStyle(thumbColor)
+                        }
+                        .scaleEffect(isDragging ? 1.1 : 1.0)
+                        .offset(x: thumbOffset)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { gesture in
+                                    isDragging = true
+                                    let newValue = calculateValue(
+                                        from: gesture.location.x,
+                                        trackWidth: trackWidth,
+                                        stepWidth: stepWidth
+                                    )
+                                    if newValue != value {
+                                        value = newValue
+                                        triggerHaptic()
+                                    }
+                                }
+                                .onEnded { _ in
+                                    isDragging = false
+                                }
+                        )
+                }
+                .frame(height: thumbSize)
+            }
+            .frame(height: thumbSize)
+
+            HStack {
+                ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
+                    Text(label)
+                        .font(.caption2)
+                        .fontWeight(index + 1 == value ? .semibold : .regular)
+                        .foregroundStyle(index + 1 == value ? thumbColor : .secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: value)
+        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isDragging)
+    }
+
+    private var trackGradient: LinearGradient {
+        LinearGradient(
+            colors: [.indigo, .blue, .yellow, .orange, .green],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private var thumbColor: Color {
+        switch value {
+        case 1: .indigo
+        case 2: .blue
+        case 3: .yellow.opacity(0.9)
+        case 4: .orange
+        case 5: .green
+        default: .gray
+        }
+    }
+
+    private func calculateValue(
+        from locationX: CGFloat,
+        trackWidth: CGFloat,
+        stepWidth: CGFloat
+    ) -> Int {
+        let clamped = min(max(locationX - thumbSize / 2, 0), trackWidth)
+        let rawValue = Int(round(clamped / stepWidth)) + range.lowerBound
+        return min(max(rawValue, range.lowerBound), range.upperBound)
+    }
+
+    private func triggerHaptic() {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
+    }
+}
+
+#Preview {
+    @Previewable @State var mood = 3
+    MoodSlider(value: $mood)
+        .padding(32)
+}
+```
+
+### EmojiPicker.swift
+
+```swift
+import SwiftUI
+import UIKit
+
+struct EmojiPicker: View {
+    @Binding var selection: String?
+
+    private let emojis = [
+        "😊", "😔", "😰", "😌",
+        "⚡", "😴", "😡", "🥰",
+        "😂", "🤔", "😢", "🎉"
+    ]
+
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 12),
+        count: 4
+    )
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(emojis, id: \.self) { emoji in
+                let isSelected = selection == emoji
+
+                Button {
+                    if selection == emoji {
+                        selection = nil
+                    } else {
+                        selection = emoji
+                        triggerHaptic()
+                    }
+                } label: {
+                    Text(emoji)
+                        .font(.system(size: 36))
+                        .frame(width: 64, height: 64)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
+                        )
+                        .overlay(
+                            Circle()
+                                .strokeBorder(
+                                    isSelected ? Color.accentColor : .clear,
+                                    lineWidth: 2.5
+                                )
+                        )
+                        .scaleEffect(isSelected ? 1.1 : 1.0)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(accessibilityName(for: emoji))
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selection)
+    }
+
+    private func triggerHaptic() {
+        let generator = UISelectionFeedbackGenerator()
+        generator.selectionChanged()
+    }
+
+    private func accessibilityName(for emoji: String) -> String {
+        switch emoji {
+        case "😊": "Happy"
+        case "😔": "Sad"
+        case "😰": "Anxious"
+        case "😌": "Calm"
+        case "⚡": "Energized"
+        case "😴": "Tired"
+        case "😡": "Angry"
+        case "🥰": "Loved"
+        case "😂": "Amused"
+        case "🤔": "Thoughtful"
+        case "😢": "Tearful"
+        case "🎉": "Excited"
+        default: emoji
+        }
+    }
+}
+
+#Preview {
+    @Previewable @State var selected: String?
+    EmojiPicker(selection: $selected)
+        .padding()
+}
+```
+
+### MoodEntryView.swift
+
+```swift
+import SwiftUI
+import UIKit
+
+struct MoodEntryView: View {
+    let repository: MoodRepository
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var viewModel = MoodEntryViewModel()
+    @FocusState private var isNoteFieldFocused: Bool
+    @State private var direction: NavigationDirection = .forward
+
+    enum NavigationDirection {
+        case forward, backward
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                stepHeader
+
+                ZStack {
+                    stepContent
+                        .id(viewModel.currentStep)
+                        .transition(stepTransition)
+                }
+                .frame(maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
+
+                footerButtons
+            }
+            .navigationTitle(viewModel.stepTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                            .font(.title3)
+                    }
+                }
+
+                ToolbarItem(placement: .principal) {
+                    Text("Step \(viewModel.currentStep) of \(viewModel.totalSteps)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .overlay {
+                if viewModel.isSaving {
+                    Color.black.opacity(0.2)
+                        .ignoresSafeArea()
+                        .overlay { ProgressView() }
+                }
+            }
+            .interactiveDismissDisabled(viewModel.isSaving)
+        }
+    }
+
+    // MARK: - Step Header
+
+    private var stepHeader: some View {
+        VStack(spacing: 4) {
+            GeometryReader { geometry in
+                let progress = CGFloat(viewModel.currentStep) / CGFloat(viewModel.totalSteps)
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(.systemGray5))
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: geometry.size.width * progress)
+                }
+            }
+            .frame(height: 4)
+            .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
+
+            Text(viewModel.stepSubtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Step Content
+
+    @ViewBuilder
+    private var stepContent: some View {
+        switch viewModel.currentStep {
+        case 1: moodLevelStep
+        case 2: emojiStep
+        case 3: noteStep
+        case 4: tagsStep
+        default: EmptyView()
+        }
+    }
+
+    private var moodLevelStep: some View {
+        VStack {
+            Spacer()
+            MoodSlider(value: $viewModel.moodLevel)
+                .padding(.horizontal, 32)
+            Spacer()
+        }
+    }
+
+    private var emojiStep: some View {
+        VStack {
+            Spacer()
+            EmojiPicker(selection: $viewModel.selectedEmoji)
+                .padding(.horizontal, 24)
+            Spacer()
+        }
+    }
+
+    private var noteStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack(alignment: .topLeading) {
+                if viewModel.noteText.isEmpty {
+                    Text("What's on your mind?")
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 8)
+                        .padding(.leading, 5)
+                }
+
+                TextEditor(text: $viewModel.noteText)
+                    .focused($isNoteFieldFocused)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 120)
+            }
+            .padding()
+            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+
+            Text("\(viewModel.noteText.count)/280")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 24)
+        .onAppear { isNoteFieldFocused = true }
+        .onDisappear { isNoteFieldFocused = false }
+    }
+
+    private var tagsStep: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+
+        return ScrollView {
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(MoodEntryViewModel.availableTags, id: \.self) { tag in
+                    let isSelected = viewModel.selectedTags.contains(tag)
+
+                    Button {
+                        if isSelected {
+                            viewModel.selectedTags.remove(tag)
+                        } else {
+                            viewModel.selectedTags.insert(tag)
+                            triggerSelectionHaptic()
+                        }
+                    } label: {
+                        Text(tag)
+                            .font(.subheadline)
+                            .fontWeight(isSelected ? .semibold : .regular)
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(
+                                isSelected ? Color.accentColor : Color(.systemGray6),
+                                in: Capsule()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: viewModel.selectedTags)
+    }
+
+    // MARK: - Transition
+
+    private var stepTransition: AnyTransition {
+        switch direction {
+        case .forward:
+            .asymmetric(
+                insertion: .move(edge: .trailing).combined(with: .opacity),
+                removal: .move(edge: .leading).combined(with: .opacity)
+            )
+        case .backward:
+            .asymmetric(
+                insertion: .move(edge: .leading).combined(with: .opacity),
+                removal: .move(edge: .trailing).combined(with: .opacity)
+            )
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footerButtons: some View {
+        HStack(spacing: 16) {
+            if !viewModel.isFirstStep {
+                Button {
+                    direction = .backward
+                    isNoteFieldFocused = false
+                    viewModel.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.bordered)
+                .tint(.secondary)
+            }
+
+            Button {
+                if viewModel.isLastStep {
+                    saveEntry()
+                } else {
+                    direction = .forward
+                    isNoteFieldFocused = false
+                    viewModel.advance()
+                }
+            } label: {
+                Group {
+                    if viewModel.isLastStep {
+                        Label("Save", systemImage: "checkmark")
+                    } else {
+                        Label("Next", systemImage: "chevron.right")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewModel.canAdvance || viewModel.isSaving)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(.bar)
+    }
+
+    // MARK: - Actions
+
+    private func saveEntry() {
+        Task {
+            await viewModel.save(using: repository)
+            if !viewModel.isSaving {
+                triggerSuccessHaptic()
+                dismiss()
+            }
+        }
+    }
+
+    private func triggerSelectionHaptic() {
+        let generator = UISelectionFeedbackGenerator()
+        generator.selectionChanged()
+    }
+
+    private func triggerSuccessHaptic() {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+    }
+}
+
+#Preview {
+    MoodEntryView(repository: PreviewMoodRepository())
+}
+```
+
+## Checkpoint
+
+Let us confirm what we built and why each piece matters.
+
+**MoodEntryViewModel** owns all form state. No state lives in the view. This means the view is purely declarative — it reads from the ViewModel and sends actions to it. If you need to unit test the mood entry logic (and you will, in Module 6), you test the ViewModel directly without touching any UI.
+
+**MoodSlider** replaces the stock `Slider` with a custom control that has personality. The gradient track, discrete snapping, and haptic feedback make a 1-5 selection feel physical. Users remember how an app feels more than how it looks.
+
+**EmojiPicker** uses a grid instead of a text field. This is a critical UX choice — giving users options to tap is always faster and more accessible than asking them to type. The accessibility labels ensure VoiceOver users get the same experience.
+
+**MoodEntryView** orchestrates the flow with directional transitions. The `.id` modifier combined with `.transition` is the pattern for animated view switching in SwiftUI. The `NavigationDirection` enum ensures the slides always match the user's mental model — forward goes left, backward goes right.
+
+**Haptic feedback** appears at three levels: light impact on the slider, selection tick on emoji and tag changes, and a success notification on save. These are not random — they follow Apple's haptic design guidelines where impact means adjustment, selection means choice, and notification means completion.
+
+---
+
+## Challenge
+
+You have the mood entry flow. Now extend it.
+
+**Add a fifth step: "Activity."** Between the current step 3 (note) and step 4 (tags), insert a new step that lets the user pick what they were doing when they logged this mood. Show a 2-column grid of activities with SF Symbol icons: Reading (book), Working (laptopcomputer), Exercising (figure.run), Eating (fork.knife), Commuting (car), Socializing (person.2), Resting (bed.double), Outdoors (sun.max).
+
+This requires changes in three places:
+1. The ViewModel — add `selectedActivity: String?`, update `totalSteps` to 5, shift step titles and `canAdvance` logic
+2. The view — add the activity step content and adjust step numbering
+3. The model — add the activity field to `MoodEntry`
+
+Prompt Claude Code for each change separately. Review each diff. This is the iterative workflow in action — one focused change at a time, not one giant prompt for everything.

@@ -1,0 +1,1212 @@
+---
+title: "AI Insights Engine"
+description: "Build the intelligence layer that analyzes mood patterns over time, generates personalized journal prompts, and creates weekly insight summaries by combining cloud AI with on-device ML."
+courseSlug: "ship-native"
+module: 4
+moduleTitle: "AI Integration"
+lesson: 3
+duration: "24 min read"
+difficulty: "advanced"
+topics: ["AI Insights", "Pattern Analysis", "Personalization", "Prompt Engineering", "Weekly Summary", "Hybrid AI", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Up to this point, Moodbit records moods and lets users write journal entries. That is useful, but it is not intelligent. The app knows what the user felt — it does not know *why*, and it cannot tell the user anything they do not already know.
+
+This lesson changes that. We are building the AI Insights Engine — the layer that looks at a user's mood data over days and weeks, detects patterns, generates personalized journal prompts, and produces weekly summaries that feel like they were written by a therapist who actually pays attention. This is the feature that turns Moodbit from a logging tool into something people open every morning.
+
+We will combine OpenAI for rich, contextual insights with Apple's NaturalLanguage framework for fast, on-device sentiment analysis. Cloud AI handles the heavy thinking. On-device ML handles the things that need to be instant and private.
+
+## What You'll Learn
+
+- How to build an `InsightsEngine` that aggregates mood data across configurable time windows (7-day, 30-day)
+- Pattern detection: mood trends over time, day-of-week patterns, and common trigger identification
+- Generating personalized journal prompts based on a user's recent entries using prompt engineering
+- Creating `DailyInsight` summaries on a weekly and monthly cadence
+- Combining OpenAI (rich narrative insights) with Apple's NaturalLanguage framework (fast on-device sentiment scoring)
+- Building an `InsightsView` with cards for trends, suggestions, and weekly summaries
+- Managing async insight generation through an `InsightsViewModel` with proper caching
+
+## Why This Matters
+
+Generic wellness apps give everyone the same advice. "Try meditating." "Drink more water." Users see through this in a week and stop opening the app. Personalized insights — "You tend to feel anxious on Mondays, especially when you mention work deadlines" — are genuinely useful. They make the user feel understood, and they provide actionable self-awareness that generic tips never will.
+
+The technical challenge is real, though. You need to aggregate data over time, format it into prompts that produce useful output, cache results so you are not burning API calls on every screen load, and fall back to on-device analysis when the network is unavailable. This is the kind of feature where the architecture matters as much as the AI.
+
+## Plan Phase: Designing the Intelligence Layer
+
+Open Claude Code in Plan mode. We need the AI to think through the data flow before writing anything:
+
+```
+I am building an AI Insights Engine for Moodbit, our mood journal
+app. Before writing code, help me plan the architecture.
+
+Context:
+- We have MoodEntry objects with: mood (1-5 scale), journalText
+  (optional String), triggers ([String]), date (Date)
+- We use SwiftData for persistence
+- We have an existing OpenAIService for API calls
+- We target iOS 17+, Swift 6 strict concurrency
+
+The Insights Engine should:
+1. Aggregate mood data over time windows (7-day, 30-day)
+2. Detect patterns: mood trends, day-of-week patterns, common
+   triggers
+3. Generate personalized journal prompts based on recent entries
+4. Produce weekly DailyInsight summaries (title + body + suggestions)
+5. Use OpenAI for rich insights, NaturalLanguage framework for
+   on-device sentiment analysis as a fallback and for quick scoring
+6. Cache generated insights to avoid redundant API calls
+7. All types @Sendable, all UI-facing code @MainActor
+
+Think through:
+- What are the core types (InsightsEngine, DailyInsight,
+  MoodPattern, InsightCache)?
+- How does the prompt engineering work — what context do we send
+  to OpenAI?
+- Where does NaturalLanguage fit vs. OpenAI?
+- How do we avoid regenerating insights that are already cached?
+- What is the failure/fallback strategy?
+
+Do not generate code yet. Give me the plan.
+```
+
+### What the AI Plan Should Contain
+
+A solid plan will include:
+
+1. **Core types** — `InsightsEngine` as the orchestrator, `DailyInsight` as the output model, `MoodPattern` to hold detected patterns, and an `InsightCache` (or a caching layer inside the engine) that stores generated insights by date range.
+2. **Two-tier analysis** — NaturalLanguage for instant sentiment scores and basic trend math (average mood by day of week, trigger frequency counts). OpenAI for narrative summaries, personalized prompts, and the "why" behind patterns.
+3. **Prompt structure** — the engine formats mood data into a structured prompt: date range, mood scores with timestamps, top triggers, journal excerpts. The system prompt defines the AI's role as a supportive wellness assistant.
+4. **Caching strategy** — insights keyed by `(timeWindow, generationDate)`. A weekly insight generated on Monday does not need regenerating until the following Monday.
+5. **Fallback** — if OpenAI fails (network error, rate limit), fall back to a locally generated insight using NaturalLanguage sentiment scores and simple trend descriptions.
+
+### Anti-Pattern: One-Size-Fits-All Insights
+
+Here is the mistake most developers make:
+
+```
+Generate a motivational quote for the user based on their mood.
+```
+
+This produces generic output that has nothing to do with the user's actual data. "Keep smiling!" when someone has logged five anxious days in a row is not just unhelpful — it feels dismissive. The fix is sending real, aggregated data in the prompt. The AI cannot personalize what it cannot see.
+
+The second anti-pattern is **never caching generated insights**. Every time the user opens the Insights tab, you fire an API call. This burns through your OpenAI budget, adds latency on every view appearance, and produces slightly different text each time — which feels inconsistent and unreliable. Cache aggressively.
+
+## Execute Phase: Implementation
+
+Switch to Execute mode. Here is the prompt:
+
+```
+Build the Moodbit Insights Engine. Generate three files with full
+Swift 6 strict concurrency compliance:
+
+1. InsightsEngine.swift — the analysis + generation layer
+   - Takes a repository (to fetch MoodEntry data) and an
+     OpenAIService
+   - Method: analyzePeriod(_ window: TimeWindow) async throws
+     -> DailyInsight
+   - Method: generateJournalPrompt(recentEntries: [MoodEntry])
+     async throws -> String
+   - TimeWindow enum: .week, .month
+   - Internally uses NaturalLanguage for sentiment scoring of
+     journal text
+   - Sends aggregated data to OpenAI for rich narrative insights
+   - Caches insights in a dictionary keyed by TimeWindow + Date
+   - DailyInsight model: id, title, body, suggestions [String],
+     moodTrend (up/down/stable), generatedAt Date
+   - MoodPattern model: averageMood Double, dayOfWeekScores
+     [String: Double], topTriggers [String], trendDirection
+   - Mark @Sendable where needed, use os.Logger
+
+2. InsightsViewModel.swift — @MainActor @Observable
+   - Properties: weeklyInsight (DailyInsight?), monthlyInsight
+     (DailyInsight?), journalPrompt (String?), isLoading, error
+   - Methods: loadInsights() async, refreshInsights() async,
+     generatePrompt() async
+   - Uses InsightsEngine under the hood
+   - Handles loading/error states cleanly
+
+3. InsightsView.swift — SwiftUI view
+   - Shows insight cards: weekly summary, monthly summary
+   - Each card displays title, body text, trend indicator
+     (arrow up/down/stable), and suggestion chips
+   - A "Journal Prompt" section with a generated prompt and
+     a refresh button
+   - Loading and empty states
+   - Pull-to-refresh
+   - #Preview
+
+Use os.Logger everywhere. Zero print(). No singletons.
+No ObservableObject/@Published. @Observable only.
+```
+
+### Reviewing the AI Output
+
+When the code comes back, here is your checklist:
+
+**InsightsEngine.swift:**
+
+- ✅ `InsightsEngine` is a `final class` (or `actor`) with an `init` that takes protocol-based dependencies
+- ✅ `DailyInsight` is a simple value type (struct) conforming to `Identifiable` and `Sendable`
+- ✅ `MoodPattern` is a struct with `averageMood`, `dayOfWeekScores`, `topTriggers`, `trendDirection`
+- ✅ `TimeWindow` enum is `Hashable` and `Sendable`
+- ✅ NaturalLanguage is imported and used for `NLTagger` sentiment scoring
+- ✅ The OpenAI prompt includes actual user data — mood scores, dates, triggers, journal excerpts
+- ✅ The cache dictionary prevents redundant API calls for the same time window
+- ⚠️ If the prompt sends raw journal text to OpenAI — check that you are comfortable with the privacy implications. Consider sending only sentiment scores and trigger keywords, not full text
+- ⚠️ If the cache has no expiration logic — note it for iteration. A cache that never invalidates will serve stale insights forever
+- ❌ If it uses `print()` anywhere — reject
+- ❌ If it hardcodes the OpenAI model name or API key — reject
+- ❌ If `DailyInsight` is a class instead of a struct — reject
+
+**InsightsViewModel.swift:**
+
+- ✅ `@MainActor` and `@Observable`
+- ✅ Calls `InsightsEngine` methods in async contexts
+- ✅ Sets `isLoading` before and after every async operation
+- ✅ Catches errors and stores a user-friendly message
+- ❌ If it creates its own `InsightsEngine` internally with hardcoded dependencies — reject. Dependencies should be injected via `init`
+- ❌ If it uses `Task.detached` without a good reason — reject
+
+**InsightsView.swift:**
+
+- ✅ Uses `@State` with the ViewModel (not `@StateObject`)
+- ✅ Cards use `.background(.ultraThinMaterial)` or similar for visual separation
+- ✅ Shows a `ProgressView` during loading
+- ✅ Shows `ContentUnavailableView` when no insights exist yet
+- ✅ Includes `.refreshable { }` for pull-to-refresh
+- ❌ If it puts business logic in the View — reject. All logic belongs in the ViewModel or Engine
+
+## Iteration
+
+After reviewing, send this follow-up:
+
+```
+Good structure. Make these adjustments:
+
+1. In InsightsEngine, add a cache expiration check — if the cached
+   insight's generatedAt is older than the time window (7 days for
+   weekly, 30 for monthly), invalidate it and regenerate
+2. Add a fallback path: if OpenAI fails, generate a basic insight
+   using only NaturalLanguage sentiment scores and simple trend
+   math (no network required)
+3. In the OpenAI prompt, do NOT send raw journal text — only send
+   sentiment scores and trigger keywords for privacy
+4. Add a MoodTrend enum (.improving, .declining, .stable) to
+   DailyInsight instead of a raw string
+5. In InsightsView, add a subtle animation when insight cards
+   appear (opacity + offset transition)
+6. Add doc comments to all public methods
+
+Zero warnings. Swift 6 strict concurrency.
+```
+
+This iteration tightens the three things that matter most: privacy (no raw text to the cloud), resilience (offline fallback), and polish (animations, cache expiry).
+
+## Verify Phase
+
+Before moving on, confirm every item:
+
+**In Xcode:**
+1. Build with `Cmd+B` — zero errors, zero warnings
+2. Run the app — navigate to the Insights tab without crashing
+3. With network available — verify a weekly insight generates and displays
+4. Toggle airplane mode — verify the fallback insight generates using on-device NaturalLanguage
+5. Open Insights again after it has already generated — verify the cached result loads instantly (no loading spinner)
+
+**In the code:**
+1. Grep for `print(` — zero matches
+2. Grep for `ObservableObject`, `@Published`, `@StateObject` — zero matches
+3. Grep for `static let shared` — zero matches
+4. Confirm `InsightsEngine` does not send raw `journalText` to OpenAI — only sentiment scores and trigger keywords
+5. Confirm the cache expiry logic works: a weekly insight older than 7 days triggers regeneration
+6. Confirm `DailyInsight` and `MoodPattern` are structs, not classes
+7. Confirm `InsightsViewModel` receives its dependencies via `init`, not by creating them internally
+
+**Edge cases to test:**
+1. User with zero mood entries — should show a "Log some moods first" empty state, not crash
+2. User with entries but no journal text — insights should still generate from mood scores and triggers alone
+3. OpenAI returns malformed JSON — the engine should catch the decoding error and fall back gracefully
+
+## Final Code
+
+Here are the complete, compilable files.
+
+### InsightsEngine.swift
+
+```swift
+import Foundation
+import NaturalLanguage
+import os
+
+// MARK: - Models
+
+/// Represents a time window for insight aggregation.
+enum TimeWindow: String, Hashable, Sendable {
+    case week
+    case month
+
+    var days: Int {
+        switch self {
+        case .week: 7
+        case .month: 30
+        }
+    }
+}
+
+/// The trend direction of a user's mood over a time period.
+enum MoodTrend: String, Sendable, Codable {
+    case improving
+    case declining
+    case stable
+}
+
+/// A generated insight for a specific time period.
+struct DailyInsight: Identifiable, Sendable {
+    let id: UUID
+    let title: String
+    let body: String
+    let suggestions: [String]
+    let moodTrend: MoodTrend
+    let generatedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        body: String,
+        suggestions: [String],
+        moodTrend: MoodTrend,
+        generatedAt: Date = .now
+    ) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.suggestions = suggestions
+        self.moodTrend = moodTrend
+        self.generatedAt = generatedAt
+    }
+}
+
+/// Detected mood patterns over a time period.
+struct MoodPattern: Sendable {
+    let averageMood: Double
+    let dayOfWeekScores: [String: Double]
+    let topTriggers: [String]
+    let trendDirection: MoodTrend
+    let sentimentScores: [Double]
+}
+
+// MARK: - Cache Key
+
+private struct InsightCacheKey: Hashable {
+    let window: TimeWindow
+    let anchorDate: String // formatted as yyyy-MM-dd
+}
+
+// MARK: - Insights Engine
+
+/// Orchestrates mood pattern analysis, combining OpenAI for rich narrative
+/// insights with on-device NaturalLanguage for fast sentiment scoring.
+final class InsightsEngine: Sendable {
+    private let openAIService: OpenAIServiceProtocol
+    private let repository: MoodRepositoryProtocol
+    private let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "InsightsEngine"
+    )
+
+    /// In-memory cache of generated insights, keyed by window + date.
+    private let cache = NSCache<NSString, CacheEntry>()
+
+    init(
+        openAIService: OpenAIServiceProtocol,
+        repository: MoodRepositoryProtocol
+    ) {
+        self.openAIService = openAIService
+        self.repository = repository
+    }
+
+    // MARK: - Public API
+
+    /// Analyzes mood entries within the given time window and generates
+    /// a personalized insight. Returns a cached result if still valid.
+    func analyzePeriod(_ window: TimeWindow) async throws -> DailyInsight {
+        let cacheKey = makeCacheKey(window: window)
+
+        if let cached = cache.object(forKey: cacheKey as NSString),
+           !isExpired(cached, window: window) {
+            logger.debug("Returning cached insight for \(window.rawValue).")
+            return cached.insight
+        }
+
+        let entries = try await repository.fetchEntries(
+            from: Calendar.current.date(
+                byAdding: .day, value: -window.days, to: .now
+            ) ?? .now,
+            to: .now
+        )
+
+        guard !entries.isEmpty else {
+            logger.info("No entries for \(window.rawValue) window.")
+            throw InsightsError.insufficientData
+        }
+
+        let pattern = analyzePattern(entries)
+
+        do {
+            let insight = try await generateCloudInsight(
+                pattern: pattern,
+                window: window,
+                entryCount: entries.count
+            )
+            cacheInsight(insight, key: cacheKey)
+            return insight
+        } catch {
+            logger.warning(
+                "OpenAI failed, falling back to on-device: \(error.localizedDescription)"
+            )
+            let fallback = generateLocalInsight(pattern: pattern, window: window)
+            cacheInsight(fallback, key: cacheKey)
+            return fallback
+        }
+    }
+
+    /// Generates a personalized journal prompt based on recent mood entries.
+    /// Sends only sentiment scores and triggers to OpenAI — never raw text.
+    func generateJournalPrompt(
+        recentEntries: [MoodEntry]
+    ) async throws -> String {
+        guard !recentEntries.isEmpty else {
+            throw InsightsError.insufficientData
+        }
+
+        let sentimentSummary = recentEntries.prefix(5).map { entry in
+            let sentiment = scoreSentiment(entry.journalText ?? "")
+            let triggers = entry.triggers.joined(separator: ", ")
+            return "Date: \(formatted(entry.date)), Mood: \(entry.mood)/5, "
+                + "Sentiment: \(String(format: "%.2f", sentiment)), "
+                + "Triggers: \(triggers.isEmpty ? "none" : triggers)"
+        }.joined(separator: "\n")
+
+        let prompt = """
+        Based on these recent mood journal entries (sentiment scores \
+        and triggers only — no raw text for privacy), generate ONE \
+        thoughtful, personalized journal prompt that helps the user \
+        reflect on their patterns. Keep it under 2 sentences. Be warm \
+        but specific.
+
+        Recent entries:
+        \(sentimentSummary)
+        """
+
+        return try await openAIService.complete(
+            systemPrompt: "You are a supportive wellness journal assistant. "
+                + "Generate reflective prompts based on mood data.",
+            userPrompt: prompt
+        )
+    }
+
+    // MARK: - Pattern Analysis (On-Device)
+
+    /// Analyzes mood entries to detect patterns entirely on-device.
+    private func analyzePattern(_ entries: [MoodEntry]) -> MoodPattern {
+        let moods = entries.map { Double($0.mood) }
+        let average = moods.reduce(0, +) / Double(moods.count)
+
+        // Day-of-week breakdown
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE"
+        var dayTotals: [String: (sum: Double, count: Int)] = [:]
+        for entry in entries {
+            let day = formatter.string(from: entry.date)
+            let existing = dayTotals[day] ?? (0, 0)
+            dayTotals[day] = (existing.sum + Double(entry.mood), existing.count + 1)
+        }
+        let dayScores = dayTotals.mapValues { $0.sum / Double($0.count) }
+
+        // Trigger frequency
+        var triggerCounts: [String: Int] = [:]
+        for entry in entries {
+            for trigger in entry.triggers {
+                triggerCounts[trigger, default: 0] += 1
+            }
+        }
+        let topTriggers = triggerCounts
+            .sorted { $0.value > $1.value }
+            .prefix(5)
+            .map(\.key)
+
+        // Trend direction: compare first half average to second half
+        let midpoint = moods.count / 2
+        let firstHalf = Array(moods.prefix(midpoint))
+        let secondHalf = Array(moods.suffix(from: midpoint))
+        let firstAvg = firstHalf.isEmpty ? average
+            : firstHalf.reduce(0, +) / Double(firstHalf.count)
+        let secondAvg = secondHalf.isEmpty ? average
+            : secondHalf.reduce(0, +) / Double(secondHalf.count)
+
+        let trend: MoodTrend
+        let delta = secondAvg - firstAvg
+        if delta > 0.3 {
+            trend = .improving
+        } else if delta < -0.3 {
+            trend = .declining
+        } else {
+            trend = .stable
+        }
+
+        // Sentiment scores from journal text
+        let sentiments = entries.map { scoreSentiment($0.journalText ?? "") }
+
+        return MoodPattern(
+            averageMood: average,
+            dayOfWeekScores: dayScores,
+            topTriggers: topTriggers,
+            trendDirection: trend,
+            sentimentScores: sentiments
+        )
+    }
+
+    // MARK: - Cloud Insight Generation
+
+    /// Sends aggregated pattern data to OpenAI for narrative insight generation.
+    /// Never sends raw journal text — only scores, triggers, and statistics.
+    private func generateCloudInsight(
+        pattern: MoodPattern,
+        window: TimeWindow,
+        entryCount: Int
+    ) async throws -> DailyInsight {
+        let dayBreakdown = pattern.dayOfWeekScores
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key): \(String(format: "%.1f", $0.value))/5" }
+            .joined(separator: ", ")
+
+        let triggers = pattern.topTriggers.isEmpty
+            ? "none identified"
+            : pattern.topTriggers.joined(separator: ", ")
+
+        let userPrompt = """
+        Analyze this \(window.rawValue)ly mood data and generate a \
+        personalized insight.
+
+        Period: last \(window.days) days (\(entryCount) entries)
+        Average mood: \(String(format: "%.1f", pattern.averageMood))/5
+        Trend: \(pattern.trendDirection.rawValue)
+        Day-of-week averages: \(dayBreakdown)
+        Top triggers: \(triggers)
+        Average journal sentiment: \(String(format: "%.2f", averageSentiment(pattern.sentimentScores)))
+
+        Respond in this exact JSON format:
+        {
+          "title": "short insight title (max 8 words)",
+          "body": "2-3 sentence personalized insight paragraph",
+          "suggestions": ["suggestion 1", "suggestion 2", "suggestion 3"]
+        }
+
+        Be specific to the data. Reference actual patterns you see. \
+        Do not give generic advice.
+        """
+
+        let systemPrompt = """
+        You are a supportive, data-driven wellness assistant inside \
+        a mood journal app called Moodbit. Speak warmly but \
+        concisely. Base every insight on the numbers provided. \
+        Never fabricate patterns not in the data. Respond ONLY \
+        with valid JSON.
+        """
+
+        let raw = try await openAIService.complete(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt
+        )
+
+        return try parseInsightJSON(raw, trend: pattern.trendDirection)
+    }
+
+    // MARK: - Local Fallback
+
+    /// Generates a basic insight using only on-device analysis when
+    /// the network is unavailable or OpenAI fails.
+    private func generateLocalInsight(
+        pattern: MoodPattern,
+        window: TimeWindow
+    ) -> DailyInsight {
+        let trendText: String
+        switch pattern.trendDirection {
+        case .improving:
+            trendText = "Your mood has been trending upward"
+        case .declining:
+            trendText = "Your mood has been trending downward"
+        case .stable:
+            trendText = "Your mood has been relatively stable"
+        }
+
+        let triggerText = pattern.topTriggers.isEmpty
+            ? ""
+            : " Your most common triggers were \(pattern.topTriggers.prefix(3).joined(separator: ", "))."
+
+        let bestDay = pattern.dayOfWeekScores
+            .max(by: { $0.value < $1.value })?.key ?? "unknown"
+        let worstDay = pattern.dayOfWeekScores
+            .min(by: { $0.value < $1.value })?.key ?? "unknown"
+
+        let body = "\(trendText) over the past \(window.days) days, "
+            + "with an average mood of \(String(format: "%.1f", pattern.averageMood))/5. "
+            + "You tend to feel best on \(bestDay)s and lowest on \(worstDay)s."
+            + triggerText
+
+        let suggestions: [String]
+        switch pattern.trendDirection {
+        case .improving:
+            suggestions = [
+                "Keep doing what is working — consistency matters",
+                "Note what changed recently that might be helping",
+                "Consider journaling about your wins this week"
+            ]
+        case .declining:
+            suggestions = [
+                "Try identifying one small thing that lifts your mood",
+                "Reach out to someone you trust this week",
+                "Review your \(worstDay) routine for patterns"
+            ]
+        case .stable:
+            suggestions = [
+                "Stability is a strength — acknowledge it",
+                "Experiment with one new positive habit this week",
+                "Reflect on what keeps your mood balanced"
+            ]
+        }
+
+        logger.info("Generated local fallback insight for \(window.rawValue).")
+
+        return DailyInsight(
+            title: "\(trendText.prefix(30))...",
+            body: body,
+            suggestions: suggestions,
+            moodTrend: pattern.trendDirection
+        )
+    }
+
+    // MARK: - NaturalLanguage Sentiment
+
+    /// Scores the sentiment of a text string using Apple's NLTagger.
+    /// Returns a value between -1.0 (very negative) and 1.0 (very positive).
+    private func scoreSentiment(_ text: String) -> Double {
+        guard !text.isEmpty else { return 0.0 }
+
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (tag, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        return Double(tag?.rawValue ?? "0") ?? 0.0
+    }
+
+    // MARK: - Helpers
+
+    private func averageSentiment(_ scores: [Double]) -> Double {
+        guard !scores.isEmpty else { return 0.0 }
+        return scores.reduce(0, +) / Double(scores.count)
+    }
+
+    private func formatted(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func makeCacheKey(window: TimeWindow) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "\(window.rawValue)_\(formatter.string(from: .now))"
+    }
+
+    private func isExpired(_ entry: CacheEntry, window: TimeWindow) -> Bool {
+        let age = Date.now.timeIntervalSince(entry.insight.generatedAt)
+        let maxAge = TimeInterval(window.days * 24 * 60 * 60)
+        return age > maxAge
+    }
+
+    private func cacheInsight(_ insight: DailyInsight, key: String) {
+        cache.setObject(CacheEntry(insight: insight), forKey: key as NSString)
+    }
+
+    private func parseInsightJSON(
+        _ raw: String,
+        trend: MoodTrend
+    ) throws -> DailyInsight {
+        struct InsightResponse: Decodable {
+            let title: String
+            let body: String
+            let suggestions: [String]
+        }
+
+        guard let data = raw.data(using: .utf8) else {
+            throw InsightsError.decodingFailed
+        }
+
+        let decoded = try JSONDecoder().decode(InsightResponse.self, from: data)
+
+        return DailyInsight(
+            title: decoded.title,
+            body: decoded.body,
+            suggestions: decoded.suggestions,
+            moodTrend: trend
+        )
+    }
+}
+
+// MARK: - Cache Entry Wrapper
+
+private final class CacheEntry: NSObject {
+    let insight: DailyInsight
+
+    init(insight: DailyInsight) {
+        self.insight = insight
+    }
+}
+
+// MARK: - Errors
+
+enum InsightsError: LocalizedError {
+    case insufficientData
+    case decodingFailed
+    case generationFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .insufficientData:
+            return "Not enough mood entries to generate insights. Keep logging."
+        case .decodingFailed:
+            return "Could not parse the AI response. Try again."
+        case .generationFailed(let reason):
+            return "Insight generation failed: \(reason)"
+        }
+    }
+}
+```
+
+### InsightsViewModel.swift
+
+```swift
+import Foundation
+import os
+
+/// Manages insight state for the InsightsView, coordinating between
+/// the InsightsEngine and the UI layer.
+@MainActor
+@Observable
+final class InsightsViewModel {
+    var weeklyInsight: DailyInsight?
+    var monthlyInsight: DailyInsight?
+    var journalPrompt: String?
+    var isLoading = false
+    var errorMessage: String?
+    var showError = false
+
+    private let engine: InsightsEngine
+    private let repository: MoodRepositoryProtocol
+    private let logger = Logger(
+        subsystem: "com.moodbit.app",
+        category: "InsightsViewModel"
+    )
+
+    init(engine: InsightsEngine, repository: MoodRepositoryProtocol) {
+        self.engine = engine
+        self.repository = repository
+    }
+
+    /// Loads both weekly and monthly insights. Uses cached results
+    /// when available, fetches fresh ones when expired.
+    func loadInsights() async {
+        isLoading = true
+        errorMessage = nil
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.loadWeeklyInsight() }
+            group.addTask { await self.loadMonthlyInsight() }
+        }
+
+        isLoading = false
+    }
+
+    /// Forces a full refresh, bypassing the cache.
+    func refreshInsights() async {
+        isLoading = true
+        errorMessage = nil
+        weeklyInsight = nil
+        monthlyInsight = nil
+        journalPrompt = nil
+
+        await loadInsights()
+        await generatePrompt()
+    }
+
+    /// Generates a personalized journal prompt from the user's
+    /// five most recent mood entries.
+    func generatePrompt() async {
+        do {
+            let recent = try await repository.fetchEntries(
+                from: Calendar.current.date(
+                    byAdding: .day, value: -7, to: .now
+                ) ?? .now,
+                to: .now
+            )
+
+            guard !recent.isEmpty else {
+                journalPrompt = "Start by logging today's mood — your first insight begins with your first entry."
+                return
+            }
+
+            journalPrompt = try await engine.generateJournalPrompt(
+                recentEntries: Array(recent.prefix(5))
+            )
+            logger.debug("Journal prompt generated successfully.")
+        } catch {
+            logger.warning("Prompt generation failed: \(error.localizedDescription)")
+            journalPrompt = "What is one thing that affected your mood today?"
+        }
+    }
+
+    // MARK: - Private
+
+    private func loadWeeklyInsight() async {
+        do {
+            weeklyInsight = try await engine.analyzePeriod(.week)
+        } catch let error as InsightsError where error == .insufficientData {
+            logger.info("Not enough data for weekly insight.")
+        } catch {
+            logger.error("Weekly insight error: \(error.localizedDescription)")
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    private func loadMonthlyInsight() async {
+        do {
+            monthlyInsight = try await engine.analyzePeriod(.month)
+        } catch let error as InsightsError where error == .insufficientData {
+            logger.info("Not enough data for monthly insight.")
+        } catch {
+            logger.error("Monthly insight error: \(error.localizedDescription)")
+            if errorMessage == nil {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
+        }
+    }
+}
+
+// MARK: - InsightsError Equatable (for pattern matching)
+
+extension InsightsError: Equatable {
+    static func == (lhs: InsightsError, rhs: InsightsError) -> Bool {
+        switch (lhs, rhs) {
+        case (.insufficientData, .insufficientData):
+            return true
+        case (.decodingFailed, .decodingFailed):
+            return true
+        case (.generationFailed(let a), .generationFailed(let b)):
+            return a == b
+        default:
+            return false
+        }
+    }
+}
+```
+
+### InsightsView.swift
+
+```swift
+import SwiftUI
+
+struct InsightsView: View {
+    @State private var viewModel: InsightsViewModel
+
+    init(engine: InsightsEngine, repository: MoodRepositoryProtocol) {
+        self._viewModel = State(
+            initialValue: InsightsViewModel(
+                engine: engine,
+                repository: repository
+            )
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                if viewModel.isLoading && viewModel.weeklyInsight == nil {
+                    loadingState
+                } else if viewModel.weeklyInsight == nil
+                            && viewModel.monthlyInsight == nil
+                            && viewModel.journalPrompt == nil {
+                    emptyState
+                } else {
+                    insightContent
+                }
+            }
+            .navigationTitle("Insights")
+            .refreshable {
+                await viewModel.refreshInsights()
+            }
+            .task {
+                await viewModel.loadInsights()
+                await viewModel.generatePrompt()
+            }
+            .alert("Error", isPresented: $viewModel.showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.errorMessage ?? "Something went wrong.")
+            }
+        }
+    }
+
+    // MARK: - Content
+
+    private var insightContent: some View {
+        LazyVStack(spacing: 16) {
+            // Journal Prompt
+            if let prompt = viewModel.journalPrompt {
+                promptCard(prompt)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            // Weekly Insight
+            if let weekly = viewModel.weeklyInsight {
+                insightCard(weekly, label: "This Week")
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            // Monthly Insight
+            if let monthly = viewModel.monthlyInsight {
+                insightCard(monthly, label: "This Month")
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding()
+        .animation(.easeInOut(duration: 0.3), value: viewModel.weeklyInsight?.id)
+        .animation(.easeInOut(duration: 0.3), value: viewModel.monthlyInsight?.id)
+    }
+
+    // MARK: - Insight Card
+
+    private func insightCard(_ insight: DailyInsight, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(label)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Spacer()
+
+                trendBadge(insight.moodTrend)
+            }
+
+            Text(insight.title)
+                .font(.title3)
+                .fontWeight(.bold)
+
+            Text(insight.body)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !insight.suggestions.isEmpty {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Suggestions")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.secondary)
+
+                    FlowLayout(spacing: 8) {
+                        ForEach(insight.suggestions, id: \.self) { suggestion in
+                            Text(suggestion)
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.blue.opacity(0.1), in: Capsule())
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Journal Prompt Card
+
+    private func promptCard(_ prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Journal Prompt", systemImage: "pencil.and.outline")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                Spacer()
+
+                Button {
+                    Task { await viewModel.generatePrompt() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+            }
+
+            Text(prompt)
+                .font(.body)
+                .italic()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            .orange.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 16)
+        )
+    }
+
+    // MARK: - Trend Badge
+
+    private func trendBadge(_ trend: MoodTrend) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: trendIcon(trend))
+                .font(.caption2)
+            Text(trend.rawValue.capitalized)
+                .font(.caption2)
+                .fontWeight(.medium)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(trendColor(trend).opacity(0.15), in: Capsule())
+        .foregroundStyle(trendColor(trend))
+    }
+
+    private func trendIcon(_ trend: MoodTrend) -> String {
+        switch trend {
+        case .improving: "arrow.up.right"
+        case .declining: "arrow.down.right"
+        case .stable: "arrow.right"
+        }
+    }
+
+    private func trendColor(_ trend: MoodTrend) -> Color {
+        switch trend {
+        case .improving: .green
+        case .declining: .red
+        case .stable: .blue
+        }
+    }
+
+    // MARK: - States
+
+    private var loadingState: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            ProgressView("Analyzing your mood patterns...")
+                .font(.subheadline)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, minHeight: 300)
+    }
+
+    private var emptyState: some View {
+        ContentUnavailableView(
+            "No Insights Yet",
+            systemImage: "brain.head.profile",
+            description: Text(
+                "Log a few days of mood entries and Moodbit will start "
+                + "spotting patterns and generating personalized insights for you."
+            )
+        )
+    }
+}
+
+// MARK: - FlowLayout (iOS 16+ compatible tag layout)
+
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let result = arrange(
+            proposal: proposal,
+            subviews: subviews
+        )
+        return result.size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let result = arrange(
+            proposal: proposal,
+            subviews: subviews
+        )
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(
+                at: CGPoint(
+                    x: bounds.minX + position.x,
+                    y: bounds.minY + position.y
+                ),
+                proposal: .unspecified
+            )
+        }
+    }
+
+    private func arrange(
+        proposal: ProposedViewSize,
+        subviews: Subviews
+    ) -> (positions: [CGPoint], size: CGSize) {
+        let maxWidth = proposal.width ?? .infinity
+        var positions: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+
+            if x + size.width > maxWidth, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+
+            positions.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+        }
+
+        return (
+            positions,
+            CGSize(width: maxWidth, height: y + rowHeight)
+        )
+    }
+}
+
+#Preview {
+    // In a real app, these would be injected from the app root.
+    // For preview, you would use mock implementations.
+    InsightsView(
+        engine: InsightsEngine(
+            openAIService: MockOpenAIService(),
+            repository: MockMoodRepository()
+        ),
+        repository: MockMoodRepository()
+    )
+}
+```
+
+### Key Design Decisions
+
+**Why NSCache instead of a plain dictionary?** `NSCache` is thread-safe without explicit locking, automatically evicts entries under memory pressure, and works correctly across `Sendable` boundaries. A plain `[String: DailyInsight]` dictionary inside a `Sendable` class would require a lock or an actor — `NSCache` gives us safe caching with less boilerplate.
+
+**Why separate NaturalLanguage and OpenAI paths?** On-device sentiment scoring with `NLTagger` is instant, free, and private. It runs in under a millisecond. OpenAI provides nuanced, narrative insights but costs money, takes a network round-trip, and receives user data. We use NaturalLanguage for the data analysis (pattern detection, trend calculation, sentiment scores) and OpenAI for the final narrative. If OpenAI is unavailable, the local path still produces a useful — if less eloquent — insight.
+
+**Why not send raw journal text to OpenAI?** Privacy. Journal entries are deeply personal. Sending sentiment scores and trigger keywords gives the AI enough context to generate personalized insights without exposing the actual words a user wrote. This is a design choice you should make explicitly, not one you should leave to the AI to decide.
+
+**Why `withTaskGroup` in the ViewModel?** Weekly and monthly insights are independent. Fetching them concurrently with a task group means the user waits for the slower of the two, not the sum of both. Small optimization, noticeable improvement.
+
+**Why `FlowLayout` for suggestion chips?** Suggestions vary in length. A simple `HStack` would clip or overflow. `FlowLayout` wraps chips onto new lines automatically, and it is a reusable component for anywhere you need tag-style layouts in the app.
+
+## Checkpoint
+
+Before moving to the next lesson, confirm every item:
+
+- [ ] Project builds with zero errors and zero warnings under Swift 6 strict concurrency
+- [ ] `InsightsEngine` accepts dependencies via `init` — no singletons, no hardcoded services
+- [ ] `DailyInsight` and `MoodPattern` are structs conforming to `Sendable`
+- [ ] `NLTagger` sentiment scoring works for empty strings (returns 0.0, does not crash)
+- [ ] OpenAI prompts contain aggregated data only — no raw journal text
+- [ ] Cache returns a stored insight on second call without hitting OpenAI
+- [ ] Cache expires after the time window (7 days for weekly, 30 for monthly)
+- [ ] When OpenAI fails, the fallback local insight generates and displays
+- [ ] `InsightsView` shows `ContentUnavailableView` when there are zero entries
+- [ ] Pull-to-refresh triggers `refreshInsights()` and updates the UI
+- [ ] Insight cards animate in with opacity + offset transitions
+- [ ] `FlowLayout` wraps suggestion chips correctly on narrow screens
+- [ ] No `print()` statements — only `os.Logger`
+- [ ] No `ObservableObject`, `@Published`, or `@StateObject` anywhere
+
+## Challenge
+
+**Add day-of-week visualization to the weekly insight card.**
+
+The `MoodPattern` already contains `dayOfWeekScores` — a dictionary mapping day names to average mood scores. Your task:
+
+1. Create a `WeekMoodChart` view that displays a simple bar chart of the seven days
+2. Each bar's height represents the average mood for that day (scaled 1-5)
+3. Color the bars: green for 4+, orange for 3-4, red for below 3
+4. Show the day abbreviation (Mon, Tue, ...) below each bar
+5. Embed the chart inside the weekly insight card, between the body text and the suggestions
+
+Use only SwiftUI — no Charts framework dependency. A simple `VStack` + `RoundedRectangle` with a calculated frame height is all you need.
+
+<details>
+<summary>Hint</summary>
+
+You already have the data in `MoodPattern.dayOfWeekScores`. Pass it to your chart view, sort the days in calendar order, and compute each bar's height as a fraction of the maximum:
+
+```swift
+struct WeekMoodChart: View {
+    let scores: [String: Double]
+
+    private let dayOrder = [
+        "Monday", "Tuesday", "Wednesday",
+        "Thursday", "Friday", "Saturday", "Sunday"
+    ]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            ForEach(dayOrder, id: \.self) { day in
+                let score = scores[day] ?? 0
+                VStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(barColor(score))
+                        .frame(width: 28, height: CGFloat(score / 5.0) * 80)
+                    Text(String(day.prefix(3)))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(height: 100)
+    }
+
+    private func barColor(_ score: Double) -> Color {
+        if score >= 4 { return .green }
+        if score >= 3 { return .orange }
+        return .red
+    }
+}
+```
+
+To get the data into the view, you will need to expose `MoodPattern` from the engine or add a `dayOfWeekScores` property to `DailyInsight`. The cleaner approach is adding it to `DailyInsight` so the view layer never touches the engine directly.
+</details>
+
+---
+
+Next up: **Lesson 4.4 — On-Device ML with Core ML**, where we train a custom mood prediction model using Create ML and integrate it into Moodbit for offline, real-time mood suggestions.
