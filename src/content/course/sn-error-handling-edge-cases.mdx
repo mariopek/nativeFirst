@@ -1,0 +1,671 @@
+---
+title: "Error Handling & Edge Cases"
+description: "Implement typed throws for clean error propagation, graceful degradation when the AI service is unavailable, and polished loading, empty, and error states that keep users informed."
+courseSlug: "ship-native"
+module: 7
+moduleTitle: "Production Polish"
+lesson: 1
+duration: "22 min read"
+difficulty: "intermediate"
+topics: ["Error Handling", "Typed Throws", "Loading State", "Empty State", "Graceful Degradation", "Retry Logic", "UX", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your Moodbit app works. The happy path is solid — the user logs a mood, the AI generates an insight, the chart updates. Ship it, right?
+
+Not yet. Open airplane mode and tap "Log Mood." What happens? Force quit the app mid-save and reopen it. What happens? Let the OpenAI API key expire. What happens?
+
+If the answer to any of those is "I am not sure," this lesson is going to fix that. Error handling is not cleanup work you do after the features are done. It is architecture. And in Swift 6, we have better tools for it than ever — specifically typed throws, which let the compiler enforce that every error is handled explicitly.
+
+## What You'll Learn
+
+- Build an `AppError` enum with typed throws so the compiler catches unhandled failure modes
+- Create a `LoadingState` enum that eliminates impossible states from your views
+- Implement graceful degradation so Moodbit falls back to on-device analysis when OpenAI is unreachable
+- Build reusable `ErrorView` and `EmptyStateView` components with retry logic and exponential backoff
+
+## Why This Matters
+
+App Store reviewers test edge cases. They turn off Wi-Fi. They deny permissions. They tap buttons rapidly. Users do the same — except they leave one-star reviews when something breaks. The difference between a 3.5-star app and a 4.8-star app is almost never features. It is how the app behaves when things go wrong.
+
+Moodbit talks to an external AI service. That service will go down. The network will drop. The device will run out of storage. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
+
+## Plan Phase: Defining What We Build
+
+Before writing any code, let us get a plan from the AI. Send this prompt to Claude Code:
+
+```
+I need to add production-quality error handling to Moodbit.
+Do NOT write code yet — just create a plan.
+
+The app has these failure points:
+1. OpenAI API calls can fail (network, rate limit, invalid key, timeout)
+2. SwiftData persistence can fail (storage full, migration error)
+3. HealthKit queries can fail (permission denied, no data)
+
+I want:
+- A typed AppError enum using Swift 6 typed throws
+- A LoadingState<T> enum (idle, loading, loaded, error)
+- Graceful degradation: if OpenAI fails, fall back to on-device
+  sentiment analysis using NLTagger
+- Reusable ErrorView with a retry button
+- Reusable EmptyStateView
+- A retry utility with exponential backoff
+
+Think through:
+1. What error cases does each subsystem need?
+2. How should errors propagate from service -> ViewModel -> View?
+3. Where should we catch vs. rethrow?
+4. What does the user see for each failure mode?
+```
+
+### Plan Analysis
+
+The AI should return something structured around three error domains (network, persistence, health), a propagation strategy, and a fallback plan. Look for these in its response:
+
+**Keep** — Separate error cases per subsystem. This is correct. A network timeout and a storage-full error require completely different user messaging and recovery strategies.
+
+**Keep** — Typed throws at the service layer, caught and translated at the ViewModel layer. The View should never see raw errors — only user-friendly states.
+
+**Question** — If the AI suggests a single `catch` block that maps every error to a generic message, push back. Each error case should map to a specific, actionable message.
+
+### Anti-Pattern: The Lazy Catch
+
+This is what you will see in most AI-generated code if you do not ask for better:
+
+```swift
+// Do NOT do this
+func loadMoodEntries() async {
+    do {
+        let entries = try await service.fetchEntries()
+        self.entries = entries
+    } catch {
+        self.errorMessage = "Something went wrong"  // Useless
+    }
+}
+```
+
+"Something went wrong" tells the user nothing. Is it their internet? Their storage? A bug? They have no idea what to do next. Every error message should answer two questions: what happened, and what can the user do about it.
+
+## Execute Phase: Implementation
+
+Now we build. Send this prompt:
+
+```
+Implement the error handling system for Moodbit based on our plan.
+
+1. Create Models/AppError.swift — a typed AppError enum with
+   cases for each failure mode. Group into nested enums:
+   AppError.Network, AppError.Persistence, AppError.Health.
+   Each case should have a userMessage property with a clear,
+   actionable error description. Use Swift 6 typed throws.
+
+2. Create Models/LoadingState.swift — a generic LoadingState<T>
+   enum with cases: idle, loading, loaded(T), error(AppError).
+   Include convenience computed properties.
+
+3. Create Services/FallbackAnalyzer.swift — uses NLTagger for
+   on-device sentiment analysis as a fallback when OpenAI is
+   unavailable. Returns a simple sentiment score.
+
+4. Create Views/Components/ErrorView.swift — a reusable error
+   view using ContentUnavailableView with a retry button.
+
+5. Create Views/Components/EmptyStateView.swift — for when the
+   user has no mood entries yet.
+
+6. Create Utilities/RetryUtility.swift — async retry with
+   exponential backoff, max 3 attempts, only retries transient
+   errors.
+
+Use Swift 6, strict concurrency. All types must be Sendable.
+```
+
+### AI Output Review
+
+Here is the code the AI should produce. Review each piece carefully.
+
+**AppError.swift:**
+
+```swift
+import Foundation
+
+enum AppError: Error, Sendable, LocalizedError {
+    case network(NetworkError)
+    case persistence(PersistenceError)
+    case health(HealthError)
+
+    enum NetworkError: Error, Sendable {
+        case noConnection
+        case timeout
+        case rateLimited(retryAfter: TimeInterval)
+        case invalidAPIKey
+        case serverError(statusCode: Int)
+        case decodingFailed(underlying: String)
+    }
+
+    enum PersistenceError: Error, Sendable {
+        case saveFailed(underlying: String)
+        case fetchFailed(underlying: String)
+        case storageFull
+        case migrationFailed
+    }
+
+    enum HealthError: Error, Sendable {
+        case permissionDenied
+        case notAvailable
+        case queryFailed(underlying: String)
+    }
+
+    var userMessage: String {
+        switch self {
+        case .network(.noConnection):
+            "No internet connection. Your mood will be saved locally and synced when you are back online."
+        case .network(.timeout):
+            "The request timed out. Check your connection and try again."
+        case .network(.rateLimited(let retryAfter)):
+            "Too many requests. Please wait \(Int(retryAfter)) seconds and try again."
+        case .network(.invalidAPIKey):
+            "There is a configuration issue. Please contact support."
+        case .network(.serverError):
+            "The AI service is temporarily unavailable. Using on-device analysis instead."
+        case .network(.decodingFailed):
+            "Received an unexpected response. Please try again."
+        case .persistence(.saveFailed):
+            "Could not save your mood entry. Please free up some storage and try again."
+        case .persistence(.fetchFailed):
+            "Could not load your mood history. Pull down to retry."
+        case .persistence(.storageFull):
+            "Your device storage is full. Free up space to continue logging moods."
+        case .persistence(.migrationFailed):
+            "There was a problem updating the app data. Please restart Moodbit."
+        case .health(.permissionDenied):
+            "Moodbit needs Health access to correlate mood with activity. Open Settings to grant permission."
+        case .health(.notAvailable):
+            "Health data is not available on this device."
+        case .health(.queryFailed):
+            "Could not read health data. Please try again."
+        }
+    }
+
+    var isTransient: Bool {
+        switch self {
+        case .network(.noConnection), .network(.timeout), .network(.serverError):
+            true
+        case .network(.rateLimited):
+            true
+        default:
+            false
+        }
+    }
+}
+```
+
+Review checklist:
+
+- ✅ Every case has a specific, actionable user message — not generic "Something went wrong"
+- ✅ `isTransient` property separates retryable errors from permanent failures
+- ✅ All types are `Sendable` for Swift 6 concurrency safety
+- ✅ Nested enums keep the namespace clean — `AppError.network(.timeout)` reads naturally
+- ⚠️ Check that `underlying: String` captures enough debug info. In production you might want to log the original error separately while keeping user messages clean
+- ❌ Watch for AI adding `case unknown` as a catch-all. Reject it. Every error should be explicitly modeled. An `unknown` case is a code smell that says "I did not think about what could go wrong here"
+
+**LoadingState.swift:**
+
+```swift
+import Foundation
+
+enum LoadingState<T: Sendable>: Sendable {
+    case idle
+    case loading
+    case loaded(T)
+    case error(AppError)
+
+    var isLoading: Bool {
+        if case .loading = self { return true }
+        return false
+    }
+
+    var data: T? {
+        if case .loaded(let value) = self { return value }
+        return nil
+    }
+
+    var appError: AppError? {
+        if case .error(let error) = self { return error }
+        return nil
+    }
+
+    var isIdle: Bool {
+        if case .idle = self { return true }
+        return false
+    }
+}
+```
+
+- ✅ Generic with `Sendable` constraint — works with Swift 6 strict concurrency
+- ✅ Uses `AppError` instead of raw `String` for the error case — preserves error semantics all the way to the View layer
+- ✅ Convenience properties eliminate `if case let` boilerplate in views
+
+**FallbackAnalyzer.swift:**
+
+```swift
+import NaturalLanguage
+import Foundation
+
+struct FallbackAnalyzer: Sendable {
+    func analyzeSentiment(for text: String) -> Double {
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (sentiment, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        guard let sentiment,
+              let score = Double(sentiment.rawValue) else {
+            return 0.0
+        }
+
+        return score  // -1.0 (negative) to 1.0 (positive)
+    }
+
+    func generateFallbackInsight(moodScore: Int, note: String?) -> String {
+        guard let note, !note.isEmpty else {
+            return moodLevelInsight(for: moodScore)
+        }
+
+        let sentiment = analyzeSentiment(for: note)
+
+        if sentiment > 0.3 && moodScore >= 7 {
+            return "Your note reflects a positive mindset. Keep building on what is working well today."
+        } else if sentiment < -0.3 && moodScore <= 4 {
+            return "It sounds like a tough moment. Remember that difficult feelings are temporary — consider a short walk or breathing exercise."
+        } else {
+            return moodLevelInsight(for: moodScore)
+        }
+    }
+
+    private func moodLevelInsight(for score: Int) -> String {
+        switch score {
+        case 1...3:
+            "Low mood is a signal, not a verdict. What is one small thing that usually helps you feel a bit better?"
+        case 4...6:
+            "A neutral mood is perfectly normal. Notice what is present in your day — sometimes calm is underrated."
+        case 7...10:
+            "Great energy today. Take a moment to appreciate what is contributing to this feeling."
+        default:
+            "Mood logged. Check back later for insights on your patterns."
+        }
+    }
+}
+```
+
+- ✅ Uses `NLTagger` — ships with iOS, no API call needed, works offline
+- ✅ `Sendable` conformance since it holds no mutable state
+- ⚠️ The fallback insights are simple. That is intentional. On-device analysis is a safety net, not a replacement for the AI service. Do not over-engineer it
+
+**RetryUtility.swift:**
+
+```swift
+import Foundation
+import os
+
+func withRetry<T: Sendable>(
+    maxAttempts: Int = 3,
+    initialDelay: TimeInterval = 1.0,
+    operation: @Sendable () async throws(AppError) -> T
+) async throws(AppError) -> T {
+    let logger = Logger(subsystem: "com.moodbit", category: "Retry")
+    var lastError: AppError?
+
+    for attempt in 1...maxAttempts {
+        do {
+            return try await operation()
+        } catch let error as AppError {
+            lastError = error
+
+            guard error.isTransient else {
+                logger.warning("Non-transient error on attempt \(attempt): \(error.userMessage)")
+                throw error
+            }
+
+            if attempt < maxAttempts {
+                let delay = initialDelay * pow(2.0, Double(attempt - 1))
+                let jitter = Double.random(in: 0...0.5)
+                let totalDelay = delay + jitter
+                logger.info("Attempt \(attempt) failed. Retrying in \(totalDelay, format: .fixed(precision: 1))s...")
+                try await Task.sleep(for: .seconds(totalDelay))
+            }
+        }
+    }
+
+    throw lastError ?? .network(.timeout)
+}
+```
+
+- ✅ Uses `throws(AppError)` — Swift 6 typed throws. The compiler knows exactly what this function can throw
+- ✅ Jitter added to backoff — prevents thundering herd when multiple retries fire simultaneously
+- ✅ Bails immediately on non-transient errors — no point retrying an invalid API key three times
+- ⚠️ If the AI omits jitter, add it yourself. Without jitter, every client retries at the exact same second, slamming the server again in unison
+
+## Iteration
+
+The initial implementation covers individual error handling. Now we need to wire it into the ViewModel with graceful degradation. Send this follow-up:
+
+```
+Now update MoodEntryViewModel to use the error handling system.
+
+When the user logs a mood:
+1. Try to get an AI insight from OpenAI using withRetry
+2. If that fails with a transient network error, fall back to
+   FallbackAnalyzer for an on-device insight — do NOT show an
+   error to the user. Log the fallback silently.
+3. Save the mood entry with whatever insight we got
+4. If saving fails, THEN show the error
+
+For loading the mood history:
+1. Use LoadingState<[MoodEntry]> — handle all four states
+2. On error, show ErrorView with retry
+
+Add a StateHandlingModifier ViewModifier that takes a
+LoadingState and renders the appropriate view for each state,
+so we do not repeat switch statements in every screen.
+```
+
+Here is the key piece — the ViewModel with graceful degradation:
+
+```swift
+import SwiftUI
+import os
+
+@Observable
+final class MoodEntryViewModel: @unchecked Sendable {
+    var historyState: LoadingState<[MoodEntry]> = .idle
+    var isSaving = false
+    var saveError: AppError?
+
+    private let aiService: AIServiceProtocol
+    private let fallbackAnalyzer = FallbackAnalyzer()
+    private let repository: MoodRepository
+    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+
+    init(aiService: AIServiceProtocol, repository: MoodRepository) {
+        self.aiService = aiService
+        self.repository = repository
+    }
+
+    func saveMood(score: Int, note: String?, emoji: String) async {
+        isSaving = true
+        defer { isSaving = false }
+
+        let insight = await generateInsight(score: score, note: note)
+
+        let entry = MoodEntry(
+            score: score,
+            note: note,
+            emoji: emoji,
+            insight: insight.text,
+            insightSource: insight.source
+        )
+
+        do {
+            try repository.save(entry)
+            logger.info("Mood entry saved. Insight source: \(insight.source.rawValue)")
+            await loadHistory()
+        } catch {
+            saveError = .persistence(.saveFailed(underlying: error.localizedDescription))
+            logger.error("Save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func loadHistory() async {
+        historyState = .loading
+
+        do {
+            let entries = try repository.fetchAll()
+            historyState = .loaded(entries)
+        } catch {
+            historyState = .error(
+                .persistence(.fetchFailed(underlying: error.localizedDescription))
+            )
+        }
+    }
+
+    // MARK: - Private
+
+    private func generateInsight(
+        score: Int,
+        note: String?
+    ) async -> (text: String, source: InsightSource) {
+        do {
+            let aiInsight = try await withRetry {
+                try await self.aiService.generateInsight(
+                    moodScore: score,
+                    note: note
+                )
+            }
+            return (aiInsight, .ai)
+        } catch {
+            logger.info("AI unavailable, using on-device fallback: \(error.userMessage)")
+            let fallback = fallbackAnalyzer.generateFallbackInsight(
+                moodScore: score,
+                note: note
+            )
+            return (fallback, .onDevice)
+        }
+    }
+}
+
+enum InsightSource: String, Codable, Sendable {
+    case ai
+    case onDevice
+}
+```
+
+Notice the degradation strategy: the user taps "Save," the app tries OpenAI with retries, and if all attempts fail, it silently falls back to `NLTagger`. The user still gets an insight. They still get their mood saved. They never see an error for the AI failure because it is not their problem to solve.
+
+This is the difference between "error handling" and "graceful degradation." Error handling shows the user a message. Graceful degradation makes the problem invisible.
+
+Now the `ViewModifier` for consistent state handling across screens:
+
+```swift
+import SwiftUI
+
+struct StateHandlingModifier<T: Sendable, LoadedContent: View>: ViewModifier {
+    let state: LoadingState<T>
+    let emptyTitle: String
+    let emptySystemImage: String
+    let emptyDescription: String
+    let onRetry: (() async -> Void)?
+    @ViewBuilder let loadedContent: (T) -> LoadedContent
+
+    func body(content: Content) -> some View {
+        switch state {
+        case .idle:
+            content
+
+        case .loading:
+            ProgressView()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .loaded(let data):
+            if isEmpty(data) {
+                ContentUnavailableView(
+                    emptyTitle,
+                    systemImage: emptySystemImage,
+                    description: Text(emptyDescription)
+                )
+            } else {
+                loadedContent(data)
+            }
+
+        case .error(let error):
+            ContentUnavailableView {
+                Label("Something Went Wrong", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(error.userMessage)
+            } actions: {
+                if let onRetry {
+                    Button("Try Again") {
+                        Task { await onRetry() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+    }
+
+    private func isEmpty(_ data: T) -> Bool {
+        if let array = data as? (any Collection) {
+            return array.isEmpty
+        }
+        return false
+    }
+}
+```
+
+## Verify Phase
+
+Before moving on, verify each of these scenarios manually:
+
+1. **Airplane mode** — Log a mood. The app should fall back to on-device analysis, save successfully, and show no error
+2. **Invalid API key** — The retry utility should bail immediately (non-transient), fall back to on-device analysis
+3. **Empty state** — Delete all mood entries. The EmptyStateView should appear with a prompt to log the first mood
+4. **Storage full** (simulate by throwing in the repository) — The user should see a specific "free up space" message, not "Something went wrong"
+5. **Rapid taps** — Tap "Save" five times quickly. The `isSaving` flag should prevent duplicate entries
+6. **Kill and reopen** — Force quit during a save. On reopen, `loadHistory` should recover cleanly with no corrupt state
+
+## Final Code
+
+Here is the complete `ErrorView` component:
+
+```swift
+import SwiftUI
+
+struct ErrorView: View {
+    let error: AppError
+    let onRetry: (() async -> Void)?
+
+    init(_ error: AppError, onRetry: (() async -> Void)? = nil) {
+        self.error = error
+        self.onRetry = onRetry
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(error.title, systemImage: error.systemImage)
+        } description: {
+            Text(error.userMessage)
+        } actions: {
+            if error.isTransient, let onRetry {
+                Button("Try Again") {
+                    Task { await onRetry() }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if case .health(.permissionDenied) = error {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
+private extension AppError {
+    var title: String {
+        switch self {
+        case .network: "Connection Issue"
+        case .persistence: "Storage Issue"
+        case .health: "Health Data Issue"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .network: "wifi.slash"
+        case .persistence: "externaldrive.badge.exclamationmark"
+        case .health: "heart.slash"
+        }
+    }
+}
+```
+
+And the `EmptyStateView`:
+
+```swift
+import SwiftUI
+
+struct EmptyStateView: View {
+    let title: String
+    let systemImage: String
+    let description: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+
+    init(
+        _ title: String,
+        systemImage: String,
+        description: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.description = description
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(description)
+        } actions: {
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+#Preview("No Entries") {
+    EmptyStateView(
+        "No Moods Yet",
+        systemImage: "face.smiling",
+        description: "Log your first mood to start tracking patterns.",
+        actionTitle: "Log Mood"
+    ) {
+        print("Tapped")
+    }
+}
+```
+
+## Checkpoint
+
+Test these before continuing to the next lesson:
+
+- [ ] `AppError` compiles with typed throws — calling a function that `throws(AppError)` and catching with `catch let error as AppError` works correctly
+- [ ] `LoadingState` handles all four states and the View never shows a blank screen
+- [ ] Turning off Wi-Fi and logging a mood produces an on-device insight silently — no error shown to the user
+- [ ] Every error message answers "what happened" and "what to do next"
+- [ ] The retry utility backs off exponentially and does not retry non-transient errors
+- [ ] `EmptyStateView` appears when the mood history is empty
+
+## Challenge
+
+**Add offline queueing:** When a mood is saved with an on-device fallback insight, queue it for AI re-analysis. When the network comes back (use `NWPathMonitor`), automatically re-analyze queued entries with OpenAI and update the insights in the background. The user should never need to do anything — the upgrade from on-device to AI insight happens silently.
+
+*Hint:* Add an `InsightSource` field to `MoodEntry`. Query for entries where `insightSource == .onDevice`. Use a background `Task` that monitors `NWPathMonitor` and triggers re-analysis when the path becomes `.satisfied`.

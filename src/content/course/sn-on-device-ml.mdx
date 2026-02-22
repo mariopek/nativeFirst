@@ -1,0 +1,649 @@
+---
+title: "On-Device ML Alternative"
+description: "Add offline sentiment analysis using Apple's NaturalLanguage framework — a zero-cost, privacy-first fallback that works without an API key or network connection."
+courseSlug: "ship-native"
+module: 4
+moduleTitle: "AI Integration"
+lesson: 2
+duration: "18 min read"
+difficulty: "intermediate"
+topics: ["NaturalLanguage", "NLTagger", "Sentiment Analysis", "On-Device ML", "Offline", "Privacy", "Fallback", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+In the previous lesson we wired Moodbit to the OpenAI API. That works brilliantly — when the user has a network connection and a valid API key. Take either away and the feature is dead. A mood journal that cannot analyze mood without Wi-Fi is not a great mood journal.
+
+Apple ships a framework called **NaturalLanguage** on every iPhone, iPad, and Mac. It includes a pre-trained sentiment analysis model that runs entirely on device. No API key. No network. No cost. No data leaving the phone. It is less nuanced than GPT, but it is always available, and for the core use case — mapping a journal entry to a mood level — it is surprisingly good.
+
+This lesson adds on-device sentiment analysis as a fallback path. Cloud first, local second, never broken.
+
+## What You'll Learn
+
+- How Apple's **NaturalLanguage** framework and **NLTagger** work for sentiment analysis
+- Building a `SentimentAnalyzer` that maps NL scores to Moodbit's mood levels
+- Creating a `LocalMLService` that conforms to the same protocol as `OpenAIService`
+- Wiring automatic fallback: try cloud, catch failure, fall back to on-device
+- The privacy and cost advantages of on-device processing
+- When cloud accuracy matters and when on-device is good enough
+
+## Why This Matters
+
+Most apps built with AI assistants hard-wire themselves to a single cloud provider. The developer prompts for "OpenAI integration," gets working code, and ships it. Then users on the subway, users on airplane mode, users who never set up an API key — they all get an error screen.
+
+This is an anti-pattern you will see constantly in vibe-coded apps. The developer builds the happy path with the AI and forgets that the real world has spotty cell service.
+
+On-device ML fixes this. Not as a replacement for cloud intelligence — as a safety net. The user always gets an answer. Sometimes that answer comes from GPT-4o. Sometimes it comes from a model sitting on the device's Neural Engine. The user does not know or care. They just see their mood analyzed.
+
+The secondary benefit is privacy. Mood journal entries are deeply personal. Some users will not want that data leaving their device — ever. On-device processing means you can offer a "private mode" that is genuinely private, not just a marketing claim.
+
+## Plan Phase
+
+Before writing any code, we need to think through the design. Here is the prompt to start the planning conversation:
+
+```
+I'm building Moodbit, an AI-powered mood journal (Swift 6, SwiftUI, iOS 17+).
+We already have an OpenAIService that analyzes journal text and returns a mood
+level (1–5) with a short insight. I want to add an on-device fallback using
+Apple's NaturalLanguage framework.
+
+Plan the implementation. I need:
+
+1. A SentimentAnalyzer struct that takes a String and returns a mood level
+   (1–5) and a confidence score, using NLTagger with .sentimentScore
+2. A LocalMLService that conforms to the same MoodAnalysisService protocol
+   as OpenAIService
+3. A fallback strategy: try cloud first, if it fails (no network, no API key,
+   timeout), use LocalMLService automatically
+4. Keep it testable — both services behind the same protocol
+
+Do NOT write code yet. Just outline the types, the flow, and flag
+any edge cases.
+```
+
+A good AI response will outline something like this:
+
+- `MoodAnalysisService` protocol with `func analyzeMood(from text: String) async throws -> MoodAnalysisResult`
+- `MoodAnalysisResult` struct holding `moodLevel: Int` (1–5), `insight: String`, `source: AnalysisSource` (.cloud, .onDevice)
+- `SentimentAnalyzer` — pure logic, no protocol, takes text and returns a score
+- `LocalMLService` conforms to `MoodAnalysisService`, uses `SentimentAnalyzer` internally
+- `OpenAIService` conforms to `MoodAnalysisService`
+- `MoodAnalysisManager` (or the ViewModel itself) tries cloud, catches, falls back
+
+The edge cases to watch for:
+
+- **Empty text** — NLTagger returns 0.0 for empty strings. That maps to neutral (level 3), which is a reasonable default.
+- **Mixed sentiment** — A long entry with both happy and sad passages. NLTagger returns a single aggregate score. It will not be as nuanced as GPT, and that is fine.
+- **Language support** — NLTagger's sentiment model works best with English. For other languages, accuracy drops. If your app supports multiple languages, the cloud path should be preferred.
+
+### The anti-pattern to avoid
+
+```
+// Bad: No fallback. Cloud or nothing.
+func analyzeMood(from text: String) async throws -> MoodResult {
+    return try await openAIService.analyze(text)
+    // If this throws, the user sees an error. Every time.
+}
+```
+
+This is the "always require network for basic features" anti-pattern. It turns a flaky dependency (the network) into a hard requirement for core functionality. If sentiment analysis is central to your app — and in Moodbit, it is — it must work offline.
+
+## Execute Phase
+
+Now we build it. Start with the foundation.
+
+### Prompt 1 — SentimentAnalyzer
+
+```
+Create a SentimentAnalyzer struct in Services/ML/SentimentAnalyzer.swift.
+
+Requirements:
+- Import NaturalLanguage
+- Method: func analyze(_ text: String) -> SentimentResult
+- Use NLTagger with .sentimentScore tag scheme
+- NLTagger returns a Double from -1.0 (negative) to 1.0 (positive)
+- Map that score to a mood level 1–5:
+  - -1.0 to -0.6 → level 1 (very negative)
+  - -0.6 to -0.2 → level 2 (somewhat negative)
+  - -0.2 to  0.2 → level 3 (neutral)
+  -  0.2 to  0.6 → level 4 (somewhat positive)
+  -  0.6 to  1.0 → level 5 (very positive)
+- SentimentResult struct: moodLevel (Int), confidence (Double 0–1),
+  rawScore (Double)
+- The confidence is the absolute value of the raw score (stronger
+  sentiment = higher confidence)
+- Handle the empty string case (return level 3, confidence 0)
+- No async needed — NLTagger is synchronous
+- Add os.Logger
+- Target Swift 6, iOS 17+
+```
+
+Here is the code you should get, reviewed and annotated:
+
+```swift
+import NaturalLanguage
+import os
+
+struct SentimentResult {
+    let moodLevel: Int       // 1–5
+    let confidence: Double   // 0.0–1.0
+    let rawScore: Double     // -1.0–1.0
+}
+
+struct SentimentAnalyzer {
+    private let logger = Logger(subsystem: "com.nativefirst.moodbit", category: "SentimentAnalyzer")
+
+    func analyze(_ text: String) -> SentimentResult {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.debug("Empty text — returning neutral")
+            return SentimentResult(moodLevel: 3, confidence: 0, rawScore: 0)
+        }
+
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (sentimentTag, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        let rawScore = Double(sentimentTag?.rawValue ?? "0") ?? 0.0
+        let moodLevel = mapScoreToMoodLevel(rawScore)
+        let confidence = min(abs(rawScore), 1.0)
+
+        logger.debug("Sentiment: \(rawScore, format: .fixed(precision: 3)) → mood \(moodLevel) (confidence \(confidence, format: .fixed(precision: 2)))")
+
+        return SentimentResult(
+            moodLevel: moodLevel,
+            confidence: confidence,
+            rawScore: rawScore
+        )
+    }
+
+    private func mapScoreToMoodLevel(_ score: Double) -> Int {
+        switch score {
+        case ...(-0.6):       return 1
+        case -0.6..<(-0.2):   return 2
+        case -0.2..<0.2:      return 3
+        case 0.2..<0.6:       return 4
+        default:              return 5
+        }
+    }
+}
+```
+
+Let us review this:
+
+- **NLTagger setup** — You create a tagger with the `.sentimentScore` scheme, assign the text, then call `tag(at:unit:scheme:)`. The `unit: .paragraph` tells NLTagger to score the entire text as one block rather than word by word. This is what you want for a journal entry.
+- **The raw value trick** — `NLTagger` returns its sentiment score as an `NLTag`, which is a wrapper around a `String`. You have to parse it to a `Double`. This is an API quirk that AI sometimes misses — it tries to cast the tag directly to a number.
+- **Score mapping** — The ranges are evenly distributed across the -1 to 1 spectrum. You could adjust these thresholds later if you find the model skews positive or negative for your users' writing style.
+- **Confidence** — We use the absolute value of the raw score. A score of 0.9 (very positive) or -0.9 (very negative) both have high confidence. A score near 0 means the model is unsure — which is neutral, level 3.
+
+### Prompt 2 — LocalMLService
+
+```
+Create a LocalMLService in Services/ML/LocalMLService.swift.
+
+Requirements:
+- Conforms to MoodAnalysisService protocol:
+  protocol MoodAnalysisService {
+      func analyzeMood(from text: String) async throws -> MoodAnalysisResult
+  }
+- MoodAnalysisResult has: moodLevel (Int), insight (String),
+  source (AnalysisSource enum: .cloud, .onDevice)
+- Uses SentimentAnalyzer internally
+- Generates a simple insight string based on the mood level
+  (e.g., "Your entry has a positive tone." for level 4–5)
+- The method is async to match the protocol, but the actual work
+  is synchronous (NLTagger is sync)
+- Never throws — on-device analysis always succeeds
+- Add os.Logger
+- Swift 6, Sendable where needed
+```
+
+```swift
+import Foundation
+import os
+
+enum AnalysisSource: String, Sendable {
+    case cloud
+    case onDevice
+}
+
+struct MoodAnalysisResult: Sendable {
+    let moodLevel: Int
+    let insight: String
+    let source: AnalysisSource
+}
+
+protocol MoodAnalysisService: Sendable {
+    func analyzeMood(from text: String) async throws -> MoodAnalysisResult
+}
+
+struct LocalMLService: MoodAnalysisService {
+    private let analyzer = SentimentAnalyzer()
+    private let logger = Logger(subsystem: "com.nativefirst.moodbit", category: "LocalMLService")
+
+    func analyzeMood(from text: String) async throws -> MoodAnalysisResult {
+        let sentiment = analyzer.analyze(text)
+
+        let insight = generateInsight(for: sentiment)
+
+        logger.info("On-device analysis complete: mood \(sentiment.moodLevel), confidence \(sentiment.confidence, format: .fixed(precision: 2))")
+
+        return MoodAnalysisResult(
+            moodLevel: sentiment.moodLevel,
+            insight: insight,
+            source: .onDevice
+        )
+    }
+
+    private func generateInsight(for sentiment: SentimentResult) -> String {
+        switch sentiment.moodLevel {
+        case 1:
+            return "Your entry suggests you're going through a difficult time. It's okay to feel this way."
+        case 2:
+            return "Your writing carries a somewhat negative tone. Consider what might help shift your perspective."
+        case 3:
+            if sentiment.confidence < 0.1 {
+                return "Your entry is fairly neutral. Sometimes a calm day is exactly what you need."
+            }
+            return "Your mood seems balanced today. A mix of thoughts and feelings is perfectly normal."
+        case 4:
+            return "Your entry has a positive tone. Something good seems to be happening."
+        case 5:
+            return "Your writing radiates positivity. Hold onto whatever is making you feel this way."
+        default:
+            return "Mood analyzed."
+        }
+    }
+}
+```
+
+Let us review this:
+
+- **Protocol conformance** — `LocalMLService` conforms to `MoodAnalysisService`, the same protocol that `OpenAIService` will conform to. This means the ViewModel does not care which implementation it is talking to. Swap them freely.
+- **Never throws** — Notice that even though the protocol method is `throws`, `LocalMLService` never actually throws. On-device analysis cannot fail in any meaningful way. If the text is empty, you get neutral. If the text is gibberish, you get neutral. The model always returns something. This is the reliability advantage of on-device.
+- **Sendable conformance** — Swift 6 strict concurrency requires `Sendable` for types passed across actor boundaries. `struct` types with `Sendable` properties are automatically `Sendable`. We mark the protocol as `Sendable` so both implementations can be used from any context.
+- **Generated insights** — These are static strings, not LLM-generated. They are less personalized than what GPT produces but they are instant, free, and always available. A future improvement could be a larger set of randomized messages per level.
+
+Now let us look at what to watch for in the AI output. Here is the review checklist:
+
+- **NLTagger tag parsing** — Did the AI parse the `NLTag.rawValue` to `Double`? If it tried `sentimentTag as? Double` or similar, that is wrong.
+- **Thread safety** — `NLTagger` is not documented as thread-safe. Our struct creates a new instance per call, which avoids shared state. If the AI made `tagger` a stored property, flag that.
+- **The protocol is defined once** — Make sure the AI did not define `MoodAnalysisService` in multiple files. It should live in one place (either its own file or alongside `MoodAnalysisResult`). Both services import it.
+- **Sendable** — If the AI ignored `Sendable`, the code will produce warnings under Swift 6 strict concurrency. Push back.
+
+## Iteration
+
+Now we connect the two services with a fallback strategy. This is where it gets interesting.
+
+```
+Update our MoodEntryViewModel to use both OpenAIService and
+LocalMLService with automatic fallback.
+
+Requirements:
+- Try OpenAIService first
+- If it fails for any reason (network error, invalid API key,
+  timeout, any thrown error), fall back to LocalMLService
+- If there is no API key configured at all, skip the cloud
+  attempt entirely and go straight to on-device
+- The MoodAnalysisResult includes .source so the UI can show
+  "Analyzed on-device" vs "Analyzed with AI" if desired
+- Log which path was used and why
+- Use the MoodAnalysisService protocol — the ViewModel should
+  not import NaturalLanguage or know about OpenAI directly
+```
+
+The key piece of logic the AI should produce looks like this:
+
+```swift
+@Observable
+final class MoodEntryViewModel {
+    var analysisResult: MoodAnalysisResult?
+    var isAnalyzing = false
+
+    private let cloudService: (any MoodAnalysisService)?
+    private let localService: any MoodAnalysisService
+    private let logger = Logger(subsystem: "com.nativefirst.moodbit", category: "MoodEntryViewModel")
+
+    init(
+        cloudService: (any MoodAnalysisService)? = nil,
+        localService: any MoodAnalysisService = LocalMLService()
+    ) {
+        self.cloudService = cloudService
+        self.localService = localService
+    }
+
+    func analyzeMood(from text: String) async {
+        isAnalyzing = true
+        defer { isAnalyzing = false }
+
+        // If cloud service is available, try it first
+        if let cloudService {
+            do {
+                analysisResult = try await cloudService.analyzeMood(from: text)
+                logger.info("Cloud analysis succeeded")
+                return
+            } catch {
+                logger.warning("Cloud analysis failed: \(error.localizedDescription). Falling back to on-device.")
+            }
+        } else {
+            logger.info("No cloud service configured. Using on-device analysis.")
+        }
+
+        // Fallback to on-device — this never throws
+        do {
+            analysisResult = try await localService.analyzeMood(from: text)
+            logger.info("On-device analysis succeeded")
+        } catch {
+            // This should never happen with LocalMLService, but handle it defensively
+            logger.error("On-device analysis failed unexpectedly: \(error.localizedDescription)")
+            analysisResult = MoodAnalysisResult(
+                moodLevel: 3,
+                insight: "Unable to analyze mood at this time.",
+                source: .onDevice
+            )
+        }
+    }
+}
+```
+
+This is the pattern. The ViewModel holds an optional cloud service and a guaranteed local service. If the cloud service is `nil` — meaning the user never configured an API key — we skip the network call entirely. No wasted time, no unnecessary error. If the cloud service exists but fails, we catch the error, log it, and fall back.
+
+The `defer { isAnalyzing = false }` guarantees the loading state is cleared no matter which path we take. The `return` after a successful cloud call skips the fallback. Simple, readable, robust.
+
+### Cloud vs. On-Device: The Tradeoffs
+
+Here is the honest comparison:
+
+| Factor | Cloud (OpenAI) | On-Device (NLTagger) |
+|---|---|---|
+| **Accuracy** | High — understands context, sarcasm, nuance | Moderate — aggregate sentiment only |
+| **Insight quality** | Personalized, contextual | Generic, template-based |
+| **Latency** | 500ms–2s depending on network | <10ms |
+| **Cost** | ~$0.001–0.01 per analysis | Free, forever |
+| **Privacy** | Text sent to OpenAI servers | Text never leaves device |
+| **Offline** | No | Yes |
+| **Languages** | Excellent multilingual support | Best for English, limited otherwise |
+| **Availability** | Requires API key + network | Always available on iOS 11+ |
+
+For Moodbit, the cloud path gives better insights. But the on-device path gives better reliability and privacy. Having both means you do not have to choose.
+
+## Verify Phase
+
+Let us make sure everything works. Here is a simple test to verify the sentiment analyzer produces sane results:
+
+```
+Write unit tests for SentimentAnalyzer. Test:
+
+1. A clearly positive string returns mood level 4 or 5
+2. A clearly negative string returns mood level 1 or 2
+3. A neutral string returns mood level 3
+4. An empty string returns mood level 3 with confidence 0
+5. The raw score is always between -1.0 and 1.0
+6. The confidence is always between 0.0 and 1.0
+
+Use Swift Testing framework (@Test, #expect).
+Do NOT test exact mood levels — NLTagger is a model, not a
+deterministic function. Test ranges.
+```
+
+```swift
+import Testing
+@testable import Moodbit
+
+struct SentimentAnalyzerTests {
+    let analyzer = SentimentAnalyzer()
+
+    @Test func positiveTextReturnHighMood() {
+        let result = analyzer.analyze(
+            "I had an amazing day! Everything went perfectly and I feel wonderful."
+        )
+        #expect(result.moodLevel >= 4)
+        #expect(result.rawScore > 0)
+    }
+
+    @Test func negativeTextReturnsLowMood() {
+        let result = analyzer.analyze(
+            "Everything went wrong today. I feel terrible and nothing is working out."
+        )
+        #expect(result.moodLevel <= 2)
+        #expect(result.rawScore < 0)
+    }
+
+    @Test func neutralTextReturnsMidMood() {
+        let result = analyzer.analyze(
+            "I went to the store and bought some groceries. Then I came home."
+        )
+        #expect(result.moodLevel == 3)
+    }
+
+    @Test func emptyTextReturnsNeutralWithZeroConfidence() {
+        let result = analyzer.analyze("")
+        #expect(result.moodLevel == 3)
+        #expect(result.confidence == 0)
+        #expect(result.rawScore == 0)
+    }
+
+    @Test func rawScoreIsInValidRange() {
+        let texts = [
+            "I love this!",
+            "I hate this.",
+            "It is fine.",
+            "The weather is partly cloudy with a chance of rain."
+        ]
+
+        for text in texts {
+            let result = analyzer.analyze(text)
+            #expect(result.rawScore >= -1.0)
+            #expect(result.rawScore <= 1.0)
+        }
+    }
+
+    @Test func confidenceIsInValidRange() {
+        let texts = [
+            "Best day ever!",
+            "Worst experience of my life.",
+            "I ate lunch.",
+            ""
+        ]
+
+        for text in texts {
+            let result = analyzer.analyze(text)
+            #expect(result.confidence >= 0.0)
+            #expect(result.confidence <= 1.0)
+        }
+    }
+}
+```
+
+Notice the testing strategy. We do **not** test for exact mood levels on real text. NLTagger is a machine learning model — its output can vary slightly across iOS versions as Apple updates the model. What we test is that positive text trends positive, negative text trends negative, and edge cases are handled correctly. Deterministic assertions on ML output lead to flaky tests.
+
+For the fallback logic, you can test the ViewModel with a mock cloud service that throws:
+
+```swift
+struct FailingCloudService: MoodAnalysisService {
+    func analyzeMood(from text: String) async throws -> MoodAnalysisResult {
+        throw URLError(.notConnectedToInternet)
+    }
+}
+
+@Test func fallbackToOnDeviceWhenCloudFails() async {
+    let viewModel = MoodEntryViewModel(
+        cloudService: FailingCloudService(),
+        localService: LocalMLService()
+    )
+
+    await viewModel.analyzeMood(from: "I feel great today!")
+
+    #expect(viewModel.analysisResult != nil)
+    #expect(viewModel.analysisResult?.source == .onDevice)
+}
+
+@Test func usesCloudWhenAvailable() async {
+    let viewModel = MoodEntryViewModel(
+        cloudService: nil, // No cloud configured
+        localService: LocalMLService()
+    )
+
+    await viewModel.analyzeMood(from: "I feel great today!")
+
+    #expect(viewModel.analysisResult != nil)
+    #expect(viewModel.analysisResult?.source == .onDevice)
+}
+```
+
+Because both services conform to the same protocol, testing the fallback is trivial. You inject a `FailingCloudService` and verify the result comes from `.onDevice`. No mocking frameworks, no network stubs. Protocol-based design pays for itself in the test suite.
+
+## Final Code
+
+Here is the complete code for the two primary files.
+
+### SentimentAnalyzer.swift
+
+```swift
+// Services/ML/SentimentAnalyzer.swift
+
+import NaturalLanguage
+import os
+
+struct SentimentResult: Sendable {
+    let moodLevel: Int
+    let confidence: Double
+    let rawScore: Double
+}
+
+struct SentimentAnalyzer: Sendable {
+    private let logger = Logger(subsystem: "com.nativefirst.moodbit", category: "SentimentAnalyzer")
+
+    func analyze(_ text: String) -> SentimentResult {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.debug("Empty text — returning neutral")
+            return SentimentResult(moodLevel: 3, confidence: 0, rawScore: 0)
+        }
+
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (sentimentTag, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        let rawScore = Double(sentimentTag?.rawValue ?? "0") ?? 0.0
+        let moodLevel = mapScoreToMoodLevel(rawScore)
+        let confidence = min(abs(rawScore), 1.0)
+
+        logger.debug("Sentiment: \(rawScore, format: .fixed(precision: 3)) → mood \(moodLevel) (confidence \(confidence, format: .fixed(precision: 2)))")
+
+        return SentimentResult(
+            moodLevel: moodLevel,
+            confidence: confidence,
+            rawScore: rawScore
+        )
+    }
+
+    private func mapScoreToMoodLevel(_ score: Double) -> Int {
+        switch score {
+        case ...(-0.6):       return 1
+        case -0.6..<(-0.2):   return 2
+        case -0.2..<0.2:      return 3
+        case 0.2..<0.6:       return 4
+        default:              return 5
+        }
+    }
+}
+```
+
+### LocalMLService.swift
+
+```swift
+// Services/ML/LocalMLService.swift
+
+import Foundation
+import os
+
+enum AnalysisSource: String, Sendable {
+    case cloud
+    case onDevice
+}
+
+struct MoodAnalysisResult: Sendable {
+    let moodLevel: Int
+    let insight: String
+    let source: AnalysisSource
+}
+
+protocol MoodAnalysisService: Sendable {
+    func analyzeMood(from text: String) async throws -> MoodAnalysisResult
+}
+
+struct LocalMLService: MoodAnalysisService {
+    private let analyzer = SentimentAnalyzer()
+    private let logger = Logger(subsystem: "com.nativefirst.moodbit", category: "LocalMLService")
+
+    func analyzeMood(from text: String) async throws -> MoodAnalysisResult {
+        let sentiment = analyzer.analyze(text)
+
+        let insight = generateInsight(for: sentiment)
+
+        logger.info("On-device analysis complete: mood \(sentiment.moodLevel), confidence \(sentiment.confidence, format: .fixed(precision: 2))")
+
+        return MoodAnalysisResult(
+            moodLevel: sentiment.moodLevel,
+            insight: insight,
+            source: .onDevice
+        )
+    }
+
+    private func generateInsight(for sentiment: SentimentResult) -> String {
+        switch sentiment.moodLevel {
+        case 1:
+            return "Your entry suggests you're going through a difficult time. It's okay to feel this way."
+        case 2:
+            return "Your writing carries a somewhat negative tone. Consider what might help shift your perspective."
+        case 3:
+            if sentiment.confidence < 0.1 {
+                return "Your entry is fairly neutral. Sometimes a calm day is exactly what you need."
+            }
+            return "Your mood seems balanced today. A mix of thoughts and feelings is perfectly normal."
+        case 4:
+            return "Your entry has a positive tone. Something good seems to be happening."
+        case 5:
+            return "Your writing radiates positivity. Hold onto whatever is making you feel this way."
+        default:
+            return "Mood analyzed."
+        }
+    }
+}
+```
+
+## Checkpoint
+
+At this point you should have:
+
+- A `SentimentAnalyzer` that takes any string and returns a mood level 1–5 with a confidence score, powered entirely by Apple's on-device NaturalLanguage model
+- A `LocalMLService` conforming to `MoodAnalysisService`, producing the same result type as your cloud service
+- A `MoodEntryViewModel` that tries cloud first and falls back to on-device automatically
+- Unit tests that verify sentiment ranges (not exact values) and the fallback path
+- Zero new dependencies, zero API costs, zero privacy concerns for the on-device path
+
+Run the app in airplane mode. Type a journal entry. Tap analyze. You should see a mood level and an insight, powered entirely by NLTagger. No spinner waiting for a server. No error alert. It just works.
+
+Then turn the network back on, make sure you have an API key configured, and analyze another entry. This time it should come from the cloud, with a more nuanced, personalized insight. Both paths, one protocol, one user experience.
+
+## Challenge
+
+**Add a user-facing toggle for "Private Mode" (30 minutes):**
+
+1. Add a setting in the app that lets the user enable "Private Mode." When enabled, Moodbit should **always** use on-device analysis, even if a cloud service is configured. The user's journal text never leaves the device.
+
+2. Show a small indicator on the analysis result — something like a shield icon with "Analyzed on device" — when the on-device path was used, whether by choice or by fallback.
+
+3. Extend `SentimentAnalyzer` to analyze text **sentence by sentence** instead of as one paragraph. Return the per-sentence scores alongside the aggregate. Display the most positive and most negative sentences in the insight card. Hint: use `NLTagger` with `unit: .sentence` and `enumerateTags(in:unit:scheme:)`.
+
+This challenge tests whether you can extend the on-device path into a genuinely differentiated feature — not just a fallback, but something worth choosing on purpose.
