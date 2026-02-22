@@ -18,6 +18,7 @@ export const NAV_LINKS = [
     ],
   },
   { label: 'Blog', href: '/blog' },
+  { label: 'Learn', href: '/learn' },
   { label: 'Contact', href: '/contact' },
 ];
 
@@ -73,6 +74,28 @@ export const APPS = {
       { title: 'Privacy by Design', description: 'Your career data stays on your device. No cloud uploads, no data selling. Ever.', icon: 'shield' },
     ],
   },
+};
+
+export const COURSE = {
+  title: 'Vibe Code Native',
+  subtitle: 'Build Real iOS Apps with AI',
+  description: 'A free, comprehensive course teaching iOS developers how to leverage AI tools — especially Claude Code — to build production-quality native apps faster.',
+  author: 'Mario',
+  totalLessons: 7,
+  modules: [
+    {
+      number: 1,
+      title: 'Introduction to Vibe Coding',
+      description: 'Understand the AI-assisted development landscape, choose the right tools, and write your first prompt.',
+      lessonCount: 3,
+    },
+    {
+      number: 2,
+      title: 'Prompting for Swift & SwiftUI',
+      description: 'Master the art of writing effective prompts, configure CLAUDE.md, and avoid the most common mistakes.',
+      lessonCount: 4,
+    },
+  ],
 };
 
 export const BLOG_TAGS = [

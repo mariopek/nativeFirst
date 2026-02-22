@@ -16,4 +16,21 @@ const blog = defineCollection({
   }),
 });
 
-export const collections = { blog };
+const course = defineCollection({
+  loader: glob({ pattern: '**/*.mdx', base: './src/content/course' }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    module: z.number(),
+    moduleTitle: z.string(),
+    lesson: z.number(),
+    duration: z.string(),
+    difficulty: z.enum(['beginner', 'intermediate', 'advanced']).default('beginner'),
+    topics: z.array(z.string()).default([]),
+    author: z.string().default('Mario'),
+    draft: z.boolean().default(false),
+    pubDate: z.coerce.date(),
+  }),
+});
+
+export const collections = { blog, course };

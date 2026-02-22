@@ -1,0 +1,146 @@
+---
+export const prerender = true;
+
+import PageLayout from '../../layouts/PageLayout.astro';
+import { getCollection } from 'astro:content';
+import { SITE, COURSE } from '../../lib/constants';
+import CourseCard from '../../components/course/CourseCard.astro';
+import PremiumCTA from '../../components/course/PremiumCTA.astro';
+
+const allLessons = await getCollection('course', ({ data }) => !data.draft);
+const lessons = allLessons.sort(
+  (a, b) => (a.data.module * 100 + a.data.lesson) - (b.data.module * 100 + b.data.lesson)
+);
+
+const module1Lessons = lessons.filter((l) => l.data.module === 1);
+const module2Lessons = lessons.filter((l) => l.data.module === 2);
+
+const courseSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'Course',
+  name: `${COURSE.title} — ${COURSE.subtitle}`,
+  description: COURSE.description,
+  provider: {
+    '@type': 'Organization',
+    name: 'NativeFirst',
+    sameAs: SITE.url,
+  },
+  isAccessibleForFree: true,
+  hasCourseInstance: {
+    '@type': 'CourseInstance',
+    courseMode: 'online',
+    courseWorkload: 'PT2H',
+  },
+  educationalLevel: 'Beginner',
+  teaches: 'AI-assisted iOS development with Claude Code and SwiftUI',
+  inLanguage: 'en',
+};
+
+const firstLesson = lessons[0];
+---
+
+<PageLayout
+  title={`${COURSE.title} — Free iOS Development Course — ${SITE.name}`}
+  description={COURSE.description}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(courseSchema)} />
+
+  <!-- Hero -->
+  <section class="relative py-20 sm:py-28 overflow-hidden bg-white dark:bg-slate-950">
+    <div class="absolute inset-0 hero-gradient opacity-50"></div>
+    <div class="relative max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+      <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 text-sm font-medium mb-6">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+        </svg>
+        Free Course
+      </div>
+
+      <h1 class="font-display font-extrabold text-4xl sm:text-5xl md:text-6xl text-slate-900 dark:text-white mb-6 leading-tight">
+        <span class="gradient-text">{COURSE.title}</span>
+        <br />
+        <span class="text-3xl sm:text-4xl md:text-5xl">{COURSE.subtitle}</span>
+      </h1>
+
+      <p class="text-lg sm:text-xl text-slate-600 dark:text-slate-400 mb-8 max-w-2xl mx-auto">
+        {COURSE.description}
+      </p>
+
+      {firstLesson && (
+        <a
+          href={`/learn/${firstLesson.id}`}
+          class="inline-flex items-center gap-2 px-8 py-4 rounded-full gradient-brand text-white font-semibold text-lg shadow-lg shadow-purple-500/25 hover:shadow-purple-500/40 transition-shadow"
+        >
+          Start Learning
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+          </svg>
+        </a>
+      )}
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section class="py-8 border-t border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-6 text-center">
+        <div>
+          <p class="font-display font-bold text-2xl text-slate-900 dark:text-white">{COURSE.totalLessons}</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">Lessons</p>
+        </div>
+        <div>
+          <p class="font-display font-bold text-2xl text-slate-900 dark:text-white">{COURSE.modules.length}</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">Modules</p>
+        </div>
+        <div>
+          <p class="font-display font-bold text-2xl gradient-text">FREE</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">No paywalls</p>
+        </div>
+        <div>
+          <p class="font-display font-bold text-2xl text-slate-900 dark:text-white">~2h</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">Reading time</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Modules -->
+  <section class="py-16 sm:py-20 bg-white dark:bg-slate-950">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <h2 class="font-display font-bold text-2xl sm:text-3xl text-slate-900 dark:text-white mb-10 text-center">
+        Course Content
+      </h2>
+
+      <div class="space-y-8">
+        {COURSE.modules[0] && (
+          <CourseCard
+            moduleNumber={COURSE.modules[0].number}
+            moduleTitle={COURSE.modules[0].title}
+            moduleDescription={COURSE.modules[0].description}
+            lessons={module1Lessons}
+          />
+        )}
+
+        {COURSE.modules[1] && (
+          <CourseCard
+            moduleNumber={COURSE.modules[1].number}
+            moduleTitle={COURSE.modules[1].title}
+            moduleDescription={COURSE.modules[1].description}
+            lessons={module2Lessons}
+          />
+        )}
+      </div>
+
+      <!-- Coming soon modules -->
+      <div class="mt-8 p-6 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 text-center">
+        <p class="text-slate-500 dark:text-slate-400 mb-1">More modules coming soon</p>
+        <p class="text-sm text-slate-400 dark:text-slate-500">
+          Build projects, architecture deep-dives, Invoize case study, and advanced topics
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Premium CTA -->
+  <PremiumCTA variant="hero" />
+</PageLayout>

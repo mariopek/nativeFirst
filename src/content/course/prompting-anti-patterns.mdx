@@ -1,0 +1,273 @@
+---
+title: "Prompting Anti-Patterns"
+description: "The top 10 mistakes developers make with AI coding tools — from mega-prompts to blind acceptance — and how to fix each one."
+module: 2
+moduleTitle: "Prompting for Swift & SwiftUI"
+lesson: 4
+duration: "10 min read"
+difficulty: "intermediate"
+topics: ["Anti-Patterns", "Common Mistakes", "Best Practices"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+We have spent three lessons talking about what to do. Now let us talk about what NOT to do. These are the ten most common mistakes I see developers make with AI coding tools, and every single one of them is avoidable.
+
+I have ranked them roughly by how often I see them. Number one is almost universal among beginners.
+
+## Anti-Pattern #1: The Mega-Prompt
+
+**The mistake:** Writing a single, enormous prompt that describes an entire feature — or worse, an entire app.
+
+```
+Build me a complete expense tracking app with user authentication,
+expense categories with color coding, monthly budgets with alerts,
+receipt photo scanning with OCR, CSV export, charts showing spending
+trends, multi-currency support with real-time exchange rates, shared
+expenses with other users, recurring expense templates, and a widget
+for the home screen. Use MVVM and SwiftData.
+```
+
+**Why it fails:** The AI has to make hundreds of decisions simultaneously. Architecture, data model, navigation, UI for each feature — all at once. The result is shallow. Every feature is half-implemented. Interactions between features are broken. And the code is unmaintainable because the AI did not have time to think through the design.
+
+**The fix:** Break it into phases. Start with the data model. Then build one feature at a time. Use the refinement ladder from Lesson 2.3.
+
+```
+Let's start with the expense data model. I need:
+- Expense: name, amount, date, category, optional receipt image
+- Category: name, color, icon (SF Symbol name)
+- Budget: category, monthly limit, period (month/year)
+
+Design the SwiftData models with proper relationships.
+```
+
+One prompt, one concern. Build up systematically.
+
+## Anti-Pattern #2: Zero Context
+
+**The mistake:** Assuming the AI knows things it cannot possibly know.
+
+```
+Fix the bug in the login screen.
+```
+
+**Why it fails:** What bug? What does the login screen look like? What framework are you using? What behavior are you seeing vs. expecting? Claude Code can read your files, but it cannot read your mind. And if there are no compiler errors, it has no idea which behavior is "wrong."
+
+**The fix:** Always describe the gap between current behavior and expected behavior.
+
+```
+The login screen has a bug: when the user enters an incorrect
+password, the error message appears but the loading spinner
+never stops. Expected behavior: spinner should stop and the
+error message should appear. The LoginViewModel.login() method
+is in ViewModels/LoginViewModel.swift.
+```
+
+## Anti-Pattern #3: Blind Acceptance
+
+**The mistake:** Accepting AI-generated code without reading it, compiling it, or testing it.
+
+**Why it fails:** AI generates plausible-looking code that may have subtle bugs:
+- Optional values force-unwrapped in edge cases
+- Race conditions in async code
+- Memory leaks from strong reference cycles in closures
+- SwiftUI views that do not update because state management is wrong
+- API calls that work in the happy path but crash on errors
+
+**The fix:** Always do a minimum review:
+
+1. **Compile it** — does it build without errors or warnings?
+2. **Read the state management** — are property wrappers correct? (@State, @Binding, @Observable)
+3. **Check unwrapping** — any force unwraps (!) or implicitly unwrapped optionals?
+4. **Test the edge cases** — empty data, no network, error states
+5. **Run it** — does it actually work in the simulator?
+
+You do not need to read every line. But you must verify the critical paths.
+
+## Anti-Pattern #4: Ignoring Compiler Warnings
+
+**The mistake:** The code compiles with warnings, and you ignore them because "it works."
+
+**Why it fails:** Warnings are future bugs. Deprecated API warnings mean your code will break in a future iOS version. Unused variable warnings often indicate logic errors. "Expression implicitly coerced" warnings can hide type mismatches.
+
+**The fix:** Paste the warning into Claude Code:
+
+```
+Xcode shows this warning on line 42 of ExpenseListView.swift:
+"'onChange(of:perform:)' was deprecated in iOS 17.0: Use
+onChange with a two or zero parameter action closure instead."
+Fix this using the modern API.
+```
+
+The AI knows how to fix deprecation warnings. Let it. There is zero reason to ship code with warnings.
+
+## Anti-Pattern #5: Wrong Level of Abstraction
+
+**The mistake:** Asking AI to implement something at the wrong level — too low (writing the code yourself in English) or too high (too abstract to be useful).
+
+**Too low:**
+```
+Create a VStack. Inside it, put a Text view with the string
+"Hello". Set the font to .title. Set the foreground color
+to .primary. Add 16 points of padding on all sides. Add a
+background with Color.blue and corner radius of 12.
+```
+
+You just wrote the code in English. Congratulations, you saved zero time and added a translation layer for bugs.
+
+**Too high:**
+```
+Make the app look professional.
+```
+
+What does "professional" mean? The AI will guess, and its guess will not match yours.
+
+**The sweet spot:**
+```
+Create a card component that displays a summary of an expense:
+the category icon on the left, the name and date stacked
+vertically in the middle, and the amount right-aligned. The
+card should have a subtle shadow and rounded corners, matching
+the style of Apple's Wallet app transaction rows.
+```
+
+This describes the *what* and the *feel* without dictating the implementation details.
+
+## Anti-Pattern #6: No CLAUDE.md (or an Empty One)
+
+**The mistake:** Using Claude Code without a CLAUDE.md file, or having one that is so minimal it adds no value.
+
+**Why it fails:** Without rules, every prompt starts from zero. The AI makes default decisions that may not match your project: it might use ObservableObject instead of @Observable, target iOS 15, create singletons for state management, or mix architectural patterns.
+
+**The fix:** Spend 15 minutes writing a proper CLAUDE.md before you write your first feature prompt. You did this in the homework for Lesson 2.2. If you skipped it, go back and do it now. Seriously.
+
+## Anti-Pattern #7: Fighting the Tool
+
+**The mistake:** Using AI for tasks it is bad at while doing manually what AI is great at.
+
+**AI is great at:**
+- Writing SwiftUI views from descriptions
+- Creating data models and CRUD operations
+- Writing unit tests
+- Generating boilerplate (networking, persistence, extensions)
+- Refactoring and renaming across files
+
+**AI is not great at (yet):**
+- Complex layout debugging (why is this view 2 pixels off?)
+- Performance profiling (Instruments is better)
+- Asset management (dragging images into asset catalogs)
+- Xcode project settings (capabilities, entitlements, build settings)
+- Pixel-perfect design matching (use preview and adjust manually)
+
+**The fix:** Use AI for what it is good at. Use Xcode and your own expertise for what it is not. The goal is not to do everything with AI — the goal is to be as productive as possible.
+
+## Anti-Pattern #8: Prompt Amnesia
+
+**The mistake:** Repeating context that Claude Code already knows from earlier in the conversation or from your CLAUDE.md.
+
+```
+Using our MVVM architecture with @Observable ViewModels and
+SwiftData persistence targeting iOS 17+ with proper Apple HIG
+compliance, add a delete button to the expense row.
+```
+
+**Why it fails:** It does not fail exactly — it is just wasteful. Claude Code already knows all of this from your CLAUDE.md and the conversation history. Adding redundant context adds noise and increases token costs.
+
+**The fix:** Trust the context. Just say:
+
+```
+Add a swipe-to-delete action to the expense rows in
+ExpenseListView.
+```
+
+Claude Code already knows your architecture, your patterns, and your constraints. Let it work.
+
+## Anti-Pattern #9: Never Starting Over
+
+**The mistake:** Iterating endlessly on a fundamentally flawed foundation because you have already invested five prompts and do not want to "waste" them.
+
+I see this constantly. The AI chose the wrong architecture in Round 1. By Round 8, the developer is still trying to "fix" it with incremental changes, and the code is a mess of patches.
+
+**Why it fails:** Sunk cost fallacy. Those five prompts cost you maybe 60 seconds and a few cents in API credits. The time you spend fighting a bad foundation costs far more.
+
+**The fix:** If after 2-3 refinements the code still does not feel right, stop. Start a new Claude Code session (or clear context). Write a better initial prompt that addresses what went wrong. The second attempt, informed by the first, will almost always be better.
+
+## Anti-Pattern #10: Not Reading the Diff
+
+**The mistake:** When Claude Code modifies existing files, not reviewing what actually changed.
+
+**Why it fails:** Claude Code modifies files in place. If you asked it to "add a search bar," it might also refactor nearby code, change variable names, or "improve" things you did not ask it to touch. Usually these changes are fine. Sometimes they introduce bugs in unrelated features.
+
+**The fix:** After every Claude Code modification to an existing file, review the diff:
+
+```bash
+git diff
+```
+
+Or ask Claude Code:
+
+```
+Show me exactly what you changed in ExpenseListView.swift
+```
+
+Take 30 seconds to scan the diff. If you see changes you did not ask for, ask why — or revert them. This is one of the most valuable habits you can develop.
+
+## Quick Reference Card
+
+| # | Anti-Pattern | Fix |
+|---|-------------|-----|
+| 1 | Mega-Prompt | One prompt, one concern |
+| 2 | Zero Context | Describe current vs. expected behavior |
+| 3 | Blind Acceptance | Compile, review state mgmt, test edges |
+| 4 | Ignoring Warnings | Paste warning into Claude Code and fix |
+| 5 | Wrong Abstraction | Describe WHAT and FEEL, not HOW |
+| 6 | No CLAUDE.md | Write one before your first feature |
+| 7 | Fighting the Tool | AI for code gen, Xcode for everything else |
+| 8 | Prompt Amnesia | Trust the context, keep prompts lean |
+| 9 | Never Starting Over | 2-3 bad iterations = fresh start |
+| 10 | Not Reading the Diff | Always review changes with git diff |
+
+## Closing
+
+That wraps up Module 2. You now have a complete prompting toolkit:
+
+- The **four-part framework** for structuring any prompt
+- **CLAUDE.md** for persistent project rules
+- **Iterative techniques** for refining output
+- **Anti-patterns** to avoid the most common mistakes
+
+In Module 3, we are going to put all of this into practice. We are going to build a complete Todo app from scratch — start to finish, entirely with AI-assisted development. You will see the full workflow: planning, prompting, iterating, reviewing, and shipping.
+
+See you there.
+
+## Key Takeaways
+
+1. **Mega-prompts fail** — break features into focused, sequential prompts
+2. **Context is king** — describe the gap between current and expected behavior
+3. **Never blindly accept** — compile, check state management, test edge cases
+4. **Fix warnings immediately** — AI handles deprecation fixes easily
+5. **Describe the WHAT, not the HOW** — let AI choose the implementation
+6. **CLAUDE.md is not optional** — 15 minutes of rules saves hours of corrections
+7. **Use AI for what it is good at** — code generation, tests, boilerplate
+8. **Trust the context** — do not repeat what CLAUDE.md already says
+9. **Know when to restart** — sunk cost fallacy kills productivity
+10. **Always read the diff** — 30 seconds of review prevents hours of debugging
+
+## Homework
+
+**Anti-pattern audit (15 minutes):**
+
+1. Open your Claude Code conversation history from Module 1
+2. Identify any prompts that fell into one of these 10 anti-patterns
+3. Rewrite those prompts using the techniques from this module
+4. Test the rewritten prompts — compare the output quality
+
+**Module 2 completion exercise:**
+Go back to the reflection exercise from Lesson 1.1 (your current workflow for adding a feature). Now rewrite it incorporating:
+- CLAUDE.md setup
+- Four-part prompt framework
+- Iterative refinement
+- Diff review
+
+How has your workflow changed? What steps were eliminated? What new steps were added?
