@@ -1,0 +1,828 @@
+---
+title: "Performance Optimization"
+description: "Optimize Moodbit's performance with lazy loading, efficient SwiftData queries, background processing for AI tasks, and launch time improvements that make your app feel instant."
+courseSlug: "ship-native"
+module: 7
+moduleTitle: "Production Polish"
+lesson: 3
+duration: "22 min read"
+difficulty: "advanced"
+topics: ["Performance", "LazyVStack", "SwiftData Optimization", "Background Processing", "Launch Time", "Memory", "Profiling", "Moodbit"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Moodbit works. The error handling is solid. The accessibility is polished. So you ship it, a user with 400 mood entries opens the app, and the launch takes four seconds. They scroll through their history and the UI stutters. They log a mood and the app freezes for two seconds while the AI generates an insight.
+
+That user deletes your app. They do not leave a review. They do not file a bug. They just leave.
+
+Performance is the silent killer of apps. Users do not think "this app has a performance problem." They think "this app is bad." And they are right — an app that stutters is bad, regardless of how good the features are.
+
+In this lesson, we measure first, optimize second, and verify that our changes actually helped. No guessing. No premature optimization. Data-driven decisions.
+
+## What You'll Learn
+
+- Replace `VStack` with `LazyVStack` and understand the measurable impact on scroll performance
+- Optimize SwiftData queries with `fetchLimit`, `fetchOffset`, `SortDescriptor`, and `#Predicate` to avoid loading thousands of entries into memory
+- Move AI processing to background tasks so the UI stays responsive during insight generation
+- Reduce launch time by deferring non-critical work and profiling with Instruments
+
+## Why This Matters
+
+Apple measures your app's launch time. If it exceeds 4 seconds on a cold start, the system may kill it — the user sees a crash. The App Store review team tests on older hardware. If your app feels sluggish on an iPhone SE, that is a rejection risk.
+
+Beyond Apple's requirements: every 100ms of delay reduces user engagement. This is not theoretical. Apple's own Human Interface Guidelines emphasize that apps should feel instant. A mood tracking app that feels slow undermines trust — the user's most personal data is in an app that cannot keep up.
+
+Moodbit talks to an external AI service, reads from a local database, and renders charts. Each of those can be a bottleneck. Let us find out which ones actually are.
+
+## Plan Phase: Defining What We Build
+
+Start with a profiling plan, not an optimization plan. Send this prompt:
+
+```
+I need to optimize Moodbit's performance before shipping.
+Do NOT write code yet — create a profiling and optimization plan.
+
+Current architecture:
+- SwiftData for persistence (MoodEntry model with score, note,
+  emoji, insight, date, insightSource)
+- OpenAI API for insight generation (network call per entry)
+- Charts framework for mood history visualization
+- ~10 views, TabView navigation
+
+Potential user scale:
+- 1-3 entries per day
+- After 1 year: ~500-1000 entries
+- Power users: up to 2000+ entries
+
+I suspect these bottlenecks but have not measured:
+1. Loading all entries on app launch
+2. The mood history list might be using VStack instead of
+   LazyVStack
+3. AI insight generation blocks the main thread
+4. Chart rendering with 365+ data points
+
+Plan:
+1. What should I measure first, and how?
+2. What are the likely bottlenecks at 1000+ entries?
+3. What optimizations should I apply in what order?
+4. How do I verify each optimization actually helped?
+```
+
+### Plan Analysis
+
+The AI should produce an ordered list of measurements before optimizations. That order matters.
+
+**Keep** — "Measure launch time with Instruments before changing anything." This is correct. You need a baseline. Without a baseline, you cannot prove an optimization helped.
+
+**Keep** — "Profile scroll performance at 1000 entries." The AI should suggest creating test data first, then profiling. Performance testing with 5 entries is useless.
+
+**Question** — If the AI jumps straight to "replace VStack with LazyVStack" without suggesting measurement first, push back. That is probably the right fix, but you should confirm with data.
+
+### Anti-Pattern: Optimizing Without Measuring
+
+```swift
+// The developer "optimizes" by adding caching everywhere
+// without knowing if caching is even the problem.
+
+// They add a cache for mood entries:
+private var cachedEntries: [MoodEntry]?  // Manual cache
+
+// They add a cache for formatted dates:
+private var dateCache: [Date: String] = [:]  // Another cache
+
+// They add a cache for chart data:
+private var chartDataCache: [ChartDataPoint]?  // Yet another
+
+// Result: more memory usage, stale data bugs, and the actual
+// bottleneck (VStack with 1000 items) is untouched.
+```
+
+Do not guess. Measure. Fix what is actually slow.
+
+## Execute Phase: Implementation
+
+First, let us generate test data so we can profile realistically:
+
+```
+Create a TestDataGenerator that populates SwiftData with
+realistic mood entries for performance testing.
+
+- Generate entries spanning 365 days
+- 1-3 entries per day (random)
+- Random mood scores weighted toward 5-8 (realistic distribution)
+- Random emoji selection
+- Some entries have notes, some do not
+- Some entries have AI insights, some have on-device insights
+- Total: roughly 700 entries
+
+Put it in Debug/TestDataGenerator.swift. Only include it in
+Debug builds using #if DEBUG.
+```
+
+```swift
+#if DEBUG
+import SwiftData
+import Foundation
+
+struct TestDataGenerator {
+    static func populate(context: ModelContext) throws {
+        let calendar = Calendar.current
+        let today = Date.now
+        let emojis = ["😄", "🙂", "😐", "😕", "😢", "😡", "😰", "😴", "🤩", "😌"]
+        let notes = [
+            "Good day at work today",
+            "Feeling stressed about the deadline",
+            "Had a great workout this morning",
+            "Could not sleep well last night",
+            nil, nil, nil  // Weight toward no note
+        ]
+
+        for dayOffset in 0..<365 {
+            guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: today) else {
+                continue
+            }
+
+            let entriesForDay = Int.random(in: 1...3)
+
+            for i in 0..<entriesForDay {
+                let hour = 8 + (i * 5) + Int.random(in: 0...3)
+                let entryDate = calendar.date(
+                    bySettingHour: hour, minute: Int.random(in: 0...59),
+                    second: 0, of: date
+                ) ?? date
+
+                // Weight scores toward 5-8
+                let score = weightedRandomScore()
+
+                let entry = MoodEntry(
+                    score: score,
+                    note: notes.randomElement() ?? nil,
+                    emoji: emojis.randomElement() ?? "😐",
+                    insight: "Sample insight for testing purposes.",
+                    insightSource: Bool.random() ? .ai : .onDevice
+                )
+                entry.date = entryDate
+
+                context.insert(entry)
+            }
+        }
+
+        try context.save()
+    }
+
+    private static func weightedRandomScore() -> Int {
+        let weights = [1, 2, 3, 5, 8, 12, 14, 12, 8, 5]  // Bell curve around 6-7
+        let total = weights.reduce(0, +)
+        var random = Int.random(in: 0..<total)
+        for (index, weight) in weights.enumerated() {
+            random -= weight
+            if random < 0 { return index + 1 }
+        }
+        return 5
+    }
+}
+#endif
+```
+
+Now, with test data in place, here are the actual optimizations. Send this prompt:
+
+```
+Optimize Moodbit for performance at scale (1000+ entries).
+Apply these optimizations in order:
+
+1. LAZY LOADING: Replace VStack with LazyVStack in
+   MoodHistoryView. Ensure the list uses lazy rendering.
+
+2. SWIFTDATA QUERIES: Optimize the @Query in MoodHistoryView
+   to use fetchLimit and SortDescriptor. Load only the most
+   recent 50 entries initially, with pagination (load more
+   on scroll).
+
+3. BACKGROUND AI PROCESSING: Move the OpenAI API call off
+   the main thread. Show the mood entry immediately with a
+   placeholder insight, then update when the AI responds.
+
+4. LAUNCH TIME: Defer non-critical initialization. The chart
+   data and AI service setup should not happen until the user
+   navigates to those screens.
+
+5. MEMORY: Use @Query with fetchLimit instead of loading all
+   entries for the chart. For the chart, fetch only the last
+   30 days.
+
+Each optimization should be measurable. Add os_signpost
+markers so I can verify improvements in Instruments.
+
+Use Swift 6, strict concurrency.
+```
+
+### AI Output Review
+
+**LazyVStack vs VStack — The Fix:**
+
+```swift
+import SwiftUI
+import SwiftData
+import os
+
+struct MoodHistoryView: View {
+    @Query(
+        filter: #Predicate<MoodEntry> { _ in true },
+        sort: \MoodEntry.date,
+        order: .reverse
+    )
+    private var allEntries: [MoodEntry]
+
+    @State private var displayCount = 50
+    private let pageSize = 50
+    private let signposter = OSSignposter(subsystem: "com.moodbit", category: "Performance")
+
+    var body: some View {
+        let displayedEntries = Array(allEntries.prefix(displayCount))
+
+        NavigationStack {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(displayedEntries) { entry in
+                        MoodEntryRow(entry: entry)
+                            .padding(.horizontal)
+                            .padding(.vertical, 6)
+
+                        if entry.id == displayedEntries.last?.id,
+                           displayCount < allEntries.count {
+                            loadMoreButton
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Mood History")
+            .onAppear {
+                let state = signposter.beginInterval("HistoryViewAppear")
+                signposter.endInterval("HistoryViewAppear", state)
+            }
+        }
+    }
+
+    private var loadMoreButton: some View {
+        Button {
+            withAnimation {
+                displayCount += pageSize
+            }
+        } label: {
+            HStack {
+                Text("Load More")
+                    .font(.subheadline)
+                Image(systemName: "arrow.down.circle")
+            }
+            .foregroundStyle(.secondary)
+            .padding()
+        }
+    }
+}
+```
+
+Review checklist:
+
+- ✅ `LazyVStack` instead of `VStack` — only visible rows are rendered
+- ✅ Pagination with `displayCount` and `prefix()` — the View starts with 50 entries and loads more on demand
+- ✅ `os_signpost` markers for Instruments profiling
+- ⚠️ `@Query` still fetches all entries into memory, even though we only display 50. The `prefix()` limits rendering but not the fetch. For true pagination, we need `FetchDescriptor` with `fetchLimit` in a ViewModel
+
+Here is the truly optimized version using `FetchDescriptor`:
+
+```swift
+import SwiftUI
+import SwiftData
+import os
+
+@Observable
+final class MoodHistoryViewModel {
+    private(set) var entries: [MoodEntry] = []
+    private(set) var hasMore = true
+    private var currentOffset = 0
+    private let pageSize = 50
+    private let context: ModelContext
+    private let signposter = OSSignposter(subsystem: "com.moodbit", category: "Performance")
+
+    init(context: ModelContext) {
+        self.context = context
+    }
+
+    func loadInitialPage() {
+        let state = signposter.beginInterval("LoadInitialPage")
+        defer { signposter.endInterval("LoadInitialPage", state) }
+
+        currentOffset = 0
+        entries = fetchPage(offset: 0)
+        hasMore = entries.count == pageSize
+    }
+
+    func loadNextPage() {
+        guard hasMore else { return }
+
+        let state = signposter.beginInterval("LoadNextPage")
+        defer { signposter.endInterval("LoadNextPage", state) }
+
+        currentOffset += pageSize
+        let newEntries = fetchPage(offset: currentOffset)
+        entries.append(contentsOf: newEntries)
+        hasMore = newEntries.count == pageSize
+    }
+
+    private func fetchPage(offset: Int) -> [MoodEntry] {
+        var descriptor = FetchDescriptor<MoodEntry>(
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        descriptor.fetchLimit = pageSize
+        descriptor.fetchOffset = offset
+
+        do {
+            return try context.fetch(descriptor)
+        } catch {
+            return []
+        }
+    }
+}
+```
+
+- ✅ `FetchDescriptor` with `fetchLimit` and `fetchOffset` — the database only returns 50 rows per page, not all 1000
+- ✅ `os_signpost` on each page load — measurable in Instruments
+- ✅ `hasMore` flag prevents unnecessary queries when all data is loaded
+
+The performance difference is significant. Here is what you should see with 1000 entries:
+
+| Metric | VStack + All Entries | LazyVStack + Pagination |
+|--------|---------------------|------------------------|
+| Initial render | ~800ms | ~45ms |
+| Memory (entries) | ~12 MB | ~1.5 MB |
+| Scroll to row 100 | Immediate (already in memory) | ~20ms (loads page 2) |
+| First visible frame | ~800ms | ~45ms |
+
+The trade-off: pagination adds a slight delay when scrolling past page boundaries. But 20ms is imperceptible. 800ms is not.
+
+**Background AI Processing:**
+
+```swift
+import SwiftUI
+import os
+
+@Observable
+final class MoodLogViewModel {
+    var isSaving = false
+    var savedEntry: MoodEntry?
+    var pendingInsight = false
+
+    private let aiService: AIServiceProtocol
+    private let fallbackAnalyzer = FallbackAnalyzer()
+    private let repository: MoodRepository
+    private let signposter = OSSignposter(subsystem: "com.moodbit", category: "Performance")
+
+    init(aiService: AIServiceProtocol, repository: MoodRepository) {
+        self.aiService = aiService
+        self.repository = repository
+    }
+
+    func saveMood(score: Int, note: String?, emoji: String) async {
+        isSaving = true
+        let saveState = signposter.beginInterval("SaveMood")
+
+        // Save immediately with a placeholder insight
+        let entry = MoodEntry(
+            score: score,
+            note: note,
+            emoji: emoji,
+            insight: "Generating your insight...",
+            insightSource: .onDevice
+        )
+
+        do {
+            try repository.save(entry)
+            savedEntry = entry
+            isSaving = false
+            signposter.endInterval("SaveMood", saveState)
+        } catch {
+            isSaving = false
+            signposter.endInterval("SaveMood", saveState)
+            return
+        }
+
+        // Generate AI insight in the background
+        pendingInsight = true
+        let insightState = signposter.beginInterval("GenerateInsight")
+
+        let insight = await generateInsight(score: score, note: note)
+        entry.insight = insight.text
+        entry.insightSource = insight.source
+
+        do {
+            try repository.save(entry)
+        } catch {
+            // Insight update failed — entry is still saved with placeholder.
+            // Not critical. Log and move on.
+        }
+
+        pendingInsight = false
+        signposter.endInterval("GenerateInsight", insightState)
+    }
+
+    private func generateInsight(
+        score: Int,
+        note: String?
+    ) async -> (text: String, source: InsightSource) {
+        do {
+            let aiInsight = try await withRetry {
+                try await self.aiService.generateInsight(
+                    moodScore: score,
+                    note: note
+                )
+            }
+            return (aiInsight, .ai)
+        } catch {
+            let fallback = fallbackAnalyzer.generateFallbackInsight(
+                moodScore: score,
+                note: note
+            )
+            return (fallback, .onDevice)
+        }
+    }
+}
+```
+
+- ✅ The mood entry saves immediately — the user sees confirmation in under 100ms
+- ✅ The AI insight generates in the background — no UI freeze
+- ✅ The entry updates in place when the insight arrives — the user sees "Generating your insight..." transition to the real insight
+- ✅ `os_signpost` separates save time from insight generation time in Instruments
+
+This is a UX improvement as much as a performance one. The user's action (logging a mood) completes instantly. The slow part (AI call) happens without blocking anything.
+
+**Launch Time Optimization:**
+
+```swift
+import SwiftUI
+import SwiftData
+import os
+
+@main
+struct MoodbitApp: App {
+    private let signposter = OSSignposter(subsystem: "com.moodbit", category: "Launch")
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .onAppear {
+                    let state = signposter.beginInterval("AppLaunchToFirstFrame")
+                    signposter.endInterval("AppLaunchToFirstFrame", state)
+                }
+        }
+        .modelContainer(for: MoodEntry.self)
+    }
+}
+
+struct ContentView: View {
+    @State private var selectedTab = 0
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            Tab("Log", systemImage: "plus.circle", value: 0) {
+                MoodLogView()
+            }
+
+            Tab("History", systemImage: "clock", value: 1) {
+                // Deferred — only creates ViewModel when tab is selected
+                MoodHistoryView()
+            }
+
+            Tab("Insights", systemImage: "chart.line.uptrend.xyaxis", value: 2) {
+                // Deferred — chart data loads only when user navigates here
+                InsightsView()
+            }
+
+            Tab("Settings", systemImage: "gear", value: 3) {
+                SettingsView()
+            }
+        }
+    }
+}
+```
+
+The key insight: SwiftUI's `TabView` does not render off-screen tabs until the user navigates to them. This means the chart, the history list, and the settings screen cost zero time at launch. Only the Log tab renders.
+
+But watch for this mistake:
+
+```swift
+// BAD — initializes all ViewModels at launch regardless of tab
+struct ContentView: View {
+    @State private var historyVM = MoodHistoryViewModel(...)  // Created at launch
+    @State private var insightsVM = InsightsViewModel(...)     // Created at launch
+    @State private var settingsVM = SettingsViewModel(...)     // Created at launch
+
+    var body: some View {
+        TabView {
+            MoodLogView()
+            MoodHistoryView(viewModel: historyVM)
+            InsightsView(viewModel: insightsVM)
+            SettingsView(viewModel: settingsVM)
+        }
+    }
+}
+```
+
+Even though the tab content is deferred, the ViewModels are all created in `@State` initializers — which run when `ContentView` appears. If those ViewModels do work in `init` (like fetching data), you have defeated the purpose of lazy tabs.
+
+**Fix:** Initialize ViewModels inside the tab views themselves, or use lazy initialization.
+
+**Chart with Limited Data:**
+
+```swift
+import SwiftUI
+import Charts
+import SwiftData
+
+struct InsightsView: View {
+    @Query(
+        filter: #Predicate<MoodEntry> {
+            $0.date > Date.now.addingTimeInterval(-30 * 24 * 60 * 60)
+        },
+        sort: \MoodEntry.date
+    )
+    private var recentEntries: [MoodEntry]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    if recentEntries.isEmpty {
+                        ContentUnavailableView(
+                            "No Data Yet",
+                            systemImage: "chart.line.uptrend.xyaxis",
+                            description: Text("Log moods for a few days to see trends.")
+                        )
+                    } else {
+                        moodChart
+                        statsSection
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Insights")
+        }
+    }
+
+    private var moodChart: some View {
+        Chart(recentEntries) { entry in
+            LineMark(
+                x: .value("Date", entry.date, unit: .day),
+                y: .value("Mood", entry.score)
+            )
+            .interpolationMethod(.catmullRom)
+
+            AreaMark(
+                x: .value("Date", entry.date, unit: .day),
+                y: .value("Mood", entry.score)
+            )
+            .foregroundStyle(.blue.opacity(0.1))
+            .interpolationMethod(.catmullRom)
+        }
+        .chartYScale(domain: 1...10)
+        .frame(height: 200)
+    }
+
+    private var statsSection: some View {
+        let scores = recentEntries.map(\.score)
+        let average = Double(scores.reduce(0, +)) / max(Double(scores.count), 1)
+
+        return VStack(spacing: 12) {
+            HStack {
+                StatCard(title: "Average", value: String(format: "%.1f", average), systemImage: "number")
+                StatCard(title: "Entries", value: "\(recentEntries.count)", systemImage: "list.bullet")
+            }
+            HStack {
+                StatCard(title: "Highest", value: "\(scores.max() ?? 0)", systemImage: "arrow.up")
+                StatCard(title: "Lowest", value: "\(scores.min() ?? 0)", systemImage: "arrow.down")
+            }
+        }
+    }
+}
+
+struct StatCard: View {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title2.bold())
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+```
+
+- ✅ `#Predicate` filters to 30 days at the database level — not fetching 1000 entries and filtering in Swift
+- ✅ The chart renders at most ~90 data points (3 entries/day times 30 days), which Charts handles without issue
+- ✅ `StatCard` is a simple value type — no performance overhead
+
+## Iteration
+
+After implementing the core optimizations, profile and verify. Send this:
+
+```
+I have applied the optimizations. Now I need to verify them.
+
+Create a PerformanceBenchmark utility that:
+1. Measures time to load the initial page of mood entries
+2. Measures time to render MoodHistoryView with 50 entries
+3. Measures memory footprint before and after loading history
+4. Logs all measurements using os_signpost so I can see
+   them in Instruments
+
+Also add a #if DEBUG performance overlay that shows:
+- Current memory usage
+- Time since last view render
+- Number of entries in memory
+
+I want to compare before/after numbers in Instruments
+to prove the optimizations worked.
+```
+
+Here is the profiling overlay for debug builds:
+
+```swift
+#if DEBUG
+import SwiftUI
+import os
+
+struct PerformanceOverlay: ViewModifier {
+    @State private var memoryUsage: String = "..."
+    @State private var renderTime: String = "..."
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottomTrailing) {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("MEM: \(memoryUsage)")
+                    Text("RENDER: \(renderTime)")
+                }
+                .font(.caption2.monospaced())
+                .padding(6)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .padding(8)
+            }
+            .task {
+                while !Task.isCancelled {
+                    memoryUsage = formatBytes(getMemoryUsage())
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+    }
+
+    private func getMemoryUsage() -> UInt64 {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size
+        ) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.resident_size : 0
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let mb = Double(bytes) / 1_048_576
+        return String(format: "%.1f MB", mb)
+    }
+}
+
+extension View {
+    func performanceOverlay() -> some View {
+        modifier(PerformanceOverlay())
+    }
+}
+#endif
+```
+
+Use this in debug builds to eyeball memory during development. For real numbers, use Instruments.
+
+## Verify Phase
+
+Open Instruments (Product > Profile in Xcode) and run these tests on a real device or the simulator with your 700+ test entries:
+
+1. **Launch time** — Use the Time Profiler. Measure from `main()` to first frame. Target: under 1 second for warm launch
+2. **Scroll performance** — Open the mood history and scroll quickly through all entries. The SwiftUI instrument should show no body evaluations taking longer than 16ms (one frame at 60fps)
+3. **Memory** — Open the Allocations instrument. Navigate to mood history, scroll through all entries, navigate back. Memory should return close to baseline — no unbounded growth
+4. **AI processing** — Log a mood and watch the Time Profiler. The save should complete on the main thread in under 100ms. The AI call should run on a background thread
+5. **Page loading** — Watch the signpost intervals in Instruments. Initial page load should be under 50ms. Each subsequent page under 30ms
+
+If any of these fail, you have data to describe the problem to AI precisely. "The initial page load takes 200ms according to my signpost, and the Allocations instrument shows 8MB allocated during the fetch" is a prompt that gets a targeted fix.
+
+## Final Code
+
+Here is the complete `MoodHistoryView` with all optimizations applied:
+
+```swift
+import SwiftUI
+import SwiftData
+import os
+
+struct MoodHistoryView: View {
+    @Environment(\.modelContext) private var context
+    @State private var viewModel: MoodHistoryViewModel?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let viewModel {
+                    historyContent(viewModel)
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                }
+            }
+            .navigationTitle("History")
+            .task {
+                if viewModel == nil {
+                    let vm = MoodHistoryViewModel(context: context)
+                    vm.loadInitialPage()
+                    viewModel = vm
+                }
+            }
+        }
+    }
+
+    private func historyContent(_ viewModel: MoodHistoryViewModel) -> some View {
+        Group {
+            if viewModel.entries.isEmpty {
+                ContentUnavailableView(
+                    "No Moods Yet",
+                    systemImage: "face.smiling",
+                    description: Text("Log your first mood to start tracking patterns.")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.entries) { entry in
+                            MoodEntryRow(entry: entry)
+                                .padding(.horizontal)
+                                .padding(.vertical, 6)
+
+                            Divider()
+                                .padding(.leading)
+                        }
+
+                        if viewModel.hasMore {
+                            ProgressView()
+                                .padding()
+                                .onAppear {
+                                    viewModel.loadNextPage()
+                                }
+                        }
+                    }
+                }
+                .refreshable {
+                    viewModel.loadInitialPage()
+                }
+            }
+        }
+    }
+}
+```
+
+- ✅ `LazyVStack` — only visible rows are created
+- ✅ Paginated fetches — 50 entries at a time from SwiftData
+- ✅ Automatic "load more" when the user scrolls to the bottom — the `ProgressView` at the bottom triggers `onAppear` which loads the next page
+- ✅ Pull-to-refresh resets to the first page
+- ✅ ViewModel is initialized lazily in `.task`, not in `@State` initializer
+- ✅ Empty state handled with `ContentUnavailableView`
+
+## Checkpoint
+
+Verify these before shipping:
+
+- [ ] The app launches and shows the first tab in under 1 second (warm) on your oldest supported device
+- [ ] Scrolling through 700+ entries in the history list maintains 60fps — no visible stuttering
+- [ ] Memory does not grow unbounded when scrolling through all entries and back
+- [ ] Logging a mood shows instant feedback — the save completes before the AI insight arrives
+- [ ] The Insights chart loads only the last 30 days of data, not the entire history
+- [ ] Instruments signposts show initial page load under 50ms for 50 entries
+- [ ] No `VStack` inside `ScrollView` with `ForEach` remains anywhere in the codebase
+
+## Challenge
+
+**Add a prefetch system for the mood history list.** When the user scrolls and is within 10 entries of the current page boundary, begin fetching the next page in the background. The user should never see the `ProgressView` "loading more" spinner because the data is already loaded by the time they reach the boundary.
+
+*Hint:* Track the index of the last visible entry using an `onAppear` modifier on each row. When the visible index reaches `entries.count - 10`, call `loadNextPage()`. Debounce the call to avoid triggering multiple fetches during fast scrolling — a simple boolean `isLoadingPage` flag is sufficient.
