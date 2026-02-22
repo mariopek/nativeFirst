@@ -4,7 +4,7 @@
 
 | Key | Value |
 |-----|-------|
-| **Duration** | ~10 minutes |
+| **Duration** | ~18 minutes |
 | **Format** | Talking head + slides |
 | **Resources needed** | Slide deck, camera |
 | **Prerequisite** | None |
@@ -17,6 +17,8 @@
 - Definition: what vibe coding actually means
 - The spectrum: copy-paste AI vs. real vibe coding
 - Why 2025/2026 is the inflection point
+- Real-world proof: how BetAway was built in 48 hours
+- Best iOS courses for building your foundation (iOS Lead Essentials, Stanford CS193p, Paul Hudson, Sean Allen)
 - What this course will teach you (and what it will not)
 
 ---
@@ -82,6 +84,44 @@ Three reasons.
 
 **Third — native development needs this more than anyone.** Here is something nobody talks about: the AI-assisted coding revolution has overwhelmingly favored web development. React, Next.js, Python — these ecosystems have massive training data, tons of Stack Overflow answers, and AI tools optimized for them. Native iOS? We have always been a smaller community. Our documentation is spread across Apple's developer site, WWDC videos, and tribal knowledge. AI tools that actually understand our ecosystem are a genuine competitive advantage.
 
+### A Real-World Example: BetAway (Talking Head)
+
+Let me give you a concrete example of what vibe coding makes possible today.
+
+We recently built BetAway — a complete iOS app for gambling addiction recovery. It has streak tracking, CBT-based therapy exercises, a crisis intervention button with guided breathing, financial recovery planning, and offline-first data persistence with SwiftData. It is completely free, completely private, and it is a real app that helps real people.
+
+We built the working MVP in forty-eight hours.
+
+Let that sink in. A native iOS app with multiple screens, proper MVVM architecture, SwiftData persistence, accessibility support, and a polished UI — in two days. Not a prototype. Not a wireframe. A functional app.
+
+Could a senior developer build this without AI? Absolutely. But it would take two to three weeks, not two days. The vibe coding workflow — describe, generate, review, refine — compressed the timeline by an order of magnitude. And the code quality? It follows every pattern we would write by hand. Because we set the rules upfront with CLAUDE.md (more on that in Module 2) and reviewed everything the AI generated.
+
+This is not a toy example. This is what the course prepares you to do.
+
+### Learn the Fundamentals First (Talking Head)
+
+[SCREEN: Slide — "Best iOS Courses (Non-AI)"]
+
+Now, I need to be honest about something. This course assumes you already know Swift and have at least basic SwiftUI experience. Vibe coding is not a replacement for understanding the fundamentals — it is a multiplier. If you multiply zero knowledge by ten, you still get zero.
+
+So before we go further, let me point you to the best resources for building that foundation. And I want to be clear: none of these are paid endorsements. These are genuine recommendations from someone who has been in the iOS ecosystem for years.
+
+**The best iOS course that exists — period — is iOS Lead Essentials by Caio Zullo and Mike Apostolakis at Essential Developer Academy.**
+
+I say this with full responsibility. It is the most comprehensive, rigorous, and career-transforming iOS course I have seen. It covers test-driven development, clean architecture, SOLID principles, design patterns, and — critically — the non-technical skills that make someone a lead developer. It is not cheap (around $2,000), but the developers who complete it consistently move into senior and lead positions. The depth of their code reviews alone is worth the investment.
+
+I hope Caio and Mike do not mind me saying this — it is simply the truth. If you are serious about becoming an exceptional iOS developer, iOS Lead Essentials is the gold standard.
+
+For those at earlier stages or on a tighter budget, here are other excellent resources:
+
+**Stanford CS193p (Free)** — Professor Paul Hegarty's legendary course. The Spring 2025 edition covers SwiftUI comprehensively. It is university-level quality, completely free, and has been the entry point for thousands of iOS developers. If you are coming from another programming language and want a structured introduction to SwiftUI, start here.
+
+**100 Days of SwiftUI by Paul Hudson (Free)** — Paul is a treasure in the iOS community. His Hacking with Swift resources are beloved for good reason. 100 Days of SwiftUI is self-paced, project-based, and covers everything from basics to advanced topics. If you prefer learning by building, this is your path.
+
+**Sean Allen (YouTube, Free + Paid)** — Sean's YouTube channel and courses are excellent for practical, real-world iOS development. His teaching style is clear and his content stays current.
+
+These resources teach you *how to write iOS apps*. Our course teaches you *how to write iOS apps faster and better with AI*. They complement each other perfectly. If you have the fundamentals down, you are ready for what comes next.
+
 ### What This Course Is (and Is Not) (Talking Head)
 
 [SCREEN: Two-column slide — "This course IS" / "This course is NOT"]
@@ -117,8 +157,9 @@ Let us get into it.
 1. **Vibe coding** was coined by Andrej Karpathy in 2025 — it describes AI-first software development
 2. There is a **spectrum** from copy-paste AI to full vibe coding — this course focuses on guided coding
 3. **2025/2026 is the inflection point** because models finally understand Swift, project-aware tools exist, and native dev benefits disproportionately
-4. This course teaches you to **collaborate with AI**, not blindly trust it
-5. You still need Swift fundamentals — AI amplifies skill, it does not replace it
+4. **BetAway proves it works** — a complete gambling addiction recovery app built in 48 hours with vibe coding
+5. **Learn the fundamentals first** — iOS Lead Essentials (Caio & Mike) is the gold standard; Stanford CS193p and Paul Hudson's 100 Days of SwiftUI are excellent free alternatives
+6. This course teaches you to **collaborate with AI**, not blindly trust it — AI amplifies skill, it does not replace it
 
 ---
 

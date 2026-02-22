@@ -161,6 +161,8 @@ Here is the setup we will use throughout this course:
 
 **Why this combination?** Claude Code gives you the deepest project understanding and the most powerful model for Swift. Copilot handles the micro-level completions. And Cursor is there when you want a GUI. Together, they cover the entire spectrum of AI-assisted development.
 
+**Proof it works:** I mentioned BetAway in the previous lesson — the gambling addiction recovery app we built in 48 hours. That app was built entirely with this exact stack. Claude Code with Opus 4.6 for all feature development, CLAUDE.md enforcing MVVM and SwiftData patterns, and Copilot in Xcode for quick inline edits during review. The result was a multi-screen native app with proper architecture, accessibility support, and a polished UI. Not a hack. Not a prototype. A real app that helps real people. This stack made that timeline possible.
+
 ### Honest Limitations (Talking Head)
 
 [SCREEN: Return to talking head]
