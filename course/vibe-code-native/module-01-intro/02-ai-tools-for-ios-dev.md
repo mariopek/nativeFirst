@@ -17,6 +17,7 @@
 - Category 1: AI Models (the brains)
 - Category 2: AI-Powered Editors & Tools (the interface)
 - Head-to-head: Claude Code vs. Cursor vs. Copilot vs. Xcode AI
+- OpenClaw — the open-source AI agent wildcard (and why it matters for iOS devs)
 - Why Claude Code + Opus 4.6 is our primary stack
 - The honest truth about each tool's weaknesses
 
@@ -141,6 +142,34 @@ The promise is compelling: AI that truly understands Apple's frameworks, integra
 
 Watch this space. Apple will improve it. But today, it is not a primary tool for serious development.
 
+#### OpenClaw — The Open-Source Wildcard
+
+[SCREEN: OpenClaw GitHub page / website]
+
+I want to highlight a tool that deserves your attention: OpenClaw. And there is a beautiful piece of iOS community history behind it.
+
+OpenClaw was created by Peter Steinberger — and if that name sounds familiar, it should. Steinberger is the creator of PSPDFKit, one of the most respected iOS SDKs ever built. The man has deep Apple platform expertise. So when he builds an AI tool, it is worth paying attention.
+
+OpenClaw started as a weekend project in November 2025 — originally called Clawdbot, then briefly Moltbot, before the community voted on the OpenClaw name. The concept: an open-source, self-hosted AI agent that runs locally on your machine, connects to your messaging apps (WhatsApp, Telegram), and can actually perform tasks on your system. It hit 60,000 GitHub stars in 72 hours. That is not hype — that is developers recognizing real utility.
+
+**What makes OpenClaw relevant for iOS developers:**
+
+**Developer workflow automation.** OpenClaw can integrate with GitHub for automated issue triage, PR reviews, and CI pipeline management. If you maintain open-source Swift packages, this is immediately useful — it can monitor issues, suggest fixes, and even draft responses.
+
+**Personal productivity layer.** It connects to Apple Notes, Apple Reminders, Things 3, and other native apps. You can ask it to organize your sprint tasks, summarize meeting notes, or set up a development schedule — all through a chat interface you already use.
+
+**Smart home and hardware integration.** This one surprised me. OpenClaw can control Philips Hue, Elgato devices, and Home Assistant setups. For developers building IoT-connected iOS apps, this opens up real testing and automation possibilities.
+
+**Web automation.** Form filling, data scraping, website navigation — useful for market research, competitive analysis, or automated App Store monitoring.
+
+**A word of caution:** OpenClaw runs with deep system access. Misconfigurations can expose credentials and files. The community skill marketplace (ClawHub) has had issues with unsafe extensions. Use it, but understand what you are granting access to. Self-hosted means self-responsible.
+
+In February 2026, Steinberger announced he is joining OpenAI to work on "smart agents" — but OpenClaw remains fully open-source under MIT license, managed by an independent foundation. The project is actively developed and the community is growing rapidly.
+
+**We believe OpenClaw is significant enough that we are planning a dedicated, comprehensive course on it.** There is a lot to cover — from initial setup and configuration, to building custom skills, to integrating it into a full iOS development workflow. Stay tuned for that.
+
+For now, think of OpenClaw as the "Swiss Army knife" in your toolbox. It is not your primary coding tool (Claude Code fills that role), but it is the automation layer that handles everything around the code — project management, research, communication, and system-level tasks.
+
 ### The Recommendation (Slide)
 
 [SCREEN: Recommendation slide with logos]
@@ -181,7 +210,9 @@ These limitations are real, and pretending they do not exist would be dishonest.
 
 ### Closing
 
-In the next lesson, we are going to install Claude Code, configure it for an Xcode project, and write your first AI-assisted SwiftUI view. Hands on keyboard. Let us go.
+One more thing before we move on. I mentioned OpenClaw earlier — the open-source AI agent built by Peter Steinberger. We believe it is significant enough that **we are planning a dedicated, in-depth course on OpenClaw** — covering everything from initial setup and configuration, to building custom skills, to integrating it into a full iOS development workflow with automation, GitHub integration, and smart home control. If you are interested, keep an eye on our Learn page. That course is coming soon.
+
+Now — in the next lesson, we are going to install Claude Code, configure it for an Xcode project, and write your first AI-assisted SwiftUI view. Hands on keyboard. Let us go.
 
 ---
 
@@ -191,8 +222,9 @@ In the next lesson, we are going to install Claude Code, configure it for an Xco
 2. **Claude Opus 4.6** is the strongest model for Swift/SwiftUI — idiomatic code, architecture awareness, modern API knowledge
 3. **Claude Code** is our primary tool — full project context, CLAUDE.md configuration, file creation/modification
 4. **Copilot** is great as a complement for inline suggestions inside Xcode
-5. **No tool is perfect** — storyboards, complex migrations, profiling, and App Store submission still need human expertise
-6. The recommended stack: **Claude Code (primary) + Copilot (inline) + Cursor (optional visual)**
+5. **OpenClaw** is the open-source automation wildcard — developer workflows, productivity, web automation, smart home. Built by PSPDFKit creator Peter Steinberger. A dedicated OpenClaw course is coming soon.
+6. **No tool is perfect** — storyboards, complex migrations, profiling, and App Store submission still need human expertise
+7. The recommended stack: **Claude Code (primary) + Copilot (inline) + Cursor (optional visual) + OpenClaw (automation)**
 
 ---
 
