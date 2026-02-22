@@ -8,6 +8,7 @@ import CourseSidebar from '../components/course/CourseSidebar.astro';
 import TableOfContents from '../components/course/TableOfContents.astro';
 import LessonNav from '../components/course/LessonNav.astro';
 import PremiumCTA from '../components/course/PremiumCTA.astro';
+import DownloadSource from '../components/course/DownloadSource.astro';
 import BlogComments from '../components/blog/BlogComments';
 
 interface Props {
@@ -177,6 +178,9 @@ const difficultyColors: Record<string, string> = {
             <slot />
           </div>
 
+          <!-- Download Source Code (premium only) -->
+          <DownloadSource courseSlug={courseData?.slug} />
+
           <!-- Premium CTA -->
           <PremiumCTA variant="inline" courseSlug={courseData?.slug} />
 
@@ -247,3 +251,39 @@ const difficultyColors: Record<string, string> = {
     </div>
   </article>
 </PageLayout>
+
+<script>
+  const copyIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>`;
+  const checkIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+  function initCopyButtons() {
+    document.querySelectorAll('pre').forEach((pre) => {
+      if (pre.hasAttribute('data-copy-init')) return;
+      pre.setAttribute('data-copy-init', '');
+      pre.style.position = 'relative';
+
+      const button = document.createElement('button');
+      button.className = 'copy-code-btn';
+      button.setAttribute('aria-label', 'Copy code');
+      button.innerHTML = copyIcon;
+
+      button.addEventListener('click', async () => {
+        const code = pre.querySelector('code');
+        const text = code ? code.textContent || '' : pre.textContent || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          button.innerHTML = checkIcon;
+          setTimeout(() => { button.innerHTML = copyIcon; }, 2000);
+        } catch {
+          button.textContent = 'Failed';
+          setTimeout(() => { button.innerHTML = copyIcon; }, 2000);
+        }
+      });
+
+      pre.appendChild(button);
+    });
+  }
+
+  initCopyButtons();
+  document.addEventListener('astro:page-load', initCopyButtons);
+</script>
