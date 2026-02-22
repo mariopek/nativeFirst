@@ -1,12 +1,12 @@
 ---
 title: "Networking & API Integration"
-description: "How to use AI to build a production-grade networking layer with async/await, generic services, and clean error handling — from first prompt to working API integration."
+description: "How to use AI to build a production-grade networking layer with async/await, generic services, and clean error handling — and why ABNetworking saves you from writing it all yourself."
 module: 4
 moduleTitle: "Real-World Patterns"
 lesson: 1
-duration: "16 min read"
+duration: "18 min read"
 difficulty: "intermediate"
-topics: ["Networking", "async/await", "API", "URLSession"]
+topics: ["Networking", "async/await", "API", "URLSession", "ABNetworking"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
@@ -18,7 +18,9 @@ Networking is where a lot of iOS developers lose hours. Not because URLSession i
 
 This is where AI shines. Not because it writes networking code you could not write yourself, but because it writes it in two minutes instead of forty. And if you prompt it correctly, the code is clean, testable, and production-ready.
 
-Let us build a complete networking layer from scratch using Claude Code.
+But here is the honest take: you do not need to build a networking layer from scratch. We already built one. It is called [ABNetworking](https://github.com/mariopek/ABNetworking) — an open-source, production-ready networking layer that we use across all of our apps, including banking applications handling thousands of API calls daily. It handles async/await, automatic retry with exponential backoff, certificate pinning, typed errors, and it is protocol-oriented so you can mock it in tests.
+
+I am going to teach you both approaches in this lesson. First, we will build a simple networking layer from scratch so you understand what is under the hood — because understanding your tools matters. Then I will show you how ABNetworking does all of this and more, and why you should use it (or something like it) instead of rolling your own for production apps.
 
 ## The Prompt Chain
 
@@ -91,7 +93,6 @@ enum NetworkError: LocalizedError {
     }
 }
 
-@Observable
 final class NetworkService {
     private let baseURL: String
     private let session: URLSession
@@ -342,7 +343,6 @@ Put it in Services/WeatherService.swift
 ```swift
 import Foundation
 
-@Observable
 final class WeatherService {
     private let networkService: NetworkService
     private let apiKey: String
@@ -358,7 +358,7 @@ final class WeatherService {
             URLQueryItem(name: "appid", value: apiKey)
         ]
 
-        let response: WeatherResponse = try try await networkService.get(
+        let response: WeatherResponse = try await networkService.get(
             "/data/2.5/weather",
             queryItems: queryItems
         )
@@ -688,6 +688,97 @@ After building dozens of networking layers with AI, here are the patterns I see 
 
 **5. Synchronous error state updates.** If the AI updates `isLoading` or `errorMessage` from a background thread without MainActor, you will get runtime warnings. Check that your ViewModel is updating state correctly — @Observable handles this well, but double-check.
 
+## The Production Approach: ABNetworking
+
+Everything we built above works. For a learning exercise or a small personal project, it is perfectly fine. But if you are building an app that goes to the App Store — especially one that handles real user data — you need more than a basic URLSession wrapper.
+
+Here is what our hand-built NetworkService is missing:
+
+- **Automatic retry with exponential backoff.** Network requests fail. Cellular connections drop. Servers return 503. A production networking layer handles transient failures gracefully without the caller needing to think about it.
+- **Certificate pinning.** For any app that handles sensitive data (banking, health, finance), you need to validate the server's certificate. Our basic service does not do this.
+- **Proper testability.** Our NetworkService is tightly coupled to URLSession. You cannot easily mock it in tests without passing a custom URLSession, which is clunky.
+- **Thread safety guarantees.** Our service works fine in simple cases, but under heavy concurrent use, there are no guarantees about thread safety.
+
+This is exactly why we built [ABNetworking](https://github.com/mariopek/ABNetworking). It is the networking layer we use across all of our apps — including banking applications handling thousands of API calls daily. We open-sourced it because every team ends up building the same thing from scratch, and most implementations miss critical production requirements.
+
+### Setting Up ABNetworking
+
+Install via Swift Package Manager:
+
+```
+https://github.com/mariopek/ABNetworking
+```
+
+ABNetworking requires iOS 12.0+ and Swift 5.7+. Zero external dependencies — just pure Swift on top of URLSession.
+
+### How ABNetworking Compares to Our Hand-Built Service
+
+Here is the same weather API integration using ABNetworking:
+
+```swift
+import ABNetworking
+
+let httpClient = URLSessionHTTPClient()
+let service = NetworkingService(httpClient: httpClient)
+
+do {
+    let request = try ABURLRequestBuilder(
+        baseURL: "https://api.openweathermap.org",
+        path: "/data/2.5/weather",
+        method: .get,
+        queryItems: [
+            URLQueryItem(name: "q", value: "London"),
+            URLQueryItem(name: "appid", value: apiKey)
+        ]
+    ).build()
+
+    let response: WeatherResponse = try await service.request(request)
+    let weather = Weather(from: response)
+} catch let error as NetworkingError {
+    switch error {
+    case .noConnection:
+        // User is offline
+    case .serverError(let code):
+        // Server returned an error
+    case .decodingError:
+        // Response did not match our model
+    default:
+        break
+    }
+}
+```
+
+Notice what you get for free:
+- **Typed errors** — `NetworkingError` gives you specific cases like `.noConnection`, `.serverError`, `.decodingError`. No more guessing what went wrong.
+- **Automatic retry** — transient failures (timeouts, 503s) are retried with exponential backoff. A 401 is not retried because your token is invalid and retrying will not help. This is smart retry logic you do not have to write.
+- **Certificate pinning** — three lines to set up:
+
+```swift
+guard let certURL = Bundle.main.url(forResource: "server", withExtension: "der"),
+      let certData = try? Data(contentsOf: certURL) else { return }
+
+let httpClient = URLSessionHTTPClient(pinnedCertificates: [certData])
+let service = NetworkingService(httpClient: httpClient)
+```
+
+- **Protocol-oriented testability** — `HTTPClient` is a protocol. In your tests, you create a mock that conforms to `HTTPClient`, return whatever responses you need, and test your business logic without making real network calls. No more fighting with URLProtocol mocks.
+- **Configurable logging** — four levels (debug, info, warning, error). In development you see everything, in production you only see what matters.
+
+### When to Use ABNetworking vs. Rolling Your Own
+
+Use ABNetworking (or a similar production library) when:
+- Your app talks to a backend API
+- You need retry logic, certificate pinning, or proper error handling
+- You want testable networking code with clean mocking
+- You are building something that goes on the App Store
+
+Roll your own when:
+- You are learning and want to understand how networking works under the hood (which is what we did earlier in this lesson)
+- You have very specific requirements that no library covers
+- You are building a library yourself and cannot take dependencies
+
+For the vast majority of apps, ABNetworking handles everything you need. The whole point of this course is to work smarter — and that means not rebuilding solved problems from scratch every time.
+
 ## Key Takeaways
 
 1. **Use a prompt chain, not one giant prompt** — NetworkService, then models, then service, then ViewModel, then view. Each step builds on the last.
@@ -695,7 +786,8 @@ After building dozens of networking layers with AI, here are the patterns I see 
 3. **Separate raw API models from display models** — one for decoding, one for UI. This protects your views from API changes.
 4. **Two-layer error handling** — technical errors at the network layer, user-friendly messages at the ViewModel layer. Never show raw error types to users.
 5. **Watch for common AI mistakes** — third-party imports, hardcoded keys, missing empty-response handling, narrow status code checks.
-6. **A generic NetworkService is reusable across your entire app** — build it once, use it for every API integration.
+6. **Use ABNetworking for production apps** — it handles retry, certificate pinning, typed errors, and testability out of the box. Do not rebuild this from scratch for every project.
+7. **Understanding the fundamentals still matters** — even when using a library, knowing how URLSession, async/await, and Codable work makes you better at debugging and prompting AI.
 
 ## Homework
 
@@ -709,12 +801,14 @@ Pick a free public API. Good options:
 
 Then build the full chain using Claude Code:
 
-1. Create a `NetworkService` if you have not already (or reuse the one from this lesson)
+1. Add [ABNetworking](https://github.com/mariopek/ABNetworking) to your project via Swift Package Manager
 2. Hit the API once with curl, copy the JSON response
 3. Prompt Claude Code with the real JSON to create Codable models
 4. Create a display model separate from the API model
-5. Build a service class that wraps the API calls
+5. Build a service class that uses ABNetworking's `NetworkingService` to make the API calls
 6. Create a ViewModel with loading state and error handling
 7. Build a SwiftUI view that displays the data
 
 Time yourself. My bet: under 20 minutes for the whole thing. Try to imagine doing it without AI, and appreciate the difference.
+
+**Bonus:** Try writing a unit test for your service class using ABNetworking's `HTTPClient` protocol to create a mock. You will see how much easier protocol-oriented networking makes testing.
