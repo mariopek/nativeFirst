@@ -62,9 +62,9 @@ export const APPS = {
     tagline: 'Land your dream job. Smarter.',
     description: 'AI-powered CV generator with 3 ATS optimization tiers — from realistic to maximum 100% match. Generate tailored CVs, then use the Interview Coach with STAR, technical, and common questions plus timed mock interviews.',
     platform: 'iOS' as const,
-    status: 'coming-soon' as const,
+    status: 'available' as const,
     icon: '/images/apps/applyiq-icon.png',
-    appStoreUrl: '#',
+    appStoreUrl: 'https://apps.apple.com/app/applyiq/id6759157564',
     features: [
       { title: 'Base CV Builder', description: 'Enter your CV manually or paste and upload it. Add personal info, professional summary, and experience — your starting point for every application.', icon: 'clipboard' },
       { title: '3-Tier CV Generation', description: 'Choose from three ATS match levels — from a realistic match to a maximum 100% ATS score. You control how aggressive the optimization is.', icon: 'target' },
