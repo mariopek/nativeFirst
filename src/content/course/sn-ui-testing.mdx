@@ -1,19 +1,19 @@
 ---
 title: "UI Testing with XCUITest"
-description: "Build reliable UI test suites for Moodbit using XCUITest, page object pattern, and AI-assisted test generation"
+description: "Build reliable UI test suites for BetAway using XCUITest, page object pattern, and AI-assisted test generation"
 courseSlug: "ship-native"
 module: 6
 moduleTitle: "Quality & Testing"
 lesson: 2
 duration: "30 min read"
 difficulty: "intermediate"
-topics: ["Testing", "XCUITest", "UI Testing", "Page Object Pattern", "Accessibility", "Automation", "Swift", "Moodbit"]
+topics: ["Testing", "XCUITest", "UI Testing", "Page Object Pattern", "Accessibility", "Automation", "Swift", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Unit tests verify that your ViewModels compute the right values. But they cannot tell you whether the user can actually tap a button, fill in a text field, and see their mood entry appear on the timeline. The ViewModel might return the correct array of entries, but if the `List` binding is wrong or the navigation link points to the wrong destination, the user sees a blank screen while all your unit tests pass green.
+Unit tests verify that your ViewModels compute the right values. But they cannot tell you whether the user can actually tap a button, fill in a text field, and see their check-in appear on the timeline. The ViewModel might return the correct array of entries, but if the `List` binding is wrong or the navigation link points to the wrong destination, the user sees a blank screen while all your unit tests pass green.
 
 UI tests fill that gap. They launch your app in a real simulator, tap real buttons, type real text, and assert on what is actually visible on screen. They are slower than unit tests and more brittle if written carelessly — but when written well, they catch an entire class of bugs that no other test can reach.
 
@@ -21,7 +21,7 @@ UI tests fill that gap. They launch your app in a real simulator, tap real butto
 
 1. **Set up XCUITest with launch arguments** that configure the app for deterministic test runs — no server calls, no persisted data, no randomness.
 2. **Build page objects** that encapsulate screen-specific element queries, so your tests read like user stories instead of XPath expressions.
-3. **Write end-to-end UI test cases** that cover the mood entry flow, timeline display, navigation, and empty states.
+3. **Write end-to-end UI test cases** that cover the check-in flow, timeline display, navigation, and empty states.
 4. **Prompt AI to generate UI tests**, then review and harden the output against the most common XCUITest pitfalls — timing, element identification, and test isolation.
 
 ## Why This Matters
@@ -37,14 +37,14 @@ The page object pattern makes this sustainable. Without it, every UI test is a w
 Before launching the simulator, plan the scope. Send this to Claude Code:
 
 ```
-I need to build a UI test suite for Moodbit using XCUITest.
+I need to build a UI test suite for BetAway using XCUITest.
 Before writing any code, help me plan the test strategy.
 
 The app has these screens:
-- Timeline: displays a list of mood entries with date, mood
+- Timeline: displays a list of recovery check-ins with date, recovery status
   emoji, and note. Has an "Add" button in the toolbar.
   Shows an empty state when no entries exist.
-- Mood Entry: multi-step flow. Step 1 selects mood level
+- Check-In: multi-step flow. Step 1 selects recovery status
   (5 emoji buttons). Step 2 adds optional note and activity
   tags. Step 3 shows a summary and "Save" button.
 - Settings: accessible from a tab bar. Has toggles for
@@ -66,8 +66,8 @@ Do NOT write code yet. Think through the design.
 A good plan separates what belongs in UI tests from what belongs in unit tests. Here is what to look for:
 
 - ✅ **Launch arguments for test configuration.** The app should check for arguments like `--uitesting` and `--reset-data` at startup. When present, it swaps in mock data, skips onboarding, and disables animations. This makes tests deterministic. Without this, tests depend on whatever data the last test run left behind.
-- ✅ **Page objects for every screen the tests touch.** Timeline, Mood Entry, and Settings each get a page object. Each page object wraps `XCUIApplication` queries and exposes methods like `tapAddButton()`, `selectMood(.great)`, and `verifySaveConfirmation()`. Tests never call `app.buttons[...]` directly.
-- ✅ **Test user-visible flows, not implementation details.** A good UI test says "add a mood entry and verify it appears on the timeline." A bad UI test checks that a specific SwiftUI `@State` variable changed.
+- ✅ **Page objects for every screen the tests touch.** Timeline, Check-In, and Settings each get a page object. Each page object wraps `XCUIApplication` queries and exposes methods like `tapAddButton()`, `selectStatus(.great)`, and `verifySaveConfirmation()`. Tests never call `app.buttons[...]` directly.
+- ✅ **Test user-visible flows, not implementation details.** A good UI test says "add a check-in and verify it appears on the timeline." A bad UI test checks that a specific SwiftUI `@State` variable changed.
 - ⚠️ **Watch for the AI suggesting too many UI tests.** If it proposes 30 test cases, push back. UI tests are slow. Test the critical paths: add entry, view timeline, navigate between tabs, empty state. Leave edge cases to unit tests.
 - ❌ **Reject tests that depend on network responses.** UI tests must run against mock data injected via launch arguments. If the AI suggests testing "loading indicators while fetching from the API," that belongs in a unit test with a mock service — not a UI test that depends on a server being available.
 
@@ -77,7 +77,7 @@ Here is a UI test that breaks every time you change a label:
 
 ```swift
 // BAD — hardcoded strings without accessibility identifiers
-func testAddMoodEntry() {
+func testAddCheckIn() {
     app.buttons["Add New Entry"].tap()
     app.buttons["😊"].tap()
     app.textFields["How are you feeling?"].tap()
@@ -90,12 +90,12 @@ This test is a maintenance nightmare. Rename the button from "Add New Entry" to 
 
 ```swift
 // GOOD — accessibility identifiers are stable and locale-independent
-func testAddMoodEntry() {
+func testAddCheckIn() {
     let timeline = TimelinePageObject(app: app)
     timeline.tapAddButton()  // Uses .accessibilityIdentifier("timeline-add-button")
 
-    let entry = MoodEntryPageObject(app: app)
-    entry.selectMood(.great)  // Uses .accessibilityIdentifier("mood-great")
+    let entry = CheckInPageObject(app: app)
+    entry.selectStatus(.great)  // Uses .accessibilityIdentifier("status-great")
     entry.typeNote("Good day")
     entry.tapSave()
 }
@@ -108,27 +108,27 @@ Same test, but it survives renaming, localization, and design changes. The page 
 Now we build. Send this prompt:
 
 ```
-Create the UI test infrastructure for Moodbit using XCUITest.
+Create the UI test infrastructure for BetAway using XCUITest.
 Generate these files:
 
-1. MoodbitUITests/Pages/MoodEntryPageObject.swift
-   - Wraps XCUIApplication queries for the mood entry flow
-   - Methods: selectMood(_ level:), typeNote(_ text:),
+1. BetAwayUITests/Pages/CheckInPageObject.swift
+   - Wraps XCUIApplication queries for the check-in flow
+   - Methods: selectStatus(_ level:), typeNote(_ text:),
      addActivity(_ name:), tapSave(), tapBack()
    - Computed properties for element existence checks
    - Uses accessibility identifiers, not display strings
 
-2. MoodbitUITests/Pages/TimelinePageObject.swift
+2. BetAwayUITests/Pages/TimelinePageObject.swift
    - Wraps queries for the timeline screen
    - Methods: tapAddButton(), tapEntry(at index:),
-     deleteEntry(at index:), pullToRefresh()
+     deleteCheckIn(at index:), pullToRefresh()
    - Properties: entryCount, isEmpty, firstEntryNote
 
-3. MoodbitUITests/MoodbitUITests.swift
+3. BetAwayUITests/BetAwayUITests.swift
    - XCUITest setup with launch arguments: --uitesting,
      --reset-data, --disable-animations
    - Test cases:
-     a. Add mood entry flow (full happy path)
+     a. Add check-in flow (full happy path)
      b. Verify entry appears on timeline after save
      c. Test navigation between tabs
      d. Test empty state display
@@ -150,11 +150,11 @@ Here is what Claude Code should produce. Let me walk through the key decisions.
 ```swift
 // In your App struct or SceneDelegate — production code
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     init() {
         if CommandLine.arguments.contains("--uitesting") {
-            // Swap to in-memory repository
-            ServiceContainer.shared.useMockRepository()
+            // Swap to in-memory service
+            ServiceContainer.shared.useMockService()
         }
         if CommandLine.arguments.contains("--reset-data") {
             // Clear any persisted state
@@ -175,49 +175,49 @@ struct MoodbitApp: App {
 
 - ✅ **`CommandLine.arguments` is the standard way** to pass configuration from XCUITest to the app under test. The test process sets `launchArguments` on `XCUIApplication`, and the app reads them at startup.
 - ✅ **Disabling animations** eliminates an entire class of timing failures. Animations cause elements to be "not hittable" while they are mid-transition. In tests, visual polish adds zero value and constant flakiness.
-- ⚠️ **The AI may put this logic in `AppDelegate` instead of `App.init()`.** Both work, but since Moodbit uses the SwiftUI app lifecycle, `App.init()` is the correct location.
+- ⚠️ **The AI may put this logic in `AppDelegate` instead of `App.init()`.** Both work, but since BetAway uses the SwiftUI app lifecycle, `App.init()` is the correct location.
 
 **Page Object Pattern:**
 
 ```swift
-// MoodbitUITests/Pages/MoodEntryPageObject.swift
+// BetAwayUITests/Pages/CheckInPageObject.swift
 import XCTest
 
-struct MoodEntryPageObject {
+struct CheckInPageObject {
     let app: XCUIApplication
 
     // MARK: - Elements
 
-    private var moodButtons: [String: XCUIElement] {
+    private var statusButtons: [String: XCUIElement] {
         [
-            "great": app.buttons["moodEntry-mood-great"],
-            "good": app.buttons["moodEntry-mood-good"],
-            "okay": app.buttons["moodEntry-mood-okay"],
-            "bad": app.buttons["moodEntry-mood-bad"],
-            "awful": app.buttons["moodEntry-mood-awful"]
+            "great": app.buttons["checkIn-status-great"],
+            "good": app.buttons["checkIn-status-good"],
+            "okay": app.buttons["checkIn-status-okay"],
+            "bad": app.buttons["checkIn-status-bad"],
+            "awful": app.buttons["checkIn-status-awful"]
         ]
     }
 
     private var noteTextField: XCUIElement {
-        app.textViews["moodEntry-note-field"]
+        app.textViews["checkIn-note-field"]
     }
 
     private var saveButton: XCUIElement {
-        app.buttons["moodEntry-save-button"]
+        app.buttons["checkIn-save-button"]
     }
 
     private var backButton: XCUIElement {
-        app.buttons["moodEntry-back-button"]
+        app.buttons["checkIn-back-button"]
     }
 
     private var nextButton: XCUIElement {
-        app.buttons["moodEntry-next-button"]
+        app.buttons["checkIn-next-button"]
     }
 
     // MARK: - Existence Checks
 
     var isDisplayed: Bool {
-        moodButtons["great"]?.waitForExistence(timeout: 3) ?? false
+        statusButtons["great"]?.waitForExistence(timeout: 3) ?? false
     }
 
     var isSaveButtonEnabled: Bool {
@@ -238,17 +238,17 @@ struct MoodEntryPageObject {
 Review checklist for the page object actions:
 
 ```swift
-extension MoodEntryPageObject {
+extension CheckInPageObject {
     // MARK: - Actions
 
-    func selectMood(_ level: String) {
-        guard let button = moodButtons[level] else {
-            XCTFail("Unknown mood level: \(level)")
+    func selectStatus(_ level: String) {
+        guard let button = statusButtons[level] else {
+            XCTFail("Unknown recovery status: \(level)")
             return
         }
         XCTAssertTrue(
             button.waitForExistence(timeout: 5),
-            "Mood button '\(level)' did not appear"
+            "Status button '\(level)' did not appear"
         )
         button.tap()
     }
@@ -263,7 +263,7 @@ extension MoodEntryPageObject {
     }
 
     func addActivity(_ name: String) {
-        let activityButton = app.buttons["moodEntry-activity-\(name)"]
+        let activityButton = app.buttons["checkIn-activity-\(name)"]
         XCTAssertTrue(
             activityButton.waitForExistence(timeout: 5),
             "Activity button '\(name)' did not appear"
@@ -297,8 +297,8 @@ extension MoodEntryPageObject {
 }
 ```
 
-- ✅ **Every action waits before tapping.** The `waitForExistence` call before every `tap()` is defensive but correct. UI transitions are asynchronous. The mood entry screen might still be animating in when the test tries to tap a button.
-- ✅ **`XCTFail` for invalid mood levels.** If a test passes `"amazing"` as a mood level, it fails immediately with a clear message instead of silently doing nothing.
+- ✅ **Every action waits before tapping.** The `waitForExistence` call before every `tap()` is defensive but correct. UI transitions are asynchronous. The check-in screen might still be animating in when the test tries to tap a button.
+- ✅ **`XCTFail` for invalid recovery statuses.** If a test passes `"amazing"` as a recovery status, it fails immediately with a clear message instead of silently doing nothing.
 - ⚠️ **5-second timeouts are generous.** In practice, most transitions complete in under one second. Five seconds is the upper bound for slow CI machines. If your tests run locally on a fast Mac, you could lower this to 3 seconds. But 5 is a safe default that prevents CI flakes.
 
 ## Iteration: Hardening the Tests
@@ -308,7 +308,7 @@ The first pass compiles but has common weaknesses. Send this follow-up:
 ```
 Review the UI tests you generated and fix these issues:
 
-1. The tests are not isolated — if "add mood entry" fails
+1. The tests are not isolated — if "add check-in" fails
    mid-flow, the next test starts on the wrong screen.
    Each test must start from a known state.
 
@@ -384,60 +384,60 @@ UI tests require more verification than unit tests because they interact with th
 
 Here is the complete, final implementation for all files. These are the versions that should be in your UI test target after the plan, execute, and iterate phases.
 
-### MoodbitUITests/Pages/MoodEntryPageObject.swift
+### BetAwayUITests/Pages/CheckInPageObject.swift
 
 ```swift
 import XCTest
 
-struct MoodEntryPageObject {
+struct CheckInPageObject {
     let app: XCUIApplication
 
     // MARK: - Elements
 
-    private var moodGreatButton: XCUIElement {
-        app.buttons["moodEntry-mood-great"]
+    private var statusGreatButton: XCUIElement {
+        app.buttons["checkIn-status-great"]
     }
 
-    private var moodGoodButton: XCUIElement {
-        app.buttons["moodEntry-mood-good"]
+    private var statusGoodButton: XCUIElement {
+        app.buttons["checkIn-status-good"]
     }
 
-    private var moodOkayButton: XCUIElement {
-        app.buttons["moodEntry-mood-okay"]
+    private var statusOkayButton: XCUIElement {
+        app.buttons["checkIn-status-okay"]
     }
 
-    private var moodBadButton: XCUIElement {
-        app.buttons["moodEntry-mood-bad"]
+    private var statusBadButton: XCUIElement {
+        app.buttons["checkIn-status-bad"]
     }
 
-    private var moodAwfulButton: XCUIElement {
-        app.buttons["moodEntry-mood-awful"]
+    private var statusAwfulButton: XCUIElement {
+        app.buttons["checkIn-status-awful"]
     }
 
     private var noteTextField: XCUIElement {
-        app.textViews["moodEntry-note-field"]
+        app.textViews["checkIn-note-field"]
     }
 
     private var saveButton: XCUIElement {
-        app.buttons["moodEntry-save-button"]
+        app.buttons["checkIn-save-button"]
     }
 
     private var nextButton: XCUIElement {
-        app.buttons["moodEntry-next-button"]
+        app.buttons["checkIn-next-button"]
     }
 
     private var backButton: XCUIElement {
-        app.buttons["moodEntry-back-button"]
+        app.buttons["checkIn-back-button"]
     }
 
     private var successMessage: XCUIElement {
-        app.staticTexts["moodEntry-success-message"]
+        app.staticTexts["checkIn-success-message"]
     }
 
     // MARK: - Existence Checks
 
     var isDisplayed: Bool {
-        moodGreatButton.waitForExistence(timeout: 5)
+        statusGreatButton.waitForExistence(timeout: 5)
     }
 
     var isSaveButtonEnabled: Bool {
@@ -454,21 +454,21 @@ struct MoodEntryPageObject {
 
     // MARK: - Actions
 
-    func selectMood(_ level: String) {
+    func selectStatus(_ level: String) {
         let button: XCUIElement
         switch level {
-        case "great": button = moodGreatButton
-        case "good": button = moodGoodButton
-        case "okay": button = moodOkayButton
-        case "bad": button = moodBadButton
-        case "awful": button = moodAwfulButton
+        case "great": button = statusGreatButton
+        case "good": button = statusGoodButton
+        case "okay": button = statusOkayButton
+        case "bad": button = statusBadButton
+        case "awful": button = statusAwfulButton
         default:
-            XCTFail("Unknown mood level: \(level)")
+            XCTFail("Unknown recovery status: \(level)")
             return
         }
         XCTAssertTrue(
             button.waitForExistence(timeout: 5),
-            "Mood button '\(level)' did not appear within timeout"
+            "Status button '\(level)' did not appear within timeout"
         )
         button.tap()
     }
@@ -483,7 +483,7 @@ struct MoodEntryPageObject {
     }
 
     func addActivity(_ name: String) {
-        let activityButton = app.buttons["moodEntry-activity-\(name)"]
+        let activityButton = app.buttons["checkIn-activity-\(name)"]
         XCTAssertTrue(
             activityButton.waitForExistence(timeout: 5),
             "Activity button '\(name)' did not appear within timeout"
@@ -515,13 +515,13 @@ struct MoodEntryPageObject {
         backButton.tap()
     }
 
-    /// Completes the entire mood entry flow from mood selection to save.
-    func completeMoodEntry(
-        mood: String = "good",
+    /// Completes the entire check-in flow from status selection to save.
+    func completeCheckIn(
+        status: String = "good",
         note: String = "UI test entry",
         activity: String? = nil
     ) {
-        selectMood(mood)
+        selectStatus(status)
         tapNext()
 
         typeNote(note)
@@ -535,7 +535,7 @@ struct MoodEntryPageObject {
 }
 ```
 
-### MoodbitUITests/Pages/TimelinePageObject.swift
+### BetAwayUITests/Pages/TimelinePageObject.swift
 
 ```swift
 import XCTest
@@ -628,7 +628,7 @@ struct TimelinePageObject {
         cell.tap()
     }
 
-    func deleteEntry(at index: Int) {
+    func deleteCheckIn(at index: Int) {
         let cell = entryCells.element(boundBy: index)
         XCTAssertTrue(
             cell.waitForExistence(timeout: 5),
@@ -669,18 +669,18 @@ struct TimelinePageObject {
 }
 ```
 
-### MoodbitUITests/MoodbitUITests.swift
+### BetAwayUITests/BetAwayUITests.swift
 
 ```swift
 import XCTest
 
-final class MoodbitUITests: XCTestCase {
+final class BetAwayUITests: XCTestCase {
 
     // MARK: - Properties
 
     private var app: XCUIApplication!
     private var timeline: TimelinePageObject!
-    private var moodEntry: MoodEntryPageObject!
+    private var checkInEntry: CheckInPageObject!
 
     // MARK: - Lifecycle
 
@@ -697,14 +697,14 @@ final class MoodbitUITests: XCTestCase {
         app.launch()
 
         timeline = TimelinePageObject(app: app)
-        moodEntry = MoodEntryPageObject(app: app)
+        checkInEntry = CheckInPageObject(app: app)
     }
 
     override func tearDownWithError() throws {
         app.terminate()
         app = nil
         timeline = nil
-        moodEntry = nil
+        checkInEntry = nil
     }
 
     // MARK: - Timeline Tests
@@ -747,34 +747,34 @@ final class MoodbitUITests: XCTestCase {
         )
     }
 
-    // MARK: - Mood Entry Flow Tests
+    // MARK: - Check-In Flow Tests
 
-    func testAddMoodEntryFullFlow() throws {
+    func testAddCheckInFullFlow() throws {
         // Given: user is on the timeline
         XCTAssertTrue(timeline.isDisplayed)
 
         // When: user taps add and completes the flow
         timeline.tapAddButton()
         XCTAssertTrue(
-            moodEntry.isDisplayed,
-            "Mood entry screen should appear after tapping add"
+            checkInEntry.isDisplayed,
+            "Check-in screen should appear after tapping add"
         )
 
-        // Step 1: Select mood
-        moodEntry.selectMood("great")
-        moodEntry.tapNext()
+        // Step 1: Select status
+        checkInEntry.selectStatus("great")
+        checkInEntry.tapNext()
 
         // Step 2: Add note and activity
         XCTAssertTrue(
-            moodEntry.isNoteFieldVisible,
+            checkInEntry.isNoteFieldVisible,
             "Note field should be visible on step 2"
         )
-        moodEntry.typeNote("Feeling fantastic today")
-        moodEntry.addActivity("Exercise")
-        moodEntry.tapNext()
+        checkInEntry.typeNote("Feeling fantastic today")
+        checkInEntry.addActivity("Exercise")
+        checkInEntry.tapNext()
 
         // Step 3: Review and save
-        moodEntry.tapSave()
+        checkInEntry.tapSave()
 
         // Then: user returns to timeline with the new entry
         XCTAssertTrue(
@@ -787,17 +787,17 @@ final class MoodbitUITests: XCTestCase {
         )
     }
 
-    func testAddMoodEntryMinimalFlow() throws {
-        // A user can save with just a mood selection and no note
+    func testAddCheckInMinimalFlow() throws {
+        // A user can save with just a status selection and no note
         timeline.tapAddButton()
 
-        moodEntry.selectMood("okay")
-        moodEntry.tapNext()
+        checkInEntry.selectStatus("okay")
+        checkInEntry.tapNext()
 
         // Skip note, go straight to next
-        moodEntry.tapNext()
+        checkInEntry.tapNext()
 
-        moodEntry.tapSave()
+        checkInEntry.tapSave()
 
         XCTAssertTrue(
             timeline.isDisplayed,
@@ -809,20 +809,20 @@ final class MoodbitUITests: XCTestCase {
         )
     }
 
-    func testMoodEntryBackNavigation() throws {
-        // Given: user is on step 2 of mood entry
+    func testCheckInBackNavigation() throws {
+        // Given: user is on step 2 of check-in
         timeline.tapAddButton()
-        moodEntry.selectMood("good")
-        moodEntry.tapNext()
-        XCTAssertTrue(moodEntry.isNoteFieldVisible)
+        checkInEntry.selectStatus("good")
+        checkInEntry.tapNext()
+        XCTAssertTrue(checkInEntry.isNoteFieldVisible)
 
         // When: user taps back
-        moodEntry.tapBack()
+        checkInEntry.tapBack()
 
-        // Then: user returns to step 1 (mood selection visible again)
+        // Then: user returns to step 1 (status selection visible again)
         XCTAssertTrue(
-            moodEntry.isDisplayed,
-            "Should return to mood selection on back"
+            checkInEntry.isDisplayed,
+            "Should return to status selection on back"
         )
     }
 
@@ -830,8 +830,8 @@ final class MoodbitUITests: XCTestCase {
         let uniqueNote = "Test entry \(UUID().uuidString.prefix(8))"
 
         timeline.tapAddButton()
-        moodEntry.completeMoodEntry(
-            mood: "bad",
+        checkInEntry.completeCheckIn(
+            status: "bad",
             note: uniqueNote,
             activity: "Work"
         )
@@ -882,8 +882,8 @@ final class MoodbitUITests: XCTestCase {
     func testDeleteEntryFromTimeline() throws {
         // Given: an entry exists on the timeline
         timeline.tapAddButton()
-        moodEntry.completeMoodEntry(
-            mood: "good",
+        checkInEntry.completeCheckIn(
+            status: "good",
             note: "Entry to delete"
         )
         XCTAssertTrue(
@@ -896,7 +896,7 @@ final class MoodbitUITests: XCTestCase {
         XCTExpectFailure(
             "Swipe-to-delete may not be implemented yet"
         ) {
-            timeline.deleteEntry(at: 0)
+            timeline.deleteCheckIn(at: 0)
 
             // Then: entry count decreases
             XCTAssertEqual(
@@ -916,16 +916,16 @@ final class MoodbitUITests: XCTestCase {
     func testMultipleEntriesDisplayInOrder() throws {
         // Add first entry
         timeline.tapAddButton()
-        moodEntry.completeMoodEntry(
-            mood: "bad",
+        checkInEntry.completeCheckIn(
+            status: "bad",
             note: "First entry"
         )
         XCTAssertTrue(timeline.isDisplayed)
 
         // Add second entry
         timeline.tapAddButton()
-        moodEntry.completeMoodEntry(
-            mood: "great",
+        checkInEntry.completeCheckIn(
+            status: "great",
             note: "Second entry"
         )
         XCTAssertTrue(timeline.isDisplayed)
@@ -951,8 +951,8 @@ The UI tests depend on accessibility identifiers in your SwiftUI views. Here is 
 
 ```swift
 // In your timeline view
-struct MoodTimelineView: View {
-    @StateObject private var viewModel: MoodTimelineViewModel
+struct RecoveryDashboardView: View {
+    @StateObject private var viewModel: RecoveryDashboardViewModel
 
     var body: some View {
         NavigationStack {
@@ -981,7 +981,7 @@ struct MoodTimelineView: View {
             Text("No Entries Yet")
                 .font(.title2)
                 .accessibilityIdentifier("timeline-empty-title")
-            Text("Tap + to record your first mood")
+            Text("Tap + to record your first check-in")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("timeline-empty-message")
@@ -991,7 +991,7 @@ struct MoodTimelineView: View {
 
     private var entryListView: some View {
         List(viewModel.entries) { entry in
-            MoodEntryRow(entry: entry)
+            CheckInRow(entry: entry)
                 .accessibilityIdentifier("timeline-entry-\(entry.id)")
         }
         .accessibilityIdentifier("timeline-list")
@@ -1009,11 +1009,11 @@ Key points for accessibility identifiers:
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `MoodbitUITests` target exists in the Xcode project with a valid test host configuration
-- [ ] `MoodEntryPageObject` compiles and exposes methods for all three steps of the mood entry flow
+- [ ] `BetAwayUITests` target exists in the Xcode project with a valid test host configuration
+- [ ] `CheckInPageObject` compiles and exposes methods for all three steps of the check-in flow
 - [ ] `TimelinePageObject` compiles and can query entries by index and by note text
 - [ ] Launch arguments `--uitesting`, `--reset-data`, and `--disable-animations` are handled in the app's startup code
-- [ ] The `testAddMoodEntryFullFlow` test passes end-to-end on iPhone 16 Pro simulator
+- [ ] The `testAddCheckInFullFlow` test passes end-to-end on iPhone 16 Pro simulator
 - [ ] The `testTimelineDisplaysEmptyState` test passes when launched with `--reset-data`
 - [ ] Every element interaction in page objects uses `waitForExistence(timeout:)` before tapping or reading
 - [ ] No test uses `Thread.sleep` or `sleep()` — all waiting is done through XCUITest expectations

@@ -1,34 +1,34 @@
 ---
 title: "Search, Filter & Sort"
-description: "Add powerful data querying to Moodbit with SwiftData predicates, date range filters, mood level filtering, tag-based search, and multi-criteria sorting."
+description: "Add powerful data querying to BetAway with SwiftData predicates, date range filters, recovery status filtering, tag-based search, and multi-criteria sorting."
 courseSlug: "ship-native"
 module: 3
 moduleTitle: "Data Layer & Persistence"
 lesson: 2
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["SwiftData", "Predicate", "Filtering", "Sorting", "Search", "FetchDescriptor", "Query Optimization", "Moodbit"]
+topics: ["SwiftData", "Predicate", "Filtering", "Sorting", "Search", "FetchDescriptor", "Query Optimization", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Our repository layer can create, read, update, and delete mood entries. That is necessary, but not sufficient. Users do not browse raw lists of data — they search for last Tuesday's panic attack, filter to only their worst days, or sort entries to spot patterns. This lesson adds that querying power using SwiftData's `#Predicate` macro, `FetchDescriptor`, and `SortDescriptor`.
+Our service layer can create, read, update, and delete recovery check-ins. That is necessary, but not sufficient. Users do not browse raw lists of data — they search for last Tuesday's crisis moment, filter to only their hardest days, or sort check-ins to spot patterns. This lesson adds that querying power using SwiftData's `#Predicate` macro, `FetchDescriptor`, and `SortDescriptor`.
 
-We are going to build a `MoodFilter` struct that captures every possible query the user might want, a repository extension that turns those filters into efficient SwiftData fetches, and a `FilteredTimelineView` with a search bar and filter chips. By the end, Moodbit's timeline will feel like a real tool for self-reflection — not just a chronological dump.
+We are going to build a `RecoveryFilter` struct that captures every possible query the user might want, a service extension that turns those filters into efficient SwiftData fetches, and a `FilteredTimelineView` with a search bar and filter chips. By the end, BetAway's timeline will feel like a real tool for recovery insight — not just a chronological dump.
 
 ## What You'll Learn
 
 - How to use the `#Predicate` macro to write type-safe, compile-checked queries
-- Building a composable `MoodFilter` value type that models every filtering dimension
+- Building a composable `RecoveryFilter` value type that models every filtering dimension
 - Combining multiple predicates into a single `FetchDescriptor`
-- Full-text search across mood entry notes
+- Full-text search across check-in notes
 - Using `fetchLimit` and `fetchOffset` for pagination
 - Wiring filter controls into the UI with a search bar and interactive chips
 
 ## Why This Matters
 
-Moodbit is a journal. Journals accumulate data fast — a user who logs twice a day has 730 entries after a year. Showing all of them in a flat list is useless. The value of a mood tracker is in the ability to ask questions: "Show me every entry where I felt anxious in January" or "What were my best days last month?" Without filtering and search, the data exists but the insight does not.
+BetAway is a recovery app. Recovery check-ins accumulate fast — a user who logs twice a day has 730 check-ins after a year. Showing all of them in a flat list is useless. The value of a recovery app is in the ability to ask questions: "Show me every check-in where I was struggling in January" or "What were my strongest days last month?" Without filtering and search, the data exists but the insight does not.
 
 On the technical side, this is where SwiftData's `#Predicate` macro earns its place. The old `NSPredicate` API was string-based and type-unsafe — a typo in a key path crashed at runtime, not compile time. `#Predicate` fixes all of that. It is Swift-native, generic, and the compiler verifies every property access. If you rename a model property, `#Predicate` produces a compiler error instead of a silent runtime failure.
 
@@ -37,19 +37,19 @@ On the technical side, this is where SwiftData's `#Predicate` macro earns its pl
 ### The Prompt
 
 ```
-I need to add search, filter, and sort capabilities to Moodbit's
-mood entry timeline. Before writing any code, think through:
+I need to add search, filter, and sort capabilities to BetAway's
+recovery check-in timeline. Before writing any code, think through:
 
 1. What filter criteria should users have? Consider date ranges,
-   mood levels, tags, and free-text search on notes.
+   recovery status levels, tags, and free-text search on notes.
 2. How should we model these filters? I want a single value type
    that captures every filtering dimension.
 3. How do we translate that filter model into SwiftData #Predicate
    queries efficiently?
 4. How should sorting work? Users should be able to sort by date,
-   mood level, or both.
+   recovery status, or both.
 5. For performance, how do we paginate instead of loading every
-   entry at once?
+   check-in at once?
 
 Then outline the files we need and their responsibilities.
 ```
@@ -58,13 +58,13 @@ Then outline the files we need and their responsibilities.
 
 Claude Code's plan should identify three pieces:
 
-1. **MoodFilter.swift** — A struct that holds `dateRange: ClosedRange<Date>?`, `moodLevels: Set<Int>`, `tagIds: Set<PersistentIdentifier>`, and `searchText: String`. All optional or defaulted to empty. This is pure data — no SwiftData dependency, trivially testable.
+1. **RecoveryFilter.swift** — A struct that holds `dateRange: ClosedRange<Date>?`, `recoveryStatuses: Set<Int>`, `tagIds: Set<PersistentIdentifier>`, and `searchText: String`. All optional or defaulted to empty. This is pure data — no SwiftData dependency, trivially testable.
 
-2. **MoodEntryRepository extensions** — Methods on the repository that accept a `MoodFilter` and a `[SortDescriptor<MoodEntry>]`, build a `FetchDescriptor`, and return results. The predicate logic lives here.
+2. **RecoveryService extensions** — Methods on the service that accept a `RecoveryFilter` and a `[SortDescriptor<CheckIn>]`, build a `FetchDescriptor`, and return results. The predicate logic lives here.
 
-3. **FilteredTimelineView.swift** — The SwiftUI view that owns a `MoodFilter` as `@State`, presents filter controls, and passes the filter to the repository through the ViewModel.
+3. **FilteredTimelineView.swift** — The SwiftUI view that owns a `RecoveryFilter` as `@State`, presents filter controls, and passes the filter to the service through the ViewModel.
 
-This is the correct separation. The filter model knows nothing about SwiftData. The repository knows SwiftData but nothing about the UI. The view knows both through the ViewModel. If the AI suggests putting `#Predicate` logic inside the view or directly querying `ModelContext` from the view, push back — that couples the UI to the persistence layer.
+This is the correct separation. The filter model knows nothing about SwiftData. The service knows SwiftData but nothing about the UI. The view knows both through the ViewModel. If the AI suggests putting `#Predicate` logic inside the view or directly querying `ModelContext` from the view, push back — that couples the UI to the persistence layer.
 
 ### Anti-Pattern: Client-Side Filtering
 
@@ -72,52 +72,52 @@ Here is what we are NOT going to do:
 
 ```swift
 // BAD — fetches everything, then filters in memory
-let all = try context.fetch(FetchDescriptor<MoodEntry>())
-let filtered = all.filter { $0.moodLevel >= 7 && $0.notes.contains("work") }
+let all = try context.fetch(FetchDescriptor<CheckIn>())
+let filtered = all.filter { $0.recoveryLevel >= 7 && $0.notes.contains("urge") }
 ```
 
-This loads every mood entry into memory and then throws most of them away. With 730 entries it is fine. With 5,000 it is sluggish. With 50,000 it is a memory spike that gets your app terminated on older devices. SwiftData predicates push the filtering down to the SQLite layer — only matching rows are loaded. Always filter at the database level, not in Swift.
+This loads every check-in into memory and then throws most of them away. With 730 check-ins it is fine. With 5,000 it is sluggish. With 50,000 it is a memory spike that gets your app terminated on older devices. SwiftData predicates push the filtering down to the SQLite layer — only matching rows are loaded. Always filter at the database level, not in Swift.
 
 The second anti-pattern is string-based `NSPredicate`:
 
 ```swift
 // BAD — string-based, no type safety
-let predicate = NSPredicate(format: "moodLevel >= %d AND notes CONTAINS[cd] %@", 7, "work")
+let predicate = NSPredicate(format: "recoveryLevel >= %d AND notes CONTAINS[cd] %@", 7, "urge")
 ```
 
-This compiles. It might even work. But rename `moodLevel` to `level` and it silently returns zero results instead of producing a compile error. The `#Predicate` macro exists to eliminate this entire class of bug. Use it.
+This compiles. It might even work. But rename `recoveryLevel` to `level` and it silently returns zero results instead of producing a compile error. The `#Predicate` macro exists to eliminate this entire class of bug. Use it.
 
 ## Execute Phase
 
 ### The Prompt
 
 ```
-Create the following files for Moodbit's search, filter, and
-sort feature. Follow our MVVM + Repository architecture.
+Create the following files for BetAway's search, filter, and
+sort feature. Follow our MVVM + Service Layer architecture.
 
-1. Models/MoodFilter.swift
+1. Models/RecoveryFilter.swift
    - Struct with: dateRange (ClosedRange<Date>?),
-     moodLevels (Set<Int>), tagIds (Set<PersistentIdentifier>),
+     recoveryStatuses (Set<Int>), tagIds (Set<PersistentIdentifier>),
      searchText (String)
    - Static property .empty for default state
    - Computed property isEmpty: Bool
    - Conform to Equatable
 
-2. Repositories/MoodEntryRepository+Filtering.swift
-   - Extension on MoodEntryRepository
-   - func fetchFiltered(filter: MoodFilter,
-     sortBy: [SortDescriptor<MoodEntry>],
-     limit: Int?, offset: Int?) throws -> [MoodEntry]
-   - Build #Predicate<MoodEntry> from each non-empty filter field
+2. Services/RecoveryService+Filtering.swift
+   - Extension on RecoveryService
+   - func fetchFiltered(filter: RecoveryFilter,
+     sortBy: [SortDescriptor<CheckIn>],
+     limit: Int?, offset: Int?) throws -> [CheckIn]
+   - Build #Predicate<CheckIn> from each non-empty filter field
    - Combine predicates with logical AND
    - Use FetchDescriptor with fetchLimit and fetchOffset
    - Full-text search should use localizedStandardContains
      on the notes property
 
 3. Views/FilteredTimelineView.swift
-   - @State var filter: MoodFilter = .empty
+   - @State var filter: RecoveryFilter = .empty
    - .searchable modifier bound to filter.searchText
-   - Horizontal ScrollView of filter chips for mood levels
+   - Horizontal ScrollView of filter chips for recovery statuses
      and active tags
    - Tapping a chip toggles it in the filter
    - Results update reactively when any filter changes
@@ -130,23 +130,23 @@ concurrency. Use os.Logger for any error logging.
 
 Here is what the AI should generate. Let us walk through each file.
 
-**MoodFilter.swift:**
+**RecoveryFilter.swift:**
 
 ```swift
 import Foundation
 import SwiftData
 
-struct MoodFilter: Equatable {
+struct RecoveryFilter: Equatable {
     var dateRange: ClosedRange<Date>?
-    var moodLevels: Set<Int> = []
+    var recoveryStatuses: Set<Int> = []
     var tagIds: Set<PersistentIdentifier> = []
     var searchText: String = ""
 
-    static let empty = MoodFilter()
+    static let empty = RecoveryFilter()
 
     var isEmpty: Bool {
         dateRange == nil
-            && moodLevels.isEmpty
+            && recoveryStatuses.isEmpty
             && tagIds.isEmpty
             && searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
@@ -155,7 +155,7 @@ struct MoodFilter: Equatable {
 
 Check these details:
 
-- **`Set<Int>` for mood levels** — not an array. Sets give us constant-time `contains` checks and automatic deduplication. When the user taps a "Level 7" chip twice, the second tap removes it cleanly via `toggle` logic. An array would let duplicates creep in.
+- **`Set<Int>` for recovery statuses** — not an array. Sets give us constant-time `contains` checks and automatic deduplication. When the user taps a "Level 7" chip twice, the second tap removes it cleanly via `toggle` logic. An array would let duplicates creep in.
 
 - **`Set<PersistentIdentifier>` for tag IDs** — we reference tags by their SwiftData persistent identifier, not by the tag object itself. This avoids retaining model objects in a value type, which would be a layering violation.
 
@@ -163,46 +163,46 @@ Check these details:
 
 - **`Equatable` conformance** — all stored properties are already `Equatable`, so Swift synthesizes the conformance. We need it so SwiftUI can diff the filter and skip unnecessary re-renders when the filter has not actually changed.
 
-**MoodEntryRepository+Filtering.swift:**
+**RecoveryService+Filtering.swift:**
 
 ```swift
 import Foundation
 import SwiftData
 import os
 
-extension MoodEntryRepository {
+extension RecoveryService {
     private static let logger = Logger(
-        subsystem: "com.moodbit",
-        category: "MoodEntryRepository+Filtering"
+        subsystem: "com.nativefirst.betaway",
+        category: "RecoveryService+Filtering"
     )
 
     func fetchFiltered(
-        filter: MoodFilter,
-        sortBy: [SortDescriptor<MoodEntry>] = [SortDescriptor(\.date, order: .reverse)],
+        filter: RecoveryFilter,
+        sortBy: [SortDescriptor<CheckIn>] = [SortDescriptor(\.date, order: .reverse)],
         limit: Int? = nil,
         offset: Int? = nil
-    ) throws -> [MoodEntry] {
-        var descriptor = FetchDescriptor<MoodEntry>()
+    ) throws -> [CheckIn] {
+        var descriptor = FetchDescriptor<CheckIn>()
 
         // Build predicate
         if !filter.isEmpty {
             let searchText = filter.searchText
                 .trimmingCharacters(in: .whitespaces)
                 .lowercased()
-            let moodLevels = filter.moodLevels
+            let recoveryStatuses = filter.recoveryStatuses
             let dateRange = filter.dateRange
             let tagIds = filter.tagIds
 
-            descriptor.predicate = #Predicate<MoodEntry> { entry in
+            descriptor.predicate = #Predicate<CheckIn> { checkIn in
                 // Date range
                 (dateRange == nil
-                    || (entry.date >= (dateRange?.lowerBound ?? .distantPast)
-                        && entry.date <= (dateRange?.upperBound ?? .distantFuture)))
-                // Mood levels
-                && (moodLevels.isEmpty || moodLevels.contains(entry.moodLevel))
+                    || (checkIn.date >= (dateRange?.lowerBound ?? .distantPast)
+                        && checkIn.date <= (dateRange?.upperBound ?? .distantFuture)))
+                // Recovery statuses
+                && (recoveryStatuses.isEmpty || recoveryStatuses.contains(checkIn.recoveryLevel))
                 // Search text
                 && (searchText.isEmpty
-                    || entry.notes.localizedStandardContains(searchText))
+                    || checkIn.notes.localizedStandardContains(searchText))
             }
         }
 
@@ -227,11 +227,11 @@ extension MoodEntryRepository {
 
 This is the core of the feature. Let me walk through the important decisions.
 
-**The `#Predicate` macro.** Everything inside the closure is translated to a SQL `WHERE` clause by SwiftData at compile time. The property accesses (`entry.date`, `entry.moodLevel`, `entry.notes`) are verified against the `MoodEntry` model — rename a property and you get a compiler error. This is the entire point of `#Predicate` over `NSPredicate`.
+**The `#Predicate` macro.** Everything inside the closure is translated to a SQL `WHERE` clause by SwiftData at compile time. The property accesses (`checkIn.date`, `checkIn.recoveryLevel`, `checkIn.notes`) are verified against the `CheckIn` model — rename a property and you get a compiler error. This is the entire point of `#Predicate` over `NSPredicate`.
 
 **`localizedStandardContains` for search.** This is Apple's recommended method for user-facing text search. It handles case insensitivity, diacritics (so searching "cafe" matches "cafe"), and locale-specific rules. Do not use `contains` — it is case-sensitive and accent-sensitive, which makes search feel broken for users.
 
-**Variable capture outside the closure.** Notice we extract `searchText`, `moodLevels`, `dateRange`, and `tagIds` into local variables before the `#Predicate` closure. This is not cosmetic — the `#Predicate` macro has restrictions on what it can capture. It cannot access properties through `filter.searchText` inside the closure because the macro needs to translate each expression to a database query. Local variable capture works; property access through a struct does not.
+**Variable capture outside the closure.** Notice we extract `searchText`, `recoveryStatuses`, `dateRange`, and `tagIds` into local variables before the `#Predicate` closure. This is not cosmetic — the `#Predicate` macro has restrictions on what it can capture. It cannot access properties through `filter.searchText` inside the closure because the macro needs to translate each expression to a database query. Local variable capture works; property access through a struct does not.
 
 **Tag filtering is intentionally omitted from the predicate.** You might notice we are not filtering by `tagIds` inside `#Predicate`. This is because SwiftData's `#Predicate` has limited support for querying across relationships and set membership on persistent identifiers. The tag filtering is better handled as a post-fetch step or via a dedicated relationship query. Here is the pragmatic approach:
 
@@ -240,14 +240,14 @@ This is the core of the feature. Let me walk through the important decisions.
 var results = try modelContext.fetch(descriptor)
 
 if !filter.tagIds.isEmpty {
-    results = results.filter { entry in
-        let entryTagIds = Set(entry.tags.map(\.persistentModelID))
-        return !entryTagIds.isDisjoint(with: filter.tagIds)
+    results = results.filter { checkIn in
+        let checkInTagIds = Set(checkIn.tags.map(\.persistentModelID))
+        return !checkInTagIds.isDisjoint(with: filter.tagIds)
     }
 }
 ```
 
-Is this client-side filtering? Yes — but only for the tag dimension, and only after the database has already narrowed results by date, mood level, and search text. The number of rows reaching this filter is small. This is a reasonable trade-off when the predicate macro does not support the operation you need.
+Is this client-side filtering? Yes — but only for the tag dimension, and only after the database has already narrowed results by date, recovery status, and search text. The number of rows reaching this filter is small. This is a reasonable trade-off when the predicate macro does not support the operation you need.
 
 **`fetchLimit` and `fetchOffset` for pagination.** These two properties on `FetchDescriptor` let you implement "load more" pagination without fetching the entire dataset. Set `fetchLimit` to 20 and `fetchOffset` to 0 for the first page, then increment `fetchOffset` by 20 for each subsequent page. SwiftData translates this to SQL `LIMIT` and `OFFSET`, so only the requested rows leave the database.
 
@@ -268,33 +268,33 @@ The first pass works, but there are two things worth refining.
 
 ```
 The sortBy parameter is an array of SortDescriptor, which is
-flexible but hard to use from the UI. Create a MoodSortOption
-enum with cases: newestFirst, oldestFirst, moodHighToLow,
-moodLowToHigh. Each case should have a computed property that
-returns the corresponding [SortDescriptor<MoodEntry>] array.
-Add this to MoodFilter.swift so the filter and sort live together.
+flexible but hard to use from the UI. Create a RecoverySortOption
+enum with cases: newestFirst, oldestFirst, statusHighToLow,
+statusLowToHigh. Each case should have a computed property that
+returns the corresponding [SortDescriptor<CheckIn>] array.
+Add this to RecoveryFilter.swift so the filter and sort live together.
 ```
 
 ```swift
-enum MoodSortOption: String, CaseIterable, Identifiable {
+enum RecoverySortOption: String, CaseIterable, Identifiable {
     case newestFirst
     case oldestFirst
-    case moodHighToLow
-    case moodLowToHigh
+    case statusHighToLow
+    case statusLowToHigh
 
     var id: String { rawValue }
 
-    var descriptors: [SortDescriptor<MoodEntry>] {
+    var descriptors: [SortDescriptor<CheckIn>] {
         switch self {
         case .newestFirst:
             [SortDescriptor(\.date, order: .reverse)]
         case .oldestFirst:
             [SortDescriptor(\.date, order: .forward)]
-        case .moodHighToLow:
-            [SortDescriptor(\.moodLevel, order: .reverse),
+        case .statusHighToLow:
+            [SortDescriptor(\.recoveryLevel, order: .reverse),
              SortDescriptor(\.date, order: .reverse)]
-        case .moodLowToHigh:
-            [SortDescriptor(\.moodLevel, order: .forward),
+        case .statusLowToHigh:
+            [SortDescriptor(\.recoveryLevel, order: .forward),
              SortDescriptor(\.date, order: .reverse)]
         }
     }
@@ -303,47 +303,47 @@ enum MoodSortOption: String, CaseIterable, Identifiable {
         switch self {
         case .newestFirst: "Newest"
         case .oldestFirst: "Oldest"
-        case .moodHighToLow: "Best days"
-        case .moodLowToHigh: "Hardest days"
+        case .statusHighToLow: "Strongest days"
+        case .statusLowToHigh: "Hardest days"
         }
     }
 }
 ```
 
-Now update `MoodFilter` to include the sort option:
+Now update `RecoveryFilter` to include the sort option:
 
 ```swift
-struct MoodFilter: Equatable {
+struct RecoveryFilter: Equatable {
     var dateRange: ClosedRange<Date>?
-    var moodLevels: Set<Int> = []
+    var recoveryStatuses: Set<Int> = []
     var tagIds: Set<PersistentIdentifier> = []
     var searchText: String = ""
-    var sortOption: MoodSortOption = .newestFirst
+    var sortOption: RecoverySortOption = .newestFirst
 
     // ...
 }
 ```
 
-The sort-by-mood cases include a secondary sort by date. Without it, all entries with the same mood level would appear in arbitrary order. The secondary sort guarantees a deterministic, predictable result.
+The sort-by-status cases include a secondary sort by date. Without it, all check-ins with the same recovery status would appear in arbitrary order. The secondary sort guarantees a deterministic, predictable result.
 
-**Iteration 2 — Convenience methods on MoodFilter.**
+**Iteration 2 — Convenience methods on RecoveryFilter.**
 
 ```
-Add helper methods to MoodFilter for toggling filter values
+Add helper methods to RecoveryFilter for toggling filter values
 from the UI:
-- mutating func toggleMoodLevel(_ level: Int)
+- mutating func toggleRecoveryStatus(_ level: Int)
 - mutating func toggleTag(_ id: PersistentIdentifier)
 - mutating func setDateRange(last days: Int)
 - mutating func clearAll()
 ```
 
 ```swift
-extension MoodFilter {
-    mutating func toggleMoodLevel(_ level: Int) {
-        if moodLevels.contains(level) {
-            moodLevels.remove(level)
+extension RecoveryFilter {
+    mutating func toggleRecoveryStatus(_ level: Int) {
+        if recoveryStatuses.contains(level) {
+            recoveryStatuses.remove(level)
         } else {
-            moodLevels.insert(level)
+            recoveryStatuses.insert(level)
         }
     }
 
@@ -367,50 +367,50 @@ extension MoodFilter {
 }
 ```
 
-These are small but they make the view code dramatically cleaner. Instead of inline set manipulation scattered across button actions, the view calls `filter.toggleMoodLevel(7)`. The intent is clear, the logic is encapsulated, and it is testable without any UI.
+These are small but they make the view code dramatically cleaner. Instead of inline set manipulation scattered across button actions, the view calls `filter.toggleRecoveryStatus(7)`. The intent is clear, the logic is encapsulated, and it is testable without any UI.
 
 ## Verify Phase
 
 Build and run. Here is what to test:
 
-1. **Empty filter returns all entries.** With `MoodFilter.empty`, the predicate should be `nil` and you get every entry sorted newest-first. Verify the count matches your test data.
+1. **Empty filter returns all check-ins.** With `RecoveryFilter.empty`, the predicate should be `nil` and you get every check-in sorted newest-first. Verify the count matches your test data.
 
-2. **Search text filters on notes.** Type a word you know appears in one entry's notes. Only that entry should appear. Type gibberish — zero results.
+2. **Search text filters on notes.** Type a word you know appears in one check-in's notes. Only that check-in should appear. Type gibberish — zero results.
 
-3. **Mood level chips.** Tap "Level 7". Only entries with `moodLevel == 7` appear. Tap "Level 3" additionally. Both 7 and 3 entries appear (it is an OR within mood levels, AND across filter dimensions). Tap "Level 7" again to deselect. Only 3 remains.
+3. **Recovery status chips.** Tap "Level 7". Only check-ins with `recoveryLevel == 7` appear. Tap "Level 3" additionally. Both 7 and 3 check-ins appear (it is an OR within recovery statuses, AND across filter dimensions). Tap "Level 7" again to deselect. Only 3 remains.
 
-4. **Date range.** Select "Last 7 Days". Entries older than 7 days disappear. Select "Last 30 Days" — more entries appear. Clear the date range — everything is back.
+4. **Date range.** Select "Last 7 Days". Check-ins older than 7 days disappear. Select "Last 30 Days" — more check-ins appear. Clear the date range — everything is back.
 
-5. **Sort options.** Switch to "Hardest days". Entries with the lowest mood levels appear first. Switch to "Newest" — back to chronological.
+5. **Sort options.** Switch to "Hardest days". Check-ins with the lowest recovery levels appear first. Switch to "Newest" — back to chronological.
 
-6. **Pagination.** If you have more than 20 entries, scroll to the bottom. A "Load More" action should fetch the next page. Verify no duplicate entries appear.
+6. **Pagination.** If you have more than 20 check-ins, scroll to the bottom. A "Load More" action should fetch the next page. Verify no duplicate check-ins appear.
 
-7. **Combined filters.** Apply a date range AND a mood level AND search text simultaneously. Each filter should narrow the results further. Clearing one filter should widen results back.
+7. **Combined filters.** Apply a date range AND a recovery status AND search text simultaneously. Each filter should narrow the results further. Clearing one filter should widen results back.
 
-If any of these fail, check the predicate logic. The most common bug is getting the AND/OR logic wrong — mood levels within the set are OR'd (any of these levels), but across dimensions (date AND mood AND search) the logic is AND. If the AI mixed these up, correct it.
+If any of these fail, check the predicate logic. The most common bug is getting the AND/OR logic wrong — recovery statuses within the set are OR'd (any of these levels), but across dimensions (date AND status AND search) the logic is AND. If the AI mixed these up, correct it.
 
 ## Final Code
 
 Here are the three production files.
 
-**Models/MoodFilter.swift:**
+**Models/RecoveryFilter.swift:**
 
 ```swift
 import Foundation
 import SwiftData
 
-struct MoodFilter: Equatable {
+struct RecoveryFilter: Equatable {
     var dateRange: ClosedRange<Date>?
-    var moodLevels: Set<Int> = []
+    var recoveryStatuses: Set<Int> = []
     var tagIds: Set<PersistentIdentifier> = []
     var searchText: String = ""
-    var sortOption: MoodSortOption = .newestFirst
+    var sortOption: RecoverySortOption = .newestFirst
 
-    static let empty = MoodFilter()
+    static let empty = RecoveryFilter()
 
     var isEmpty: Bool {
         dateRange == nil
-            && moodLevels.isEmpty
+            && recoveryStatuses.isEmpty
             && tagIds.isEmpty
             && searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
@@ -418,25 +418,25 @@ struct MoodFilter: Equatable {
 
 // MARK: - Sort Options
 
-enum MoodSortOption: String, CaseIterable, Identifiable, Equatable {
+enum RecoverySortOption: String, CaseIterable, Identifiable, Equatable {
     case newestFirst
     case oldestFirst
-    case moodHighToLow
-    case moodLowToHigh
+    case statusHighToLow
+    case statusLowToHigh
 
     var id: String { rawValue }
 
-    var descriptors: [SortDescriptor<MoodEntry>] {
+    var descriptors: [SortDescriptor<CheckIn>] {
         switch self {
         case .newestFirst:
             [SortDescriptor(\.date, order: .reverse)]
         case .oldestFirst:
             [SortDescriptor(\.date, order: .forward)]
-        case .moodHighToLow:
-            [SortDescriptor(\.moodLevel, order: .reverse),
+        case .statusHighToLow:
+            [SortDescriptor(\.recoveryLevel, order: .reverse),
              SortDescriptor(\.date, order: .reverse)]
-        case .moodLowToHigh:
-            [SortDescriptor(\.moodLevel, order: .forward),
+        case .statusLowToHigh:
+            [SortDescriptor(\.recoveryLevel, order: .forward),
              SortDescriptor(\.date, order: .reverse)]
         }
     }
@@ -445,20 +445,20 @@ enum MoodSortOption: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .newestFirst: "Newest"
         case .oldestFirst: "Oldest"
-        case .moodHighToLow: "Best days"
-        case .moodLowToHigh: "Hardest days"
+        case .statusHighToLow: "Strongest days"
+        case .statusLowToHigh: "Hardest days"
         }
     }
 }
 
 // MARK: - Filter Mutations
 
-extension MoodFilter {
-    mutating func toggleMoodLevel(_ level: Int) {
-        if moodLevels.contains(level) {
-            moodLevels.remove(level)
+extension RecoveryFilter {
+    mutating func toggleRecoveryStatus(_ level: Int) {
+        if recoveryStatuses.contains(level) {
+            recoveryStatuses.remove(level)
         } else {
-            moodLevels.insert(level)
+            recoveryStatuses.insert(level)
         }
     }
 
@@ -482,42 +482,42 @@ extension MoodFilter {
 }
 ```
 
-**Repositories/MoodEntryRepository+Filtering.swift:**
+**Services/RecoveryService+Filtering.swift:**
 
 ```swift
 import Foundation
 import SwiftData
 import os
 
-extension MoodEntryRepository {
+extension RecoveryService {
     private static let logger = Logger(
-        subsystem: "com.moodbit",
-        category: "MoodEntryRepository+Filtering"
+        subsystem: "com.nativefirst.betaway",
+        category: "RecoveryService+Filtering"
     )
 
-    /// Fetches mood entries matching the given filter and sort criteria.
+    /// Fetches check-ins matching the given filter and sort criteria.
     /// Uses SwiftData #Predicate for type-safe, database-level filtering.
     func fetchFiltered(
-        filter: MoodFilter,
+        filter: RecoveryFilter,
         limit: Int? = nil,
         offset: Int? = nil
-    ) throws -> [MoodEntry] {
-        var descriptor = FetchDescriptor<MoodEntry>()
+    ) throws -> [CheckIn] {
+        var descriptor = FetchDescriptor<CheckIn>()
 
         if !filter.isEmpty {
             let searchText = filter.searchText
                 .trimmingCharacters(in: .whitespaces)
                 .lowercased()
-            let moodLevels = filter.moodLevels
+            let recoveryStatuses = filter.recoveryStatuses
             let startDate = filter.dateRange?.lowerBound ?? .distantPast
             let endDate = filter.dateRange?.upperBound ?? .distantFuture
             let hasDateRange = filter.dateRange != nil
 
-            descriptor.predicate = #Predicate<MoodEntry> { entry in
-                (!hasDateRange || (entry.date >= startDate && entry.date <= endDate))
-                && (moodLevels.isEmpty || moodLevels.contains(entry.moodLevel))
+            descriptor.predicate = #Predicate<CheckIn> { checkIn in
+                (!hasDateRange || (checkIn.date >= startDate && checkIn.date <= endDate))
+                && (recoveryStatuses.isEmpty || recoveryStatuses.contains(checkIn.recoveryLevel))
                 && (searchText.isEmpty
-                    || entry.notes.localizedStandardContains(searchText))
+                    || checkIn.notes.localizedStandardContains(searchText))
             }
         }
 
@@ -536,9 +536,9 @@ extension MoodEntryRepository {
             // Tag filtering — handled post-fetch because #Predicate
             // has limited support for relationship set membership
             if !filter.tagIds.isEmpty {
-                results = results.filter { entry in
-                    let entryTagIds = Set(entry.tags.map(\.persistentModelID))
-                    return !entryTagIds.isDisjoint(with: filter.tagIds)
+                results = results.filter { checkIn in
+                    let checkInTagIds = Set(checkIn.tags.map(\.persistentModelID))
+                    return !checkInTagIds.isDisjoint(with: filter.tagIds)
                 }
             }
 
@@ -549,9 +549,9 @@ extension MoodEntryRepository {
         }
     }
 
-    /// Returns the total count of entries matching the filter,
+    /// Returns the total count of check-ins matching the filter,
     /// useful for displaying result counts without loading all data.
-    func fetchFilteredCount(filter: MoodFilter) throws -> Int {
+    func fetchFilteredCount(filter: RecoveryFilter) throws -> Int {
         let results = try fetchFiltered(filter: filter)
         return results.count
     }
@@ -566,8 +566,8 @@ import SwiftData
 
 struct FilteredTimelineView: View {
     @Environment(\.modelContext) private var modelContext
-    @State private var filter: MoodFilter = .empty
-    @State private var entries: [MoodEntry] = []
+    @State private var filter: RecoveryFilter = .empty
+    @State private var checkIns: [CheckIn] = []
     @State private var isLoadingMore = false
 
     private let pageSize = 20
@@ -581,16 +581,16 @@ struct FilteredTimelineView: View {
                     activeFiltersSection
                 }
 
-                if entries.isEmpty {
+                if checkIns.isEmpty {
                     ContentUnavailableView.search
                 } else {
-                    ForEach(entries) { entry in
-                        NavigationLink(value: entry) {
-                            MoodEntryRow(entry: entry)
+                    ForEach(checkIns) { checkIn in
+                        NavigationLink(value: checkIn) {
+                            CheckInRow(checkIn: checkIn)
                         }
                     }
 
-                    if entries.count >= pageSize && !isLoadingMore {
+                    if checkIns.count >= pageSize && !isLoadingMore {
                         loadMoreButton
                     }
                 }
@@ -611,10 +611,10 @@ struct FilteredTimelineView: View {
                 }
             }
             .onChange(of: filter) {
-                loadEntries(reset: true)
+                loadCheckIns(reset: true)
             }
             .onAppear {
-                loadEntries(reset: true)
+                loadCheckIns(reset: true)
             }
         }
     }
@@ -632,13 +632,13 @@ struct FilteredTimelineView: View {
                 Divider()
                     .frame(height: 24)
 
-                // Mood level chips
+                // Recovery status chips
                 ForEach(1...10, id: \.self) { level in
                     FilterChip(
                         label: "\(level)",
-                        isActive: filter.moodLevels.contains(level)
+                        isActive: filter.recoveryStatuses.contains(level)
                     ) {
-                        filter.toggleMoodLevel(level)
+                        filter.toggleRecoveryStatus(level)
                     }
                 }
 
@@ -677,7 +677,7 @@ struct FilteredTimelineView: View {
 
     private var sortMenu: some View {
         Menu {
-            ForEach(MoodSortOption.allCases) { option in
+            ForEach(RecoverySortOption.allCases) { option in
                 Button {
                     filter.sortOption = option
                 } label: {
@@ -697,7 +697,7 @@ struct FilteredTimelineView: View {
 
     private var loadMoreButton: some View {
         Button {
-            loadEntries(reset: false)
+            loadCheckIns(reset: false)
         } label: {
             HStack {
                 Spacer()
@@ -715,24 +715,24 @@ struct FilteredTimelineView: View {
 
     // MARK: - Data Loading
 
-    private func loadEntries(reset: Bool) {
-        let repository = MoodEntryRepository(modelContext: modelContext)
-        let currentOffset = reset ? 0 : entries.count
+    private func loadCheckIns(reset: Bool) {
+        let service = RecoveryService(modelContext: modelContext)
+        let currentOffset = reset ? 0 : checkIns.count
 
         do {
-            let fetched = try repository.fetchFiltered(
+            let fetched = try service.fetchFiltered(
                 filter: filter,
                 limit: pageSize,
                 offset: currentOffset
             )
 
             if reset {
-                entries = fetched
+                checkIns = fetched
             } else {
-                entries.append(contentsOf: fetched)
+                checkIns.append(contentsOf: fetched)
             }
         } catch {
-            // Error is already logged by the repository
+            // Error is already logged by the service
         }
     }
 
@@ -784,35 +784,35 @@ struct FilterChip: View {
 
 #Preview {
     FilteredTimelineView()
-        .modelContainer(for: [MoodEntry.self, Tag.self], inMemory: true)
+        .modelContainer(for: [CheckIn.self, Tag.self], inMemory: true)
 }
 ```
 
 Let me highlight the decisions that matter in this view:
 
-**`.searchable` bound directly to `filter.searchText`.** SwiftUI's `.searchable` modifier provides the standard search bar with cancel button, keyboard management, and animated appearance — all for free. By binding it directly to the filter's `searchText`, every keystroke updates the filter, which triggers `onChange(of: filter)`, which re-fetches. No manual debouncing needed for SwiftData because the fetch is fast against a local database. If you were hitting a network API, you would debounce — but for on-device queries, immediate updates feel better.
+**`.searchable` bound directly to `filter.searchText`.** SwiftUI's `.searchable` modifier provides the standard search bar with cancel button, keyboard management, and animated appearance -- all for free. By binding it directly to the filter's `searchText`, every keystroke updates the filter, which triggers `onChange(of: filter)`, which re-fetches. No manual debouncing needed for SwiftData because the fetch is fast against a local database. If you were hitting a network API, you would debounce -- but for on-device queries, immediate updates feel better.
 
 **`safeAreaInset(edge: .top)` for the chips bar.** This places the filter chips below the navigation bar and search bar, but above the list content. The list scrolls underneath the chips bar. This is the same pattern Apple uses in the App Store's search results. Do not put the chips inside the list — they should be sticky, always visible.
 
 **`.sensoryFeedback(.selection, trigger: isActive)` on FilterChip.** iOS 17+ provides this declarative haptics modifier. It fires a light selection haptic whenever `isActive` changes. The user feels a tap when they select or deselect a chip. Small detail, significant UX improvement. This replaces the old `UIImpactFeedbackGenerator` approach.
 
-**The `loadEntries(reset:)` pattern.** When `reset` is `true`, we start from offset 0 and replace the array. When `false`, we append. This is the simplest pagination model — no fancy infinite scroll, just a "Load More" button. For a mood journal, this is the right level of complexity. Infinite scroll with prefetching is overkill here and adds real state management complexity.
+**The `loadCheckIns(reset:)` pattern.** When `reset` is `true`, we start from offset 0 and replace the array. When `false`, we append. This is the simplest pagination model — no fancy infinite scroll, just a "Load More" button. For a recovery app, this is the right level of complexity. Infinite scroll with prefetching is overkill here and adds real state management complexity.
 
 ## Checkpoint
 
-At this point in Moodbit, the data layer is fully capable:
+At this point in BetAway, the data layer is fully capable:
 
-- Mood entries can be created, read, updated, and deleted (Lesson 3.1)
-- The timeline can be searched by text, filtered by date range, mood levels, and tags, sorted by four criteria, and paginated (this lesson)
+- Recovery check-ins can be created, read, updated, and deleted (Lesson 3.1)
+- The timeline can be searched by text, filtered by date range, recovery statuses, and tags, sorted by four criteria, and paginated (this lesson)
 - All queries run at the database level via `#Predicate` and `FetchDescriptor`
 - The filter model is a simple value type, testable without any UI
 
 Before moving on, verify:
 
 1. Build succeeds with zero warnings
-2. The timeline shows all entries with an empty filter
+2. The timeline shows all check-ins with an empty filter
 3. Typing in the search bar narrows results to matching notes
-4. Mood level chips toggle correctly and combine with search
+4. Recovery status chips toggle correctly and combine with search
 5. Sorting changes the order instantly
 6. "Load More" fetches the next page without duplicates
 
@@ -822,6 +822,6 @@ If all six pass, you are ready for Lesson 3.3 — migrations.
 
 **Add a "Favorites" filter dimension.**
 
-Assume `MoodEntry` has a `isFavorited: Bool` property. Extend `MoodFilter` with a `showFavoritesOnly: Bool` field (defaulting to `false`). Update the repository's `fetchFiltered` method to include this in the `#Predicate`. Add a star-shaped filter chip to `FilteredTimelineView` that toggles it.
+Assume `CheckIn` has a `isFavorited: Bool` property. Extend `RecoveryFilter` with a `showFavoritesOnly: Bool` field (defaulting to `false`). Update the service's `fetchFiltered` method to include this in the `#Predicate`. Add a star-shaped filter chip to `FilteredTimelineView` that toggles it.
 
-This exercises the full loop — model, repository predicate, and UI — in under 10 minutes. If your predicate compiles on the first try and the chip toggles correctly, you have internalized the pattern.
+This exercises the full loop — model, service predicate, and UI — in under 10 minutes. If your predicate compiles on the first try and the chip toggles correctly, you have internalized the pattern.

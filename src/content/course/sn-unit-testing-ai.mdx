@@ -1,32 +1,32 @@
 ---
 title: "Unit Testing with AI"
-description: "Build a comprehensive test suite for Moodbit using the Swift Testing framework and AI-generated tests, covering mock repositories, the makeSUT pattern, and async ViewModel testing that catches real bugs."
+description: "Build a comprehensive test suite for BetAway using the Swift Testing framework and AI-generated tests, covering mock services, the makeSUT pattern, and async ViewModel testing that catches real bugs."
 courseSlug: "ship-native"
 module: 6
 moduleTitle: "Quality & Testing"
 lesson: 1
 duration: "28 min read"
 difficulty: "intermediate"
-topics: ["Testing", "XCTest", "AI Testing", "Mock Objects", "ViewModels", "Swift Testing", "Protocols", "Async", "Moodbit"]
+topics: ["Testing", "XCTest", "AI Testing", "Mock Objects", "ViewModels", "Swift Testing", "Protocols", "Async", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-You have a working app. The mood entry flow saves data, the timeline displays it, the AI generates insights. Everything works when you tap through it manually. But you have no idea if it still works after the next change you make.
+You have a working app. The check-in flow saves data, the recovery dashboard displays it, the on-device ML generates insights. Everything works when you tap through it manually. But you have no idea if it still works after the next change you make.
 
 That is the problem unit tests solve. Not in some abstract "best practices" sense — in the concrete sense that without tests, every code change is a gamble. You refactor the ViewModel, and you have to manually tap through every screen to check nothing broke. You add a new feature, and you cannot be sure the old features still work. Tests remove the guessing.
 
 ## What You'll Learn
 
-1. **Build a `MockMoodRepository`** with call tracking that verifies your ViewModels interact with the data layer correctly, without touching SwiftData.
+1. **Build a `MockRecoveryService`** with call tracking that verifies your ViewModels interact with the data layer correctly, without touching SwiftData.
 2. **Use the `makeSUT` pattern** to create clean, isolated test setups that prevent test pollution and make failures easy to diagnose.
 3. **Write async ViewModel tests** using the Swift Testing framework (`@Test`, `#expect`) that verify loading, saving, error handling, and state transitions.
 4. **Prompt AI to generate tests**, then review and fix the output — because AI-generated tests compile but often test the wrong things.
 
 ## Why This Matters
 
-Most indie developers skip tests because "the app is small enough to test by hand." That works until it does not. The first time you refactor the repository layer and accidentally break the mood entry save — but do not notice for three days because you were working on the chart screen — you will wish you had a test that ran in two seconds and caught the regression immediately.
+Most indie developers skip tests because "the app is small enough to test by hand." That works until it does not. The first time you refactor the service layer and accidentally break the check-in save — but do not notice for three days because you were working on the streak tracking screen — you will wish you had a test that ran in two seconds and caught the regression immediately.
 
 Unit tests in a SwiftUI app are not about 100% coverage. They are about testing the logic that matters: ViewModels, services, and data transformations. The View layer is tested by UI tests (next lesson) and your own eyes. The ViewModel layer is tested here, thoroughly and fast.
 
@@ -35,17 +35,17 @@ Unit tests in a SwiftUI app are not about 100% coverage. They are about testing 
 Before writing a single test, we need a strategy. What do we test? What do we skip? Send this to Claude Code:
 
 ```
-I need to build a unit test suite for Moodbit. Before writing
+I need to build a unit test suite for BetAway. Before writing
 any code, help me plan a test strategy.
 
 The app has:
-- MoodTimelineViewModel: loads entries from MoodRepository,
-  deletes entries, handles errors, manages loading state
-- MoodEntryViewModel: multi-step form state, validation,
-  saves via MoodRepository
-- MoodRepository protocol with SwiftDataMoodRepository
-  (production) and MockMoodRepository (tests)
-- AIService protocol for generating insights
+- RecoveryDashboardViewModel: loads check-ins from RecoveryService,
+  deletes check-ins, handles errors, manages loading state
+- CheckInViewModel: multi-step form state, validation,
+  saves via RecoveryService
+- RecoveryService protocol with SwiftDataRecoveryService
+  (production) and MockRecoveryService (tests)
+- InsightEngine protocol for generating recovery insights
 
 Plan:
 1. What should we test? What should we NOT test?
@@ -61,9 +61,9 @@ Do NOT write code yet. Think through the design.
 The AI should return a clear strategy. Here is what to look for:
 
 - ✅ **Test ViewModels, not Views.** ViewModels contain the business logic. Views are declarative UI descriptions. Testing a View means testing SwiftUI itself, which Apple already does. Test the ViewModel that drives the View.
-- ✅ **Test behavior, not implementation.** A good test says "when I call `loadEntries()`, the entries array is populated." A bad test says "when I call `loadEntries()`, `fetchAll()` is called on the repository." The first survives refactoring. The second breaks every time you change the internal wiring.
-- ✅ **Mock at the protocol boundary.** We already have `MoodRepository` as a protocol. The mock implements that protocol with in-memory storage and call tracking. No SwiftData, no disk, no flakiness.
-- ⚠️ **Watch for over-mocking.** If the AI suggests mocking `Date`, `UUID`, and every system type, push back. Mock the things you own (repositories, services). Use real value types for everything else.
+- ✅ **Test behavior, not implementation.** A good test says "when I call `loadCheckIns()`, the check-ins array is populated." A bad test says "when I call `loadCheckIns()`, `fetchAll()` is called on the service." The first survives refactoring. The second breaks every time you change the internal wiring.
+- ✅ **Mock at the protocol boundary.** We already have `RecoveryService` as a protocol. The mock implements that protocol with in-memory storage and call tracking. No SwiftData, no disk, no flakiness.
+- ⚠️ **Watch for over-mocking.** If the AI suggests mocking `Date`, `UUID`, and every system type, push back. Mock the things you own (services, insight engines). Use real value types for everything else.
 - ❌ **Reject snapshot testing for unit tests.** Snapshot testing is a UI concern. If the AI mixes it into the unit test plan, separate it. We cover snapshot testing in the UI testing lesson.
 
 ### Anti-Pattern: Testing Implementation Details
@@ -72,28 +72,28 @@ Here is a test that looks thorough but is actually harmful:
 
 ```swift
 // BAD — tests implementation details
-@Test func loadEntries_callsRepositoryFetchAll() async {
-    let mock = MockMoodRepository()
-    let sut = MoodTimelineViewModel(repository: mock)
+@Test func loadCheckIns_callsServiceFetchAll() async {
+    let mock = MockRecoveryService()
+    let sut = RecoveryDashboardViewModel(service: mock)
 
-    await sut.loadEntries()
+    await sut.loadCheckIns()
 
     #expect(mock.fetchAllCallCount == 1)  // Brittle!
 }
 ```
 
-This test breaks the moment you add caching, debouncing, or batch loading — even though the behavior (entries appear) is unchanged. It tests how the ViewModel works, not what it does. A better test checks the observable outcome:
+This test breaks the moment you add caching, debouncing, or batch loading — even though the behavior (check-ins appear) is unchanged. It tests how the ViewModel works, not what it does. A better test checks the observable outcome:
 
 ```swift
 // GOOD — tests observable behavior
-@Test func loadEntries_populatesEntriesArray() async {
-    let mock = MockMoodRepository()
-    mock.entries = [MoodEntry.sample()]
-    let sut = MoodTimelineViewModel(repository: mock)
+@Test func loadCheckIns_populatesCheckInsArray() async {
+    let mock = MockRecoveryService()
+    mock.checkIns = [CheckIn.sample()]
+    let sut = RecoveryDashboardViewModel(service: mock)
 
-    await sut.loadEntries()
+    await sut.loadCheckIns()
 
-    #expect(sut.entries.count == 1)
+    #expect(sut.checkIns.count == 1)
 }
 ```
 
@@ -104,33 +104,33 @@ Same scenario, but this test survives any internal refactoring. It only breaks w
 Now we build. Send this prompt:
 
 ```
-Create the test infrastructure for Moodbit. Generate these files:
+Create the test infrastructure for BetAway. Generate these files:
 
-1. MoodbitTests/Mocks/MockMoodRepository.swift
-   - Implements MoodRepository protocol
-   - Stores entries in an in-memory array
+1. BetAwayTests/Mocks/MockRecoveryService.swift
+   - Implements RecoveryService protocol
+   - Stores check-ins in an in-memory array
    - Tracks which methods were called and how many times
    - Has a throwingError property — when set, all methods
      throw that error instead of executing normally
    - Has a delay property — when set, methods wait that
      duration before returning (for testing loading states)
 
-2. MoodbitTests/Helpers/MoodEntry+Sample.swift
-   - Extension on MoodEntry with static factory methods:
-     .sample() returns a single entry with sensible defaults
-     .samples(count:) returns an array of entries
+2. BetAwayTests/Helpers/CheckIn+Sample.swift
+   - Extension on CheckIn with static factory methods:
+     .sample() returns a single check-in with sensible defaults
+     .samples(count:) returns an array of check-ins
 
-3. MoodbitTests/MoodRepositoryTests.swift
-   - Tests for the MockMoodRepository itself — verify it
+3. BetAwayTests/RecoveryServiceTests.swift
+   - Tests for the MockRecoveryService itself — verify it
      stores, retrieves, updates, and deletes correctly
    - Use Swift Testing framework: @Test, #expect, @Suite
 
-4. MoodbitTests/TimelineViewModelTests.swift
-   - Tests for MoodTimelineViewModel
+4. BetAwayTests/DashboardViewModelTests.swift
+   - Tests for RecoveryDashboardViewModel
    - Use the makeSUT() pattern for setup
-   - Test: loadEntries populates array, loadEntries sets
-     loading state, loadEntries handles errors, deleteEntry
-     removes from array, deleteEntry handles errors
+   - Test: loadCheckIns populates array, loadCheckIns sets
+     loading state, loadCheckIns handles errors, deleteCheckIn
+     removes from array, deleteCheckIn handles errors
 
 Use Swift Testing framework (@Test, #expect), NOT XCTest
 (no XCTAssertEqual). Swift 6, @MainActor where needed.
@@ -140,16 +140,16 @@ Use Swift Testing framework (@Test, #expect), NOT XCTest
 
 Here is what Claude Code should produce. Let me walk through each file with the review markers.
 
-**MockMoodRepository.swift:**
+**MockRecoveryService.swift:**
 
 ```swift
 import Foundation
-@testable import Moodbit
+@testable import BetAway
 
-final class MockMoodRepository: MoodRepository, @unchecked Sendable {
+final class MockRecoveryService: RecoveryService, @unchecked Sendable {
     // MARK: - Storage
 
-    var entries: [MoodEntry] = []
+    var checkIns: [CheckIn] = []
 
     // MARK: - Configuration
 
@@ -164,53 +164,53 @@ final class MockMoodRepository: MoodRepository, @unchecked Sendable {
     private(set) var updateCallCount = 0
     private(set) var deleteCallCount = 0
 
-    private(set) var lastSavedEntry: MoodEntry?
-    private(set) var lastDeletedEntry: MoodEntry?
+    private(set) var lastSavedEntry: CheckIn?
+    private(set) var lastDeletedEntry: CheckIn?
 
-    // MARK: - MoodRepository
+    // MARK: - RecoveryService
 
-    func fetchAll() async throws -> [MoodEntry] {
+    func fetchAll() async throws -> [CheckIn] {
         fetchAllCallCount += 1
         if let delay = artificialDelay {
             try await Task.sleep(for: delay)
         }
         if let error = throwingError { throw error }
-        return entries.sorted { $0.date > $1.date }
+        return checkIns.sorted { $0.date > $1.date }
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
+    func fetch(by id: UUID) async throws -> CheckIn? {
         fetchByIDCallCount += 1
         if let error = throwingError { throw error }
-        return entries.first { $0.id == id }
+        return checkIns.first { $0.id == id }
     }
 
-    func save(_ entry: MoodEntry) async throws {
+    func save(_ entry: CheckIn) async throws {
         saveCallCount += 1
         if let error = throwingError { throw error }
         lastSavedEntry = entry
-        entries.append(entry)
+        checkIns.append(entry)
     }
 
-    func update(_ entry: MoodEntry) async throws {
+    func update(_ entry: CheckIn) async throws {
         updateCallCount += 1
         if let error = throwingError { throw error }
-        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else {
+        guard let index = checkIns.firstIndex(where: { $0.id == entry.id }) else {
             return
         }
-        entries[index] = entry
+        checkIns[index] = entry
     }
 
-    func delete(_ entry: MoodEntry) async throws {
+    func delete(_ entry: CheckIn) async throws {
         deleteCallCount += 1
         if let error = throwingError { throw error }
         lastDeletedEntry = entry
-        entries.removeAll { $0.id == entry.id }
+        checkIns.removeAll { $0.id == entry.id }
     }
 
     // MARK: - Helpers
 
     func reset() {
-        entries = []
+        checkIns = []
         throwingError = nil
         artificialDelay = nil
         fetchAllCallCount = 0
@@ -233,24 +233,24 @@ Review checklist:
 - ✅ **`lastSavedEntry` and `lastDeletedEntry`** — lets tests verify which entry was passed to save/delete without asserting on call counts.
 - ⚠️ **Watch for the AI using `XCTest` assertions inside the mock.** Mocks should be inert data containers. Assertions belong in the test, not the mock.
 
-**MoodEntry+Sample.swift:**
+**CheckIn+Sample.swift:**
 
 ```swift
 import Foundation
-@testable import Moodbit
+@testable import BetAway
 
-extension MoodEntry {
+extension CheckIn {
     static func sample(
         id: UUID = UUID(),
-        mood: MoodLevel = .good,
-        note: String = "Test mood entry",
+        recoveryStatus: RecoveryStatus = .good,
+        note: String = "Test check-in",
         activities: [String] = ["Work", "Exercise"],
         date: Date = .now,
         createdAt: Date = .now
-    ) -> MoodEntry {
-        MoodEntry(
+    ) -> CheckIn {
+        CheckIn(
             id: id,
-            mood: mood,
+            recoveryStatus: recoveryStatus,
             note: note,
             activities: activities,
             date: date,
@@ -258,13 +258,13 @@ extension MoodEntry {
         )
     }
 
-    static func samples(count: Int) -> [MoodEntry] {
+    static func samples(count: Int) -> [CheckIn] {
         let calendar = Calendar.current
-        let moods: [MoodLevel] = [.great, .good, .okay, .bad, .awful]
+        let statuses: [RecoveryStatus] = [.great, .good, .okay, .bad, .awful]
 
         return (0..<count).map { index in
-            MoodEntry.sample(
-                mood: moods[index % moods.count],
+            CheckIn.sample(
+                recoveryStatus: statuses[index % statuses.count],
                 note: "Sample entry \(index + 1)",
                 activities: ["Activity \(index + 1)"],
                 date: calendar.date(
@@ -278,23 +278,23 @@ extension MoodEntry {
 }
 ```
 
-- ✅ **Default parameters on `sample()`** — you can call `.sample()` for a generic entry or `.sample(mood: .awful, note: "bad day")` when specific values matter for the test.
+- ✅ **Default parameters on `sample()`** — you can call `.sample()` for a generic entry or `.sample(recoveryStatus: .awful, note: "bad day")` when specific values matter for the test.
 - ✅ **`samples(count:)` spreads dates across days** — entries are not all timestamped at the same second, which matters for sort-order tests.
-- ✅ **Cycles through mood levels** — gives variety in test data without randomness.
+- ✅ **Cycles through recovery statuses** — gives variety in test data without randomness.
 
-**MoodRepositoryTests.swift — testing the mock itself:**
+**RecoveryServiceTests.swift — testing the mock itself:**
 
 ```swift
 import Testing
-@testable import Moodbit
+@testable import BetAway
 
-@Suite("MockMoodRepository")
-struct MoodRepositoryTests {
+@Suite("MockRecoveryService")
+struct RecoveryServiceTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> MockMoodRepository {
-        MockMoodRepository()
+    private func makeSUT() -> MockRecoveryService {
+        MockRecoveryService()
     }
 
     // MARK: - Fetch
@@ -302,13 +302,13 @@ struct MoodRepositoryTests {
     @Test("fetchAll returns entries sorted by date descending")
     func fetchAllReturnsSorted() async throws {
         let sut = makeSUT()
-        let older = MoodEntry.sample(
+        let older = CheckIn.sample(
             date: Date(timeIntervalSinceNow: -86400)
         )
-        let newer = MoodEntry.sample(
+        let newer = CheckIn.sample(
             date: Date(timeIntervalSinceNow: 0)
         )
-        sut.entries = [older, newer]
+        sut.checkIns = [older, newer]
 
         let result = try await sut.fetchAll()
 
@@ -319,8 +319,8 @@ struct MoodRepositoryTests {
     @Test("fetch by ID returns matching entry")
     func fetchByIDReturnsMatch() async throws {
         let sut = makeSUT()
-        let target = MoodEntry.sample()
-        sut.entries = [MoodEntry.sample(), target, MoodEntry.sample()]
+        let target = CheckIn.sample()
+        sut.checkIns = [CheckIn.sample(), target, CheckIn.sample()]
 
         let result = try await sut.fetch(by: target.id)
 
@@ -330,7 +330,7 @@ struct MoodRepositoryTests {
     @Test("fetch by ID returns nil when not found")
     func fetchByIDReturnsNilWhenMissing() async throws {
         let sut = makeSUT()
-        sut.entries = [MoodEntry.sample()]
+        sut.checkIns = [CheckIn.sample()]
 
         let result = try await sut.fetch(by: UUID())
 
@@ -342,12 +342,12 @@ struct MoodRepositoryTests {
     @Test("save appends entry to storage")
     func saveAppendsEntry() async throws {
         let sut = makeSUT()
-        let entry = MoodEntry.sample()
+        let entry = CheckIn.sample()
 
         try await sut.save(entry)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.id == entry.id)
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.id == entry.id)
         #expect(sut.saveCallCount == 1)
         #expect(sut.lastSavedEntry?.id == entry.id)
     }
@@ -357,17 +357,17 @@ struct MoodRepositoryTests {
     @Test("update replaces entry with matching ID")
     func updateReplacesEntry() async throws {
         let sut = makeSUT()
-        let original = MoodEntry.sample(note: "Original")
-        sut.entries = [original]
+        let original = CheckIn.sample(note: "Original")
+        sut.checkIns = [original]
 
-        let updated = MoodEntry.sample(
+        let updated = CheckIn.sample(
             id: original.id,
             note: "Updated"
         )
         try await sut.update(updated)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.note == "Updated")
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.note == "Updated")
     }
 
     // MARK: - Delete
@@ -375,12 +375,12 @@ struct MoodRepositoryTests {
     @Test("delete removes entry from storage")
     func deleteRemovesEntry() async throws {
         let sut = makeSUT()
-        let entry = MoodEntry.sample()
-        sut.entries = [entry]
+        let entry = CheckIn.sample()
+        sut.checkIns = [entry]
 
         try await sut.delete(entry)
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
         #expect(sut.deleteCallCount == 1)
         #expect(sut.lastDeletedEntry?.id == entry.id)
     }
@@ -409,34 +409,34 @@ Review checklist:
 
 ## Iteration: ViewModel Tests
 
-The repository tests verify the infrastructure. Now we test the actual business logic. This is where the real value is.
+The service tests verify the infrastructure. Now we test the actual business logic. This is where the real value is.
 
 ```
-Now write TimelineViewModelTests.swift using the makeSUT pattern.
+Now write DashboardViewModelTests.swift using the makeSUT pattern.
 
-MoodTimelineViewModel has:
-- entries: [MoodEntry] (populated by loadEntries)
+RecoveryDashboardViewModel has:
+- entries: [CheckIn] (populated by loadCheckIns)
 - isLoading: Bool
 - errorMessage: String?
-- loadEntries() async
-- addEntry(_ entry: MoodEntry) async
-- deleteEntry(_ entry: MoodEntry) async
+- loadCheckIns() async
+- addCheckIn(_ entry: CheckIn) async
+- deleteCheckIn(_ entry: CheckIn) async
 
-It takes a MoodRepository in its init.
+It takes a RecoveryService in its init.
 
 Write tests for:
-1. loadEntries populates the entries array
-2. loadEntries sets isLoading to true during load
-3. loadEntries sets errorMessage on failure
-4. loadEntries clears previous error on success
-5. addEntry inserts entry at the beginning
-6. addEntry sets errorMessage on failure
-7. deleteEntry removes the entry from the array
-8. deleteEntry sets errorMessage on failure
+1. loadCheckIns populates the checkIns array
+2. loadCheckIns sets isLoading to true during load
+3. loadCheckIns sets errorMessage on failure
+4. loadCheckIns clears previous error on success
+5. addCheckIn inserts entry at the beginning
+6. addCheckIn sets errorMessage on failure
+7. deleteCheckIn removes the entry from the array
+8. deleteCheckIn sets errorMessage on failure
 9. entries are sorted by date descending after load
 
 Use @Suite, @Test, #expect. Use makeSUT() that returns
-(sut: MoodTimelineViewModel, repository: MockMoodRepository).
+(sut: RecoveryDashboardViewModel, service: MockRecoveryService).
 All tests are async. Use @MainActor on the suite.
 ```
 
@@ -444,43 +444,43 @@ All tests are async. Use @MainActor on the suite.
 
 ```swift
 import Testing
-@testable import Moodbit
+@testable import BetAway
 
-@Suite("MoodTimelineViewModel")
+@Suite("RecoveryDashboardViewModel")
 @MainActor
-struct TimelineViewModelTests {
+struct DashboardViewModelTests {
 
     // MARK: - makeSUT
 
     private func makeSUT() -> (
-        sut: MoodTimelineViewModel,
-        repository: MockMoodRepository
+        sut: RecoveryDashboardViewModel,
+        service: MockRecoveryService
     ) {
-        let repository = MockMoodRepository()
-        let sut = MoodTimelineViewModel(repository: repository)
-        return (sut, repository)
+        let service = MockRecoveryService()
+        let sut = RecoveryDashboardViewModel(service: service)
+        return (sut, service)
     }
 
     // MARK: - Load Entries
 
-    @Test("loadEntries populates entries from repository")
-    func loadEntriesPopulatesArray() async {
-        let (sut, repository) = makeSUT()
-        repository.entries = MoodEntry.samples(count: 3)
+    @Test("loadCheckIns populates entries from service")
+    func loadCheckInsPopulatesArray() async {
+        let (sut, service) = makeSUT()
+        service.checkIns = CheckIn.samples(count: 3)
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
-        #expect(sut.entries.count == 3)
+        #expect(sut.checkIns.count == 3)
     }
 
-    @Test("loadEntries sets isLoading during fetch")
-    func loadEntriesSetsLoadingState() async {
-        let (sut, repository) = makeSUT()
-        repository.artificialDelay = .milliseconds(50)
-        repository.entries = [MoodEntry.sample()]
+    @Test("loadCheckIns sets isLoading during fetch")
+    func loadCheckInsSetsLoadingState() async {
+        let (sut, service) = makeSUT()
+        service.artificialDelay = .milliseconds(50)
+        service.checkIns = [CheckIn.sample()]
 
         let loadTask = Task {
-            await sut.loadEntries()
+            await sut.loadCheckIns()
         }
 
         // Give the task a moment to start
@@ -491,132 +491,132 @@ struct TimelineViewModelTests {
         #expect(sut.isLoading == false)
     }
 
-    @Test("loadEntries sets errorMessage on failure")
-    func loadEntriesSetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        repository.throwingError = .persistence(
+    @Test("loadCheckIns sets errorMessage on failure")
+    func loadCheckInsSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        service.throwingError = .persistence(
             .fetchFailed(underlying: "disk error")
         )
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
         #expect(sut.errorMessage != nil)
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
     }
 
-    @Test("loadEntries clears previous error on success")
-    func loadEntriesClearsPreviousError() async {
-        let (sut, repository) = makeSUT()
+    @Test("loadCheckIns clears previous error on success")
+    func loadCheckInsClearsPreviousError() async {
+        let (sut, service) = makeSUT()
 
         // First call fails
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .fetchFailed(underlying: "disk error")
         )
-        await sut.loadEntries()
+        await sut.loadCheckIns()
         #expect(sut.errorMessage != nil)
 
         // Second call succeeds
-        repository.throwingError = nil
-        repository.entries = [MoodEntry.sample()]
-        await sut.loadEntries()
+        service.throwingError = nil
+        service.checkIns = [CheckIn.sample()]
+        await sut.loadCheckIns()
 
         #expect(sut.errorMessage == nil)
-        #expect(sut.entries.count == 1)
+        #expect(sut.checkIns.count == 1)
     }
 
-    @Test("loadEntries returns entries sorted by date descending")
-    func loadEntriesReturnsSorted() async {
-        let (sut, repository) = makeSUT()
-        let oldEntry = MoodEntry.sample(
+    @Test("loadCheckIns returns entries sorted by date descending")
+    func loadCheckInsReturnsSorted() async {
+        let (sut, service) = makeSUT()
+        let oldEntry = CheckIn.sample(
             date: Date(timeIntervalSinceNow: -86400)
         )
-        let newEntry = MoodEntry.sample(
+        let newEntry = CheckIn.sample(
             date: Date(timeIntervalSinceNow: 0)
         )
-        repository.entries = [oldEntry, newEntry]
+        service.checkIns = [oldEntry, newEntry]
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
-        #expect(sut.entries.first?.id == newEntry.id)
-        #expect(sut.entries.last?.id == oldEntry.id)
+        #expect(sut.checkIns.first?.id == newEntry.id)
+        #expect(sut.checkIns.last?.id == oldEntry.id)
     }
 
     // MARK: - Add Entry
 
-    @Test("addEntry inserts entry at the beginning of the array")
-    func addEntryInsertsAtBeginning() async {
-        let (sut, repository) = makeSUT()
-        let existing = MoodEntry.sample(
+    @Test("addCheckIn inserts entry at the beginning of the array")
+    func addCheckInInsertsAtBeginning() async {
+        let (sut, service) = makeSUT()
+        let existing = CheckIn.sample(
             note: "Existing",
             date: Date(timeIntervalSinceNow: -3600)
         )
-        repository.entries = [existing]
-        await sut.loadEntries()
+        service.checkIns = [existing]
+        await sut.loadCheckIns()
 
-        let newEntry = MoodEntry.sample(
+        let newEntry = CheckIn.sample(
             note: "New",
             date: .now
         )
-        await sut.addEntry(newEntry)
+        await sut.addCheckIn(newEntry)
 
-        #expect(sut.entries.first?.note == "New")
-        #expect(sut.entries.count == 2)
+        #expect(sut.checkIns.first?.note == "New")
+        #expect(sut.checkIns.count == 2)
     }
 
-    @Test("addEntry sets errorMessage on failure")
-    func addEntrySetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        repository.throwingError = .persistence(
+    @Test("addCheckIn sets errorMessage on failure")
+    func addCheckInSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        service.throwingError = .persistence(
             .saveFailed(underlying: "disk full")
         )
 
-        let entry = MoodEntry.sample()
-        await sut.addEntry(entry)
+        let entry = CheckIn.sample()
+        await sut.addCheckIn(entry)
 
         #expect(sut.errorMessage != nil)
     }
 
     // MARK: - Delete Entry
 
-    @Test("deleteEntry removes entry from the array")
-    func deleteEntryRemovesFromArray() async {
-        let (sut, repository) = makeSUT()
-        let entry = MoodEntry.sample()
-        repository.entries = [entry]
-        await sut.loadEntries()
-        #expect(sut.entries.count == 1)
+    @Test("deleteCheckIn removes entry from the array")
+    func deleteCheckInRemovesFromArray() async {
+        let (sut, service) = makeSUT()
+        let entry = CheckIn.sample()
+        service.checkIns = [entry]
+        await sut.loadCheckIns()
+        #expect(sut.checkIns.count == 1)
 
-        await sut.deleteEntry(entry)
+        await sut.deleteCheckIn(entry)
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
     }
 
-    @Test("deleteEntry sets errorMessage on failure")
-    func deleteEntrySetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        let entry = MoodEntry.sample()
-        repository.entries = [entry]
-        await sut.loadEntries()
+    @Test("deleteCheckIn sets errorMessage on failure")
+    func deleteCheckInSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        let entry = CheckIn.sample()
+        service.checkIns = [entry]
+        await sut.loadCheckIns()
 
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .saveFailed(underlying: "delete failed")
         )
-        await sut.deleteEntry(entry)
+        await sut.deleteCheckIn(entry)
 
         #expect(sut.errorMessage != nil)
         // Entry should still be in the array since delete failed
-        #expect(sut.entries.count == 1)
+        #expect(sut.checkIns.count == 1)
     }
 }
 ```
 
 Review checklist:
 
-- ✅ **`@MainActor` on the suite** — `MoodTimelineViewModel` is `@MainActor` because it drives UI. All tests that touch it must run on the main actor. Without this annotation, Swift 6 will reject the tests at compile time.
-- ✅ **`makeSUT()` returns a tuple** — the test gets both the ViewModel and the mock repository. This is critical: the test configures the mock, calls methods on the ViewModel, and asserts on the ViewModel's observable state. The tuple makes both accessible without instance variables.
+- ✅ **`@MainActor` on the suite** — `RecoveryDashboardViewModel` is `@MainActor` because it drives UI. All tests that touch it must run on the main actor. Without this annotation, Swift 6 will reject the tests at compile time.
+- ✅ **`makeSUT()` returns a tuple** — the test gets both the ViewModel and the mock service. This is critical: the test configures the mock, calls methods on the ViewModel, and asserts on the ViewModel's observable state. The tuple makes both accessible without instance variables.
 - ✅ **Loading state test uses `artificialDelay`** — this creates a small window where `isLoading` is `true`. The test checks mid-flight, then waits for completion and checks again. This is the correct way to test transient states.
 - ✅ **Error clearing test runs two scenarios in sequence** — first fails, then succeeds. This catches a common bug where the error message persists even after a successful retry.
-- ✅ **Delete failure test verifies the entry is still present** — if the repository throws during delete, the ViewModel should not remove the entry from its local array. This is a real bug that AI-generated code often has.
+- ✅ **Delete failure test verifies the entry is still present** — if the service throws during delete, the ViewModel should not remove the entry from its local array. This is a real bug that AI-generated code often has.
 - ⚠️ **The loading state test has a timing dependency.** The `Task.sleep(for: .milliseconds(10))` is a pragmatic workaround. In a perfect world, you would use a synchronization primitive. In practice, a 10ms sleep in a test that runs in under 100ms total is acceptable. If it flakes, increase the delay slightly.
 
 ## Verify Phase: Running the Tests
@@ -634,16 +634,16 @@ Build and run the tests. Here is what to check:
 - Mark the mock as `@unchecked Sendable`
 - Use `await` when calling actor-isolated methods
 
-**5. Edge case: empty repository.** Add a test that calls `loadEntries()` on an empty repository and verifies `entries` is empty and `errorMessage` is `nil`. This sounds trivial but catches ViewModels that set an error state when there are no results.
+**5. Edge case: empty repository.** Add a test that calls `loadCheckIns()` on an empty service and verifies `entries` is empty and `errorMessage` is `nil`. This sounds trivial but catches ViewModels that set an error state when there are no results.
 
 ```swift
-@Test("loadEntries with empty repository sets empty array without error")
-func loadEntriesEmptyRepository() async {
+@Test("loadCheckIns with empty service sets empty array without error")
+func loadCheckInsEmptyRepository() async {
     let (sut, _) = makeSUT()
 
-    await sut.loadEntries()
+    await sut.loadCheckIns()
 
-    #expect(sut.entries.isEmpty)
+    #expect(sut.checkIns.isEmpty)
     #expect(sut.errorMessage == nil)
     #expect(sut.isLoading == false)
 }
@@ -653,16 +653,16 @@ func loadEntriesEmptyRepository() async {
 
 Here is the complete, final implementation for all files. These are the versions that should be in your test target after the plan, execute, and iterate phases.
 
-### MoodbitTests/Mocks/MockMoodRepository.swift
+### BetAwayTests/Mocks/MockRecoveryService.swift
 
 ```swift
 import Foundation
-@testable import Moodbit
+@testable import BetAway
 
-final class MockMoodRepository: MoodRepository, @unchecked Sendable {
+final class MockRecoveryService: RecoveryService, @unchecked Sendable {
     // MARK: - Storage
 
-    var entries: [MoodEntry] = []
+    var checkIns: [CheckIn] = []
 
     // MARK: - Configuration
 
@@ -677,53 +677,53 @@ final class MockMoodRepository: MoodRepository, @unchecked Sendable {
     private(set) var updateCallCount = 0
     private(set) var deleteCallCount = 0
 
-    private(set) var lastSavedEntry: MoodEntry?
-    private(set) var lastDeletedEntry: MoodEntry?
+    private(set) var lastSavedEntry: CheckIn?
+    private(set) var lastDeletedEntry: CheckIn?
 
-    // MARK: - MoodRepository
+    // MARK: - RecoveryService
 
-    func fetchAll() async throws -> [MoodEntry] {
+    func fetchAll() async throws -> [CheckIn] {
         fetchAllCallCount += 1
         if let delay = artificialDelay {
             try await Task.sleep(for: delay)
         }
         if let error = throwingError { throw error }
-        return entries.sorted { $0.date > $1.date }
+        return checkIns.sorted { $0.date > $1.date }
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
+    func fetch(by id: UUID) async throws -> CheckIn? {
         fetchByIDCallCount += 1
         if let error = throwingError { throw error }
-        return entries.first { $0.id == id }
+        return checkIns.first { $0.id == id }
     }
 
-    func save(_ entry: MoodEntry) async throws {
+    func save(_ entry: CheckIn) async throws {
         saveCallCount += 1
         if let error = throwingError { throw error }
         lastSavedEntry = entry
-        entries.append(entry)
+        checkIns.append(entry)
     }
 
-    func update(_ entry: MoodEntry) async throws {
+    func update(_ entry: CheckIn) async throws {
         updateCallCount += 1
         if let error = throwingError { throw error }
-        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else {
+        guard let index = checkIns.firstIndex(where: { $0.id == entry.id }) else {
             return
         }
-        entries[index] = entry
+        checkIns[index] = entry
     }
 
-    func delete(_ entry: MoodEntry) async throws {
+    func delete(_ entry: CheckIn) async throws {
         deleteCallCount += 1
         if let error = throwingError { throw error }
         lastDeletedEntry = entry
-        entries.removeAll { $0.id == entry.id }
+        checkIns.removeAll { $0.id == entry.id }
     }
 
     // MARK: - Helpers
 
     func reset() {
-        entries = []
+        checkIns = []
         throwingError = nil
         artificialDelay = nil
         fetchAllCallCount = 0
@@ -737,24 +737,24 @@ final class MockMoodRepository: MoodRepository, @unchecked Sendable {
 }
 ```
 
-### MoodbitTests/Helpers/MoodEntry+Sample.swift
+### BetAwayTests/Helpers/CheckIn+Sample.swift
 
 ```swift
 import Foundation
-@testable import Moodbit
+@testable import BetAway
 
-extension MoodEntry {
+extension CheckIn {
     static func sample(
         id: UUID = UUID(),
-        mood: MoodLevel = .good,
-        note: String = "Test mood entry",
+        recoveryStatus: RecoveryStatus = .good,
+        note: String = "Test check-in",
         activities: [String] = ["Work", "Exercise"],
         date: Date = .now,
         createdAt: Date = .now
-    ) -> MoodEntry {
-        MoodEntry(
+    ) -> CheckIn {
+        CheckIn(
             id: id,
-            mood: mood,
+            recoveryStatus: recoveryStatus,
             note: note,
             activities: activities,
             date: date,
@@ -762,13 +762,13 @@ extension MoodEntry {
         )
     }
 
-    static func samples(count: Int) -> [MoodEntry] {
+    static func samples(count: Int) -> [CheckIn] {
         let calendar = Calendar.current
-        let moods: [MoodLevel] = [.great, .good, .okay, .bad, .awful]
+        let statuses: [RecoveryStatus] = [.great, .good, .okay, .bad, .awful]
 
         return (0..<count).map { index in
-            MoodEntry.sample(
-                mood: moods[index % moods.count],
+            CheckIn.sample(
+                recoveryStatus: statuses[index % statuses.count],
                 note: "Sample entry \(index + 1)",
                 activities: ["Activity \(index + 1)"],
                 date: calendar.date(
@@ -782,19 +782,19 @@ extension MoodEntry {
 }
 ```
 
-### MoodbitTests/MoodRepositoryTests.swift
+### BetAwayTests/RecoveryServiceTests.swift
 
 ```swift
 import Testing
-@testable import Moodbit
+@testable import BetAway
 
-@Suite("MockMoodRepository")
-struct MoodRepositoryTests {
+@Suite("MockRecoveryService")
+struct RecoveryServiceTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> MockMoodRepository {
-        MockMoodRepository()
+    private func makeSUT() -> MockRecoveryService {
+        MockRecoveryService()
     }
 
     // MARK: - Fetch
@@ -802,13 +802,13 @@ struct MoodRepositoryTests {
     @Test("fetchAll returns entries sorted by date descending")
     func fetchAllReturnsSorted() async throws {
         let sut = makeSUT()
-        let older = MoodEntry.sample(
+        let older = CheckIn.sample(
             date: Date(timeIntervalSinceNow: -86400)
         )
-        let newer = MoodEntry.sample(
+        let newer = CheckIn.sample(
             date: Date(timeIntervalSinceNow: 0)
         )
-        sut.entries = [older, newer]
+        sut.checkIns = [older, newer]
 
         let result = try await sut.fetchAll()
 
@@ -819,8 +819,8 @@ struct MoodRepositoryTests {
     @Test("fetch by ID returns matching entry")
     func fetchByIDReturnsMatch() async throws {
         let sut = makeSUT()
-        let target = MoodEntry.sample()
-        sut.entries = [MoodEntry.sample(), target, MoodEntry.sample()]
+        let target = CheckIn.sample()
+        sut.checkIns = [CheckIn.sample(), target, CheckIn.sample()]
 
         let result = try await sut.fetch(by: target.id)
 
@@ -830,7 +830,7 @@ struct MoodRepositoryTests {
     @Test("fetch by ID returns nil when not found")
     func fetchByIDReturnsNilWhenMissing() async throws {
         let sut = makeSUT()
-        sut.entries = [MoodEntry.sample()]
+        sut.checkIns = [CheckIn.sample()]
 
         let result = try await sut.fetch(by: UUID())
 
@@ -842,12 +842,12 @@ struct MoodRepositoryTests {
     @Test("save appends entry to storage")
     func saveAppendsEntry() async throws {
         let sut = makeSUT()
-        let entry = MoodEntry.sample()
+        let entry = CheckIn.sample()
 
         try await sut.save(entry)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.id == entry.id)
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.id == entry.id)
         #expect(sut.saveCallCount == 1)
         #expect(sut.lastSavedEntry?.id == entry.id)
     }
@@ -857,17 +857,17 @@ struct MoodRepositoryTests {
     @Test("update replaces entry with matching ID")
     func updateReplacesEntry() async throws {
         let sut = makeSUT()
-        let original = MoodEntry.sample(note: "Original")
-        sut.entries = [original]
+        let original = CheckIn.sample(note: "Original")
+        sut.checkIns = [original]
 
-        let updated = MoodEntry.sample(
+        let updated = CheckIn.sample(
             id: original.id,
             note: "Updated"
         )
         try await sut.update(updated)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.note == "Updated")
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.note == "Updated")
     }
 
     // MARK: - Delete
@@ -875,12 +875,12 @@ struct MoodRepositoryTests {
     @Test("delete removes entry from storage")
     func deleteRemovesEntry() async throws {
         let sut = makeSUT()
-        let entry = MoodEntry.sample()
-        sut.entries = [entry]
+        let entry = CheckIn.sample()
+        sut.checkIns = [entry]
 
         try await sut.delete(entry)
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
         #expect(sut.deleteCallCount == 1)
         #expect(sut.lastDeletedEntry?.id == entry.id)
     }
@@ -888,14 +888,14 @@ struct MoodRepositoryTests {
     @Test("delete does not affect other entries")
     func deleteOnlyRemovesTarget() async throws {
         let sut = makeSUT()
-        let keep = MoodEntry.sample(note: "Keep")
-        let remove = MoodEntry.sample(note: "Remove")
-        sut.entries = [keep, remove]
+        let keep = CheckIn.sample(note: "Keep")
+        let remove = CheckIn.sample(note: "Remove")
+        sut.checkIns = [keep, remove]
 
         try await sut.delete(remove)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.id == keep.id)
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.id == keep.id)
     }
 
     // MARK: - Error Simulation
@@ -915,71 +915,71 @@ struct MoodRepositoryTests {
     @Test("reset clears all state and counters")
     func resetClearsState() async throws {
         let sut = makeSUT()
-        sut.entries = MoodEntry.samples(count: 3)
+        sut.checkIns = CheckIn.samples(count: 3)
         sut.throwingError = .network(.timeout)
         _ = try? await sut.fetchAll()
 
         sut.reset()
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
         #expect(sut.throwingError == nil)
         #expect(sut.fetchAllCallCount == 0)
     }
 }
 ```
 
-### MoodbitTests/TimelineViewModelTests.swift
+### BetAwayTests/DashboardViewModelTests.swift
 
 ```swift
 import Testing
-@testable import Moodbit
+@testable import BetAway
 
-@Suite("MoodTimelineViewModel")
+@Suite("RecoveryDashboardViewModel")
 @MainActor
-struct TimelineViewModelTests {
+struct DashboardViewModelTests {
 
     // MARK: - makeSUT
 
     private func makeSUT() -> (
-        sut: MoodTimelineViewModel,
-        repository: MockMoodRepository
+        sut: RecoveryDashboardViewModel,
+        service: MockRecoveryService
     ) {
-        let repository = MockMoodRepository()
-        let sut = MoodTimelineViewModel(repository: repository)
-        return (sut, repository)
+        let service = MockRecoveryService()
+        let sut = RecoveryDashboardViewModel(service: service)
+        return (sut, service)
     }
 
     // MARK: - Load Entries
 
-    @Test("loadEntries populates entries from repository")
-    func loadEntriesPopulatesArray() async {
-        let (sut, repository) = makeSUT()
-        repository.entries = MoodEntry.samples(count: 3)
+    @Test("loadCheckIns populates entries from service")
+    func loadCheckInsPopulatesArray() async {
+        let (sut, service) = makeSUT()
+        service.checkIns = CheckIn.samples(count: 3)
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
-        #expect(sut.entries.count == 3)
+        #expect(sut.checkIns.count == 3)
     }
 
-    @Test("loadEntries with empty repository sets empty array without error")
-    func loadEntriesEmptyRepository() async {
+    @Test("loadCheckIns with empty service sets empty array without error")
+    func loadCheckInsEmptyRepository() async {
         let (sut, _) = makeSUT()
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
         #expect(sut.errorMessage == nil)
         #expect(sut.isLoading == false)
     }
 
-    @Test("loadEntries sets isLoading during fetch")
-    func loadEntriesSetsLoadingState() async {
-        let (sut, repository) = makeSUT()
-        repository.artificialDelay = .milliseconds(50)
-        repository.entries = [MoodEntry.sample()]
+    @Test("loadCheckIns sets isLoading during fetch")
+    func loadCheckInsSetsLoadingState() async {
+        let (sut, service) = makeSUT()
+        service.artificialDelay = .milliseconds(50)
+        service.checkIns = [CheckIn.sample()]
 
         let loadTask = Task {
-            await sut.loadEntries()
+            await sut.loadCheckIns()
         }
 
         try? await Task.sleep(for: .milliseconds(10))
@@ -989,165 +989,165 @@ struct TimelineViewModelTests {
         #expect(sut.isLoading == false)
     }
 
-    @Test("loadEntries sets errorMessage on failure")
-    func loadEntriesSetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        repository.throwingError = .persistence(
+    @Test("loadCheckIns sets errorMessage on failure")
+    func loadCheckInsSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        service.throwingError = .persistence(
             .fetchFailed(underlying: "disk error")
         )
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
         #expect(sut.errorMessage != nil)
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
     }
 
-    @Test("loadEntries clears previous error on success")
-    func loadEntriesClearsPreviousError() async {
-        let (sut, repository) = makeSUT()
+    @Test("loadCheckIns clears previous error on success")
+    func loadCheckInsClearsPreviousError() async {
+        let (sut, service) = makeSUT()
 
         // First call fails
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .fetchFailed(underlying: "disk error")
         )
-        await sut.loadEntries()
+        await sut.loadCheckIns()
         #expect(sut.errorMessage != nil)
 
         // Second call succeeds
-        repository.throwingError = nil
-        repository.entries = [MoodEntry.sample()]
-        await sut.loadEntries()
+        service.throwingError = nil
+        service.checkIns = [CheckIn.sample()]
+        await sut.loadCheckIns()
 
         #expect(sut.errorMessage == nil)
-        #expect(sut.entries.count == 1)
+        #expect(sut.checkIns.count == 1)
     }
 
-    @Test("loadEntries returns entries sorted by date descending")
-    func loadEntriesReturnsSorted() async {
-        let (sut, repository) = makeSUT()
-        let oldEntry = MoodEntry.sample(
+    @Test("loadCheckIns returns entries sorted by date descending")
+    func loadCheckInsReturnsSorted() async {
+        let (sut, service) = makeSUT()
+        let oldEntry = CheckIn.sample(
             date: Date(timeIntervalSinceNow: -86400)
         )
-        let newEntry = MoodEntry.sample(
+        let newEntry = CheckIn.sample(
             date: Date(timeIntervalSinceNow: 0)
         )
-        repository.entries = [oldEntry, newEntry]
+        service.checkIns = [oldEntry, newEntry]
 
-        await sut.loadEntries()
+        await sut.loadCheckIns()
 
-        #expect(sut.entries.first?.id == newEntry.id)
-        #expect(sut.entries.last?.id == oldEntry.id)
+        #expect(sut.checkIns.first?.id == newEntry.id)
+        #expect(sut.checkIns.last?.id == oldEntry.id)
     }
 
     // MARK: - Add Entry
 
-    @Test("addEntry inserts entry at the beginning of the array")
-    func addEntryInsertsAtBeginning() async {
-        let (sut, repository) = makeSUT()
-        let existing = MoodEntry.sample(
+    @Test("addCheckIn inserts entry at the beginning of the array")
+    func addCheckInInsertsAtBeginning() async {
+        let (sut, service) = makeSUT()
+        let existing = CheckIn.sample(
             note: "Existing",
             date: Date(timeIntervalSinceNow: -3600)
         )
-        repository.entries = [existing]
-        await sut.loadEntries()
+        service.checkIns = [existing]
+        await sut.loadCheckIns()
 
-        let newEntry = MoodEntry.sample(
+        let newEntry = CheckIn.sample(
             note: "New",
             date: .now
         )
-        await sut.addEntry(newEntry)
+        await sut.addCheckIn(newEntry)
 
-        #expect(sut.entries.first?.note == "New")
-        #expect(sut.entries.count == 2)
+        #expect(sut.checkIns.first?.note == "New")
+        #expect(sut.checkIns.count == 2)
     }
 
-    @Test("addEntry sets errorMessage on failure")
-    func addEntrySetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        repository.throwingError = .persistence(
+    @Test("addCheckIn sets errorMessage on failure")
+    func addCheckInSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        service.throwingError = .persistence(
             .saveFailed(underlying: "disk full")
         )
 
-        let entry = MoodEntry.sample()
-        await sut.addEntry(entry)
+        let entry = CheckIn.sample()
+        await sut.addCheckIn(entry)
 
         #expect(sut.errorMessage != nil)
     }
 
-    @Test("addEntry does not add to array on failure")
-    func addEntryDoesNotAddOnFailure() async {
-        let (sut, repository) = makeSUT()
-        await sut.loadEntries()
-        #expect(sut.entries.isEmpty)
+    @Test("addCheckIn does not add to array on failure")
+    func addCheckInDoesNotAddOnFailure() async {
+        let (sut, service) = makeSUT()
+        await sut.loadCheckIns()
+        #expect(sut.checkIns.isEmpty)
 
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .saveFailed(underlying: "disk full")
         )
 
-        let entry = MoodEntry.sample()
-        await sut.addEntry(entry)
+        let entry = CheckIn.sample()
+        await sut.addCheckIn(entry)
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
     }
 
     // MARK: - Delete Entry
 
-    @Test("deleteEntry removes entry from the array")
-    func deleteEntryRemovesFromArray() async {
-        let (sut, repository) = makeSUT()
-        let entry = MoodEntry.sample()
-        repository.entries = [entry]
-        await sut.loadEntries()
-        #expect(sut.entries.count == 1)
+    @Test("deleteCheckIn removes entry from the array")
+    func deleteCheckInRemovesFromArray() async {
+        let (sut, service) = makeSUT()
+        let entry = CheckIn.sample()
+        service.checkIns = [entry]
+        await sut.loadCheckIns()
+        #expect(sut.checkIns.count == 1)
 
-        await sut.deleteEntry(entry)
+        await sut.deleteCheckIn(entry)
 
-        #expect(sut.entries.isEmpty)
+        #expect(sut.checkIns.isEmpty)
     }
 
-    @Test("deleteEntry sets errorMessage on failure")
-    func deleteEntrySetsErrorOnFailure() async {
-        let (sut, repository) = makeSUT()
-        let entry = MoodEntry.sample()
-        repository.entries = [entry]
-        await sut.loadEntries()
+    @Test("deleteCheckIn sets errorMessage on failure")
+    func deleteCheckInSetsErrorOnFailure() async {
+        let (sut, service) = makeSUT()
+        let entry = CheckIn.sample()
+        service.checkIns = [entry]
+        await sut.loadCheckIns()
 
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .saveFailed(underlying: "delete failed")
         )
-        await sut.deleteEntry(entry)
+        await sut.deleteCheckIn(entry)
 
         #expect(sut.errorMessage != nil)
     }
 
-    @Test("deleteEntry keeps entry in array on failure")
-    func deleteEntryKeepsEntryOnFailure() async {
-        let (sut, repository) = makeSUT()
-        let entry = MoodEntry.sample()
-        repository.entries = [entry]
-        await sut.loadEntries()
+    @Test("deleteCheckIn keeps entry in array on failure")
+    func deleteCheckInKeepsEntryOnFailure() async {
+        let (sut, service) = makeSUT()
+        let entry = CheckIn.sample()
+        service.checkIns = [entry]
+        await sut.loadCheckIns()
 
-        repository.throwingError = .persistence(
+        service.throwingError = .persistence(
             .saveFailed(underlying: "delete failed")
         )
-        await sut.deleteEntry(entry)
+        await sut.deleteCheckIn(entry)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.id == entry.id)
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.id == entry.id)
     }
 
-    @Test("deleteEntry only removes the targeted entry")
-    func deleteEntryOnlyRemovesTarget() async {
-        let (sut, repository) = makeSUT()
-        let keep = MoodEntry.sample(note: "Keep")
-        let remove = MoodEntry.sample(note: "Remove")
-        repository.entries = [keep, remove]
-        await sut.loadEntries()
+    @Test("deleteCheckIn only removes the targeted entry")
+    func deleteCheckInOnlyRemovesTarget() async {
+        let (sut, service) = makeSUT()
+        let keep = CheckIn.sample(note: "Keep")
+        let remove = CheckIn.sample(note: "Remove")
+        service.checkIns = [keep, remove]
+        await sut.loadCheckIns()
 
-        await sut.deleteEntry(remove)
+        await sut.deleteCheckIn(remove)
 
-        #expect(sut.entries.count == 1)
-        #expect(sut.entries.first?.note == "Keep")
+        #expect(sut.checkIns.count == 1)
+        #expect(sut.checkIns.first?.note == "Keep")
     }
 }
 ```
@@ -1156,10 +1156,10 @@ struct TimelineViewModelTests {
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `MockMoodRepository` conforms to `MoodRepository` with no compiler warnings
-- [ ] `MoodEntry.sample()` creates valid entries with sensible defaults
-- [ ] All `MoodRepositoryTests` pass — fetch, save, update, delete, error simulation
-- [ ] All `TimelineViewModelTests` pass — load, add, delete, error states, sort order
+- [ ] `MockRecoveryService` conforms to `RecoveryService` with no compiler warnings
+- [ ] `CheckIn.sample()` creates valid entries with sensible defaults
+- [ ] All `RecoveryServiceTests` pass — fetch, save, update, delete, error simulation
+- [ ] All `DashboardViewModelTests` pass — load, add, delete, error states, sort order
 - [ ] The test suite runs in under one second with zero flaky failures
 - [ ] Every test uses `makeSUT()` — no shared mutable state between tests
 - [ ] Swift 6 strict concurrency compiles without warnings in the test target
@@ -1169,32 +1169,32 @@ If any test is flaky (passes sometimes, fails sometimes), the cause is almost al
 
 ## Challenge
 
-**Test the `MoodEntryViewModel` form validation logic.**
+**Test the `CheckInViewModel` form validation logic.**
 
-Write a new test suite `MoodEntryViewModelTests` that covers:
-1. `canAdvance` returns `true` on step 1 (mood selection does not require validation)
+Write a new test suite `CheckInViewModelTests` that covers:
+1. `canAdvance` returns `true` on step 1 (status selection does not require validation)
 2. `canAdvance` returns `false` on step 2 when no emoji is selected
 3. `canAdvance` returns `true` on step 2 after selecting an emoji
 4. `advance()` increments `currentStep` when `canAdvance` is true
 5. `advance()` does not increment past `totalSteps`
 6. `goBack()` decrements `currentStep`
 7. `goBack()` does not decrement below 1
-8. `save(using:)` creates a `MoodEntry` with the correct values from the form state
+8. `save(using:)` creates a `CheckIn` with the correct values from the form state
 9. `reset()` returns all state to defaults
 
 <details>
 <summary>Hint</summary>
 
-The `MoodEntryViewModel` does not depend on a repository for most of its logic — only `save()` needs one. Your `makeSUT()` for this suite should still create a `MockMoodRepository`, but most tests will only manipulate the ViewModel's properties directly:
+The `CheckInViewModel` does not depend on a service for most of its logic — only `save()` needs one. Your `makeSUT()` for this suite should still create a `MockRecoveryService`, but most tests will only manipulate the ViewModel's properties directly:
 
 ```swift
 private func makeSUT() -> (
-    sut: MoodEntryViewModel,
-    repository: MockMoodRepository
+    sut: CheckInViewModel,
+    service: MockRecoveryService
 ) {
-    let repository = MockMoodRepository()
-    let sut = MoodEntryViewModel()
-    return (sut, repository)
+    let service = MockRecoveryService()
+    let sut = CheckInViewModel()
+    return (sut, service)
 }
 
 @Test("canAdvance is false on step 2 without emoji")
@@ -1207,5 +1207,5 @@ func canAdvanceStep2RequiresEmoji() {
 }
 ```
 
-For the `save()` test, set all form properties, call `save(using: repository)`, and then check `repository.lastSavedEntry` to verify the entry was created with the correct mood level, emoji, note, and tags.
+For the `save()` test, set all form properties, call `save(using: service)`, and then check `service.lastSavedEntry` to verify the entry was created with the correct recovery status, emoji, note, and tags.
 </details>

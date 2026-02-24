@@ -1,13 +1,13 @@
 ---
 title: "Accessibility & Localization"
-description: "Make Moodbit usable by everyone — add VoiceOver labels for mood controls, support Dynamic Type for readability, and localize with String Catalogs for multi-language support."
+description: "Make BetAway usable by everyone — add VoiceOver labels for recovery controls, support Dynamic Type for readability, and localize with String Catalogs for multi-language support."
 courseSlug: "ship-native"
 module: 7
 moduleTitle: "Production Polish"
 lesson: 2
 duration: "20 min read"
 difficulty: "intermediate"
-topics: ["Accessibility", "VoiceOver", "Dynamic Type", "Localization", "String Catalogs", "Inclusive Design", "i18n", "Moodbit"]
+topics: ["Accessibility", "VoiceOver", "Dynamic Type", "Localization", "String Catalogs", "Inclusive Design", "i18n", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
@@ -15,7 +15,7 @@ pubDate: 2026-02-22
 
 There is a question I ask every developer before they ship: "Can a blind person use your app?" The answer is almost always an uncomfortable silence followed by "I have not tested that."
 
-Moodbit is a mood tracker. Its core interaction is a slider that goes from 1 to 10 and an emoji picker. Both of those controls are completely invisible to VoiceOver unless you explicitly make them accessible. A screen reader user would open your app and hear... nothing useful. They would have no idea what the slider represents, what the current value is, or how to pick an emoji.
+BetAway is a recovery app. Its core interaction is a slider that goes from 1 to 10 and an status picker. Both of those controls are completely invisible to VoiceOver unless you explicitly make them accessible. A screen reader user would open your app and hear... nothing useful. They would have no idea what the slider represents, what the current value is, or how to pick an emoji.
 
 That is not a feature gap. That is a broken app for roughly 15% of the population.
 
@@ -23,7 +23,7 @@ The good news: SwiftUI makes accessibility straightforward once you know the mod
 
 ## What You'll Learn
 
-- Add VoiceOver labels, hints, and values to Moodbit's mood slider and emoji picker so screen reader users get a complete experience
+- Add VoiceOver labels, hints, and values to BetAway's recovery slider and status picker so screen reader users get a complete experience
 - Support Dynamic Type with `@ScaledMetric` so layouts adapt to any text size without breaking
 - Set up String Catalogs (`.xcstrings`) for localization, extract all user-facing strings, and handle pluralization
 - Test with Accessibility Inspector and verify RTL layout support
@@ -32,23 +32,23 @@ The good news: SwiftUI makes accessibility straightforward once you know the mod
 
 Apple reviews apps for accessibility. Not aggressively — they will not reject you for a missing label. But they will feature accessible apps, and the App Store editorial team explicitly looks for inclusive design when choosing "App of the Day" and similar placements.
 
-Beyond the business case: roughly 2.2 billion people globally live with some form of vision impairment. Millions use VoiceOver daily. If Moodbit cannot be used with a screen reader, you have excluded those users entirely from tracking their mental health. That should matter to you.
+Beyond the business case: roughly 2.2 billion people globally live with some form of vision impairment. Millions use VoiceOver daily. If BetAway cannot be used with a screen reader, you have excluded those users entirely from tracking their mental health. That should matter to you.
 
-On localization: if Moodbit launches in English only, you are ignoring 75% of smartphone users worldwide. String Catalogs make adding a second language a one-day task, not a one-week task. There is no reason to skip it.
+On localization: if BetAway launches in English only, you are ignoring 75% of smartphone users worldwide. String Catalogs make adding a second language a one-day task, not a one-week task. There is no reason to skip it.
 
 ## Plan Phase: Defining What We Build
 
 Start with a plan prompt:
 
 ```
-I need to make Moodbit fully accessible and prepare it for
+I need to make BetAway fully accessible and prepare it for
 localization. Do NOT write code yet — just audit and plan.
 
 The app has these custom controls:
-1. A mood slider (custom — not a standard Slider) that goes
+1. A recovery slider (custom — not a standard Slider) that goes
    from 1 to 10
-2. An emoji picker (horizontal scroll of emoji buttons)
-3. A mood history chart (line chart of mood over time)
+2. An status picker (horizontal scroll of emoji buttons)
+3. A recovery history chart (line chart of recovery over time)
 4. Insight cards (AI-generated text in styled cards)
 
 Audit for:
@@ -67,24 +67,24 @@ Then create a plan with specific tasks for each issue found.
 
 The AI should identify several concrete issues. Here is what to look for:
 
-**Keep** — The mood slider needs `.accessibilityValue`, `.accessibilityAdjustableAction`, and a label. This is the highest priority fix because it is the primary interaction.
+**Keep** — The recovery slider needs `.accessibilityValue`, `.accessibilityAdjustableAction`, and a label. This is the highest priority fix because it is the primary interaction.
 
-**Keep** — The emoji picker needs each button labeled with the emoji's meaning, not just the Unicode character. VoiceOver reading "smiling face with open mouth" is useful. VoiceOver reading nothing because it is a custom button is not.
+**Keep** — The status picker needs each button labeled with the emoji's meaning, not just the Unicode character. VoiceOver reading "smiling face with open mouth" is useful. VoiceOver reading nothing because it is a custom button is not.
 
-**Question** — If the AI suggests making the chart fully accessible with per-data-point VoiceOver navigation, consider whether that complexity is worth it for v1. A summary label ("Your mood averaged 7.2 over the last week, trending upward") is more useful than navigating 30 individual data points.
+**Question** — If the AI suggests making the chart fully accessible with per-data-point VoiceOver navigation, consider whether that complexity is worth it for v1. A summary label ("Your recovery score averaged 7.2 over the last week, trending upward") is more useful than navigating 30 individual data points.
 
 ### Anti-Pattern: The Accessibility Afterthought
 
 ```swift
 // Do NOT do this — hardcoded size that ignores Dynamic Type
-Text("Mood Score")
+Text("Recovery Score")
     .font(.system(size: 14))
 
 // Do NOT do this — no accessibility on custom controls
 Circle()
-    .fill(moodColor)
+    .fill(statusColor)
     .frame(width: 44, height: 44)
-    .onTapGesture { selectMood(7) }
+    .onTapGesture { selectStatus(7) }
     // VoiceOver user: "What is this? How do I interact with it?"
 
 // Do NOT do this — hardcoded English strings
@@ -99,17 +99,17 @@ Every one of these is common in AI-generated code. AI defaults to `.system(size:
 Send this prompt:
 
 ```
-Implement accessibility and localization for Moodbit.
+Implement accessibility and localization for BetAway.
 
-1. Update the mood slider (MoodSliderView) with full VoiceOver
+1. Update the recovery slider (RecoverySliderView) with full VoiceOver
    support:
    - accessibilityLabel describing what it is
-   - accessibilityValue reporting the current mood level as
+   - accessibilityValue reporting the current recovery status as
      "3 out of 10" (not just "3")
    - accessibilityAdjustableAction for increment/decrement
    - accessibilityHint explaining the interaction
 
-2. Update the emoji picker (EmojiPickerView) so each emoji
+2. Update the status picker (StatusPickerView) so each emoji
    button has:
    - accessibilityLabel with the emoji meaning
    - accessibilityAddTraits(.isButton) if not already a Button
@@ -120,8 +120,8 @@ Implement accessibility and localization for Moodbit.
    text styles (.body, .headline, etc.) or @ScaledMetric for
    custom spacing and icon sizes
 
-4. Add an accessibility summary to the mood chart:
-   - accessibilityLabel with average mood and trend
+4. Add an accessibility summary to the recovery chart:
+   - accessibilityLabel with average recovery score and trend
    - accessibilityElement(children: .ignore) on individual
      data points (for now)
 
@@ -134,13 +134,13 @@ including Accessibility sizes.
 
 ### AI Output Review
 
-**MoodSliderView with VoiceOver:**
+**RecoverySliderView with VoiceOver:**
 
 ```swift
 import SwiftUI
 
-struct MoodSliderView: View {
-    @Binding var moodScore: Int
+struct RecoverySliderView: View {
+    @Binding var recoveryScore: Int
     @ScaledMetric(relativeTo: .title) private var trackHeight: CGFloat = 8
     @ScaledMetric(relativeTo: .title) private var thumbSize: CGFloat = 36
 
@@ -165,7 +165,7 @@ struct MoodSliderView: View {
 
                         // Filled portion
                         Capsule()
-                            .fill(moodGradient)
+                            .fill(statusGradient)
                             .frame(
                                 width: filledWidth(in: geometry.size.width),
                                 height: trackHeight
@@ -188,20 +188,20 @@ struct MoodSliderView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(moodEmoji)
+            Text(statusEmoji)
                 .font(.system(size: thumbSize))
                 .accessibilityHidden(true)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Mood level"))
-        .accessibilityValue(Text("\(moodScore) out of 10"))
+        .accessibilityLabel(Text("Recovery status"))
+        .accessibilityValue(Text("\(recoveryScore) out of 10"))
         .accessibilityHint(Text("Swipe up or down to adjust"))
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment:
-                if moodScore < 10 { moodScore += 1 }
+                if recoveryScore < 10 { recoveryScore += 1 }
             case .decrement:
-                if moodScore > 1 { moodScore -= 1 }
+                if recoveryScore > 1 { recoveryScore -= 1 }
             @unknown default:
                 break
             }
@@ -211,12 +211,12 @@ struct MoodSliderView: View {
     // MARK: - Layout Calculations
 
     private func filledWidth(in totalWidth: CGFloat) -> CGFloat {
-        let fraction = CGFloat(moodScore - 1) / 9.0
+        let fraction = CGFloat(recoveryScore - 1) / 9.0
         return totalWidth * fraction
     }
 
     private func thumbOffset(in totalWidth: CGFloat) -> CGFloat {
-        let fraction = CGFloat(moodScore - 1) / 9.0
+        let fraction = CGFloat(recoveryScore - 1) / 9.0
         return (totalWidth - thumbSize) * fraction
     }
 
@@ -225,13 +225,13 @@ struct MoodSliderView: View {
             .onChanged { value in
                 let fraction = max(0, min(1, value.location.x / totalWidth))
                 let newScore = Int(round(fraction * 9)) + 1
-                if newScore != moodScore {
-                    moodScore = newScore
+                if newScore != recoveryScore {
+                    recoveryScore = newScore
                 }
             }
     }
 
-    private var moodGradient: LinearGradient {
+    private var statusGradient: LinearGradient {
         LinearGradient(
             colors: [.red, .orange, .yellow, .green],
             startPoint: .leading,
@@ -239,8 +239,8 @@ struct MoodSliderView: View {
         )
     }
 
-    private var moodEmoji: String {
-        switch moodScore {
+    private var statusEmoji: String {
+        switch recoveryScore {
         case 1...2: return "😢"
         case 3...4: return "😕"
         case 5...6: return "😐"
@@ -261,12 +261,12 @@ Review checklist:
 - ✅ The decorative emoji below the slider uses `.accessibilityHidden(true)` — VoiceOver skips it since the value is already announced
 - ⚠️ Make sure the drag gesture does not interfere with VoiceOver's swipe gestures. When VoiceOver is on, iOS disables custom gestures and uses the adjustable action instead — this is correct behavior
 
-**EmojiPickerView with VoiceOver:**
+**StatusPickerView with VoiceOver:**
 
 ```swift
 import SwiftUI
 
-struct EmojiPickerView: View {
+struct StatusPickerView: View {
     @Binding var selectedEmoji: String
     @ScaledMetric(relativeTo: .title) private var emojiSize: CGFloat = 40
     @ScaledMetric(relativeTo: .body) private var buttonPadding: CGFloat = 8
@@ -338,8 +338,8 @@ struct EmojiPickerView: View {
 ```swift
 import SwiftUI
 
-struct MoodEntryRow: View {
-    let entry: MoodEntry
+struct CheckInRow: View {
+    let entry: CheckIn
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var emojiSize: CGFloat = 32
 
@@ -359,14 +359,14 @@ struct MoodEntryRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(entry.date, format: .dateTime.month().day().hour().minute())
                     .font(.subheadline)
-                Text("Mood: \(entry.score)/10")
+                Text("Status: \(entry.score)/10")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            moodIndicator
+            statusIndicator
         }
         .accessibilityElement(children: .combine)
     }
@@ -376,26 +376,26 @@ struct MoodEntryRow: View {
             HStack {
                 Text(entry.emoji)
                     .font(.system(size: emojiSize))
-                moodIndicator
+                statusIndicator
             }
 
             Text(entry.date, format: .dateTime.month().day().hour().minute())
                 .font(.subheadline)
-            Text("Mood: \(entry.score)/10")
+            Text("Status: \(entry.score)/10")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
     }
 
-    private var moodIndicator: some View {
+    private var statusIndicator: some View {
         HStack(spacing: 4) {
             Image(systemName: entry.score >= 7 ? "arrow.up.right" : entry.score >= 4 ? "arrow.right" : "arrow.down.right")
-                .foregroundStyle(entry.moodColor)
+                .foregroundStyle(entry.statusColor)
                 .accessibilityHidden(true)
-            Text(entry.moodLabel)
+            Text(entry.statusLabel)
                 .font(.caption2)
-                .foregroundStyle(entry.moodColor)
+                .foregroundStyle(entry.statusColor)
         }
     }
 }
@@ -412,7 +412,7 @@ struct MoodEntryRow: View {
 // Before — hardcoded strings (not localizable)
 Text("How are you feeling?")
 Text("No entries yet")
-Text("Log Mood")
+Text("Log Check-In")
 Button("Try Again") { ... }
 
 // After — these are ALREADY localizable in SwiftUI
@@ -421,7 +421,7 @@ Button("Try Again") { ... }
 // picks these up when you build.
 
 // For strings with interpolation, use explicit keys:
-Text("mood_score_label \(score)")
+Text("recovery_score_label \(score)")
 // In the String Catalog, this becomes a key with a %lld substitution
 
 // For strings outside of SwiftUI views:
@@ -435,7 +435,7 @@ Setting up the String Catalog in Xcode:
 3. Add a language in Project Settings > Info > Localizations (for example, Spanish)
 4. Open the String Catalog and translate
 
-For pluralization in Moodbit:
+For pluralization in BetAway:
 
 ```swift
 // This handles English pluralization automatically
@@ -455,14 +455,14 @@ After the initial implementation, test and refine. Send this follow-up:
 
 ```
 I tested with VoiceOver and found these issues:
-1. The mood chart is completely silent — VoiceOver skips it
-2. When navigating the emoji picker, there is no indication of
+1. The recovery chart is completely silent — VoiceOver skips it
+2. When navigating the status picker, there is no indication of
    which section the user is in
 3. The insight card reads the entire AI response as one block
    — it needs a label before the content
 
 Fix these three issues. For the chart, add an accessibility
-label that summarizes the data: average mood, highest/lowest
+label that summarizes the data: average recovery score, highest/lowest
 day, and trend direction. Do not make individual data points
 navigable — just provide the summary.
 ```
@@ -472,15 +472,15 @@ The chart accessibility summary:
 ```swift
 import SwiftUI
 
-struct MoodChartView: View {
-    let entries: [MoodEntry]
+struct RecoveryChartView: View {
+    let entries: [CheckIn]
 
     var body: some View {
         Chart {
             ForEach(entries) { entry in
                 LineMark(
                     x: .value("Date", entry.date),
-                    y: .value("Mood", entry.score)
+                    y: .value("Recovery Score", entry.score)
                 )
             }
         }
@@ -491,7 +491,7 @@ struct MoodChartView: View {
 
     private var chartSummary: String {
         guard !entries.isEmpty else {
-            return "Mood chart. No data available."
+            return "Recovery chart. No data available."
         }
 
         let scores = entries.map(\.score)
@@ -513,7 +513,7 @@ struct MoodChartView: View {
             trend = "not enough data for a trend"
         }
 
-        return "Mood chart showing \(entries.count) entries. Average mood \(String(format: "%.1f", average)) out of 10. Highest \(highest), lowest \(lowest). Currently \(trend)."
+        return "Recovery chart showing \(entries.count) entries. Average recovery score \(String(format: "%.1f", average)) out of 10. Highest \(highest), lowest \(lowest). Currently \(trend)."
     }
 }
 ```
@@ -524,16 +524,16 @@ This is significantly more useful than navigating 30 data points one by one. A V
 
 Test each of these with VoiceOver enabled (Simulator > Features > Accessibility > VoiceOver, or on device: Settings > Accessibility > VoiceOver):
 
-1. **Mood slider** — Navigate to it. VoiceOver should say "Mood level, 5 out of 10. Swipe up or down to adjust." Swipe up — it should say "6 out of 10." Swipe down — "4 out of 10"
+1. **Recovery slider** — Navigate to it. VoiceOver should say "Recovery status, 5 out of 10. Swipe up or down to adjust." Swipe up — it should say "6 out of 10." Swipe down — "4 out of 10"
 2. **Emoji picker** — Navigate through emojis. Each should say its label: "Very happy, button" or "Sad, selected, button." No emoji should say "image"
-3. **Mood chart** — Navigate to the chart. VoiceOver should read the summary in one pass. Individual data points should be silent
-4. **Dynamic Type** — Set text size to AX5 (the largest). Every screen should be usable. No text should be clipped or overlapping. The mood entry row should switch to vertical layout
-5. **RTL layout** — In the simulator, set the language to Arabic (or use the scheme override: Edit Scheme > Run > Options > App Language > Right to Left Pseudolanguage). Verify that the slider, emoji picker, and lists all mirror correctly
+3. **Recovery chart** — Navigate to the chart. VoiceOver should read the summary in one pass. Individual data points should be silent
+4. **Dynamic Type** — Set text size to AX5 (the largest). Every screen should be usable. No text should be clipped or overlapping. The check-in row should switch to vertical layout
+5. **RTL layout** — In the simulator, set the language to Arabic (or use the scheme override: Edit Scheme > Run > Options > App Language > Right to Left Pseudolanguage). Verify that the slider, status picker, and lists all mirror correctly
 6. **String extraction** — Build the project and open the String Catalog. Every user-facing string should appear. If any are missing, they are likely constructed with string interpolation outside of `Text()` — wrap them in `String(localized:)`
 
 ## Final Code
 
-Complete `MoodSliderView`, `EmojiPickerView`, and `MoodEntryRow` are shown in the Execute Phase above. Here is the testing utility for verifying accessibility in previews:
+Complete `RecoverySliderView`, `StatusPickerView`, and `CheckInRow` are shown in the Execute Phase above. Here is the testing utility for verifying accessibility in previews:
 
 ```swift
 import SwiftUI
@@ -554,18 +554,18 @@ extension View {
 }
 
 #Preview("Default Size") {
-    MoodSliderView(moodScore: .constant(5))
+    RecoverySliderView(recoveryScore: .constant(5))
         .padding()
 }
 
 #Preview("Accessibility XL") {
-    MoodSliderView(moodScore: .constant(5))
+    RecoverySliderView(recoveryScore: .constant(5))
         .padding()
         .previewDynamicType(.accessibility3)
 }
 
 #Preview("Accessibility AX5") {
-    MoodSliderView(moodScore: .constant(5))
+    RecoverySliderView(recoveryScore: .constant(5))
         .padding()
         .previewDynamicType(.accessibility5)
 }
@@ -577,9 +577,9 @@ Create multiple previews at different Dynamic Type sizes. If it looks broken in 
 
 Verify these before moving on:
 
-- [ ] VoiceOver reads the mood slider as a single adjustable element with value "X out of 10"
+- [ ] VoiceOver reads the recovery slider as a single adjustable element with value "X out of 10"
 - [ ] Every emoji in the picker has a human-readable label, not just the Unicode character
-- [ ] The mood chart provides a spoken summary, not silence
+- [ ] The recovery chart provides a spoken summary, not silence
 - [ ] No `.font(.system(size:))` calls remain — all replaced with text styles or `@ScaledMetric`
 - [ ] The app is fully usable at Accessibility text size AX5 with no clipping or overlapping
 - [ ] All user-facing strings appear in the String Catalog after building
@@ -587,6 +587,6 @@ Verify these before moving on:
 
 ## Challenge
 
-**Add a full Spanish localization to Moodbit.** Export the String Catalog, use AI to generate translations for every key, import them back, and test the app in Spanish. Pay attention to three things: (1) strings that are longer in Spanish and might overflow layouts, (2) pluralization rules for "entry/entries" (`entrada/entradas`), and (3) the AI-generated insights — when the locale is Spanish, send a system prompt to OpenAI requesting Spanish-language responses.
+**Add a full Spanish localization to BetAway.** Export the String Catalog, use AI to generate translations for every key, import them back, and test the app in Spanish. Pay attention to three things: (1) strings that are longer in Spanish and might overflow layouts, (2) pluralization rules for "entry/entries" (`entrada/entradas`), and (3) the AI-generated insights — when the locale is Spanish, send a system prompt to OpenAI requesting Spanish-language responses.
 
 *Hint:* Use `Locale.current.language.languageCode?.identifier` to detect the current language at runtime. Pass it to your AI service so the insight text matches the app language. For the fallback analyzer, `NLTagger` supports sentiment analysis in multiple languages — it handles Spanish out of the box.

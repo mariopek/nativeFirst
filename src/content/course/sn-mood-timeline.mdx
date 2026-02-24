@@ -1,64 +1,64 @@
 ---
-title: "Home Screen — Mood Timeline"
-description: "Build the main timeline view that displays mood entries grouped by date, with lazy loading, relative timestamps, empty states, and pull-to-refresh."
+title: "Home Screen — Recovery Dashboard"
+description: "Build the main dashboard view that displays recovery check-ins grouped by date, with lazy loading, relative timestamps, empty states, and pull-to-refresh."
 courseSlug: "ship-native"
 module: 2
 moduleTitle: "Core UI with SwiftUI"
 lesson: 2
 duration: "24 min read"
 difficulty: "intermediate"
-topics: ["SwiftUI", "LazyVStack", "Timeline", "ScrollView", "Empty State", "Loading State", "Pull-to-Refresh", "Moodbit"]
+topics: ["SwiftUI", "LazyVStack", "Dashboard", "ScrollView", "Empty State", "Loading State", "Pull-to-Refresh", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-The data layer exists. Models are defined, the repository is wired, mood entries persist. Now we build the screen users will open dozens of times a day — the mood timeline.
+The data layer exists. Models are defined, the service layer is wired, recovery check-ins persist. Now we build the screen users will open dozens of times a day — the recovery dashboard.
 
-This is the home screen of Moodbit. It shows every mood entry the user has logged, grouped by date, scrollable, and responsive. It needs to handle zero entries gracefully, load efficiently when there are hundreds, and refresh when the user pulls down. Get this screen right and the app feels real. Get it wrong and nothing else matters.
+This is the home screen of BetAway. It shows every recovery check-in the user has logged, grouped by date, scrollable, and responsive. It needs to handle zero check-ins gracefully, load efficiently when there are hundreds, and refresh when the user pulls down. Get this screen right and the app feels real. Get it wrong and nothing else matters.
 
 ## What You'll Learn
 
 By the end of this lesson you will have:
 
-1. A `TimelineView` with a `ScrollView` and `LazyVStack` that groups mood entries by date — today, yesterday, this week, and older
-2. A `MoodEntryRow` component that displays the mood indicator, emoji, note preview, and relative timestamp
-3. A `TimelineViewModel` using the `@Observable` macro that fetches entries from the repository and exposes loading, empty, and populated states
+1. A `DashboardView` with a `ScrollView` and `LazyVStack` that groups recovery check-ins by date — today, yesterday, this week, and older
+2. A `CheckInRow` component that displays the status indicator, emoji, note preview, and relative timestamp
+3. A `DashboardViewModel` using the `@Observable` macro that fetches check-ins from the service layer and exposes loading, empty, and populated states
 4. Pull-to-refresh with `.refreshable` and a proper empty state using `ContentUnavailableView`
 
 ## Why This Matters
 
-Every social app, journaling app, and health app has a timeline. The patterns here — lazy loading for performance, date grouping for context, empty states for first-run experience, pull-to-refresh for freshness — show up in virtually every production iOS app. Master them once and you reuse them everywhere.
+Every social app, recovery app, and health app has a dashboard. The patterns here — lazy loading for performance, date grouping for context, empty states for first-run experience, pull-to-refresh for freshness — show up in virtually every production iOS app. Master them once and you reuse them everywhere.
 
-The timeline is also where performance problems surface first. A naive implementation that loads everything into a `VStack` will stutter on scroll after a few dozen entries. We are going to build it correctly from the start.
+The dashboard is also where performance problems surface first. A naive implementation that loads everything into a `VStack` will stutter on scroll after a few dozen check-ins. We are going to build it correctly from the start.
 
 ## Plan Phase: Defining What We Build
 
-Open Claude Code in your Moodbit project directory. Before writing any implementation code, we ask the AI to plan.
+Open Claude Code in your BetAway project directory. Before writing any implementation code, we ask the AI to plan.
 
 ### The Prompt
 
 ```
-I need to build the home screen for Moodbit — a mood timeline that
-shows all mood entries grouped by date. Before writing code, plan
+I need to build the home screen for BetAway — a recovery dashboard
+that shows all check-ins grouped by date. Before writing code, plan
 the implementation.
 
 Requirements:
 - ScrollView + LazyVStack for performance (not List)
-- Entries grouped into sections: Today, Yesterday, This Week, Older
-- Each row shows: mood color indicator, emoji, note preview
+- Check-ins grouped into sections: Today, Yesterday, This Week, Older
+- Each row shows: status color indicator, emoji, note preview
   (truncated to 2 lines), and a relative timestamp
-- Empty state when no entries exist (ContentUnavailableView)
+- Empty state when no check-ins exist (ContentUnavailableView)
 - Loading state with ProgressView on first load
 - Pull-to-refresh with .refreshable
-- ViewModel uses @Observable macro, fetches from MoodRepository
+- ViewModel uses @Observable macro, fetches from RecoveryService
 - RelativeDateTimeFormatter for timestamps
 - Swift 6, iOS 17+
 
 Think through:
 1. What files do we need?
-2. What is the data flow from repository to view?
-3. How do we group entries by date?
+2. What is the data flow from service to view?
+3. How do we group check-ins by date?
 4. What are the edge cases?
 ```
 
@@ -66,11 +66,11 @@ Think through:
 
 The plan should identify three files:
 
-- **TimelineViewModel.swift** — `@Observable` class that holds the state, fetches from `MoodRepository`, groups entries by date section
-- **TimelineView.swift** — the main screen with `ScrollView`, `LazyVStack`, section headers, and state handling
-- **MoodEntryRow.swift** — a reusable row component for a single mood entry
+- **DashboardViewModel.swift** — `@Observable` class that holds the state, fetches from `RecoveryService`, groups check-ins by date section
+- **DashboardView.swift** — the main screen with `ScrollView`, `LazyVStack`, section headers, and state handling
+- **CheckInRow.swift** — a reusable row component for a single recovery check-in
 
-The data flow: `MoodRepository` returns `[MoodEntry]` sorted by date descending. The ViewModel groups them into four buckets using `Calendar` date comparisons. The view switches on loading/empty/populated state and renders the appropriate UI.
+The data flow: `RecoveryService` returns `[CheckIn]` sorted by date descending. The ViewModel groups them into four buckets using `Calendar` date comparisons. The view switches on loading/empty/populated state and renders the appropriate UI.
 
 Edge cases the AI should flag: empty sections should not render headers, the "This Week" section should exclude today and yesterday, timezone handling for date grouping, and the first load vs. subsequent refreshes.
 
@@ -78,9 +78,9 @@ Edge cases the AI should flag: empty sections should not render headers, the "Th
 
 What you do NOT want to build:
 
-- **`VStack` instead of `LazyVStack`** — a plain `VStack` creates every row upfront. With 200 entries, that means 200 views allocated on appear. `LazyVStack` only creates views as they scroll into the visible area. This is the single most common performance mistake in SwiftUI timeline views.
+- **`VStack` instead of `LazyVStack`** — a plain `VStack` creates every row upfront. With 200 check-ins, that means 200 views allocated on appear. `LazyVStack` only creates views as they scroll into the visible area. This is the single most common performance mistake in SwiftUI dashboard views.
 - **Fetching all data with no state management** — no loading spinner on first open, no empty state, just a blank screen that eventually fills in. Users will think the app is broken.
-- **Flat list with no grouping** — a wall of entries with no date context is disorienting. Grouping by date gives the timeline structure and makes it scannable.
+- **Flat list with no grouping** — a wall of check-ins with no date context is disorienting. Grouping by date gives the dashboard structure and makes it scannable.
 
 If the AI's plan includes any of these, correct it before moving to implementation.
 
@@ -91,33 +91,33 @@ Now we execute. Send the implementation prompt.
 ### The Prompt
 
 ```
-Build the mood timeline based on our plan. Create three files:
+Build the recovery dashboard based on our plan. Create three files:
 
-1. TimelineViewModel.swift
+1. DashboardViewModel.swift
    - @Observable class
-   - Properties: entries grouped as
-     todayEntries, yesterdayEntries, thisWeekEntries, olderEntries
+   - Properties: check-ins grouped as
+     todayCheckIns, yesterdayCheckIns, thisWeekCheckIns, olderCheckIns
    - isLoading: Bool for first load
-   - fetchEntries() method that reads from MoodRepository
-   - Group entries using Calendar date comparisons
+   - fetchCheckIns() method that reads from RecoveryService
+   - Group check-ins using Calendar date comparisons
 
-2. MoodEntryRow.swift
-   - Takes a MoodEntry
+2. CheckInRow.swift
+   - Takes a CheckIn
    - HStack layout:
-     * Left: circle filled with the mood's color (12pt)
+     * Left: circle filled with the status color (12pt)
      * Center: VStack with emoji + note preview (2-line limit)
      * Right: relative timestamp using RelativeDateTimeFormatter
    - Compact, clean, no unnecessary padding
 
-3. TimelineView.swift
-   - NavigationStack with title "Timeline"
+3. DashboardView.swift
+   - NavigationStack with title "Dashboard"
    - Switch on state: loading, empty, populated
    - Loading: centered ProgressView
-   - Empty: ContentUnavailableView with mood-appropriate messaging
+   - Empty: ContentUnavailableView with recovery-appropriate messaging
    - Populated: ScrollView + LazyVStack with pinned section headers
-   - Each section: header label + ForEach of MoodEntryRow
-   - .refreshable calls viewModel.fetchEntries()
-   - .task calls fetchEntries() on first appear
+   - Each section: header label + ForEach of CheckInRow
+   - .refreshable calls viewModel.fetchCheckIns()
+   - .task calls fetchCheckIns() on first appear
 
 Use RelativeDateTimeFormatter for timestamps. Follow Swift 6
 conventions. Use os.Logger for errors.
@@ -127,26 +127,26 @@ conventions. Use os.Logger for errors.
 
 The AI will generate all three files. Here is what to check:
 
-**TimelineViewModel** — verify it uses `@Observable` (not `ObservableObject`), that `fetchEntries()` sets `isLoading` before the fetch and clears it after, and that date grouping uses `Calendar.current` methods like `isDateInToday` and `isDateInYesterday`. Common mistake: the AI might use raw date arithmetic instead of Calendar APIs — Calendar handles timezones and locale correctly, raw arithmetic does not.
+**DashboardViewModel** — verify it uses `@Observable` (not `ObservableObject`), that `fetchCheckIns()` sets `isLoading` before the fetch and clears it after, and that date grouping uses `Calendar.current` methods like `isDateInToday` and `isDateInYesterday`. Common mistake: the AI might use raw date arithmetic instead of Calendar APIs — Calendar handles timezones and locale correctly, raw arithmetic does not.
 
-**MoodEntryRow** — verify the layout is an `HStack`, the note preview has `.lineLimit(2)`, and the relative timestamp uses `RelativeDateTimeFormatter`. Check that the mood color circle uses `.fill` style, not `.stroke`. Watch for the AI adding excessive padding or spacing — timeline rows should be compact.
+**CheckInRow** — verify the layout is an `HStack`, the note preview has `.lineLimit(2)`, and the relative timestamp uses `RelativeDateTimeFormatter`. Check that the status color circle uses `.fill` style, not `.stroke`. Watch for the AI adding excessive padding or spacing — dashboard rows should be compact.
 
-**TimelineView** — verify it uses `ScrollView` + `LazyVStack(pinnedViews: [.sectionHeaders])`, not `List`. Check that `.refreshable` does NOT wrap the call in an extra `Task` — the closure is already async. Verify the empty state uses `ContentUnavailableView`, not a custom VStack with an image.
+**DashboardView** — verify it uses `ScrollView` + `LazyVStack(pinnedViews: [.sectionHeaders])`, not `List`. Check that `.refreshable` does NOT wrap the call in an extra `Task` — the closure is already async. Verify the empty state uses `ContentUnavailableView`, not a custom VStack with an image.
 
 Here is the scoring:
 
-- The ViewModel uses `@Observable` and groups with Calendar APIs — **correct**
-- The row uses `RelativeDateTimeFormatter` — **correct**
-- The view uses `LazyVStack` with pinned headers — **correct**
-- `.refreshable` wraps in unnecessary `Task { }` — **fix this**, the closure is already async
-- Empty state uses a custom VStack instead of `ContentUnavailableView` — **fix this**, use the system component
+- The ViewModel uses `@Observable` and groups with Calendar APIs -- **correct**
+- The row uses `RelativeDateTimeFormatter` -- **correct**
+- The view uses `LazyVStack` with pinned headers -- **correct**
+- `.refreshable` wraps in unnecessary `Task { }` -- **fix this**, the closure is already async
+- Empty state uses a custom VStack instead of `ContentUnavailableView` -- **fix this**, use the system component
 
 ## Iteration
 
 The first pass is functional but needs refinement. Send this follow-up:
 
 ```
-Two fixes for the timeline:
+Two fixes for the dashboard:
 
 1. The .refreshable closure should NOT wrap in Task { }.
    The closure is already async. Remove the Task wrapper so
@@ -155,13 +155,13 @@ Two fixes for the timeline:
 
 2. Replace the custom empty state VStack with
    ContentUnavailableView. Use the "heart.text.clipboard"
-   SF Symbol, title "No Entries Yet", and description
-   "Start tracking your mood to see your timeline."
+   SF Symbol, title "No Check-Ins Yet", and description
+   "Start tracking your recovery to see your dashboard."
 
 Also add: when the view appears for the first time and
 isLoading is true, show a ProgressView centered in the
 screen. On subsequent refreshes (pull-to-refresh), keep
-the existing entries visible — do not show the ProgressView
+the existing check-ins visible — do not show the ProgressView
 again.
 ```
 
@@ -171,133 +171,133 @@ This is the "yes, but..." pattern from Module 1. The structure is right, we are 
 
 Build and run in the simulator. Check each state:
 
-1. **First launch (no entries)** — you should see the `ContentUnavailableView` with the clipboard icon and "No Entries Yet" message. Not a blank screen. Not a spinner that never stops.
+1. **First launch (no check-ins)** — you should see the `ContentUnavailableView` with the clipboard icon and "No Check-Ins Yet" message. Not a blank screen. Not a spinner that never stops.
 
-2. **Add a mood entry from another screen, come back** — pull to refresh. The entry should appear under the "Today" section with the correct emoji, note preview, and a relative timestamp like "Just now" or "2 minutes ago."
+2. **Add a check-in from another screen, come back** — pull to refresh. The check-in should appear under the "Today" section with the correct emoji, note preview, and a relative timestamp like "Just now" or "2 minutes ago."
 
-3. **Add several entries across multiple days** (adjust device date or seed test data) — verify that grouping works. Today entries under "Today," yesterday's under "Yesterday," entries from earlier this week under "This Week," everything else under "Older." Empty sections should not show headers.
+3. **Add several check-ins across multiple days** (adjust device date or seed test data) — verify that grouping works. Today's check-ins under "Today," yesterday's under "Yesterday," check-ins from earlier this week under "This Week," everything else under "Older." Empty sections should not show headers.
 
-4. **Scroll performance** — add 50+ entries (seed them in the repository for testing). Scroll quickly up and down. The timeline should be smooth with no frame drops. If you see stuttering, verify you are using `LazyVStack` and not `VStack`.
+4. **Scroll performance** — add 50+ check-ins (seed them in the service for testing). Scroll quickly up and down. The dashboard should be smooth with no frame drops. If you see stuttering, verify you are using `LazyVStack` and not `VStack`.
 
-5. **Pull-to-refresh** — pull down on the timeline. The system refresh spinner should appear, the data should reload, and the spinner should dismiss when the fetch completes. If the spinner hangs indefinitely, check for the `Task { }` wrapper bug mentioned above.
+5. **Pull-to-refresh** — pull down on the dashboard. The system refresh spinner should appear, the data should reload, and the spinner should dismiss when the fetch completes. If the spinner hangs indefinitely, check for the `Task { }` wrapper bug mentioned above.
 
 ## Final Code
 
 Three files. Copy these into your project.
 
-### TimelineViewModel.swift
+### DashboardViewModel.swift
 
 ```swift
 import Foundation
 import os
 
 @Observable
-final class TimelineViewModel {
-    private(set) var todayEntries: [MoodEntry] = []
-    private(set) var yesterdayEntries: [MoodEntry] = []
-    private(set) var thisWeekEntries: [MoodEntry] = []
-    private(set) var olderEntries: [MoodEntry] = []
+final class DashboardViewModel {
+    private(set) var todayCheckIns: [CheckIn] = []
+    private(set) var yesterdayCheckIns: [CheckIn] = []
+    private(set) var thisWeekCheckIns: [CheckIn] = []
+    private(set) var olderCheckIns: [CheckIn] = []
     private(set) var isLoading = true
 
-    private let repository: MoodRepository
+    private let service: RecoveryService
     private let calendar = Calendar.current
-    private let logger = Logger(subsystem: "com.moodbit", category: "TimelineViewModel")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "DashboardViewModel")
 
     var isEmpty: Bool {
-        todayEntries.isEmpty
-            && yesterdayEntries.isEmpty
-            && thisWeekEntries.isEmpty
-            && olderEntries.isEmpty
+        todayCheckIns.isEmpty
+            && yesterdayCheckIns.isEmpty
+            && thisWeekCheckIns.isEmpty
+            && olderCheckIns.isEmpty
     }
 
-    init(repository: MoodRepository) {
-        self.repository = repository
+    init(service: RecoveryService) {
+        self.service = service
     }
 
-    func fetchEntries() async {
+    func fetchCheckIns() async {
         do {
-            let allEntries = try await repository.fetchAll()
-            groupEntries(allEntries)
-            logger.debug("Loaded \(allEntries.count) mood entries")
+            let allCheckIns = try await service.fetchAll()
+            groupCheckIns(allCheckIns)
+            logger.debug("Loaded \(allCheckIns.count) recovery check-ins")
         } catch {
-            logger.error("Failed to fetch entries: \(error.localizedDescription)")
+            logger.error("Failed to fetch check-ins: \(error.localizedDescription)")
         }
 
         isLoading = false
     }
 
-    private func groupEntries(_ entries: [MoodEntry]) {
+    private func groupCheckIns(_ checkIns: [CheckIn]) {
         let now = Date.now
         let startOfToday = calendar.startOfDay(for: now)
 
         guard let startOfYesterday = calendar.date(byAdding: .day, value: -1, to: startOfToday),
               let startOfWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now))
         else {
-            todayEntries = entries
+            todayCheckIns = checkIns
             return
         }
 
-        var today: [MoodEntry] = []
-        var yesterday: [MoodEntry] = []
-        var thisWeek: [MoodEntry] = []
-        var older: [MoodEntry] = []
+        var today: [CheckIn] = []
+        var yesterday: [CheckIn] = []
+        var thisWeek: [CheckIn] = []
+        var older: [CheckIn] = []
 
-        for entry in entries {
-            if calendar.isDateInToday(entry.createdAt) {
-                today.append(entry)
-            } else if calendar.isDateInYesterday(entry.createdAt) {
-                yesterday.append(entry)
-            } else if entry.createdAt >= startOfWeek {
-                thisWeek.append(entry)
+        for checkIn in checkIns {
+            if calendar.isDateInToday(checkIn.createdAt) {
+                today.append(checkIn)
+            } else if calendar.isDateInYesterday(checkIn.createdAt) {
+                yesterday.append(checkIn)
+            } else if checkIn.createdAt >= startOfWeek {
+                thisWeek.append(checkIn)
             } else {
-                older.append(entry)
+                older.append(checkIn)
             }
         }
 
-        todayEntries = today.sorted { $0.createdAt > $1.createdAt }
-        yesterdayEntries = yesterday.sorted { $0.createdAt > $1.createdAt }
-        thisWeekEntries = thisWeek.sorted { $0.createdAt > $1.createdAt }
-        olderEntries = older.sorted { $0.createdAt > $1.createdAt }
+        todayCheckIns = today.sorted { $0.createdAt > $1.createdAt }
+        yesterdayCheckIns = yesterday.sorted { $0.createdAt > $1.createdAt }
+        thisWeekCheckIns = thisWeek.sorted { $0.createdAt > $1.createdAt }
+        olderCheckIns = older.sorted { $0.createdAt > $1.createdAt }
     }
 }
 ```
 
 A few things worth noting.
 
-**`private(set)` on the entry arrays.** The view can read them, but only the ViewModel can mutate them. This prevents accidental writes from the view layer.
+**`private(set)` on the check-in arrays.** The view can read them, but only the ViewModel can mutate them. This prevents accidental writes from the view layer.
 
-**`Calendar.current` for all date logic.** We use `isDateInToday`, `isDateInYesterday`, and `startOfDay` — these handle timezones and locale automatically. Never do `Date().timeIntervalSince(entry.createdAt) < 86400` — that breaks across DST transitions and timezone changes.
+**`Calendar.current` for all date logic.** We use `isDateInToday`, `isDateInYesterday`, and `startOfDay` — these handle timezones and locale automatically. Never do `Date().timeIntervalSince(checkIn.createdAt) < 86400` — that breaks across DST transitions and timezone changes.
 
 **The `startOfWeek` calculation** uses `dateComponents([.yearForWeekOfYear, .weekOfYear])`. This respects the user's locale — the week starts on Monday in Europe and Sunday in the US. The Calendar handles it.
 
 **`isLoading` starts as `true`** and gets set to `false` after the first fetch completes. On subsequent fetches (pull-to-refresh), `isLoading` stays `false` so the existing content remains visible.
 
-### MoodEntryRow.swift
+### CheckInRow.swift
 
 ```swift
 import SwiftUI
 
-struct MoodEntryRow: View {
-    let entry: MoodEntry
+struct CheckInRow: View {
+    let checkIn: CheckIn
 
     private var relativeTimestamp: String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
-        return formatter.localizedString(for: entry.createdAt, relativeTo: .now)
+        return formatter.localizedString(for: checkIn.createdAt, relativeTo: .now)
     }
 
     var body: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(entry.mood.color)
+                .fill(checkIn.status.color)
                 .frame(width: 12, height: 12)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.mood.emoji)
+                Text(checkIn.status.emoji)
                     .font(.title3)
 
-                if !entry.note.isEmpty {
-                    Text(entry.note)
+                if !checkIn.note.isEmpty {
+                    Text(checkIn.note)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -316,16 +316,16 @@ struct MoodEntryRow: View {
 
 #Preview {
     List {
-        MoodEntryRow(
-            entry: MoodEntry(
-                mood: .happy,
-                note: "Had a great morning run. Felt energized for the rest of the day.",
+        CheckInRow(
+            checkIn: CheckIn(
+                status: .strong,
+                note: "Completed my morning breathing exercises. Feeling grounded and focused.",
                 createdAt: Date.now.addingTimeInterval(-3600)
             )
         )
-        MoodEntryRow(
-            entry: MoodEntry(
-                mood: .sad,
+        CheckInRow(
+            checkIn: CheckIn(
+                status: .struggling,
                 note: "",
                 createdAt: Date.now.addingTimeInterval(-7200)
             )
@@ -336,21 +336,21 @@ struct MoodEntryRow: View {
 
 **`RelativeDateTimeFormatter`** gives you localized strings like "2 hr. ago", "yesterday", "3 min. ago" — all without manual date math. The `.short` units style keeps the label compact, which is what you want in a row. Do not build this yourself. Apple already did the work, and it handles every locale.
 
-**The note is optional in display.** If the entry has no note, the `Text` does not render at all. No blank space, no "No note" placeholder. Clean.
+**The note is optional in display.** If the check-in has no note, the `Text` does not render at all. No blank space, no "No note" placeholder. Clean.
 
-**`.foregroundStyle(.tertiary)`** for the timestamp. This is lighter than `.secondary` — the timestamp is metadata, not content. It should be visible but not compete with the mood indicator and note for attention.
+**`.foregroundStyle(.tertiary)`** for the timestamp. This is lighter than `.secondary` — the timestamp is metadata, not content. It should be visible but not compete with the status indicator and note for attention.
 
-### TimelineView.swift
+### DashboardView.swift
 
 ```swift
 import SwiftUI
 
-struct TimelineView: View {
-    @State private var viewModel: TimelineViewModel
+struct DashboardView: View {
+    @State private var viewModel: DashboardViewModel
 
-    init(repository: MoodRepository) {
+    init(service: RecoveryService) {
         _viewModel = State(
-            initialValue: TimelineViewModel(repository: repository)
+            initialValue: DashboardViewModel(service: service)
         )
     }
 
@@ -362,12 +362,12 @@ struct TimelineView: View {
                 } else if viewModel.isEmpty {
                     emptyView
                 } else {
-                    timelineContent
+                    dashboardContent
                 }
             }
-            .navigationTitle("Timeline")
+            .navigationTitle("Dashboard")
             .task {
-                await viewModel.fetchEntries()
+                await viewModel.fetchCheckIns()
             }
         }
     }
@@ -378,7 +378,7 @@ struct TimelineView: View {
         VStack(spacing: 16) {
             ProgressView()
                 .controlSize(.large)
-            Text("Loading entries...")
+            Text("Loading check-ins...")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -389,36 +389,36 @@ struct TimelineView: View {
 
     private var emptyView: some View {
         ContentUnavailableView(
-            "No Entries Yet",
+            "No Check-Ins Yet",
             systemImage: "heart.text.clipboard",
-            description: Text("Start tracking your mood to see your timeline.")
+            description: Text("Start tracking your recovery to see your dashboard.")
         )
     }
 
-    // MARK: - Timeline Content
+    // MARK: - Dashboard Content
 
-    private var timelineContent: some View {
+    private var dashboardContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                timelineSection("Today", entries: viewModel.todayEntries)
-                timelineSection("Yesterday", entries: viewModel.yesterdayEntries)
-                timelineSection("This Week", entries: viewModel.thisWeekEntries)
-                timelineSection("Older", entries: viewModel.olderEntries)
+                dashboardSection("Today", checkIns: viewModel.todayCheckIns)
+                dashboardSection("Yesterday", checkIns: viewModel.yesterdayCheckIns)
+                dashboardSection("This Week", checkIns: viewModel.thisWeekCheckIns)
+                dashboardSection("Older", checkIns: viewModel.olderCheckIns)
             }
         }
         .refreshable {
-            await viewModel.fetchEntries()
+            await viewModel.fetchCheckIns()
         }
     }
 
     // MARK: - Section Builder
 
     @ViewBuilder
-    private func timelineSection(_ title: String, entries: [MoodEntry]) -> some View {
-        if !entries.isEmpty {
+    private func dashboardSection(_ title: String, checkIns: [CheckIn]) -> some View {
+        if !checkIns.isEmpty {
             Section {
-                ForEach(entries) { entry in
-                    MoodEntryRow(entry: entry)
+                ForEach(checkIns) { checkIn in
+                    CheckInRow(checkIn: checkIn)
                         .padding(.horizontal)
                 }
             } header: {
@@ -435,7 +435,7 @@ struct TimelineView: View {
 }
 
 #Preview {
-    TimelineView(repository: MoodRepository())
+    DashboardView(service: RecoveryService())
 }
 ```
 
@@ -443,9 +443,9 @@ Let me walk through the key decisions.
 
 **`LazyVStack(pinnedViews: [.sectionHeaders])`** — this pins section headers to the top of the scroll view as you scroll past them, just like `UITableView`'s plain-style section headers. Users see which date group they are in at all times. Without `pinnedViews`, the headers scroll away and the user loses context.
 
-**The `@ViewBuilder` helper function.** Instead of repeating the section layout four times, `timelineSection(_:entries:)` takes a title and array and builds the section. If the array is empty, `@ViewBuilder` returns `EmptyView` — no header renders for empty sections. This keeps the main body clean and eliminates duplication.
+**The `@ViewBuilder` helper function.** Instead of repeating the section layout four times, `dashboardSection(_:checkIns:)` takes a title and array and builds the section. If the array is empty, `@ViewBuilder` returns `EmptyView` — no header renders for empty sections. This keeps the main body clean and eliminates duplication.
 
-**`.refreshable` is directly on `ScrollView`.** The closure is `async` — no `Task { }` wrapper. SwiftUI manages the refresh indicator lifecycle. When `fetchEntries()` completes, the spinner dismisses automatically. Wrapping in `Task` breaks this contract and can cause the spinner to dismiss before the fetch finishes.
+**`.refreshable` is directly on `ScrollView`.** The closure is `async` — no `Task { }` wrapper. SwiftUI manages the refresh indicator lifecycle. When `fetchCheckIns()` completes, the spinner dismisses automatically. Wrapping in `Task` breaks this contract and can cause the spinner to dismiss before the fetch finishes.
 
 **`.task` for initial load.** The `.task` modifier fires once when the view appears and cancels automatically if the view disappears before it completes. This is the correct place for initial data loading — not `onAppear` with a manual `Task { }`.
 
@@ -455,21 +455,21 @@ Let me walk through the key decisions.
 
 Before moving to the next lesson, verify:
 
-- [ ] Timeline shows grouped entries under Today, Yesterday, This Week, and Older
+- [ ] Dashboard shows grouped check-ins under Today, Yesterday, This Week, and Older
 - [ ] Empty sections do not render headers
-- [ ] First launch with no data shows `ContentUnavailableView` with "No Entries Yet"
-- [ ] First launch shows `ProgressView` while entries load
+- [ ] First launch with no data shows `ContentUnavailableView` with "No Check-Ins Yet"
+- [ ] First launch shows `ProgressView` while check-ins load
 - [ ] Pull-to-refresh triggers a reload and the spinner dismisses when done
 - [ ] Relative timestamps display correctly ("2 min. ago", "1 hr. ago")
-- [ ] Scrolling 50+ entries is smooth with no stuttering
+- [ ] Scrolling 50+ check-ins is smooth with no stuttering
 - [ ] Section headers pin to the top during scroll
 
 ## Challenge
 
 **Add a date label to the "Older" section rows.**
 
-Right now, entries in the "Older" section show a relative timestamp like "2 weeks ago" — but once entries are more than a week old, relative timestamps lose precision. "2 weeks ago" could mean 8 days or 14 days.
+Right now, check-ins in the "Older" section show a relative timestamp like "2 weeks ago" — but once check-ins are more than a week old, relative timestamps lose precision. "2 weeks ago" could mean 8 days or 14 days.
 
-Modify `MoodEntryRow` to accept an optional `showFullDate` parameter (default `false`). When `true`, display the full date (e.g., "Feb 10, 2026") instead of the relative timestamp. Then update `TimelineView` to pass `showFullDate: true` for entries in the "Older" section.
+Modify `CheckInRow` to accept an optional `showFullDate` parameter (default `false`). When `true`, display the full date (e.g., "Feb 10, 2026") instead of the relative timestamp. Then update `DashboardView` to pass `showFullDate: true` for check-ins in the "Older" section.
 
-**Hint:** You will need to update the `timelineSection` helper to accept a boolean and forward it to each `MoodEntryRow`. Use `.formatted(.dateTime.month(.abbreviated).day().year())` for the full date format.
+**Hint:** You will need to update the `dashboardSection` helper to accept a boolean and forward it to each `CheckInRow`. Use `.formatted(.dateTime.month(.abbreviated).day().year())` for the full date format.

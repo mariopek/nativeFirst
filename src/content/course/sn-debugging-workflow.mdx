@@ -1,24 +1,24 @@
 ---
 title: "Debugging Workflow with AI"
-description: "Master a systematic debugging workflow combining Xcode instruments, LLDB, os.Logger, and AI-assisted root cause analysis for Moodbit"
+description: "Master a systematic debugging workflow combining Xcode instruments, LLDB, os.Logger, and AI-assisted root cause analysis for BetAway"
 courseSlug: "ship-native"
 module: 6
 moduleTitle: "Quality & Testing"
 lesson: 3
 duration: "25 min read"
 difficulty: "intermediate"
-topics: ["Debugging", "os.Logger", "LLDB", "Instruments", "OSSignposter", "SwiftUI", "Performance", "Moodbit"]
+topics: ["Debugging", "os.Logger", "LLDB", "Instruments", "OSSignposter", "SwiftUI", "Performance", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 order: 23
 ---
 
-Your tests pass. Your app compiles. You tap through the mood entry flow and everything looks fine. Then a tester reports that the timeline screen freezes for two seconds after logging five entries in a row. Or the app crashes on launch — but only on their device, never on yours. Or memory climbs steadily until the system kills the process after ten minutes of normal use.
+Your tests pass. Your app compiles. You tap through the check-in flow and everything looks fine. Then a tester reports that the timeline screen freezes for two seconds after logging five entries in a row. Or the app crashes on launch — but only on their device, never on yours. Or memory climbs steadily until the system kills the process after ten minutes of normal use.
 
 These are not problems that unit tests catch. These are runtime problems — performance regressions, threading violations, memory leaks, state corruption that only manifests under specific conditions. Solving them requires a different toolkit: structured logging that survives release builds, a debugger that lets you inspect state without recompiling, profiling instruments that show you exactly where time and memory go, and a systematic process for narrowing down root causes.
 
-This lesson builds that toolkit for Moodbit.
+This lesson builds that toolkit for BetAway.
 
 ## What You'll Learn
 
@@ -40,12 +40,12 @@ Combined with LLDB for interactive debugging, Instruments for profiling, and a d
 Before writing any debug tooling, plan the system. Send this to Claude Code:
 
 ```
-I need to build a debugging and diagnostics toolkit for Moodbit,
-a SwiftUI mood tracking app. Before writing code, help me plan
+I need to build a debugging and diagnostics toolkit for BetAway,
+a SwiftUI recovery tracking app. Before writing code, help me plan
 the approach.
 
 The app has:
-- SwiftData persistence layer (MoodRepository)
+- SwiftData persistence layer (RecoveryService)
 - ViewModels driving SwiftUI views (@MainActor, @Observable)
 - AI service layer calling OpenAI API
 - Background tasks for data sync
@@ -67,7 +67,7 @@ Do NOT write code yet. Design the architecture.
 
 The AI should return a structured plan. Here is what to look for:
 
-- ✅ **Single subsystem, multiple categories.** The subsystem should be your bundle identifier (e.g., `com.yourname.Moodbit`). Categories map to functional areas: `persistence`, `viewModel`, `network`, `ai`, `sync`. This structure lets you filter all Moodbit logs with one subsystem filter, then drill into specific categories.
+- ✅ **Single subsystem, multiple categories.** The subsystem should be your bundle identifier (e.g., `com.yourname.BetAway`). Categories map to functional areas: `persistence`, `viewModel`, `network`, `ai`, `sync`. This structure lets you filter all BetAway logs with one subsystem filter, then drill into specific categories.
 - ✅ **Log levels mapped to intent.** `.debug` for developer-only details (state dumps, entry/exit). `.info` for routine operations (entry saved, sync completed). `.error` for recoverable failures (network timeout, parse error). `.fault` for unrecoverable states (database corruption, missing required data). The AI should not map everything to `.error`.
 - ✅ **Debug overlay scoped to `#if DEBUG`.** The entire overlay view and its supporting code should be compiled out of release builds. No runtime checks — compile-time exclusion.
 - ⚠️ **Watch for over-engineering.** If the AI suggests a logging abstraction layer on top of `os.Logger`, push back. `os.Logger` is already the abstraction. Wrapping it adds indirection without value. Extensions that add convenience methods are fine. Wrapper classes that hide the logger are not.
@@ -78,11 +78,11 @@ The AI should return a structured plan. Here is what to look for:
 Now we build. Send this prompt:
 
 ```
-Create the debugging toolkit for Moodbit. Generate these files:
+Create the debugging toolkit for BetAway. Generate these files:
 
 1. Logger+Extensions.swift
    - Define a Logger enum or struct with static loggers for
-     each Moodbit subsystem category: persistence, viewModel,
+     each BetAway subsystem category: persistence, viewModel,
      network, ai, sync, ui
    - Add convenience methods for common patterns: function
      entry/exit, operation timing, state snapshots
@@ -119,7 +119,7 @@ The AI should generate a clean namespace for loggers plus convenience extensions
 - ✅ **Bundle-based subsystem** — using `Bundle.main.bundleIdentifier` ensures the subsystem matches your app across targets.
 - ✅ **`OSSignposter` integration** — signpost intervals wrap long-running operations so Instruments can visualize them as named regions on the timeline.
 - ✅ **No wrapper class** — the extensions add convenience without hiding the underlying `os.Logger` API. You can always fall back to raw logger calls.
-- ⚠️ **Watch for string interpolation privacy.** `os.Logger` redacts dynamic strings by default in release builds. The AI may forget to add `privacy: .public` where appropriate (e.g., mood level names are not sensitive). Conversely, it should use `.private` for user-entered notes.
+- ⚠️ **Watch for string interpolation privacy.** `os.Logger` redacts dynamic strings by default in release builds. The AI may forget to add `privacy: .public` where appropriate (e.g., recovery status names are not sensitive). Conversely, it should use `.private` for user-entered notes.
 
 **DiagnosticReport.swift:**
 
@@ -175,13 +175,13 @@ Good foundation. Now improve the debugging toolkit:
 
 **5. Release build excludes debug code.** Archive the app or build with the Release configuration. Search the binary for debug overlay strings — they should not be present. The `#if DEBUG` guards must be at the file level, not just the method level.
 
-**6. LLDB commands work in a live session.** Set a breakpoint in `MoodTimelineViewModel.loadEntries()`. When it hits, try these commands in the Xcode debug console:
+**6. LLDB commands work in a live session.** Set a breakpoint in `RecoveryDashboardViewModel.loadCheckIns()`. When it hits, try these commands in the Xcode debug console:
 
 ```
 (lldb) po self.entries.count
 (lldb) v self.isLoading
 (lldb) expr self.isLoading = true
-(lldb) breakpoint set -n "MoodRepository.fetchAll"
+(lldb) breakpoint set -n "RecoveryService.fetchAll"
 ```
 
 All four should execute without errors. If `po` fails with "expression produced error," try `v` instead — it reads memory directly without running code.
@@ -190,17 +190,17 @@ All four should execute without errors. If `po` fails with "expression produced 
 
 Here is the complete, final implementation for all files. These are the versions that should be in your project after the plan, execute, and iterate phases.
 
-### Moodbit/Debug/Logger+Extensions.swift
+### BetAway/Debug/Logger+Extensions.swift
 
 ```swift
 import os
 import Foundation
 
-// MARK: - Moodbit Logger Namespace
+// MARK: - BetAway Logger Namespace
 
 enum Log {
-    /// Subsystem identifier for all Moodbit logging.
-    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.moodbit.app"
+    /// Subsystem identifier for all BetAway logging.
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.nativefirst.betaway.app"
 
     // MARK: - Category Loggers
 
@@ -268,7 +268,7 @@ extension OSSignposter {
     /// Usage:
     /// ```swift
     /// let entries = try await Log.signposter.measure("Load Entries") {
-    ///     try await repository.fetchAll()
+    ///     try await service.fetchAll()
     /// }
     /// ```
     func measure<T>(
@@ -371,7 +371,7 @@ extension Logger {
 
 // MARK: - LLDB Cheat Sheet
 //
-// Keep this reference handy when debugging Moodbit in Xcode.
+// Keep this reference handy when debugging BetAway in Xcode.
 //
 // ┌─────────────────────────────────────────────────────────────────┐
 // │ Command          │ Description                                  │
@@ -425,7 +425,7 @@ extension Logger {
 //   → e.g., `entries.count > 10` to break only on large datasets
 ```
 
-### Moodbit/Debug/DiagnosticReport.swift
+### BetAway/Debug/DiagnosticReport.swift
 
 ```swift
 import Foundation
@@ -536,7 +536,7 @@ struct DiagnosticReport: Sendable {
         let divider = String(repeating: "-", count: 50)
         var lines: [String] = []
 
-        lines.append("MOODBIT DIAGNOSTIC REPORT")
+        lines.append("BETAWAY DIAGNOSTIC REPORT")
         lines.append("Generated: \(generatedAt.formatted(.dateTime))")
         lines.append(divider)
 
@@ -622,7 +622,7 @@ struct DiagnosticReport: Sendable {
 }
 ```
 
-### Moodbit/Debug/DebugOverlayView.swift
+### BetAway/Debug/DebugOverlayView.swift
 
 ```swift
 #if DEBUG
@@ -876,7 +876,7 @@ private extension Thread {
 
 ### LLDB Commands Quick Reference
 
-Use these commands in the Xcode debug console when a breakpoint hits. This table covers the commands you will use most often when debugging Moodbit.
+Use these commands in the Xcode debug console when a breakpoint hits. This table covers the commands you will use most often when debugging BetAway.
 
 | Command | What It Does | Example |
 |---|---|---|
@@ -887,7 +887,7 @@ Use these commands in the Xcode debug console when a breakpoint hits. This table
 | `fr v` | Show all variables in the current frame | `fr v` |
 | `bt` | Backtrace of current thread | `bt` |
 | `bt all` | Backtrace of every thread | `bt all` |
-| `br s -n <func>` | Set breakpoint on function name | `br s -n "loadEntries"` |
+| `br s -n <func>` | Set breakpoint on function name | `br s -n "loadCheckIns"` |
 | `br s -f <file> -l <line>` | Set breakpoint on file and line | `br s -f ViewModel.swift -l 42` |
 | `br mod -c "<cond>" <id>` | Add condition to breakpoint | `br mod -c "entries.count > 5" 3` |
 | `br com add <id>` | Add auto-run commands to breakpoint | `br com add 3` |
@@ -904,7 +904,7 @@ Use these commands in the Xcode debug console when a breakpoint hits. This table
 
 ### Instruments Workflow Checklist
 
-Follow this checklist when profiling Moodbit with Instruments.
+Follow this checklist when profiling BetAway with Instruments.
 
 ```
 INSTRUMENTS PROFILING WORKFLOW
@@ -930,7 +930,7 @@ ALLOCATIONS (finding memory leaks):
   [ ] Open Instruments > Allocations
   [ ] Use "Mark Generation" before and after a user action
   [ ] Compare generations — growth between marks = potential leak
-  [ ] Filter by "Moodbit" to see only your allocations
+  [ ] Filter by "BetAway" to see only your allocations
   [ ] Look for: objects that grow but never shrink
   [ ] Look for: retain cycles in closures (strong self captures)
   [ ] Check "Allocation Lifespan: Created & Still Living"
@@ -963,7 +963,7 @@ PRODUCTION (MXMetricManager):
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `Logger+Extensions.swift` compiles with `import os` and defines loggers for all Moodbit subsystems
+- [ ] `Logger+Extensions.swift` compiles with `import os` and defines loggers for all BetAway subsystems
 - [ ] Log messages appear in Console.app filtered by your subsystem when running in the Simulator
 - [ ] `os.Logger` is used everywhere — no `print()` or `NSLog()` calls remain in the codebase
 - [ ] `DebugOverlayView` renders with memory, uptime, and recent logs when tapped in a DEBUG build
@@ -971,7 +971,7 @@ Before moving to the next lesson, verify every item:
 - [ ] `DiagnosticReport.generate()` returns a report with correct device model, OS version, and memory
 - [ ] `DiagnosticReport.formattedReport()` produces a readable, paste-friendly string
 - [ ] `OSSignposter` intervals appear in Instruments when profiling a wrapped operation
-- [ ] LLDB `po`, `v`, and `expr` commands work at a breakpoint in `MoodTimelineViewModel`
+- [ ] LLDB `po`, `v`, and `expr` commands work at a breakpoint in `RecoveryDashboardViewModel`
 - [ ] A watchpoint on `errorMessage` triggers when the property changes value
 
 ## Challenge
@@ -993,7 +993,7 @@ Wrap an existing AI service call (e.g., `generateInsight()`) with the signpost a
 Use `Log.signposter` to create the interval, and pair it with `Log.network` for the structured log entry. The key is to capture the `OSSignpostIntervalState` from `beginInterval` and pass it to `endInterval` in both the success and error paths:
 
 ```swift
-func generateInsight(for entries: [MoodEntry]) async throws -> String {
+func generateInsight(for entries: [CheckIn]) async throws -> String {
     let state = Log.signposter.beginInterval(
         "API Request",
         "endpoint: /v1/chat/completions"

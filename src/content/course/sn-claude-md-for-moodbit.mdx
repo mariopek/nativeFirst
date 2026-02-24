@@ -7,13 +7,13 @@ moduleTitle: "Project Foundation"
 lesson: 3
 duration: "18 min read"
 difficulty: "intermediate"
-topics: ["CLAUDE.md", "AI Configuration", "Code Standards", "Naming Conventions", "Architecture Rules", "Developer Workflow", "Moodbit"]
+topics: ["CLAUDE.md", "AI Configuration", "Code Standards", "Naming Conventions", "Architecture Rules", "Developer Workflow", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-In the previous two lessons, we set up the Xcode project and defined our MVVM + Repository architecture with SwiftData models. We have the skeleton. Now we need the brain — a file that tells our AI assistant exactly how to build inside that skeleton, every single time.
+In the previous two lessons, we set up the Xcode project and defined our MVVM + Service Layer architecture with SwiftData models. We have the skeleton. Now we need the brain — a file that tells our AI assistant exactly how to build inside that skeleton, every single time.
 
 That file is `CLAUDE.md`.
 
@@ -21,7 +21,7 @@ That file is `CLAUDE.md`.
 
 1. How to write a production `CLAUDE.md` that enforces architecture, naming, and style rules automatically
 2. Why vague AI configuration files produce vague code — and how to fix it
-3. The exact `CLAUDE.md` we will use for Moodbit throughout this entire course
+3. The exact `CLAUDE.md` we will use for BetAway throughout this entire course
 4. How to verify your `CLAUDE.md` actually works before you trust it
 
 ## Why This Matters
@@ -36,24 +36,24 @@ We wrote a CLAUDE.md in 30 minutes. The next day, every piece of generated code 
 
 ## Plan Phase: Defining What We Build
 
-Before writing the file, we need to think about what belongs in it. Open Claude Code in the Moodbit project directory and send this:
+Before writing the file, we need to think about what belongs in it. Open Claude Code in the BetAway project directory and send this:
 
 ```
-I need to write a CLAUDE.md for our Moodbit project — an iOS mood
-journal app. Before writing the file, help me think through what
-sections we need.
+I need to write a CLAUDE.md for our BetAway project — a free
+gambling recovery app for iOS. Before writing the file, help me
+think through what sections we need.
 
 Here is the context:
-- Architecture: MVVM + Repository pattern
-- Persistence: SwiftData (repositories abstract all data access)
+- Architecture: MVVM + Service Layer pattern
+- Persistence: SwiftData (services abstract all data access)
 - ViewModels never access SwiftData directly
 - Swift 6 with strict concurrency
 - iOS 17+, SwiftUI only
-- We will integrate OpenAI API later and Apple's NaturalLanguage
-  framework as a fallback
+- We use on-device ML (Apple's NaturalLanguage framework) for
+  recovery insights — completely offline-first, no external APIs
 - We need consistent naming conventions for Views, ViewModels,
-  Repositories, and Models
-- Testing with Swift Testing framework, mock repositories
+  Services, and Models
+- Testing with Swift Testing framework, mock services
 
 List the sections this CLAUDE.md needs and what each section
 should cover. Do not write the file yet — just the outline.
@@ -68,9 +68,9 @@ Review that outline. Make sure it covers architecture enforcement, naming conven
 Here is what a bad CLAUDE.md looks like. I see versions of this constantly:
 
 ```markdown
-# Moodbit
+# BetAway
 
-iOS mood tracking app.
+iOS gambling recovery app.
 
 ## Rules
 - Write clean code
@@ -88,24 +88,24 @@ Compare that to what we are about to build. The difference is specificity.
 Now we write the real thing. Send this to Claude Code:
 
 ```
-Write the complete CLAUDE.md file for Moodbit based on the outline
+Write the complete CLAUDE.md file for BetAway based on the outline
 we discussed. Here are the specific rules to include:
 
 Architecture:
-- MVVM + Repository pattern
+- MVVM + Service Layer pattern
 - ViewModels are @Observable classes, never ObservableObject
 - Views own ViewModels via @State private var viewModel
-- ViewModels depend on repository protocols, never concrete types
-- Repositories abstract all SwiftData access — ViewModels never
+- ViewModels depend on service protocols, never concrete types
+- Services abstract all SwiftData access — ViewModels never
   import SwiftData
 - Use dependency injection, not service locators or singletons
 
 Naming:
-- Views: [Feature]View (MoodEntryView, TimelineView)
-- ViewModels: [Feature]ViewModel (MoodEntryViewModel)
-- Repositories: [Entity]Repository protocol, SwiftData[Entity]Repository
+- Views: [Feature]View (CheckInView, DashboardView)
+- ViewModels: [Feature]ViewModel (CheckInViewModel)
+- Service protocols: [Domain]Service protocol, SwiftData[Domain]Service
   concrete class
-- Models: singular nouns (MoodEntry, not MoodEntries)
+- Models: singular nouns (CheckIn, not CheckIns)
 
 Swift style:
 - Swift 6 strict concurrency — mark actors, Sendable conformances
@@ -115,12 +115,12 @@ Swift style:
 - os.Logger for debugging, never print()
 
 File organization:
-- Feature-grouped folders under Moodbit/
+- Feature-grouped folders under BetAway/
 - Shared/ for reusable components, extensions, constants
 
 Testing:
 - Swift Testing framework, not XCTest
-- Mock repositories conforming to protocols
+- Mock services conforming to protocols
 - Test naming: test_[method]_[scenario]_[expected]
 
 Do NOT list:
@@ -136,7 +136,7 @@ Do NOT list:
 When Claude Code generates the file, review it against these criteria:
 
 - ✅ **Architecture is enforced, not suggested.** "ViewModels never import SwiftData" is a rule. "Try to keep data access separate" is a suggestion. You want rules.
-- ✅ **Naming conventions have concrete examples.** Every naming rule should include at least one example. "Views: `[Feature]View` (e.g., `MoodEntryView`)" — the example removes all ambiguity.
+- ✅ **Naming conventions have concrete examples.** Every naming rule should include at least one example. "Views: `[Feature]View` (e.g., `CheckInView`)" — the example removes all ambiguity.
 - ✅ **The Do NOT section exists and is specific.** At least 5-7 explicit prohibitions. These are the highest-value lines in the entire file.
 - ⚠️ **Watch for contradictions.** If one section says "use `@Observable`" and another mentions `ObservableObject`, fix it immediately. Contradictions make the AI guess, and guessing is what we are eliminating.
 - ❌ **Reject generic filler.** If you see "write clean, maintainable code" or "follow industry best practices," delete it. Those phrases consume tokens and convey zero information.
@@ -148,7 +148,7 @@ The first draft will be close but not perfect. Send a follow-up:
 ```
 Update the CLAUDE.md with these changes:
 
-1. Add the complete folder structure for Moodbit showing where
+1. Add the complete folder structure for BetAway showing where
    every file type goes
 2. In the coding standards section, add: "Use .task {} for async
    work in views, not .onAppear with Task {}"
@@ -174,89 +174,90 @@ Create a new ViewModel called SettingsViewModel that loads the
 user's notification preferences.
 ```
 
-Check: Does it use `@Observable`? Does it depend on a repository protocol? Does it avoid importing SwiftData?
+Check: Does it use `@Observable`? Does it depend on a service protocol? Does it avoid importing SwiftData?
 
 **Test 2 — Naming Conventions:**
 
 ```
-Create the view and view model for a mood statistics screen.
+Create the view and view model for a recovery statistics screen.
 ```
 
-Check: Are the files named `MoodStatsView.swift` and `MoodStatsViewModel.swift`? Not `StatsScreen.swift` or `MoodStatisticsVM.swift`.
+Check: Are the files named `RecoveryStatsView.swift` and `RecoveryStatsViewModel.swift`? Not `StatsScreen.swift` or `RecoveryStatisticsVM.swift`.
 
 **Test 3 — The Do NOT Rules:**
 
 ```
-Add a quick way to fetch mood entries directly in the view.
+Add a quick way to fetch recovery check-ins directly in the view.
 ```
 
-This is a trap prompt. If the AI puts a `@Query` or SwiftData fetch directly in the view, your CLAUDE.md is not strong enough. It should route through the ViewModel and repository.
+This is a trap prompt. If the AI puts a `@Query` or SwiftData fetch directly in the view, your CLAUDE.md is not strong enough. It should route through the ViewModel and service.
 
 If any test fails, strengthen the relevant rule. Make it more explicit, add an example, or move it higher in the file (rules near the top get more weight).
 
 ## Final Code
 
-Here is the complete `CLAUDE.md` for Moodbit. This is the exact file we will use for the rest of the course.
+Here is the complete `CLAUDE.md` for BetAway. This is the exact file we will use for the rest of the course.
 
 ```markdown
-# Moodbit
+# BetAway
 
-AI-powered mood journal for iOS. Users log daily moods, write reflections,
-and receive AI-generated insights about their emotional patterns.
+Free gambling recovery app for iOS. Users track recovery streaks,
+complete CBT-based therapy exercises, access crisis intervention,
+and receive on-device ML insights about their recovery patterns.
 
 ## Tech Stack
 - Language: Swift 6 (strict concurrency)
 - UI: SwiftUI
 - Persistence: SwiftData
-- AI: OpenAI API + Apple NaturalLanguage (on-device fallback)
+- ML: Apple NaturalLanguage framework (on-device, offline-first)
 - Minimum Target: iOS 17.0
-- Architecture: MVVM + Repository
+- Architecture: MVVM + Service Layer
 
 ## Architecture
 
-### MVVM + Repository Pattern
+### MVVM + Service Layer Pattern
 - Every screen has a View and a ViewModel
 - ViewModels are `@Observable` classes (NOT ObservableObject)
 - Views own ViewModels via `@State private var viewModel`
 - Views are purely declarative — zero business logic
 - ViewModels handle all business logic, data transformation, and state
-- Repositories abstract all data access — ViewModels never import SwiftData
-- ViewModels depend on repository protocols, never concrete implementations
+- Services abstract all data access — ViewModels never import SwiftData
+- ViewModels depend on service protocols, never concrete implementations
 - Use initializer-based dependency injection
 
 ### Data Flow
 ```
-View → ViewModel → Repository Protocol → SwiftDataRepository → SwiftData
+View → ViewModel → Service Protocol → SwiftDataService → SwiftData
 ```
 
 ### File Organization
 ```
-Moodbit/
+BetAway/
   App/
-    MoodbitApp.swift
+    BetAwayApp.swift
   Models/
-    MoodEntry.swift
-    MoodInsight.swift
+    CheckIn.swift
+    RecoveryInsight.swift
     UserSettings.swift
-  Repositories/
+  Services/
     Protocols/
-      MoodEntryRepository.swift
-      InsightRepository.swift
+      RecoveryService.swift
+      InsightService.swift
     SwiftData/
-      SwiftDataMoodEntryRepository.swift
-      SwiftDataInsightRepository.swift
+      SwiftDataRecoveryService.swift
+      SwiftDataInsightService.swift
   ViewModels/
-    TimelineViewModel.swift
-    MoodEntryViewModel.swift
+    DashboardViewModel.swift
+    CheckInViewModel.swift
     InsightsViewModel.swift
     SettingsViewModel.swift
   Views/
-    Timeline/
-      TimelineView.swift
-      MoodCardView.swift
-    Entry/
-      MoodEntryView.swift
-      MoodPickerView.swift
+    Dashboard/
+      DashboardView.swift
+      StreakCardView.swift
+    CheckIn/
+      CheckInView.swift
+      RecoveryStatusPickerView.swift
     Insights/
       InsightsView.swift
       InsightCardView.swift
@@ -267,11 +268,11 @@ Moodbit/
     AppRoutes.swift
   Shared/
     Components/
-      MoodBadge.swift
+      RecoveryBadge.swift
       LoadingStateView.swift
     Extensions/
       Date+Formatting.swift
-      Color+MoodTheme.swift
+      Color+RecoveryTheme.swift
     Constants/
       AppConstants.swift
   Resources/
@@ -281,18 +282,18 @@ Moodbit/
 ## Naming Conventions
 
 ### Types
-- Views: `[Feature]View` — MoodEntryView, TimelineView, SettingsView
-- ViewModels: `[Feature]ViewModel` — MoodEntryViewModel, TimelineViewModel
-- Repository protocols: `[Entity]Repository` — MoodEntryRepository
-- Repository implementations: `SwiftData[Entity]Repository` — SwiftDataMoodEntryRepository
-- Models: singular nouns — MoodEntry, MoodInsight, UserSettings
+- Views: `[Feature]View` — CheckInView, DashboardView, SettingsView
+- ViewModels: `[Feature]ViewModel` — CheckInViewModel, DashboardViewModel
+- Service protocols: `[Domain]Service` — RecoveryService
+- Service implementations: `SwiftData[Domain]Service` — SwiftDataRecoveryService
+- Models: singular nouns — CheckIn, RecoveryInsight, UserSettings
 - Router: `Router` (one per app)
 
 ### Properties and Methods
 - camelCase for all properties and methods
-- Boolean prefix: `is`, `has`, `should` — isLoading, hasEntries, shouldRefresh
-- Async methods: verb-first — fetchEntries(), saveMoodEntry(), deleteInsight()
-- Computed properties: noun or adjective — filteredEntries, isEmpty
+- Boolean prefix: `is`, `has`, `should` — isLoading, hasCheckIns, shouldRefresh
+- Async methods: verb-first — fetchCheckIns(), saveCheckIn(), deleteInsight()
+- Computed properties: noun or adjective — filteredCheckIns, isEmpty
 
 ### Constants
 - Enum-based, never magic strings or numbers
@@ -303,7 +304,7 @@ Moodbit/
 ### Swift 6 Concurrency
 - Enable strict concurrency checking
 - Mark ViewModels as `@MainActor`
-- Mark repository protocols with appropriate actor isolation
+- Mark service protocols with appropriate actor isolation
 - Use `Sendable` conformance for types crossing isolation boundaries
 - Use `async/await` for all asynchronous work
 
@@ -318,7 +319,7 @@ Moodbit/
 - Format dates with user locale, never hardcode date formats
 
 ### Error Handling
-- Define domain-specific error enums (MoodError, NetworkError)
+- Define domain-specific error enums (RecoveryError, PersistenceError)
 - User-facing errors must be human-readable
 - Log technical details with `os.Logger`
 - Surface errors in ViewModels via published error state
@@ -344,18 +345,18 @@ Moodbit/
 
 ### Strategy
 - Unit test all ViewModel logic
-- Use mock repositories conforming to repository protocols
-- Mock files go in `MoodbitTests/Mocks/`
+- Use mock services conforming to service protocols
+- Mock files go in `BetAwayTests/Mocks/`
 - Test both success and failure paths
 - Test edge cases: empty data, nil values, boundary dates
 
 ### Example
 ```swift
-@Test func test_fetchEntries_emptyRepository_returnsEmptyArray() async {
-    let mockRepo = MockMoodEntryRepository(entries: [])
-    let viewModel = TimelineViewModel(repository: mockRepo)
-    await viewModel.loadEntries()
-    #expect(viewModel.entries.isEmpty)
+@Test func test_fetchCheckIns_emptyService_returnsEmptyArray() async {
+    let mockService = MockRecoveryService(checkIns: [])
+    let viewModel = DashboardViewModel(service: mockService)
+    await viewModel.loadCheckIns()
+    #expect(viewModel.checkIns.isEmpty)
 }
 ```
 
@@ -363,14 +364,14 @@ Moodbit/
 - ALWAYS plan before implementing features that touch multiple files
 - Explain architectural reasoning when making design decisions
 - Ask for clarification on ambiguous requirements — do not guess
-- When creating a new feature: define the model first, then repository
+- When creating a new feature: define the model first, then service
   protocol, then implementation, then ViewModel, then View
 - Keep PRs focused — one feature per prompt when possible
 
 ## Do NOT
 - Use singletons or the singleton pattern for any purpose
 - Create god classes — if a file exceeds 200 lines, it likely needs splitting
-- Access SwiftData directly from Views or ViewModels — always go through repositories
+- Access SwiftData directly from Views or ViewModels — always go through services
 - Force unwrap optionals (`!`)
 - Use `AnyView` — prefer concrete types or `@ViewBuilder`
 - Use `ObservableObject` / `@Published` — use `@Observable` exclusively
@@ -386,9 +387,9 @@ Moodbit/
 
 Let me walk through why this works.
 
-**The architecture section is prescriptive, not descriptive.** It does not say "we use MVVM." It says exactly how data flows: `View → ViewModel → Repository Protocol → SwiftDataRepository → SwiftData`. Any prompt Claude Code processes will follow that chain. If you ask for a new feature, the AI will create the repository protocol first, then the implementation, then the ViewModel, then the view. Every time.
+**The architecture section is prescriptive, not descriptive.** It does not say "we use MVVM." It says exactly how data flows: `View → ViewModel → Service Protocol → SwiftDataService → SwiftData`. Any prompt Claude Code processes will follow that chain. If you ask for a new feature, the AI will create the service protocol first, then the implementation, then the ViewModel, then the view. Every time.
 
-**The naming conventions include examples for every pattern.** There is no ambiguity about whether a repository should be called `MoodRepo`, `MoodDataStore`, or `MoodEntryRepository`. The rule says `[Entity]Repository`, the example says `MoodEntryRepository`. Done.
+**The naming conventions include examples for every pattern.** There is no ambiguity about whether a service should be called `RecoveryRepo`, `RecoveryDataStore`, or `RecoveryService`. The rule says `[Domain]Service`, the example says `RecoveryService`. Done.
 
 **The Do NOT section is long — and that is intentional.** Fourteen explicit prohibitions. Each one prevents a specific class of mistake that AI models commonly make. "No singletons" stops a pattern that appears in millions of training examples. "No AnyView" prevents a type erasure habit that kills SwiftUI performance. "No force unwraps" prevents runtime crashes. These lines will save you more debugging time than any other part of the file.
 
@@ -396,40 +397,40 @@ Let me walk through why this works.
 
 Here is what the same prompt produces with a bad CLAUDE.md versus our production one.
 
-**Prompt:** "Add a way to delete a mood entry"
+**Prompt:** "Add a way to delete a recovery check-in"
 
 **With the vague CLAUDE.md** ("write clean code, use MVVM"):
 ```swift
 // The AI might put this directly in the View
-struct TimelineView: View {
-    @Query var entries: [MoodEntry]
+struct DashboardView: View {
+    @Query var checkIns: [CheckIn]
     @Environment(\.modelContext) var context
 
-    func delete(_ entry: MoodEntry) {
-        context.delete(entry)
+    func delete(_ checkIn: CheckIn) {
+        context.delete(checkIn)
         try? context.save()  // force try, no error handling
     }
 }
 ```
 
-Problems: SwiftData access in the View. No ViewModel. No repository. Force try. No error handling. No separation of concerns.
+Problems: SwiftData access in the View. No ViewModel. No service. Force try. No error handling. No separation of concerns.
 
-**With our Moodbit CLAUDE.md:**
+**With our BetAway CLAUDE.md:**
 ```swift
-// Repository protocol
-protocol MoodEntryRepository {
-    func delete(_ entry: MoodEntry) async throws
+// Service protocol
+protocol RecoveryService {
+    func delete(_ checkIn: CheckIn) async throws
 }
 
 // ViewModel
 @Observable @MainActor
-class TimelineViewModel {
-    private let repository: MoodEntryRepository
+class DashboardViewModel {
+    private let service: RecoveryService
 
-    func deleteEntry(_ entry: MoodEntry) async {
+    func deleteCheckIn(_ checkIn: CheckIn) async {
         do {
-            try await repository.delete(entry)
-            entries.removeAll { $0.id == entry.id }
+            try await service.delete(checkIn)
+            checkIns.removeAll { $0.id == checkIn.id }
         } catch {
             self.error = error
         }
@@ -438,7 +439,7 @@ class TimelineViewModel {
 
 // View — just calls the ViewModel
 Button("Delete", role: .destructive) {
-    Task { await viewModel.deleteEntry(entry) }
+    Task { await viewModel.deleteCheckIn(checkIn) }
 }
 ```
 
@@ -448,12 +449,12 @@ Same prompt. Radically different output. The CLAUDE.md did the work.
 
 Before moving on, verify:
 
-- [ ] `CLAUDE.md` exists in your Moodbit project root
-- [ ] Architecture section specifies MVVM + Repository with the data flow chain
-- [ ] Naming conventions cover Views, ViewModels, Repositories, and Models with examples
+- [ ] `CLAUDE.md` exists in your BetAway project root
+- [ ] Architecture section specifies MVVM + Service Layer with the data flow chain
+- [ ] Naming conventions cover Views, ViewModels, Services, and Models with examples
 - [ ] Swift style rules include strict concurrency, guard-let, no force unwraps, enum constants
 - [ ] File organization shows the complete folder structure
-- [ ] Testing section specifies Swift Testing, mock repositories, and naming conventions
+- [ ] Testing section specifies Swift Testing, mock services, and naming conventions
 - [ ] Do NOT section has at least 10 specific prohibitions
 - [ ] You ran at least one test prompt and confirmed the AI follows the rules
 
@@ -461,7 +462,7 @@ Before moving on, verify:
 
 **Write a CLAUDE.md extension for a new feature area.**
 
-Moodbit will eventually include a Charts module for visualizing mood trends over time (we build this in Module 5). Write an additional section for the CLAUDE.md that covers:
+BetAway will eventually include a Charts module for visualizing recovery trends over time (we build this in Module 5). Write an additional section for the CLAUDE.md that covers:
 
 - Chart-specific naming conventions
 - What framework to use (hint: Swift Charts)
@@ -471,7 +472,7 @@ Moodbit will eventually include a Charts module for visualizing mood trends over
 Add it to your existing CLAUDE.md and test it with this prompt:
 
 ```
-Create a MoodChartView that shows mood scores over the last 7 days
+Create a RecoveryChartView that shows recovery scores over the last 7 days
 as a line chart.
 ```
 
@@ -480,7 +481,7 @@ Does the output follow your new rules?
 <details>
 <summary>Hint</summary>
 
-Think about where chart data transformation should happen. It is the same answer as every other data question in this architecture — the ViewModel. The View should receive ready-to-render data points, not raw MoodEntry arrays. Your section should specify something like: "Chart ViewModels transform raw model data into chart-ready structs. Views never perform data aggregation."
+Think about where chart data transformation should happen. It is the same answer as every other data question in this architecture — the ViewModel. The View should receive ready-to-render data points, not raw CheckIn arrays. Your section should specify something like: "Chart ViewModels transform raw model data into chart-ready structs. Views never perform data aggregation."
 
 Also consider: should the chart section specify `import Charts` only in Views, or is it acceptable in ViewModels too? Since Charts is a UI framework, it belongs in the View layer.
 

@@ -1,28 +1,28 @@
 ---
-title: "Repository Pattern Implementation"
-description: "Implement protocol-based repositories with generic CRUD operations, a concrete SwiftData implementation, and dependency injection that makes your code testable from day one."
+title: "Service Layer Implementation"
+description: "Implement protocol-based services with generic CRUD operations, a concrete SwiftData implementation, and dependency injection that makes your code testable from day one."
 courseSlug: "ship-native"
 module: 3
 moduleTitle: "Data Layer & Persistence"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Repository Pattern", "Protocol", "Dependency Injection", "SwiftData", "CRUD", "Generics", "Testability", "Moodbit"]
+topics: ["Service Layer", "Protocol", "Dependency Injection", "SwiftData", "CRUD", "Generics", "Testability", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-In the previous module we built Moodbit's UI layer — the mood timeline, the entry flow, and the navigation architecture. Every one of those views is currently backed by placeholder data. Time to fix that.
+In the previous module we built BetAway's UI layer — the recovery timeline, the check-in flow, and the navigation architecture. Every one of those views is currently backed by placeholder data. Time to fix that.
 
-This lesson introduces the pattern that will underpin every data operation in Moodbit: the repository pattern. By the end, your views will read and write real persisted data, but they will never know — or care — whether that data comes from SwiftData, an in-memory store, or a mock you created for tests.
+This lesson introduces the pattern that will underpin every data operation in BetAway: the service layer. By the end, your views will read and write real persisted data, but they will never know — or care — whether that data comes from SwiftData, an in-memory store, or a mock you created for tests.
 
 ## What You'll Learn
 
-1. **Define a `MoodRepository` protocol** that exposes generic CRUD operations and hides all persistence details from the rest of the app.
-2. **Build `SwiftDataMoodRepository`**, a concrete implementation that uses `ModelContext` for reading and writing mood entries.
-3. **Create a `RepositoryProvider`** that acts as a lightweight dependency injection container, so ViewModels receive protocols — never concrete types.
-4. **Write a `MockMoodRepository`** that powers SwiftUI previews and unit tests without touching a database.
+1. **Define a `RecoveryService` protocol** that exposes generic CRUD operations and hides all persistence details from the rest of the app.
+2. **Build `SwiftDataRecoveryService`**, a concrete implementation that uses `ModelContext` for reading and writing recovery check-ins.
+3. **Create a `ServiceProvider`** that acts as a lightweight dependency injection container, so ViewModels receive protocols — never concrete types.
+4. **Write a `MockRecoveryService`** that powers SwiftUI previews and unit tests without touching a database.
 
 ## Why This Matters
 
@@ -30,31 +30,31 @@ In a small personal project, calling `modelContext.insert()` directly from a Vie
 
 The moment you want to write a unit test, you need a real SwiftData container — or you skip the test. The moment you want to swap persistence frameworks (Core Data to SwiftData, for instance), you rewrite every ViewModel. The moment two developers touch the same ViewModel, they trip over persistence logic mixed in with business logic.
 
-The repository pattern solves all three problems with one abstraction. Your ViewModels depend on a protocol. Production injects the SwiftData implementation. Tests inject a mock. The ViewModel code is identical in both cases. This is not academic architecture astronautics — it is the difference between code that ships once and code that ships continuously.
+The service layer solves all three problems with one abstraction. Your ViewModels depend on a protocol. Production injects the SwiftData implementation. Tests inject a mock. The ViewModel code is identical in both cases. This is not academic architecture astronautics — it is the difference between code that ships once and code that ships continuously.
 
 ## Plan Phase: Defining What We Build
 
-Open Claude Code in your Moodbit project directory and send this planning prompt:
+Open Claude Code in your BetAway project directory and send this planning prompt:
 
 ```
-I need to implement the repository pattern for Moodbit's mood entries.
+I need to implement the service layer for BetAway's recovery check-ins.
 
 Before writing code, plan the following:
 
-1. A MoodRepository protocol with these operations:
-   - fetchAll() — returns all mood entries sorted by date descending
-   - fetch(by id: UUID) — returns a single entry or nil
-   - save(MoodEntry) — persists a new entry
-   - update(MoodEntry) — updates an existing entry
-   - delete(MoodEntry) — removes an entry
+1. A RecoveryService protocol with these operations:
+   - fetchAll() — returns all check-ins sorted by date descending
+   - fetch(by id: UUID) — returns a single check-in or nil
+   - save(CheckIn) — persists a new check-in
+   - update(CheckIn) — updates an existing check-in
+   - delete(CheckIn) — removes a check-in
 
-2. A SwiftDataMoodRepository class that implements the protocol
+2. A SwiftDataRecoveryService class that implements the protocol
    using ModelContext.
 
-3. A RepositoryProvider that holds repository instances and can
+3. A ServiceProvider that holds service instances and can
    be swapped between production and test configurations.
 
-4. A MockMoodRepository for previews and tests.
+4. A MockRecoveryService for previews and tests.
 
 All code must use Swift 6 strict concurrency. Annotate with
 @MainActor where needed. Do NOT use singletons.
@@ -67,8 +67,8 @@ Think through the design first — do not generate code yet.
 The AI should identify three things:
 
 - **Protocol methods are `async throws`.** SwiftData operations can fail, and wrapping them in async keeps the door open for future remote persistence.
-- **`@MainActor` on the concrete repository.** `ModelContext` is not `Sendable`. Accessing it off the main actor is a Swift 6 error. The protocol itself should not require `@MainActor` — only the SwiftData implementation needs it.
-- **`RepositoryProvider` is a struct, not a class.** It holds protocol references and gets injected via the SwiftUI environment or passed through init. No singletons, no global state.
+- **`@MainActor` on the concrete service.** `ModelContext` is not `Sendable`. Accessing it off the main actor is a Swift 6 error. The protocol itself should not require `@MainActor` — only the SwiftData implementation needs it.
+- **`ServiceProvider` is a struct, not a class.** It holds protocol references and gets injected via the SwiftUI environment or passed through init. No singletons, no global state.
 
 ### Anti-pattern: What bad looks like
 
@@ -77,11 +77,11 @@ Here is what to reject if the AI proposes it:
 ```swift
 // BAD — ViewModel directly owns ModelContext
 @Observable
-class MoodTimelineViewModel {
+class RecoveryTimelineViewModel {
     private let modelContext: ModelContext  // tight coupling
 
-    func addEntry(_ entry: MoodEntry) {
-        modelContext.insert(entry)  // no abstraction
+    func addCheckIn(_ checkIn: CheckIn) {
+        modelContext.insert(checkIn)  // no abstraction
         try? modelContext.save()    // swallowed error
     }
 }
@@ -96,19 +96,19 @@ Now send the execution prompt:
 ```
 Implement the plan. Generate:
 
-1. MoodRepository protocol in Repositories/MoodRepository.swift
-2. SwiftDataMoodRepository in Repositories/SwiftDataMoodRepository.swift
-3. RepositoryProvider in Repositories/RepositoryProvider.swift
-4. MockMoodRepository in Repositories/MockMoodRepository.swift
+1. RecoveryService protocol in Services/RecoveryService.swift
+2. SwiftDataRecoveryService in Services/SwiftDataRecoveryService.swift
+3. ServiceProvider in Services/ServiceProvider.swift
+4. MockRecoveryService in Services/MockRecoveryService.swift
 
 Requirements:
 - Swift 6 strict concurrency
-- @MainActor on SwiftDataMoodRepository
+- @MainActor on SwiftDataRecoveryService
 - Protocol methods are async throws
 - Use os.Logger, not print
 - Include MARK comments for sections
-- MoodEntry is an existing @Model class with: id (UUID),
-  mood (MoodLevel enum), note (String), activities ([String]),
+- CheckIn is an existing @Model class with: id (UUID),
+  recoveryStatus (RecoveryStatus enum), note (String), activities ([String]),
   date (Date), createdAt (Date)
 ```
 
@@ -116,28 +116,28 @@ Requirements:
 
 Here is what Claude Code should generate. Read each file carefully — I will flag the things that matter.
 
-**MoodRepository.swift** — the protocol.
+**RecoveryService.swift** — the protocol.
 
 ```swift
 import Foundation
 
-protocol MoodRepository: Sendable {
-    func fetchAll() async throws -> [MoodEntry]
-    func fetch(by id: UUID) async throws -> MoodEntry?
-    func save(_ entry: MoodEntry) async throws
-    func update(_ entry: MoodEntry) async throws
-    func delete(_ entry: MoodEntry) async throws
+protocol RecoveryService: Sendable {
+    func fetchAll() async throws -> [CheckIn]
+    func fetch(by id: UUID) async throws -> CheckIn?
+    func save(_ checkIn: CheckIn) async throws
+    func update(_ checkIn: CheckIn) async throws
+    func delete(_ checkIn: CheckIn) async throws
 }
 ```
 
 Review checklist:
 
-- ✅ **`Sendable` conformance.** The protocol itself must be `Sendable` so it can be stored in `@Observable` ViewModels under Swift 6 strict concurrency. Without this, the compiler will reject any ViewModel that holds a `MoodRepository` reference.
-- ✅ **`async throws` on every method.** Even though the SwiftData implementation is synchronous under the hood, marking these as `async throws` keeps the contract flexible. A future network-backed repository can conform without protocol changes.
+- ✅ **`Sendable` conformance.** The protocol itself must be `Sendable` so it can be stored in `@Observable` ViewModels under Swift 6 strict concurrency. Without this, the compiler will reject any ViewModel that holds a `RecoveryService` reference.
+- ✅ **`async throws` on every method.** Even though the SwiftData implementation is synchronous under the hood, marking these as `async throws` keeps the contract flexible. A future network-backed service can conform without protocol changes.
 - ✅ **No `@MainActor` on the protocol.** The abstraction should not force a specific actor. Only the concrete implementation decides its isolation.
-- ⚠️ **Check the `save` vs `update` distinction.** Some AI outputs merge these into a single upsert. For Moodbit, keeping them separate is clearer — `save` inserts, `update` modifies an existing record. If the AI merged them, ask it to split.
+- ⚠️ **Check the `save` vs `update` distinction.** Some AI outputs merge these into a single upsert. For BetAway, keeping them separate is clearer — `save` inserts, `update` modifies an existing record. If the AI merged them, ask it to split.
 
-**SwiftDataMoodRepository.swift** — the concrete implementation.
+**SwiftDataRecoveryService.swift** — the concrete implementation.
 
 ```swift
 import Foundation
@@ -145,11 +145,11 @@ import SwiftData
 import os
 
 @MainActor
-final class SwiftDataMoodRepository: MoodRepository {
+final class SwiftDataRecoveryService: RecoveryService {
     private let modelContext: ModelContext
     private let logger = Logger(
-        subsystem: "com.nativefirst.moodbit",
-        category: "SwiftDataMoodRepository"
+        subsystem: "com.nativefirst.betaway",
+        category: "SwiftDataRecoveryService"
     )
 
     nonisolated init(modelContext: ModelContext) {
@@ -158,39 +158,39 @@ final class SwiftDataMoodRepository: MoodRepository {
 
     // MARK: - Fetch
 
-    func fetchAll() async throws -> [MoodEntry] {
-        let descriptor = FetchDescriptor<MoodEntry>(
+    func fetchAll() async throws -> [CheckIn] {
+        let descriptor = FetchDescriptor<CheckIn>(
             sortBy: [SortDescriptor(\.date, order: .reverse)]
         )
-        let entries = try modelContext.fetch(descriptor)
-        logger.debug("Fetched \(entries.count) mood entries")
-        return entries
+        let checkIns = try modelContext.fetch(descriptor)
+        logger.debug("Fetched \(checkIns.count) check-ins")
+        return checkIns
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
-        let predicate = #Predicate<MoodEntry> { $0.id == id }
-        var descriptor = FetchDescriptor<MoodEntry>(predicate: predicate)
+    func fetch(by id: UUID) async throws -> CheckIn? {
+        let predicate = #Predicate<CheckIn> { $0.id == id }
+        var descriptor = FetchDescriptor<CheckIn>(predicate: predicate)
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
     }
 
     // MARK: - Mutate
 
-    func save(_ entry: MoodEntry) async throws {
-        modelContext.insert(entry)
+    func save(_ checkIn: CheckIn) async throws {
+        modelContext.insert(checkIn)
         try modelContext.save()
-        logger.debug("Saved mood entry: \(entry.id)")
+        logger.debug("Saved check-in: \(checkIn.id)")
     }
 
-    func update(_ entry: MoodEntry) async throws {
+    func update(_ checkIn: CheckIn) async throws {
         try modelContext.save()
-        logger.debug("Updated mood entry: \(entry.id)")
+        logger.debug("Updated check-in: \(checkIn.id)")
     }
 
-    func delete(_ entry: MoodEntry) async throws {
-        modelContext.delete(entry)
+    func delete(_ checkIn: CheckIn) async throws {
+        modelContext.delete(checkIn)
         try modelContext.save()
-        logger.debug("Deleted mood entry: \(entry.id)")
+        logger.debug("Deleted check-in: \(checkIn.id)")
     }
 }
 ```
@@ -198,34 +198,34 @@ final class SwiftDataMoodRepository: MoodRepository {
 Review checklist:
 
 - ✅ **`@MainActor` on the class.** `ModelContext` must be accessed on the main actor in Swift 6. This annotation makes that guarantee at compile time.
-- ✅ **`nonisolated init`.** The initializer does not access actor-isolated state (it only assigns), so marking it `nonisolated` lets you create the repository from any context — including the app's `init()`.
-- ✅ **`fetchLimit = 1` on single-fetch.** Small thing, big impact. Without the limit, SwiftData scans every record even though we only need one. For a mood journal this is negligible; for production patterns, it matters.
+- ✅ **`nonisolated init`.** The initializer does not access actor-isolated state (it only assigns), so marking it `nonisolated` lets you create the service from any context — including the app's `init()`.
+- ✅ **`fetchLimit = 1` on single-fetch.** Small thing, big impact. Without the limit, SwiftData scans every record even though we only need one. For a recovery app this is negligible; for production patterns, it matters.
 - ✅ **Explicit `try modelContext.save()` after every mutation.** SwiftData's autosave is convenient but unpredictable in timing. Explicit saves mean we know exactly when data hits disk.
-- ⚠️ **Check that `update` does not re-insert.** A common AI mistake is calling `modelContext.insert(entry)` inside `update`. SwiftData tracks changes on `@Model` objects automatically — you only need to call `save()`. If the AI added an insert, remove it.
+- ⚠️ **Check that `update` does not re-insert.** A common AI mistake is calling `modelContext.insert(checkIn)` inside `update`. SwiftData tracks changes on `@Model` objects automatically — you only need to call `save()`. If the AI added an insert, remove it.
 
-**RepositoryProvider.swift** — dependency injection.
+**ServiceProvider.swift** — dependency injection.
 
 ```swift
 import Foundation
 import SwiftData
 
-struct RepositoryProvider: Sendable {
-    let moodRepository: MoodRepository
+struct ServiceProvider: Sendable {
+    let recoveryService: RecoveryService
 
     // MARK: - Production
 
     @MainActor
-    static func live(modelContext: ModelContext) -> RepositoryProvider {
-        RepositoryProvider(
-            moodRepository: SwiftDataMoodRepository(modelContext: modelContext)
+    static func live(modelContext: ModelContext) -> ServiceProvider {
+        ServiceProvider(
+            recoveryService: SwiftDataRecoveryService(modelContext: modelContext)
         )
     }
 
     // MARK: - Preview & Test
 
-    static var mock: RepositoryProvider {
-        RepositoryProvider(
-            moodRepository: MockMoodRepository()
+    static var mock: ServiceProvider {
+        ServiceProvider(
+            recoveryService: MockRecoveryService()
         )
     }
 }
@@ -235,40 +235,40 @@ Review checklist:
 
 - ✅ **Struct, not class.** No shared mutable state. No accidental reference semantics.
 - ✅ **`Sendable` conformance.** Required because this will live in the SwiftUI environment and get passed across actor boundaries.
-- ✅ **Static factory methods.** `RepositoryProvider.live(modelContext:)` for production, `RepositoryProvider.mock` for previews and tests. Clear, discoverable, impossible to confuse.
+- ✅ **Static factory methods.** `ServiceProvider.live(modelContext:)` for production, `ServiceProvider.mock` for previews and tests. Clear, discoverable, impossible to confuse.
 - ❌ **Watch for singletons.** If the AI generates a `static let shared = ...`, reject it. The whole point is explicit injection. Singletons hide dependencies and make testing fragile.
 
-**MockMoodRepository.swift** — for previews and tests.
+**MockRecoveryService.swift** — for previews and tests.
 
 ```swift
 import Foundation
 
-final class MockMoodRepository: MoodRepository, @unchecked Sendable {
-    var entries: [MoodEntry] = []
+final class MockRecoveryService: RecoveryService, @unchecked Sendable {
+    var checkIns: [CheckIn] = []
 
     // MARK: - Fetch
 
-    func fetchAll() async throws -> [MoodEntry] {
-        entries.sorted { $0.date > $1.date }
+    func fetchAll() async throws -> [CheckIn] {
+        checkIns.sorted { $0.date > $1.date }
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
-        entries.first { $0.id == id }
+    func fetch(by id: UUID) async throws -> CheckIn? {
+        checkIns.first { $0.id == id }
     }
 
     // MARK: - Mutate
 
-    func save(_ entry: MoodEntry) async throws {
-        entries.append(entry)
+    func save(_ checkIn: CheckIn) async throws {
+        checkIns.append(checkIn)
     }
 
-    func update(_ entry: MoodEntry) async throws {
-        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
-        entries[index] = entry
+    func update(_ checkIn: CheckIn) async throws {
+        guard let index = checkIns.firstIndex(where: { $0.id == checkIn.id }) else { return }
+        checkIns[index] = checkIn
     }
 
-    func delete(_ entry: MoodEntry) async throws {
-        entries.removeAll { $0.id == entry.id }
+    func delete(_ checkIn: CheckIn) async throws {
+        checkIns.removeAll { $0.id == checkIn.id }
     }
 }
 ```
@@ -277,20 +277,20 @@ Review checklist:
 
 - ✅ **In-memory array.** No persistence, no setup, instant. Perfect for previews that need sample data and tests that need deterministic behavior.
 - ✅ **`@unchecked Sendable`.** The mock is only used in single-threaded test and preview contexts. Marking it `@unchecked Sendable` satisfies the protocol requirement without adding unnecessary synchronization.
-- ⚠️ **Pre-populate for previews.** The mock is empty by default. For SwiftUI previews, you will want a convenience initializer or static factory that pre-fills sample mood entries. If the AI did not include one, we will add it in the iteration phase.
+- ⚠️ **Pre-populate for previews.** The mock is empty by default. For SwiftUI previews, you will want a convenience initializer or static factory that pre-fills sample recovery check-ins. If the AI did not include one, we will add it in the iteration phase.
 
 ## Iteration
 
 The generated code is solid but the mock needs sample data for previews. Send this follow-up:
 
 ```
-Add a static property to MockMoodRepository called "withSampleData"
-that returns a MockMoodRepository pre-populated with 5 sample
-MoodEntry values spanning the last 7 days, covering different
-MoodLevel values and activities. This is for SwiftUI previews.
+Add a static property to MockRecoveryService called "withSampleData"
+that returns a MockRecoveryService pre-populated with 5 sample
+CheckIn values spanning the last 7 days, covering different
+RecoveryStatus values and activities. This is for SwiftUI previews.
 
-Also show me how a ViewModel should use MoodRepository — create
-a small example of MoodTimelineViewModel that depends on the
+Also show me how a ViewModel should use RecoveryService — create
+a small example of RecoveryTimelineViewModel that depends on the
 protocol, not the concrete type.
 ```
 
@@ -302,54 +302,54 @@ import os
 
 @Observable
 @MainActor
-final class MoodTimelineViewModel {
-    private(set) var entries: [MoodEntry] = []
+final class RecoveryTimelineViewModel {
+    private(set) var checkIns: [CheckIn] = []
     private(set) var isLoading = false
     var errorMessage: String?
 
-    private let repository: MoodRepository
+    private let service: RecoveryService
     private let logger = Logger(
-        subsystem: "com.nativefirst.moodbit",
-        category: "MoodTimelineViewModel"
+        subsystem: "com.nativefirst.betaway",
+        category: "RecoveryTimelineViewModel"
     )
 
-    init(repository: MoodRepository) {
-        self.repository = repository
+    init(service: RecoveryService) {
+        self.service = service
     }
 
     // MARK: - Loading
 
-    func loadEntries() async {
+    func loadCheckIns() async {
         isLoading = true
         defer { isLoading = false }
 
         do {
-            entries = try await repository.fetchAll()
+            checkIns = try await service.fetchAll()
         } catch {
-            logger.error("Failed to load entries: \(error.localizedDescription)")
-            errorMessage = "Could not load your mood entries."
+            logger.error("Failed to load check-ins: \(error.localizedDescription)")
+            errorMessage = "Could not load your recovery check-ins."
         }
     }
 
     // MARK: - Mutations
 
-    func addEntry(_ entry: MoodEntry) async {
+    func addCheckIn(_ checkIn: CheckIn) async {
         do {
-            try await repository.save(entry)
-            entries.insert(entry, at: 0)
+            try await service.save(checkIn)
+            checkIns.insert(checkIn, at: 0)
         } catch {
-            logger.error("Failed to save entry: \(error.localizedDescription)")
-            errorMessage = "Could not save your mood entry."
+            logger.error("Failed to save check-in: \(error.localizedDescription)")
+            errorMessage = "Could not save your check-in."
         }
     }
 
-    func deleteEntry(_ entry: MoodEntry) async {
+    func deleteCheckIn(_ checkIn: CheckIn) async {
         do {
-            try await repository.delete(entry)
-            entries.removeAll { $0.id == entry.id }
+            try await service.delete(checkIn)
+            checkIns.removeAll { $0.id == checkIn.id }
         } catch {
-            logger.error("Failed to delete entry: \(error.localizedDescription)")
-            errorMessage = "Could not delete the entry."
+            logger.error("Failed to delete check-in: \(error.localizedDescription)")
+            errorMessage = "Could not delete the check-in."
         }
     }
 }
@@ -360,9 +360,9 @@ Notice what the ViewModel does NOT know:
 - It does not know about `ModelContext`.
 - It does not know about SwiftData.
 - It does not import any persistence framework.
-- It depends on `MoodRepository` — a protocol with five methods.
+- It depends on `RecoveryService` — a protocol with five methods.
 
-This means you can test it with `MockMoodRepository`, preview it with sample data, and run it in production with `SwiftDataMoodRepository`. The ViewModel code is identical in all three scenarios.
+This means you can test it with `MockRecoveryService`, preview it with sample data, and run it in production with `SwiftDataRecoveryService`. The ViewModel code is identical in all three scenarios.
 
 ## Verify Phase
 
@@ -370,11 +370,11 @@ Before moving on, verify these things manually. Do not skip this.
 
 **1. Compile check.** Build the project. Swift 6 strict concurrency will catch any actor isolation mistakes. If the compiler complains about sending a non-Sendable type across actor boundaries, the fix is usually adding `@MainActor` to the call site or marking the type `Sendable`.
 
-**2. Protocol conformance.** Make sure `SwiftDataMoodRepository` and `MockMoodRepository` both conform to `MoodRepository` without any warnings. If you see "non-sendable type ... cannot conform to Sendable protocol," double-check your `@unchecked Sendable` annotation on the mock.
+**2. Protocol conformance.** Make sure `SwiftDataRecoveryService` and `MockRecoveryService` both conform to `RecoveryService` without any warnings. If you see "non-sendable type ... cannot conform to Sendable protocol," double-check your `@unchecked Sendable` annotation on the mock.
 
-**3. Preview test.** Create a quick preview that uses `MockMoodRepository.withSampleData` and verify the sample data renders in your timeline view. Previews should not require a `ModelContainer`.
+**3. Preview test.** Create a quick preview that uses `MockRecoveryService.withSampleData` and verify the sample data renders in your timeline view. Previews should not require a `ModelContainer`.
 
-**4. No direct `ModelContext` access outside the repository.** Search your project for `modelContext` — it should only appear inside `SwiftDataMoodRepository` and the app entry point. If any ViewModel imports SwiftData, something leaked.
+**4. No direct `ModelContext` access outside the service.** Search your project for `modelContext` — it should only appear inside `SwiftDataRecoveryService` and the app entry point. If any ViewModel imports SwiftData, something leaked.
 
 **5. Error paths.** Temporarily throw an error from one of the mock methods. Verify that the ViewModel catches it and sets `errorMessage` instead of crashing.
 
@@ -382,23 +382,23 @@ Before moving on, verify these things manually. Do not skip this.
 
 Here is the complete, final implementation for all four files. This is the version that should be in your project after the plan, execute, and iterate phases.
 
-### Repositories/MoodRepository.swift
+### Services/RecoveryService.swift
 
 ```swift
 import Foundation
 
-/// Defines all data operations for mood entries.
+/// Defines all data operations for recovery check-ins.
 /// Concrete implementations provide the persistence mechanism.
-protocol MoodRepository: Sendable {
-    func fetchAll() async throws -> [MoodEntry]
-    func fetch(by id: UUID) async throws -> MoodEntry?
-    func save(_ entry: MoodEntry) async throws
-    func update(_ entry: MoodEntry) async throws
-    func delete(_ entry: MoodEntry) async throws
+protocol RecoveryService: Sendable {
+    func fetchAll() async throws -> [CheckIn]
+    func fetch(by id: UUID) async throws -> CheckIn?
+    func save(_ checkIn: CheckIn) async throws
+    func update(_ checkIn: CheckIn) async throws
+    func delete(_ checkIn: CheckIn) async throws
 }
 ```
 
-### Repositories/SwiftDataMoodRepository.swift
+### Services/SwiftDataRecoveryService.swift
 
 ```swift
 import Foundation
@@ -406,11 +406,11 @@ import SwiftData
 import os
 
 @MainActor
-final class SwiftDataMoodRepository: MoodRepository {
+final class SwiftDataRecoveryService: RecoveryService {
     private let modelContext: ModelContext
     private let logger = Logger(
-        subsystem: "com.nativefirst.moodbit",
-        category: "SwiftDataMoodRepository"
+        subsystem: "com.nativefirst.betaway",
+        category: "SwiftDataRecoveryService"
     )
 
     nonisolated init(modelContext: ModelContext) {
@@ -419,143 +419,143 @@ final class SwiftDataMoodRepository: MoodRepository {
 
     // MARK: - Fetch
 
-    func fetchAll() async throws -> [MoodEntry] {
-        let descriptor = FetchDescriptor<MoodEntry>(
+    func fetchAll() async throws -> [CheckIn] {
+        let descriptor = FetchDescriptor<CheckIn>(
             sortBy: [SortDescriptor(\.date, order: .reverse)]
         )
-        let entries = try modelContext.fetch(descriptor)
-        logger.debug("Fetched \(entries.count) mood entries")
-        return entries
+        let checkIns = try modelContext.fetch(descriptor)
+        logger.debug("Fetched \(checkIns.count) check-ins")
+        return checkIns
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
-        let predicate = #Predicate<MoodEntry> { $0.id == id }
-        var descriptor = FetchDescriptor<MoodEntry>(predicate: predicate)
+    func fetch(by id: UUID) async throws -> CheckIn? {
+        let predicate = #Predicate<CheckIn> { $0.id == id }
+        var descriptor = FetchDescriptor<CheckIn>(predicate: predicate)
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
     }
 
     // MARK: - Mutate
 
-    func save(_ entry: MoodEntry) async throws {
-        modelContext.insert(entry)
+    func save(_ checkIn: CheckIn) async throws {
+        modelContext.insert(checkIn)
         try modelContext.save()
-        logger.debug("Saved mood entry: \(entry.id)")
+        logger.debug("Saved check-in: \(checkIn.id)")
     }
 
-    func update(_ entry: MoodEntry) async throws {
+    func update(_ checkIn: CheckIn) async throws {
         // SwiftData tracks changes on @Model objects automatically.
         // Calling save() persists any in-memory mutations.
         try modelContext.save()
-        logger.debug("Updated mood entry: \(entry.id)")
+        logger.debug("Updated check-in: \(checkIn.id)")
     }
 
-    func delete(_ entry: MoodEntry) async throws {
-        modelContext.delete(entry)
+    func delete(_ checkIn: CheckIn) async throws {
+        modelContext.delete(checkIn)
         try modelContext.save()
-        logger.debug("Deleted mood entry: \(entry.id)")
+        logger.debug("Deleted check-in: \(checkIn.id)")
     }
 }
 ```
 
-### Repositories/RepositoryProvider.swift
+### Services/ServiceProvider.swift
 
 ```swift
 import Foundation
 import SwiftData
 
-struct RepositoryProvider: Sendable {
-    let moodRepository: MoodRepository
+struct ServiceProvider: Sendable {
+    let recoveryService: RecoveryService
 
     // MARK: - Production
 
     @MainActor
-    static func live(modelContext: ModelContext) -> RepositoryProvider {
-        RepositoryProvider(
-            moodRepository: SwiftDataMoodRepository(modelContext: modelContext)
+    static func live(modelContext: ModelContext) -> ServiceProvider {
+        ServiceProvider(
+            recoveryService: SwiftDataRecoveryService(modelContext: modelContext)
         )
     }
 
     // MARK: - Preview & Test
 
-    static var mock: RepositoryProvider {
-        RepositoryProvider(
-            moodRepository: MockMoodRepository.withSampleData
+    static var mock: ServiceProvider {
+        ServiceProvider(
+            recoveryService: MockRecoveryService.withSampleData
         )
     }
 }
 ```
 
-### Repositories/MockMoodRepository.swift
+### Services/MockRecoveryService.swift
 
 ```swift
 import Foundation
 
-final class MockMoodRepository: MoodRepository, @unchecked Sendable {
-    var entries: [MoodEntry] = []
+final class MockRecoveryService: RecoveryService, @unchecked Sendable {
+    var checkIns: [CheckIn] = []
 
     // MARK: - Fetch
 
-    func fetchAll() async throws -> [MoodEntry] {
-        entries.sorted { $0.date > $1.date }
+    func fetchAll() async throws -> [CheckIn] {
+        checkIns.sorted { $0.date > $1.date }
     }
 
-    func fetch(by id: UUID) async throws -> MoodEntry? {
-        entries.first { $0.id == id }
+    func fetch(by id: UUID) async throws -> CheckIn? {
+        checkIns.first { $0.id == id }
     }
 
     // MARK: - Mutate
 
-    func save(_ entry: MoodEntry) async throws {
-        entries.append(entry)
+    func save(_ checkIn: CheckIn) async throws {
+        checkIns.append(checkIn)
     }
 
-    func update(_ entry: MoodEntry) async throws {
-        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else {
+    func update(_ checkIn: CheckIn) async throws {
+        guard let index = checkIns.firstIndex(where: { $0.id == checkIn.id }) else {
             return
         }
-        entries[index] = entry
+        checkIns[index] = checkIn
     }
 
-    func delete(_ entry: MoodEntry) async throws {
-        entries.removeAll { $0.id == entry.id }
+    func delete(_ checkIn: CheckIn) async throws {
+        checkIns.removeAll { $0.id == checkIn.id }
     }
 
     // MARK: - Sample Data
 
-    static var withSampleData: MockMoodRepository {
-        let mock = MockMoodRepository()
+    static var withSampleData: MockRecoveryService {
+        let mock = MockRecoveryService()
         let calendar = Calendar.current
 
-        mock.entries = [
-            MoodEntry(
-                mood: .great,
-                note: "Morning run in the park. Felt alive.",
+        mock.checkIns = [
+            CheckIn(
+                recoveryStatus: .strong,
+                note: "Morning run in the park. Felt clear-headed.",
                 activities: ["Exercise", "Outdoors"],
                 date: calendar.date(byAdding: .day, value: 0, to: .now)!
             ),
-            MoodEntry(
-                mood: .good,
-                note: "Productive day at work.",
+            CheckIn(
+                recoveryStatus: .steady,
+                note: "Productive day at work. No urges.",
                 activities: ["Work", "Coding"],
                 date: calendar.date(byAdding: .day, value: -1, to: .now)!
             ),
-            MoodEntry(
-                mood: .okay,
-                note: "Quiet afternoon. Read a few chapters.",
-                activities: ["Reading"],
+            CheckIn(
+                recoveryStatus: .managing,
+                note: "Quiet afternoon. Used breathing exercises.",
+                activities: ["Breathing"],
                 date: calendar.date(byAdding: .day, value: -3, to: .now)!
             ),
-            MoodEntry(
-                mood: .bad,
-                note: "Barely slept. Everything felt off.",
+            CheckIn(
+                recoveryStatus: .struggling,
+                note: "Barely slept. Triggered by financial stress.",
                 activities: ["Poor Sleep"],
                 date: calendar.date(byAdding: .day, value: -5, to: .now)!
             ),
-            MoodEntry(
-                mood: .great,
-                note: "Dinner with friends. Laughed a lot.",
-                activities: ["Social", "Food"],
+            CheckIn(
+                recoveryStatus: .strong,
+                note: "Support group meeting. Felt connected.",
+                activities: ["Social", "Support Group"],
                 date: calendar.date(byAdding: .day, value: -6, to: .now)!
             ),
         ]
@@ -569,10 +569,10 @@ final class MockMoodRepository: MoodRepository, @unchecked Sendable {
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `MoodRepository` protocol exists with five `async throws` methods
-- [ ] `SwiftDataMoodRepository` is annotated `@MainActor` and compiles under Swift 6 strict concurrency
-- [ ] `RepositoryProvider` has `.live(modelContext:)` and `.mock` factory methods — no singletons
-- [ ] `MockMoodRepository` has `.withSampleData` and your timeline preview renders without a `ModelContainer`
+- [ ] `RecoveryService` protocol exists with five `async throws` methods
+- [ ] `SwiftDataRecoveryService` is annotated `@MainActor` and compiles under Swift 6 strict concurrency
+- [ ] `ServiceProvider` has `.live(modelContext:)` and `.mock` factory methods — no singletons
+- [ ] `MockRecoveryService` has `.withSampleData` and your timeline preview renders without a `ModelContainer`
 - [ ] No ViewModel imports `SwiftData` or references `ModelContext` directly
 - [ ] The project builds with zero warnings
 
@@ -582,18 +582,18 @@ If any item fails, go back to the relevant section. Do not carry broken foundati
 
 **Add a filtered fetch method.**
 
-Extend `MoodRepository` with a new method:
+Extend `RecoveryService` with a new method:
 
 ```swift
-func fetchEntries(from startDate: Date, to endDate: Date) async throws -> [MoodEntry]
+func fetchCheckIns(from startDate: Date, to endDate: Date) async throws -> [CheckIn]
 ```
 
-Implement it in both `SwiftDataMoodRepository` (using a `#Predicate` with date range) and `MockMoodRepository` (using `filter`). Then use it in a ViewModel to load only this week's entries.
+Implement it in both `SwiftDataRecoveryService` (using a `#Predicate` with date range) and `MockRecoveryService` (using `filter`). Then use it in a ViewModel to load only this week's check-ins.
 
-**Hint:** In `SwiftDataMoodRepository`, your predicate will look like this:
+**Hint:** In `SwiftDataRecoveryService`, your predicate will look like this:
 
 ```swift
-let predicate = #Predicate<MoodEntry> {
+let predicate = #Predicate<CheckIn> {
     $0.date >= startDate && $0.date <= endDate
 }
 ```

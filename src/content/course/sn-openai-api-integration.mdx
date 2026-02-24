@@ -7,17 +7,19 @@ moduleTitle: "AI Integration"
 lesson: 1
 duration: "26 min read"
 difficulty: "intermediate"
-topics: ["OpenAI API", "Networking", "Keychain", "async/await", "Error Handling", "Retry Logic", "API Security", "Moodbit"]
+topics: ["OpenAI API", "Networking", "Keychain", "async/await", "Error Handling", "Retry Logic", "API Security", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Moodbit has a data layer, a UI, and a persistence strategy. Users can log moods and see their entries on a timeline. It works — but it is not smart yet. This is the lesson where Moodbit gets a brain.
+BetAway has a data layer, a UI, and a persistence strategy. Users can log recovery check-ins and see their entries on a timeline. It works — but it is not smart yet. This is the lesson where BetAway gets a brain.
 
-We are going to integrate the OpenAI Chat Completion API to analyze mood journal entries and return structured sentiment data. The API will read what the user wrote, classify the sentiment, extract key themes, and generate a short insight. All of this happens over HTTPS, so we need a proper networking layer — one that handles authentication securely, decodes structured responses, retries on transient failures, and fails gracefully when things go wrong.
+Most AI-powered apps reach for a cloud API at this point. That is a valid approach for many products, but BetAway takes a different path. As a gambling recovery app, privacy is non-negotiable — users are journaling about deeply personal struggles, financial damage, and emotional triggers. Sending that data to a cloud API is a design decision we reject on principle.
 
-This is real-world networking. Not a toy example with JSONPlaceholder. A production integration with an API that costs money per call, rate-limits aggressively, and returns complex nested JSON. If you get this right, you can integrate any API.
+Instead, BetAway uses Apple's **NaturalLanguage** framework for on-device ML. All sentiment analysis runs locally on the device's Neural Engine. No API key. No network dependency. No data leaving the phone. Zero cost per analysis.
+
+That said, understanding how cloud API integration works is a critical skill for any iOS developer. You will encounter projects that require it. So this lesson teaches both: we will walk through a production-quality OpenAI integration pattern — the networking layer, Keychain storage, retry logic, error handling — and then explain why BetAway deliberately chooses the on-device alternative. Learn the cloud pattern. Understand when to reject it.
 
 ## What You'll Learn
 
@@ -25,26 +27,31 @@ This is real-world networking. Not a toy example with JSONPlaceholder. A product
 - Store the API key securely in the iOS Keychain — never in UserDefaults, never hardcoded
 - Define structured Codable request and response models that match the OpenAI API exactly
 - Implement typed error handling with Swift 6 typed throws and automatic retry with exponential backoff
+- Understand why BetAway uses on-device ML instead, and when each approach is appropriate
 
 ## Why This Matters
 
-Every AI-powered feature in a production app depends on the same foundation: a secure, resilient networking layer. If you hardcode your API key, it gets scraped from your binary within days. If you skip retry logic, users on flaky cellular connections see errors constantly. If your error types are stringly-typed, debugging production issues becomes guesswork.
+Every AI-powered feature in a production app depends on one of two foundations: a secure, resilient networking layer for cloud AI, or an efficient on-device ML pipeline. If you hardcode your API key, it gets scraped from your binary within days. If you skip retry logic, users on flaky cellular connections see errors constantly. If your error types are stringly-typed, debugging production issues becomes guesswork.
 
-The patterns in this lesson are not OpenAI-specific. They transfer to any authenticated API — Anthropic, Google Cloud, your own backend. Learn them once, use them everywhere.
+The networking patterns in this lesson are not OpenAI-specific. They transfer to any authenticated API — Anthropic, Google Cloud, your own backend. Learn them once, use them everywhere. And then understand that for sensitive domains like recovery apps, the privacy-first approach of on-device ML is often the better choice.
 
 ## Plan Phase: Defining What We Build
 
-Open Claude Code in your Moodbit project directory and send this planning prompt:
+Open Claude Code in your BetAway project directory and send this planning prompt:
 
 ```
-I need to integrate the OpenAI Chat Completion API into our Moodbit
-mood journal app. Before writing code, plan the implementation.
+I need to integrate the OpenAI Chat Completion API as a reference
+implementation for our BetAway gambling recovery app. Before writing
+code, plan the implementation.
 
 Context:
-- Moodbit is a SwiftUI app using MVVM + Repository, Swift 6,
+- BetAway is a SwiftUI app using MVVM + Service Layer, Swift 6,
   SwiftData, targeting iOS 17+
-- We need to send a mood journal entry (user text) to GPT and
-  receive structured sentiment analysis back
+- We want to understand how cloud sentiment analysis works, even
+  though BetAway will use on-device ML (NaturalLanguage framework)
+  for privacy reasons
+- The reference implementation should send a recovery journal entry
+  (user text) to GPT and receive structured sentiment analysis back
 - The response should include: sentiment (positive/neutral/negative),
   a confidence score (0.0–1.0), up to 3 key themes, and a short
   AI-generated insight (1-2 sentences)
@@ -89,8 +96,9 @@ Hardcoded keys get extracted from your app binary with trivial tooling. Force-un
 Now send the execution prompt:
 
 ```
-Implement the OpenAI integration for Moodbit. Follow our CLAUDE.md
-conventions (Swift 6, strict concurrency, @Observable, os.Logger).
+Implement the OpenAI integration as a reference pattern. Follow our
+CLAUDE.md conventions (Swift 6, strict concurrency, @Observable,
+os.Logger).
 
 Create these files in order:
 
@@ -172,7 +180,7 @@ Before moving on, verify these things manually:
 
 ## Final Code
 
-Here is the complete, production-quality implementation. Every file compiles with Swift 6 strict concurrency enabled.
+Here is the complete, production-quality implementation. Every file compiles with Swift 6 strict concurrency enabled. Note: BetAway uses on-device ML for its actual sentiment analysis (covered in the next lesson). This OpenAI integration serves as a reference pattern for cloud API work you will encounter in other projects.
 
 ### APIError.swift
 
@@ -230,7 +238,7 @@ import Foundation
 import Security
 
 struct KeychainHelper: Sendable {
-    private static let serviceName = "com.moodbit.api"
+    private static let serviceName = "com.nativefirst.betaway.api"
 
     // MARK: - Generic Operations
 
@@ -402,7 +410,7 @@ final class OpenAIService: Sendable {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
-    private let logger = Logger(subsystem: "com.moodbit", category: "OpenAIService")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "OpenAIService")
 
     private let maxRetries = 3
     private let initialBackoff: TimeInterval = 1.0
@@ -430,10 +438,10 @@ final class OpenAIService: Sendable {
         }
 
         let systemPrompt = """
-        You are a sentiment analysis engine for a mood journal app. \
+        You are a sentiment analysis engine for a recovery journal app. \
         Analyze the user's journal entry and respond with ONLY a JSON object \
         in this exact format, no markdown, no explanation:
-        {"sentiment":"positive","confidence":0.85,"themes":["gratitude","progress"],"insight":"A brief 1-2 sentence insight."}
+        {"sentiment":"positive","confidence":0.85,"themes":["progress","resilience"],"insight":"A brief 1-2 sentence insight."}
 
         Rules:
         - sentiment must be exactly one of: positive, neutral, negative
@@ -620,6 +628,20 @@ A few things worth calling out in this implementation.
 
 **Retry only fires on 429 and 5xx.** A 401 means your key is wrong — retrying will not fix it. A 400 means your request is malformed — retrying will not fix it. Only transient errors (rate limits, server hiccups) get retried. This is a decision most tutorials get wrong.
 
+### Why BetAway Uses On-Device ML Instead
+
+Now that you understand how cloud API integration works, here is why BetAway deliberately avoids it:
+
+1. **Privacy** — Recovery journal entries contain deeply sensitive information: gambling amounts, emotional breakdowns, relationship damage, financial details. Sending this to any cloud API — even one with good privacy policies — is a trust violation. BetAway promises that journal text never leaves the device.
+
+2. **Offline-first** — Users in crisis need the app to work immediately, regardless of network conditions. A cloud dependency means the app fails exactly when the user needs it most.
+
+3. **Zero cost** — No API key management, no billing, no usage caps. The app is completely free and stays that way.
+
+4. **Speed** — On-device sentiment analysis with NLTagger runs in under 10 milliseconds. A cloud round-trip takes 500ms to 2 seconds. For a crisis intervention feature, that latency matters.
+
+The next lesson builds BetAway's actual sentiment analysis using Apple's NaturalLanguage framework — the approach we ship in production.
+
 ## Checkpoint
 
 Before moving to the next lesson, confirm all of the following:
@@ -633,6 +655,7 @@ Before moving to the next lesson, confirm all of the following:
 - [ ] The `Retry-After` header is respected on 429 responses
 - [ ] Searching the project for `sk-` returns zero results
 - [ ] The API key is read from `KeychainHelper`, never passed as a parameter from the UI layer
+- [ ] You understand why BetAway uses on-device ML instead of this cloud approach
 
 ## Challenge
 

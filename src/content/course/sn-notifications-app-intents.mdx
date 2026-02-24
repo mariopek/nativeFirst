@@ -1,21 +1,21 @@
 ---
 title: "Notifications & App Intents"
-description: "Schedule daily mood check-in reminders with local notifications and let users log moods hands-free through Siri Shortcuts powered by App Intents."
+description: "Schedule daily recovery check-in reminders with local notifications and let users log check-ins hands-free through Siri Shortcuts powered by App Intents."
 courseSlug: "ship-native"
 module: 5
 moduleTitle: "System Frameworks"
 lesson: 3
 duration: "20 min read"
 difficulty: "intermediate"
-topics: ["Notifications", "App Intents", "Siri Shortcuts", "UNUserNotificationCenter", "Reminders", "Automation", "Moodbit"]
+topics: ["Notifications", "App Intents", "Siri Shortcuts", "UNUserNotificationCenter", "Reminders", "Automation", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-A mood tracking app that relies on users remembering to open it is a mood tracking app that gets abandoned in two weeks. The data is only valuable if entries are consistent, and consistency requires a nudge. That nudge is a local notification — a gentle daily reminder that says "How are you feeling?" at whatever time the user chooses.
+A recovery app that relies on users remembering to open it is a recovery app that gets abandoned in two weeks. The data is only valuable if check-ins are consistent, and consistency requires a nudge. That nudge is a local notification — a gentle daily reminder that says "How is your recovery going?" at whatever time the user chooses.
 
-And once you have notifications, the next question is obvious: can I log a mood without even opening the app? That is what App Intents and Siri Shortcuts give you. The user says "Hey Siri, log my mood as great" and the entry appears in the database. No app launch, no navigation, no tapping.
+And once you have notifications, the next question is obvious: can I log a check-in without even opening the app? That is what App Intents and Siri Shortcuts give you. The user says "Hey Siri, log my check-in as thriving" and the entry appears in the database. No app launch, no navigation, no tapping.
 
 These two features — notifications and App Intents — are different frameworks, but they solve the same problem: keeping users engaged with your app outside of the app itself.
 
@@ -23,25 +23,26 @@ These two features — notifications and App Intents — are different framework
 
 - Build a `NotificationManager` that schedules daily reminders at a user-chosen time using `UNUserNotificationCenter`
 - Request notification permission at the right moment — not at launch, but when the user explicitly enables reminders
-- Create a `LogMoodIntent` using the App Intents framework that lets users log moods through Siri and the Shortcuts app
+- Create a `LogCheckInIntent` using the App Intents framework that lets users log check-ins through Siri and the Shortcuts app
 - Register your intents with an `AppShortcutsProvider` so they appear automatically in Spotlight and the Shortcuts gallery
 
 ## Why This Matters
 
 Notification permission is a one-shot deal on iOS. If you ask at the wrong moment — like the first time the app launches, before the user understands why you need it — and they tap "Don't Allow," you cannot ask again. Ever. The system remembers. You are locked out of notifications for that user unless they manually go to Settings. This is why timing the permission request correctly is not a UX nicety; it is a business requirement.
 
-App Intents are the modern replacement for SiriKit's older Intents framework. They are simpler to implement, they do not require a separate extension, and they automatically integrate with Siri, Shortcuts, Spotlight, and the Action Button. If your app has a clear action users perform repeatedly — logging a mood, starting a timer, adding a task — an App Intent makes that action accessible from everywhere on the device.
+App Intents are the modern replacement for SiriKit's older Intents framework. They are simpler to implement, they do not require a separate extension, and they automatically integrate with Siri, Shortcuts, Spotlight, and the Action Button. If your app has a clear action users perform repeatedly — logging a check-in, starting a timer, adding a task — an App Intent makes that action accessible from everywhere on the device.
 
 ## Plan Phase: Defining What We Build
 
-We need two systems: a notification manager for daily reminders and an App Intent for Siri-driven mood logging. They share the same underlying data layer (the `MoodEntry` model and its SwiftData store) but are otherwise independent.
+We need two systems: a notification manager for daily reminders and an App Intent for Siri-driven check-in logging. They share the same underlying data layer (the `CheckIn` model and its SwiftData store) but are otherwise independent.
 
 Here is the planning prompt:
 
 ```
-I'm adding two features to Moodbit, my SwiftUI mood tracking
-app. The app uses SwiftData with MoodEntry (id, mood 1-5,
-date, note) and the shared ModelContainer from App Groups.
+I'm adding two features to BetAway, my SwiftUI gambling
+recovery app. The app uses SwiftData with CheckIn (id,
+status 1-5, date, note) and the shared ModelContainer from
+App Groups.
 
 Feature 1 — Daily Reminder Notifications:
 - A NotificationManager (@Observable) that schedules a daily
@@ -50,18 +51,18 @@ Feature 1 — Daily Reminder Notifications:
   "Daily Reminder" switch in Settings — NOT at app launch
 - If permission was previously denied, show a message with
   a button to open Settings
-- The notification should have a title "Moodbit" and body
-  "How are you feeling? Take a moment to log your mood."
+- The notification should have a title "BetAway" and body
+  "How is your recovery going? Take a moment to log a check-in."
 - User can change the reminder time, which cancels the old
   notification and schedules a new one
 - Store the reminder time and enabled state in UserDefaults
 
-Feature 2 — Log Mood via Siri:
-- An AppIntent called LogMoodIntent that lets users say
-  "Log my mood as [level]" to Siri
-- The mood level is a parameter (1-5 or the labels: Awful,
-  Bad, Okay, Good, Great)
-- The intent creates a MoodEntry in the shared SwiftData store
+Feature 2 — Log Check-In via Siri:
+- An AppIntent called LogCheckInIntent that lets users say
+  "Log my check-in as [level]" to Siri
+- The recovery status is a parameter (1-5 or the labels:
+  Crisis, Struggling, Coping, Strong, Thriving)
+- The intent creates a CheckIn in the shared SwiftData store
 - An AppShortcutsProvider that registers the intent with
   suggested phrases
 - A parameter summary that reads naturally in the Shortcuts app
@@ -75,7 +76,7 @@ Technical:
 What is the implementation plan?
 ```
 
-**What to look for in the plan.** The AI should separate notification logic from the view layer. It should propose storing the reminder time and enabled state in `UserDefaults` (not SwiftData — this is a user preference, not app data). For App Intents, it should mention conforming to `AppIntent`, using `@Parameter` for the mood level, and implementing `AppShortcutsProvider`. If the AI proposes creating an Intents Extension or using the old `INIntent` protocol, stop it — that is the deprecated approach.
+**What to look for in the plan.** The AI should separate notification logic from the view layer. It should propose storing the reminder time and enabled state in `UserDefaults` (not SwiftData — this is a user preference, not app data). For App Intents, it should mention conforming to `AppIntent`, using `@Parameter` for the recovery status, and implementing `AppShortcutsProvider`. If the AI proposes creating an Intents Extension or using the old `INIntent` protocol, stop it — that is the deprecated approach.
 
 **Anti-pattern: requesting notification permission at app launch.** I cannot stress this enough. The worst thing you can do is call `UNUserNotificationCenter.requestAuthorization()` in your `App.init()` or in `ContentView.onAppear`. The user has no context for why you want permission. They will deny it reflexively. Request permission only when the user takes an explicit action that requires notifications — in our case, when they toggle on the "Daily Reminder" switch.
 
@@ -83,7 +84,7 @@ What is the implementation plan?
 
 ```
 Generate the NotificationManager, the reminder settings view,
-the LogMoodIntent, and the AppShortcutsProvider. Specifics:
+the LogCheckInIntent, and the AppShortcutsProvider. Specifics:
 
 NotificationManager:
 - @Observable class in Services/NotificationManager.swift
@@ -92,10 +93,10 @@ NotificationManager:
   reminderTime (Date, persisted to UserDefaults, default 9:00 AM)
 - Methods: checkAuthorization(), requestPermission() async,
   scheduleReminder(), cancelReminder(), openSettings()
-- Notification identifier: "moodbit.daily.reminder"
+- Notification identifier: "betaway.daily.reminder"
 - Use UNCalendarNotificationTrigger with repeats: true
-- Add a custom notification category "MOOD_CHECKIN" with
-  actions for quick mood logging (Good, Okay, Bad)
+- Add a custom notification category "RECOVERY_CHECKIN" with
+  actions for quick check-in logging (Strong, Coping, Struggling)
 
 ReminderSettingsView:
 - A Form-based view in Views/ReminderSettingsView.swift
@@ -104,18 +105,18 @@ ReminderSettingsView:
 - Shows permission status
 - If denied, shows a warning with "Open Settings" button
 
-LogMoodIntent:
-- AppIntent in Intents/LogMoodIntent.swift
-- Title: "Log Mood"
-- Parameter: moodLevel (an AppEnum with cases awful, bad,
-  okay, good, great mapped to 1-5)
-- Creates a MoodEntry in the shared container and saves it
+LogCheckInIntent:
+- AppIntent in Intents/LogCheckInIntent.swift
+- Title: "Log Check-In"
+- Parameter: recoveryStatus (an AppEnum with cases crisis,
+  struggling, coping, strong, thriving mapped to 1-5)
+- Creates a CheckIn in the shared container and saves it
 - Returns a dialog confirming what was logged
 
-MoodShortcuts:
-- AppShortcutsProvider in Intents/MoodShortcuts.swift
-- Phrases: "Log my mood in Moodbit", "How am I feeling"
-- Uses the Moodbit app icon as systemImageName
+RecoveryShortcuts:
+- AppShortcutsProvider in Intents/RecoveryShortcuts.swift
+- Phrases: "Log my check-in in BetAway", "Record my recovery"
+- Uses the BetAway app icon as systemImageName
 ```
 
 Review the AI output for these specific issues:
@@ -123,8 +124,8 @@ Review the AI output for these specific issues:
 - **Permission request is inside `requestPermission()`, not in `init()`.** The method should be called only from user interaction, not automatically.
 - **`scheduleReminder()` cancels existing before scheduling new.** Without canceling first, you get duplicate notifications.
 - **UserDefaults persistence for reminder time.** The reminder preferences should survive app restarts. The AI should store both the enabled state and the time in UserDefaults.
-- **LogMoodIntent uses the shared ModelContainer.** It must use the same App Group container URL so entries appear in the main app.
-- **The AppEnum for mood levels has string representations.** Siri needs to match spoken words to enum cases. The `typeDisplayRepresentation` and case display names must be natural language, not code identifiers.
+- **LogCheckInIntent uses the shared ModelContainer.** It must use the same App Group container URL so check-ins appear in the main app.
+- **The AppEnum for recovery statuses has string representations.** Siri needs to match spoken words to enum cases. The `typeDisplayRepresentation` and case display names must be natural language, not code identifiers.
 - **`AppShortcutsProvider` has phrases.** Without phrases, the shortcut does not appear in Spotlight suggestions.
 
 ## Iteration
@@ -142,11 +143,11 @@ Two improvements needed:
    onChange(of:) modifier to trigger the flow.
 
 2. For the App Intent: Add an @Parameter for an optional note
-   string so users can say "Log my mood as great, feeling
-   energized." Also add an IntentDialog result that includes
-   the emoji for the logged mood, like "Logged 😄 Great."
+   string so users can say "Log my check-in as thriving, had
+   a great day." Also add an IntentDialog result that includes
+   the icon for the logged status, like "Logged 💚 Thriving."
    Make sure the parameter summary reads as a complete
-   sentence: "Log mood as ${moodLevel} with note ${note}"
+   sentence: "Log check-in as ${recoveryStatus} with note ${note}"
 ```
 
 This iteration handles the critical permission flow for the toggle. Without it, the toggle can be ON while notifications are actually denied, which is confusing. The toggle state must always reflect the real authorization status.
@@ -157,17 +158,17 @@ These features need specific testing scenarios:
 
 **Notifications:**
 
-1. **First toggle ON** — Does the system permission dialog appear? If you tap "Allow," does the reminder schedule? Check in Settings > Notifications > Moodbit that the permission is granted.
+1. **First toggle ON** — Does the system permission dialog appear? If you tap "Allow," does the reminder schedule? Check in Settings > Notifications > BetAway that the permission is granted.
 2. **Deny permission** — Reset notification permissions in the simulator (Settings > General > Transfer or Reset iPhone > Reset All Settings, or delete and reinstall the app). Toggle the reminder ON, then deny. Does the toggle flip back to OFF? Does the denied message with "Open Settings" appear?
 3. **Change the time** — With the reminder enabled, change the time from 9:00 AM to 8:00 PM. Check the scheduled notification was updated: call `UNUserNotificationCenter.current().getPendingNotificationRequests()` in a debug log and verify only one request exists with the new time.
 4. **Kill and relaunch the app** — Is the reminder still enabled? Is the time still correct? UserDefaults should persist these.
-5. **Receive the notification** — In the simulator, you can trigger a notification by scheduling it 10 seconds in the future for testing. Does it appear? Do the custom actions (Good, Okay, Bad) show when you long-press the notification?
+5. **Receive the notification** — In the simulator, you can trigger a notification by scheduling it 10 seconds in the future for testing. Does it appear? Do the custom actions (Strong, Coping, Struggling) show when you long-press the notification?
 
 **App Intents:**
 
-1. **Shortcuts app** — Open the Shortcuts app. Search for "Moodbit." Does the "Log Mood" shortcut appear? Can you run it manually?
-2. **Siri** — Hold the side button and say "Log my mood in Moodbit." Does Siri recognize the phrase and prompt for a mood level?
-3. **Data integrity** — After logging via Siri, open the main app. Does the mood entry appear in the list with the correct date, level, and note?
+1. **Shortcuts app** — Open the Shortcuts app. Search for "BetAway." Does the "Log Check-In" shortcut appear? Can you run it manually?
+2. **Siri** — Hold the side button and say "Log my check-in in BetAway." Does Siri recognize the phrase and prompt for a recovery status?
+3. **Data integrity** — After logging via Siri, open the main app. Does the check-in appear in the list with the correct date, status, and note?
 4. **Parameter validation** — Try logging with an invalid level. Does the intent handle it gracefully?
 
 ## Final Code
@@ -206,9 +207,9 @@ final class NotificationManager {
     }
 
     private let center = UNUserNotificationCenter.current()
-    private let notificationID = "moodbit.daily.reminder"
-    private let categoryID = "MOOD_CHECKIN"
-    private let logger = Logger(subsystem: "com.moodbit", category: "NotificationManager")
+    private let notificationID = "betaway.daily.reminder"
+    private let categoryID = "RECOVERY_CHECKIN"
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "NotificationManager")
 
     init() {
         registerCategory()
@@ -240,8 +241,8 @@ final class NotificationManager {
         cancelReminder()
 
         let content = UNMutableNotificationContent()
-        content.title = "Moodbit"
-        content.body = "How are you feeling? Take a moment to log your mood."
+        content.title = "BetAway"
+        content.body = "How is your recovery going? Take a moment to log a check-in."
         content.sound = .default
         content.categoryIdentifier = categoryID
 
@@ -281,25 +282,25 @@ final class NotificationManager {
     }
 
     private func registerCategory() {
-        let goodAction = UNNotificationAction(
-            identifier: "MOOD_GOOD",
-            title: "Good 🙂",
+        let strongAction = UNNotificationAction(
+            identifier: "RECOVERY_STRONG",
+            title: "Strong 🟢",
             options: []
         )
-        let okayAction = UNNotificationAction(
-            identifier: "MOOD_OKAY",
-            title: "Okay 😐",
+        let copingAction = UNNotificationAction(
+            identifier: "RECOVERY_COPING",
+            title: "Coping 🟡",
             options: []
         )
-        let badAction = UNNotificationAction(
-            identifier: "MOOD_BAD",
-            title: "Bad 😕",
+        let strugglingAction = UNNotificationAction(
+            identifier: "RECOVERY_STRUGGLING",
+            title: "Struggling 🟠",
             options: []
         )
 
         let category = UNNotificationCategory(
             identifier: categoryID,
-            actions: [goodAction, okayAction, badAction],
+            actions: [strongAction, copingAction, strugglingAction],
             intentIdentifiers: [],
             options: []
         )
@@ -332,7 +333,7 @@ struct ReminderSettingsView: View {
                     )
                 }
             } footer: {
-                Text("Get a daily nudge to log your mood at the time you choose.")
+                Text("Get a daily nudge to log your recovery check-in at the time you choose.")
             }
 
             if notificationManager.isDenied {
@@ -421,62 +422,62 @@ struct ReminderSettingsView: View {
 }
 ```
 
-### LogMoodIntent
+### LogCheckInIntent
 
 ```swift
 import AppIntents
 import SwiftData
 
-enum MoodLevel: String, AppEnum {
-    case awful
-    case bad
-    case okay
-    case good
-    case great
+enum RecoveryStatus: String, AppEnum {
+    case crisis
+    case struggling
+    case coping
+    case strong
+    case thriving
 
-    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Mood Level")
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Recovery Status")
 
-    static var caseDisplayRepresentations: [MoodLevel: DisplayRepresentation] = [
-        .awful: "Awful",
-        .bad: "Bad",
-        .okay: "Okay",
-        .good: "Good",
-        .great: "Great"
+    static var caseDisplayRepresentations: [RecoveryStatus: DisplayRepresentation] = [
+        .crisis: "Crisis",
+        .struggling: "Struggling",
+        .coping: "Coping",
+        .strong: "Strong",
+        .thriving: "Thriving"
     ]
 
     var numericValue: Int {
         switch self {
-        case .awful: 1
-        case .bad: 2
-        case .okay: 3
-        case .good: 4
-        case .great: 5
+        case .crisis: 1
+        case .struggling: 2
+        case .coping: 3
+        case .strong: 4
+        case .thriving: 5
         }
     }
 
-    var emoji: String {
+    var icon: String {
         switch self {
-        case .awful: "😣"
-        case .bad: "😕"
-        case .okay: "😐"
-        case .good: "🙂"
-        case .great: "😄"
+        case .crisis: "🔴"
+        case .struggling: "🟠"
+        case .coping: "🟡"
+        case .strong: "🟢"
+        case .thriving: "💚"
         }
     }
 }
 
-struct LogMoodIntent: AppIntent {
-    static var title: LocalizedStringResource = "Log Mood"
-    static var description = IntentDescription("Log your current mood in Moodbit.")
+struct LogCheckInIntent: AppIntent {
+    static var title: LocalizedStringResource = "Log Check-In"
+    static var description = IntentDescription("Log your current recovery status in BetAway.")
 
-    @Parameter(title: "Mood Level")
-    var moodLevel: MoodLevel
+    @Parameter(title: "Recovery Status")
+    var recoveryStatus: RecoveryStatus
 
     @Parameter(title: "Note", default: nil)
     var note: String?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Log mood as \(\.$moodLevel)") {
+        Summary("Log check-in as \(\.$recoveryStatus)") {
             \.$note
         }
     }
@@ -487,17 +488,17 @@ struct LogMoodIntent: AppIntent {
         let container = try SharedModelContainer.create()
         let context = ModelContext(container)
 
-        let entry = MoodEntry(
-            mood: moodLevel.numericValue,
+        let checkIn = CheckIn(
+            status: recoveryStatus.numericValue,
             date: .now,
             note: note ?? ""
         )
 
-        context.insert(entry)
+        context.insert(checkIn)
         try context.save()
 
         let dialog = IntentDialog(
-            "Logged \(moodLevel.emoji) \(moodLevel.rawValue.capitalized)"
+            "Logged \(recoveryStatus.icon) \(recoveryStatus.rawValue.capitalized)"
         )
 
         return .result(dialog: dialog)
@@ -505,23 +506,23 @@ struct LogMoodIntent: AppIntent {
 }
 ```
 
-### MoodShortcuts (AppShortcutsProvider)
+### RecoveryShortcuts (AppShortcutsProvider)
 
 ```swift
 import AppIntents
 
-struct MoodShortcuts: AppShortcutsProvider {
+struct RecoveryShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
-            intent: LogMoodIntent(),
+            intent: LogCheckInIntent(),
             phrases: [
-                "Log my mood in \(.applicationName)",
-                "Log mood in \(.applicationName)",
-                "How am I feeling in \(.applicationName)",
-                "Record my mood with \(.applicationName)"
+                "Log my check-in in \(.applicationName)",
+                "Log check-in in \(.applicationName)",
+                "Record my recovery in \(.applicationName)",
+                "How is my recovery in \(.applicationName)"
             ],
-            shortTitle: "Log Mood",
-            systemImageName: "face.smiling"
+            shortTitle: "Log Check-In",
+            systemImageName: "heart.circle"
         )
     }
 }
@@ -529,7 +530,7 @@ struct MoodShortcuts: AppShortcutsProvider {
 
 ### Handling Notification Actions in the App Delegate
 
-To handle the quick-action buttons on the notification (Good, Okay, Bad), add a `UNUserNotificationCenterDelegate`:
+To handle the quick-action buttons on the notification (Strong, Coping, Struggling), add a `UNUserNotificationCenterDelegate`:
 
 ```swift
 import UserNotifications
@@ -543,19 +544,19 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     ) {
         let actionID = response.actionIdentifier
 
-        let mood: Int? = switch actionID {
-        case "MOOD_GOOD": 4
-        case "MOOD_OKAY": 3
-        case "MOOD_BAD": 2
+        let status: Int? = switch actionID {
+        case "RECOVERY_STRONG": 4
+        case "RECOVERY_COPING": 3
+        case "RECOVERY_STRUGGLING": 2
         default: nil
         }
 
-        if let mood {
+        if let status {
             Task {
                 guard let container = try? SharedModelContainer.create() else { return }
                 let context = ModelContext(container)
-                let entry = MoodEntry(mood: mood, date: .now, note: "")
-                context.insert(entry)
+                let checkIn = CheckIn(status: status, date: .now, note: "")
+                context.insert(checkIn)
                 try? context.save()
             }
         }
@@ -577,7 +578,7 @@ Register this delegate early in your app lifecycle:
 
 ```swift
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
@@ -599,21 +600,21 @@ Verify each of these:
 
 - [ ] Notification permission is requested only when the user toggles the reminder switch ON — never at launch, never automatically
 - [ ] If the user denies permission, the toggle flips back to OFF and a "Notifications are disabled" message appears with an "Open Settings" button
-- [ ] Changing the reminder time cancels the old notification and schedules a new one — there is only ever one pending notification with ID `moodbit.daily.reminder`
+- [ ] Changing the reminder time cancels the old notification and schedules a new one — there is only ever one pending notification with ID `betaway.daily.reminder`
 - [ ] The reminder time and enabled state persist in `UserDefaults` across app restarts
-- [ ] The notification shows custom actions (Good, Okay, Bad) when long-pressed
-- [ ] Tapping a notification action logs a mood entry without opening the app
-- [ ] `LogMoodIntent` appears in the Shortcuts app under Moodbit
-- [ ] Running the shortcut creates a `MoodEntry` in the shared SwiftData store that the main app can see
-- [ ] The intent's result dialog shows the emoji and mood label: "Logged [emoji] [Level]"
-- [ ] `AppShortcutsProvider` phrases work with Siri — "Log my mood in Moodbit" triggers the intent
+- [ ] The notification shows custom actions (Strong, Coping, Struggling) when long-pressed
+- [ ] Tapping a notification action logs a check-in without opening the app
+- [ ] `LogCheckInIntent` appears in the Shortcuts app under BetAway
+- [ ] Running the shortcut creates a `CheckIn` in the shared SwiftData store that the main app can see
+- [ ] The intent's result dialog shows the icon and status label: "Logged [icon] [Level]"
+- [ ] `AppShortcutsProvider` phrases work with Siri — "Log my check-in in BetAway" triggers the intent
 
 ## Challenge
 
-**Add configurable notification actions with mood-based deep linking.**
+**Add configurable notification actions with recovery-based deep linking.**
 
-Extend the notification system so that tapping the notification itself (not just the quick actions) opens the app directly to the "Add Mood" screen with today's date pre-selected. Use a URL scheme (`moodbit://log`) and handle it with `.onOpenURL` in your root view to navigate programmatically.
+Extend the notification system so that tapping the notification itself (not just the quick actions) opens the app directly to the "Log Check-In" screen with today's date pre-selected. Use a URL scheme (`betaway://log`) and handle it with `.onOpenURL` in your root view to navigate programmatically.
 
-Then, make the quick-action buttons configurable: let users choose which three mood levels appear as notification actions in the settings screen. Store the selection in `UserDefaults` and rebuild the `UNNotificationCategory` whenever the selection changes.
+Then, make the quick-action buttons configurable: let users choose which three recovery statuses appear as notification actions in the settings screen. Store the selection in `UserDefaults` and rebuild the `UNNotificationCategory` whenever the selection changes.
 
-**Hint:** For deep linking, register a URL type in your Info.plist with the scheme `moodbit`. In your root view, add `.onOpenURL { url in ... }` and parse the URL path. If the path is `/log`, set a `@State` property that presents the mood logging sheet. For configurable actions, create a new `UNNotificationCategory` with the user's chosen mood levels and call `center.setNotificationCategories([updatedCategory])` — the system replaces the previous category registration.
+**Hint:** For deep linking, register a URL type in your Info.plist with the scheme `betaway`. In your root view, add `.onOpenURL { url in ... }` and parse the URL path. If the path is `/log`, set a `@State` property that presents the check-in logging sheet. For configurable actions, create a new `UNNotificationCategory` with the user's chosen recovery statuses and call `center.setNotificationCategories([updatedCategory])` — the system replaces the previous category registration.

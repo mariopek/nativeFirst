@@ -1,26 +1,26 @@
 ---
 title: "Architecture for a Real Project"
-description: "Set up the Moodbit Xcode project with Swift 6 strict concurrency, define the MVVM + Repository architecture, and create the folder structure that will carry you through the entire build."
+description: "Set up the BetAway Xcode project with Swift 6 strict concurrency, define the MVVM + Service Layer architecture, and create the folder structure that will carry you through the entire build."
 courseSlug: "ship-native"
 module: 1
 moduleTitle: "Project Foundation"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Swift 6", "Xcode", "MVVM", "Repository Pattern", "Architecture", "Project Setup", "Concurrency", "Moodbit"]
+topics: ["Swift 6", "Xcode", "MVVM", "Service Layer", "Architecture", "Project Setup", "Concurrency", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-This is where we start building Moodbit — a real app, for real users, shipping to a real App Store. No toy examples. No "Hello World." We are laying the foundation that the rest of the course builds on, and a weak foundation means rework in every future lesson.
+This is where we start building BetAway — a real app, for real users, shipping to a real App Store. No toy examples. No "Hello World." We are laying the foundation that the rest of the course builds on, and a weak foundation means rework in every future lesson.
 
 In this lesson, we set up the Xcode project, lock in Swift 6 strict concurrency from day one, define the architecture, and create the folder structure. By the end, you will have a project that compiles, navigates, and is ready to accept features.
 
 ## What You'll Learn
 
 - How to create an Xcode project configured for Swift 6 strict concurrency mode
-- The MVVM + Repository architecture and why it scales for production apps
+- The MVVM + Service Layer architecture and why it scales for production apps
 - A folder structure (`App/`, `Core/`, `Features/`, `Data/`, `Tests/`) that keeps a growing codebase navigable
 - How to build an enum-based `AppRouter` for type-safe navigation with `NavigationStack`
 
@@ -33,12 +33,12 @@ Every production iOS app that survives past v1.0 has a clear architecture. Witho
 Open Claude Code (or your AI tool of choice) in Plan mode. We want the AI to think through the architecture before it writes a single line. Here is the prompt — copy-paste it exactly:
 
 ```
-I am starting a new iOS app called "Moodbit" — an AI-powered mood
-journal. Before writing any code, help me plan the project setup.
+I am starting a new iOS app called "BetAway" — a free gambling
+recovery app. Before writing any code, help me plan the project setup.
 
 Requirements:
 - Xcode 16+, iOS 17+, Swift 6 with strict concurrency enabled
-- Architecture: MVVM + Repository pattern
+- Architecture: MVVM + Service Layer pattern
 - Navigation: enum-based Router with NavigationStack
 - Persistence: SwiftData (set up the ModelContainer, no models yet)
 - Logging: os.Logger everywhere, zero print() calls
@@ -61,9 +61,9 @@ A good plan from this prompt will include:
 
 1. **Build Settings** — `SWIFT_STRICT_CONCURRENCY = complete` and the Swift language version set to 6 in the Xcode build settings.
 2. **Folder structure** — something close to `App/`, `Core/`, `Features/`, `Data/`, `Tests/`, with clear separation of concerns.
-3. **Entry point** — `MoodbitApp.swift` with a `ModelContainer` configured and injected into the environment.
+3. **Entry point** — `BetAwayApp.swift` with a `ModelContainer` configured and injected into the environment.
 4. **Router** — an `AppRouter` class (or struct) using an enum for routes, paired with `NavigationStack(path:)`.
-5. **Protocols** — at minimum, a `Repository` protocol pattern so the data layer can be swapped for mocks in tests.
+5. **Protocols** — at minimum, a service protocol pattern so the data layer can be swapped for mocks in tests.
 6. **DI strategy** — protocols defined in `Core/`, implementations in `Data/`, injected at the `App` level.
 
 If the plan is missing any of these, ask a follow-up. The plan is cheap. Rework is expensive.
@@ -73,7 +73,7 @@ If the plan is missing any of these, ask a follow-up. The plan is cheap. Rework 
 Here is what NOT to send:
 
 ```
-Set up an Xcode project for a mood tracking app
+Set up an Xcode project for a gambling recovery app
 ```
 
 This prompt gives the AI almost nothing to work with. You will get Swift 5 defaults, no concurrency settings, `NavigationView` instead of `NavigationStack`, `print()` statements, a flat file structure, and an architecture that is "whatever the AI felt like today." Vague input produces vague output. Every time.
@@ -83,10 +83,10 @@ This prompt gives the AI almost nothing to work with. You will get Swift 5 defau
 Now that we have a plan, switch to Execute mode. Here is the implementation prompt:
 
 ```
-Create the Moodbit project foundation. Generate the following
+Create the BetAway project foundation. Generate the following
 files with full Swift 6 strict concurrency compliance:
 
-1. MoodbitApp.swift — @main entry point
+1. BetAwayApp.swift — @main entry point
    - Configure a SwiftData ModelContainer (empty schema for now,
      we will add models next lesson)
    - Create and inject an AppRouter as an @State property
@@ -101,10 +101,10 @@ files with full Swift 6 strict concurrency compliance:
    - Use os.Logger, not print()
 
 3. Folder structure (create empty placeholder files where needed):
-   App/          → MoodbitApp.swift, AppRouter.swift
+   App/          → BetAwayApp.swift, AppRouter.swift
    Core/         → (empty for now — protocols go here)
    Features/     → (empty for now — feature modules go here)
-   Data/         → (empty for now — repositories go here)
+   Data/         → (empty for now — services go here)
    Tests/        → (empty for now)
 
 Every type that touches UI must be @MainActor.
@@ -116,7 +116,7 @@ Zero warnings under strict concurrency.
 
 When the AI responds, here is what to look for:
 
-**MoodbitApp.swift:**
+**BetAwayApp.swift:**
 
 - ✅ Uses `@main` and conforms to `App`
 - ✅ Creates `ModelContainer` in an `init()` with proper error handling
@@ -147,8 +147,8 @@ Good start. Make these adjustments:
    so views can access it via @Environment(\.router)
 2. Add a `Sendable` conformance to Route
 3. Add a logger instance to AppRouter using
-   os.Logger(subsystem: "com.moodbit.app", category: "Router")
-4. In MoodbitApp, wrap the ModelContainer creation in a static
+   os.Logger(subsystem: "com.nativefirst.betaway", category: "Router")
+4. In BetAwayApp, wrap the ModelContainer creation in a static
    method `makeModelContainer()` to keep init() clean
 5. Make sure every public method has a brief doc comment
 
@@ -187,21 +187,21 @@ Here are the complete, compilable files for this lesson.
 ### Folder Structure
 
 ```
-Moodbit/
+BetAway/
 ├── App/
-│   ├── MoodbitApp.swift
+│   ├── BetAwayApp.swift
 │   └── AppRouter.swift
 ├── Core/
 │   └── (empty — protocols added in future lessons)
 ├── Features/
 │   └── (empty — feature modules added in future lessons)
 ├── Data/
-│   └── (empty — repositories added in future lessons)
+│   └── (empty — services added in future lessons)
 └── Tests/
     └── (empty — tests added in Module 6)
 ```
 
-### MoodbitApp.swift
+### BetAwayApp.swift
 
 ```swift
 import SwiftUI
@@ -209,9 +209,9 @@ import SwiftData
 import os
 
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     private static let logger = Logger(
-        subsystem: "com.moodbit.app",
+        subsystem: "com.nativefirst.betaway",
         category: "App"
     )
 
@@ -261,7 +261,7 @@ struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Moodbit")
+            Text("BetAway")
                 .font(.largeTitle.bold())
             Text("Your foundation is ready.")
                 .foregroundStyle(.secondary)
@@ -284,7 +284,7 @@ import os
 @Observable
 final class AppRouter {
     private let logger = Logger(
-        subsystem: "com.moodbit.app",
+        subsystem: "com.nativefirst.betaway",
         category: "Router"
     )
 
@@ -371,7 +371,7 @@ Before moving to Lesson 1.2, confirm every item:
 - [ ] Xcode project builds with zero errors and zero warnings
 - [ ] Swift Language Version is set to 6 in Build Settings
 - [ ] Strict Concurrency Checking is set to Complete
-- [ ] `MoodbitApp.swift` compiles with `ModelContainer` and router injection
+- [ ] `BetAwayApp.swift` compiles with `ModelContainer` and router injection
 - [ ] `AppRouter.swift` compiles with `@MainActor`, `@Observable`, and `NavigationPath`
 - [ ] `@Environment(\.router)` resolves correctly in `HomeView`
 - [ ] App launches in the Simulator without crashing
@@ -386,12 +386,12 @@ Before moving to Lesson 1.2, confirm every item:
 Extend `AppRouter.Route` with a new case:
 
 ```swift
-case moodDetail(id: UUID)
+case checkInDetail(id: UUID)
 ```
 
 Then:
 1. Update the `destination(for:)` method to return a placeholder view that displays the UUID
-2. Add a button in `HomeView` that navigates to `moodDetail(id: UUID())` on tap
+2. Add a button in `HomeView` that navigates to `checkInDetail(id: UUID())` on tap
 3. Verify it compiles under strict concurrency with zero warnings
 4. Verify `pop()` and `popToRoot()` still work correctly
 
@@ -403,11 +403,11 @@ Then:
 Your placeholder view just needs to accept a `UUID` parameter:
 
 ```swift
-struct MoodDetailPlaceholder: View {
-    let moodID: UUID
+struct CheckInDetailPlaceholder: View {
+    let checkInID: UUID
 
     var body: some View {
-        Text("Mood: \(moodID.uuidString)")
+        Text("Check-In: \(checkInID.uuidString)")
             .navigationTitle("Detail")
     }
 }
@@ -416,4 +416,4 @@ struct MoodDetailPlaceholder: View {
 
 ---
 
-Next up: **Lesson 1.2 — Data Modeling with SwiftData**, where we define the `MoodEntry` model, set up relationships, and build the repository protocol that the entire app depends on.
+Next up: **Lesson 1.2 — Data Modeling with SwiftData**, where we define the `CheckIn` model, set up relationships, and build the service protocol that the entire app depends on.

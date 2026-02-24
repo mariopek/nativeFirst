@@ -128,7 +128,7 @@ export const PREMIUM_COURSE = {
   slug: 'ship-native',
   title: 'Ship Native',
   subtitle: 'Build a Production iOS App with AI in 24 Hours',
-  description: 'Build "Moodbit" — an AI-powered mood journal for iOS — from zero to App Store. Master Swift 6, SwiftUI, SwiftData, Charts, WidgetKit, App Intents, and the OpenAI API through hands-on, prompt-driven lessons.',
+  description: 'Build "BetAway" — a free gambling recovery app for iOS — from zero to App Store. Master Swift 6, SwiftUI, SwiftData, Charts, WidgetKit, App Intents, and on-device ML through hands-on, prompt-driven lessons. You learn to code — and build something that helps people.',
   author: 'Mario',
   isPremium: true,
   price: 79,
@@ -143,7 +143,7 @@ export const PREMIUM_COURSE = {
     {
       number: 2,
       title: 'Core UI with SwiftUI',
-      description: 'Build a design system, mood timeline, entry flow with haptic feedback, and a Router-based navigation architecture.',
+      description: 'Build a design system, recovery dashboard, check-in flow with haptic feedback, and a Router-based navigation architecture.',
       lessonCount: 4,
     },
     {
@@ -155,13 +155,13 @@ export const PREMIUM_COURSE = {
     {
       number: 4,
       title: 'AI Integration',
-      description: 'Connect to the OpenAI API, add on-device ML as a fallback, and build an insights engine that finds patterns in mood data.',
+      description: 'Add on-device ML with NaturalLanguage, build a sentiment analysis engine for journal entries, and create a CBT-powered insights system.',
       lessonCount: 3,
     },
     {
       number: 5,
       title: 'System Frameworks',
-      description: 'Visualize mood trends with Charts, create a WidgetKit home screen widget, and integrate Siri Shortcuts through App Intents.',
+      description: 'Visualize recovery streaks with Charts, create a WidgetKit home screen widget, and integrate Siri Shortcuts through App Intents.',
       lessonCount: 3,
     },
     {
@@ -185,7 +185,7 @@ export const PREMIUM_COURSE = {
     {
       number: 9,
       title: 'Bonus — Advanced Patterns',
-      description: 'CloudKit sync for multi-device support and a Share Extension for logging moods from anywhere.',
+      description: 'CloudKit sync for multi-device support and a Share Extension for quick recovery check-ins from anywhere.',
       lessonCount: 2,
     },
   ],

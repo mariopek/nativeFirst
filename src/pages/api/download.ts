@@ -73,7 +73,7 @@ export const GET: APIRoute = async ({ request, locals }) => {
     status: 200,
     headers: {
       'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="moodbit-source-code.zip"',
+      'Content-Disposition': 'attachment; filename="betaway-source-code.zip"',
       'Cache-Control': 'no-store',
     },
   });

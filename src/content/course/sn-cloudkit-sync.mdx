@@ -1,19 +1,19 @@
 ---
 title: "CloudKit Sync"
-description: "Add multi-device sync to Moodbit with SwiftData's CloudKit integration — configure the container, handle merge conflicts, and test sync between simulator and device."
+description: "Add multi-device sync to BetAway with SwiftData's CloudKit integration — configure the container, handle merge conflicts, and test sync between simulator and device."
 courseSlug: "ship-native"
 module: 9
 moduleTitle: "Bonus: Advanced Topics"
 lesson: 1
 duration: "24 min read"
 difficulty: "advanced"
-topics: ["CloudKit", "SwiftData Sync", "iCloud", "Conflict Resolution", "Multi-Device", "Moodbit"]
+topics: ["CloudKit", "SwiftData Sync", "iCloud", "Conflict Resolution", "Multi-Device", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Your users have an iPhone and an iPad. They log a mood on the train with their phone, then open the iPad at home and expect to see it there. If it is not there, they do not file a bug report — they just stop using your app. Multi-device sync is not a feature. It is table stakes.
+Your users have an iPhone and an iPad. They log a check-in on the train with their phone, then open the iPad at home and expect to see it there. If it is not there, they do not file a bug report — they just stop using your app. Multi-device sync is not a feature. It is table stakes.
 
 The good news: SwiftData and CloudKit were designed to work together. The bad news: "designed to work together" does not mean "works without thinking." Merge conflicts, network failures, and sync delays are real, and ignoring them produces an app that silently loses data. This lesson gets you through the full setup, the conflict resolution strategy, and the testing workflow you need to ship sync with confidence.
 
@@ -33,12 +33,12 @@ Users expect their data to follow them across devices. Apple makes this possible
 Open plan mode and think through the full integration before writing code:
 
 ```
-I want to add iCloud sync to Moodbit using SwiftData's CloudKit
+I want to add iCloud sync to BetAway using SwiftData's CloudKit
 integration.
 
 Current setup:
-- SwiftData ModelContainer with MoodEntry model
-- MoodEntry has: id (UUID), mood (Int), note (String), date (Date),
+- SwiftData ModelContainer with CheckIn model
+- CheckIn has: id (UUID), recoveryStatus (Int), note (String), date (Date),
   aiInsight (String?)
 - Local persistence already works (from Module 3)
 - Swift 6 strict concurrency, iOS 17+
@@ -47,7 +47,7 @@ Plan the CloudKit integration:
 1. What changes to ModelConfiguration are needed?
 2. What Xcode capabilities and entitlements must I add?
 3. What iCloud container do I need and how do I create it?
-4. What happens when two devices edit the same MoodEntry? What is
+4. What happens when two devices edit the same CheckIn? What is
    SwiftData's default conflict resolution?
 5. What model constraints affect CloudKit compatibility? (e.g.,
    unique constraints, optional vs required fields, relationships)
@@ -64,7 +64,7 @@ The AI plan should contain these specific items. If any are missing, push back b
 
 - ✅ **ModelConfiguration change** — set `cloudKitDatabase: .automatic` (or `.private`) on the `ModelConfiguration`. That is the entire SwiftData change to enable sync. If the plan says to import CloudKit and manually create `CKContainer` instances, it is overcomplicating things.
 - ✅ **Xcode capabilities** — iCloud capability with CloudKit checked, plus Background Modes with "Remote notifications" enabled. CloudKit uses silent push notifications to trigger sync between devices.
-- ✅ **Container identifier** — an iCloud container identifier like `iCloud.com.yourname.moodbit`, created in the Apple Developer portal or automatically by Xcode when you check the CloudKit capability.
+- ✅ **Container identifier** — an iCloud container identifier like `iCloud.com.yourname.betaway`, created in the Apple Developer portal or automatically by Xcode when you check the CloudKit capability.
 - ✅ **Entitlements** — `com.apple.developer.icloud-container-identifiers` and `com.apple.developer.icloud-services` with `CloudKit` value in the entitlements file.
 - ✅ **Conflict resolution** — SwiftData with CloudKit uses last-write-wins by default. The most recent change (by device timestamp) overwrites the older one. No merge, no prompt. If the plan describes field-level merging as a built-in feature, it is wrong.
 - ⚠️ **CloudKit limitations** — `@Attribute(.unique)` constraints are **not supported** with CloudKit. All properties should be optional or have default values. `@Transient` properties do not sync. Relationships must be optional. If the plan does not mention the `@Attribute(.unique)` restriction, flag it. This is the single most common cause of "sync just does not work" bugs.
@@ -89,14 +89,14 @@ We need two things: an updated model that is CloudKit-compatible and a container
 First, make sure the data model works with CloudKit:
 
 ```
-Review and update the MoodEntry SwiftData model for CloudKit
+Review and update the CheckIn SwiftData model for CloudKit
 compatibility.
 
 Current model:
 @Model
-final class MoodEntry {
+final class CheckIn {
     var id: UUID
-    var mood: Int
+    var recoveryStatus: Int
     var note: String
     var date: Date
     var aiInsight: String?
@@ -127,13 +127,13 @@ Review the AI output against these criteria:
 ### Step 2: Container Configuration
 
 ```
-Generate the updated ModelContainer configuration for Moodbit with
+Generate the updated ModelContainer configuration for BetAway with
 CloudKit sync enabled.
 
 Requirements:
-1. Update MoodbitApp.swift to use a ModelConfiguration with
+1. Update BetAwayApp.swift to use a ModelConfiguration with
    cloudKitDatabase set to .automatic
-2. Set the container identifier to "iCloud.com.yourname.moodbit"
+2. Set the container identifier to "iCloud.com.yourname.betaway"
 3. Keep the existing local-only fallback for previews and tests
 4. Add a static method that creates an in-memory, non-syncing
    container for SwiftUI previews
@@ -147,7 +147,7 @@ Swift 6 strict concurrency. Zero warnings.
 ### Code Review
 
 - ✅ `ModelConfiguration` uses `cloudKitDatabase: .automatic`
-- ✅ Container identifier string matches the format `iCloud.com.yourname.moodbit`
+- ✅ Container identifier string matches the format `iCloud.com.yourname.betaway`
 - ✅ Preview container uses `cloudKitDatabase: .none` and `isStoredInMemoryOnly: true`
 - ✅ No force unwrapping on container creation
 - ⚠️ If it does not handle the "not signed into iCloud" case — the app will still work (SwiftData falls back to local), but logging a warning helps debugging
@@ -204,19 +204,19 @@ CloudKit sync requires careful testing because failures are often silent. Work t
 2. Select your container
 3. Navigate to the "Development" environment
 4. Check that SwiftData has created the record types matching your model (this happens on first launch)
-5. You should see a record type for `MoodEntry` with fields matching your properties
+5. You should see a record type for `CheckIn` with fields matching your properties
 
 **Sync testing — two simulators:**
 1. Open two iOS Simulator instances (Xcode > Open Developer Tool > Simulator, then File > New Simulator)
 2. Sign both into the same iCloud account (Settings > Apple ID)
-3. Run the app on Simulator A, create a mood entry
+3. Run the app on Simulator A, create a check-in
 4. Wait 10-30 seconds
 5. Run the app on Simulator B — the entry should appear
 6. Edit the entry on Simulator B, wait, confirm the edit appears on Simulator A
 
 **Offline-to-online transition:**
 1. Enable Airplane Mode on the simulator (or use Network Link Conditioner)
-2. Create three mood entries while offline
+2. Create three recovery check-ins while offline
 3. Disable Airplane Mode
 4. Confirm all three entries sync to the other device within 60 seconds
 
@@ -238,15 +238,15 @@ import Foundation
 import SwiftData
 import os
 
-/// Centralizes CloudKit and ModelContainer configuration for Moodbit.
+/// Centralizes CloudKit and ModelContainer configuration for BetAway.
 enum CloudKitConfiguration {
     private static let logger = Logger(
-        subsystem: "com.moodbit.app",
+        subsystem: "com.nativefirst.betaway.app",
         category: "CloudKit"
     )
 
     /// The iCloud container identifier. Must match the entitlements file.
-    static let containerIdentifier = "iCloud.com.yourname.moodbit"
+    static let containerIdentifier = "iCloud.com.yourname.betaway"
 
     /// Creates the production ModelContainer with CloudKit sync enabled.
     ///
@@ -255,12 +255,12 @@ enum CloudKitConfiguration {
     static func makeProductionContainer() -> ModelContainer {
         do {
             let configuration = ModelConfiguration(
-                "Moodbit",
-                schema: Schema([MoodEntry.self]),
+                "BetAway",
+                schema: Schema([CheckIn.self]),
                 cloudKitDatabase: .automatic
             )
             let container = try ModelContainer(
-                for: MoodEntry.self,
+                for: CheckIn.self,
                 configurations: [configuration]
             )
             logger.info("ModelContainer created with CloudKit sync enabled.")
@@ -281,7 +281,7 @@ enum CloudKitConfiguration {
         )
         do {
             return try ModelContainer(
-                for: MoodEntry.self,
+                for: CheckIn.self,
                 configurations: [configuration]
             )
         } catch {
@@ -304,29 +304,29 @@ enum CloudKitConfiguration {
 }
 ```
 
-### MoodEntry.swift (Updated for CloudKit)
+### CheckIn.swift (Updated for CloudKit)
 
 ```swift
 import Foundation
 import SwiftData
 
-/// A single mood journal entry, synced across devices via CloudKit.
+/// A single recovery app entry, synced across devices via CloudKit.
 ///
 /// CloudKit compatibility rules enforced here:
 /// - No @Attribute(.unique) constraints
 /// - All non-optional properties have default values
 /// - @Transient properties are local-only and do not sync
 @Model
-final class MoodEntry {
+final class CheckIn {
     /// Stable identifier for the entry.
     /// NOT marked @Attribute(.unique) — CloudKit manages its own
     /// record IDs and unique constraints break sync.
     var id: UUID = UUID()
 
-    /// Mood rating from 1 (lowest) to 5 (highest).
-    var mood: Int = 3
+    /// Recovery status rating from 1 (lowest) to 5 (highest).
+    var recoveryStatus: Int = 3
 
-    /// User-written note accompanying the mood.
+    /// User-written note accompanying the check-in.
     var note: String = ""
 
     /// When the entry was created.
@@ -348,12 +348,12 @@ final class MoodEntry {
     var isPendingAnalysis: Bool = false
 
     init(
-        mood: Int,
+        recoveryStatus: Int,
         note: String,
         date: Date = .now
     ) {
         self.id = UUID()
-        self.mood = mood
+        self.recoveryStatus = recoveryStatus
         self.note = note
         self.date = date
         self.lastModified = .now
@@ -363,7 +363,7 @@ final class MoodEntry {
 }
 ```
 
-### MoodbitApp.swift (Updated with CloudKit Container)
+### BetAwayApp.swift (Updated with CloudKit Container)
 
 ```swift
 import SwiftUI
@@ -371,9 +371,9 @@ import SwiftData
 import os
 
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     private static let logger = Logger(
-        subsystem: "com.moodbit.app",
+        subsystem: "com.nativefirst.betaway.app",
         category: "App"
     )
 
@@ -417,7 +417,7 @@ import os
 @Observable
 final class SyncMonitor {
     private let logger = Logger(
-        subsystem: "com.moodbit.app",
+        subsystem: "com.nativefirst.betaway.app",
         category: "Sync"
     )
 
@@ -580,7 +580,7 @@ struct SyncStatusView: View {
 
 **Why no `@Attribute(.unique)` on `id`?** CloudKit manages record identity internally using `CKRecord.ID`. Adding a unique constraint on your own `id` field causes the persistent store coordinator to throw merge errors during sync, because CloudKit's conflict resolution operates at the record level, not the field level. Your `id` is still useful as a stable application-level identifier — just do not enforce uniqueness at the database level.
 
-**Why last-write-wins?** SwiftData with CloudKit does not offer built-in field-level merge. The entire record is replaced by whichever device wrote last (by timestamp). For a mood journal, this is acceptable — users rarely edit the same entry on two devices simultaneously. For collaborative apps (shared documents, team task lists), you would need a custom merge strategy or a different sync backend entirely.
+**Why last-write-wins?** SwiftData with CloudKit does not offer built-in field-level merge. The entire record is replaced by whichever device wrote last (by timestamp). For a recovery app, this is acceptable — users rarely edit the same entry on two devices simultaneously. For collaborative apps (shared documents, team task lists), you would need a custom merge strategy or a different sync backend entirely.
 
 **Why `@Transient` on `isPendingAnalysis`?** This flag is a local UI concern. If Device A is waiting for an AI response, Device B does not need to know. Syncing transient state creates unnecessary network traffic and confusing UX where one device shows a spinner for another device's network request.
 
@@ -591,10 +591,10 @@ Before considering CloudKit sync complete, verify every item:
 1. iCloud capability added in Xcode with CloudKit checked
 2. Background Modes capability added with "Remote notifications" enabled
 3. Container identifier matches between Xcode entitlements and `ModelConfiguration`
-4. `MoodEntry` has no `@Attribute(.unique)` constraints on any property
-5. All non-optional properties in `MoodEntry` have default values
+4. `CheckIn` has no `@Attribute(.unique)` constraints on any property
+5. All non-optional properties in `CheckIn` have default values
 6. App builds and runs with zero warnings under Swift 6 strict concurrency
-7. CloudKit Dashboard shows the `MoodEntry` record type after first launch
+7. CloudKit Dashboard shows the `CheckIn` record type after first launch
 8. Creating an entry on Device A appears on Device B within 60 seconds
 9. Editing an entry on one device reflects on the other
 10. Deleting an entry on one device removes it from the other
@@ -639,7 +639,7 @@ if !syncMonitor.isCloudAvailable {
     ContentUnavailableView(
         "iCloud Not Available",
         systemImage: "icloud.slash",
-        description: Text("Sign into iCloud in Settings to sync your mood entries across devices.")
+        description: Text("Sign into iCloud in Settings to sync your recovery check-ins across devices.")
     )
 }
 ```
@@ -647,4 +647,4 @@ if !syncMonitor.isCloudAvailable {
 
 ---
 
-Next up: **Bonus Lesson 9.2 — Share Extension & Beyond**, where we build a Share Extension for quick mood logging from any app and chart your path forward as an AI-augmented iOS developer.
+Next up: **Bonus Lesson 9.2 — Share Extension & Beyond**, where we build a Share Extension for quick check-in logging from any app and chart your path forward as an AI-augmented iOS developer.

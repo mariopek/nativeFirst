@@ -1,66 +1,67 @@
 ---
 title: "SwiftData Model Layer"
-description: "Design and implement the MoodEntry, MoodTag, and DailyInsight SwiftData models with relationships, configure the ModelContainer, and build the repository protocol for data access."
+description: "Design and implement the CheckIn, RecoveryTag, and RecoveryInsight SwiftData models with relationships, configure the ModelContainer, and build the service protocol for data access."
 courseSlug: "ship-native"
 module: 1
 moduleTitle: "Project Foundation"
 lesson: 2
 duration: "25 min read"
 difficulty: "intermediate"
-topics: ["SwiftData", "@Model", "Data Modeling", "Relationships", "Repository Pattern", "CRUD", "Predicates", "Moodbit"]
+topics: ["SwiftData", "@Model", "Data Modeling", "Relationships", "Service Layer", "CRUD", "Predicates", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Your architecture is set. Your CLAUDE.md is written. Now we build the thing that every feature in Moodbit depends on: the data layer.
+Your architecture is set. Your CLAUDE.md is written. Now we build the thing that every feature in BetAway depends on: the data layer.
 
 If you get the models wrong, every view, every query, every insight engine built on top of them will be wrong. If you get them right, everything else falls into place. This is why we build models first, views second, and AI features last.
 
-In this lesson, we design three SwiftData models, wire their relationships, configure the ModelContainer, and create a repository protocol that gives us a clean, testable API for data access. We do it using the Plan-Execute-Verify workflow — the same workflow you will use for every feature in this course.
+In this lesson, we design three SwiftData models, wire their relationships, configure the ModelContainer, and create a service protocol that gives us a clean, testable API for data access. We do it using the Plan-Execute-Verify workflow — the same workflow you will use for every feature in this course.
 
 ## What You'll Learn
 
 - How to design `@Model` classes with relationships and inverse references using SwiftData
 - How to write `#Predicate` queries for filtered, sorted data access
 - How to configure a `ModelContainer` in a Swift 6 strict concurrency environment
-- How to abstract persistence behind a protocol so your views never touch SwiftData directly
+- How to abstract persistence behind a service protocol so your views never touch SwiftData directly
 
 ## Why This Matters
 
-Every production iOS app needs a persistence layer, and SwiftData is Apple's answer for Swift-native apps. But SwiftData is opinionated — get the relationships, delete rules, or thread safety wrong and you hit runtime crashes that the compiler will not catch. The repository pattern we build here is the same pattern used in banking apps, health apps, and anything that ships to the App Store with real user data on the line.
+Every production iOS app needs a persistence layer, and SwiftData is Apple's answer for Swift-native apps. But SwiftData is opinionated — get the relationships, delete rules, or thread safety wrong and you hit runtime crashes that the compiler will not catch. The service layer pattern we build here is the same pattern used in banking apps, health apps, and anything that ships to the App Store with real user data on the line.
 
 ## Plan Phase: Defining What We Build
 
 Before we prompt for code, we tell the AI what we want and ask it to think. Here is the planning prompt:
 
 ```
-I am building Moodbit, an AI-powered mood journal for iOS.
+I am building BetAway, a free gambling recovery app for iOS.
 I need the SwiftData model layer. Before writing code, plan
 the following:
 
-1. MoodEntry — the core model. Properties: id (UUID),
-   moodLevel (Int, 1-5), emoji (String), note (String,
+1. CheckIn — the core model. Properties: id (UUID),
+   recoveryStatus (Int, 1-5), emoji (String), note (String,
    optional), createdAt (Date). It should have a many-to-many
-   relationship with MoodTag.
+   relationship with RecoveryTag.
 
-2. MoodTag — a tagging model. Properties: id (UUID),
+2. RecoveryTag — a tagging model. Properties: id (UUID),
    name (String), color (String, hex value). It should have
-   an inverse relationship back to MoodEntry.
+   an inverse relationship back to CheckIn.
 
-3. DailyInsight — AI-generated daily summary. Properties:
-   id (UUID), date (Date, unique per day), summary (String),
-   sentimentScore (Double, 0.0-1.0), generatedAt (Date).
+3. RecoveryInsight — on-device ML generated daily summary.
+   Properties: id (UUID), date (Date, unique per day),
+   summary (String), sentimentScore (Double, 0.0-1.0),
+   generatedAt (Date).
 
-4. A MoodRepository protocol that defines CRUD operations
-   for MoodEntry, including filtered fetches by date range
-   and mood level.
+4. A RecoveryService protocol that defines CRUD operations
+   for CheckIn, including filtered fetches by date range
+   and recovery status.
 
 5. ModelContainer configuration for the App struct.
 
 Think through: relationship types, delete rules, which
 properties need defaults, and how #Predicate queries will
-work for the repository. Then implement everything in
+work for the service. Then implement everything in
 Swift 6 with strict concurrency.
 ```
 
@@ -73,7 +74,7 @@ It also specifies Swift 6 strict concurrency, which matters because SwiftData's 
 ### The Anti-Pattern: What Not to Prompt
 
 ```
-Make SwiftData models for a mood app. I need entries, tags,
+Make SwiftData models for a recovery app. I need check-ins, tags,
 and insights. Also add CRUD.
 ```
 
@@ -83,32 +84,32 @@ This will produce code. It will also produce models with `String!` force-unwrapp
 
 Now we send the planning prompt. Claude Code generates the full model layer. Let us review each file.
 
-### MoodEntry.swift
+### CheckIn.swift
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class MoodEntry {
+final class CheckIn {
     @Attribute(.unique) var id: UUID
-    var moodLevel: Int
+    var recoveryStatus: Int
     var emoji: String
     var note: String
     var createdAt: Date
 
-    @Relationship(deleteRule: .nullify, inverse: \MoodTag.entries)
-    var tags: [MoodTag]
+    @Relationship(deleteRule: .nullify, inverse: \RecoveryTag.checkIns)
+    var tags: [RecoveryTag]
 
     init(
         id: UUID = UUID(),
-        moodLevel: Int,
+        recoveryStatus: Int,
         emoji: String,
         note: String = "",
         createdAt: Date = .now
     ) {
         self.id = id
-        self.moodLevel = moodLevel
+        self.recoveryStatus = recoveryStatus
         self.emoji = emoji
         self.note = note
         self.createdAt = createdAt
@@ -119,27 +120,27 @@ final class MoodEntry {
 
 Let us verify the critical details:
 
-- **`@Attribute(.unique)` on `id`.** This tells SwiftData to enforce uniqueness at the database level. Without it, you could accidentally insert duplicate entries.
-- **`moodLevel` is a plain `Int`, not optional.** Every mood entry must have a level. The prompt said 1-5, so we enforce that in the repository layer, not the model. SwiftData does not support range constraints natively.
+- **`@Attribute(.unique)` on `id`.** This tells SwiftData to enforce uniqueness at the database level. Without it, you could accidentally insert duplicate check-ins.
+- **`recoveryStatus` is a plain `Int`, not optional.** Every check-in must have a status. The prompt said 1-5, so we enforce that in the service layer, not the model. SwiftData does not support range constraints natively.
 - **`note` defaults to an empty string** instead of being optional. This simplifies every view that displays notes — no nil checking, no `if let`. An empty string and a nil string mean the same thing semantically, so pick the simpler representation.
-- **`deleteRule: .nullify`** on the tags relationship means deleting an entry removes it from any tag's `entries` array without deleting the tags. This is correct — tags are shared across entries.
-- **`inverse: \MoodTag.entries`** explicitly links the two sides of the relationship. If you omit this, SwiftData can silently fail to update the inverse side, leading to stale data.
+- **`deleteRule: .nullify`** on the tags relationship means deleting a check-in removes it from any tag's `checkIns` array without deleting the tags. This is correct — tags are shared across check-ins.
+- **`inverse: \RecoveryTag.checkIns`** explicitly links the two sides of the relationship. If you omit this, SwiftData can silently fail to update the inverse side, leading to stale data.
 - **`tags` is initialized to an empty array** in the init, not as `nil`. For a to-many relationship, an empty array is the correct "no tags" state.
 
-### MoodTag.swift
+### RecoveryTag.swift
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class MoodTag {
+final class RecoveryTag {
     @Attribute(.unique) var id: UUID
     var name: String
     var color: String
 
     @Relationship(deleteRule: .nullify)
-    var entries: [MoodEntry]
+    var checkIns: [CheckIn]
 
     init(
         id: UUID = UUID(),
@@ -149,16 +150,16 @@ final class MoodTag {
         self.id = id
         self.name = name
         self.color = color
-        self.entries = []
+        self.checkIns = []
     }
 
     static let predefined: [(name: String, color: String)] = [
-        ("Work", "#4A90D9"),
+        ("Urge", "#E74C3C"),
+        ("Therapy", "#4A90D9"),
         ("Exercise", "#2ECC71"),
         ("Social", "#F39C12"),
-        ("Family", "#E74C3C"),
-        ("Health", "#1ABC9C"),
-        ("Creative", "#9B59B6"),
+        ("Financial", "#1ABC9C"),
+        ("Breathing", "#9B59B6"),
     ]
 }
 ```
@@ -166,18 +167,18 @@ final class MoodTag {
 Review:
 
 - **`color` is a `String` (hex), not a SwiftUI `Color`.** SwiftData cannot persist `Color` directly. We store the hex value and convert in the view layer. This is the right trade-off.
-- **`deleteRule: .nullify`** on entries means deleting a tag removes it from all entries' `tags` arrays. Entries are never deleted when a tag is removed.
-- **No `inverse:` parameter on `entries`.** We already declared the inverse on `MoodEntry.tags`. Declaring it on both sides causes a compiler error. One side declares the inverse — the other is the target.
+- **`deleteRule: .nullify`** on checkIns means deleting a tag removes it from all check-ins' `tags` arrays. Check-ins are never deleted when a tag is removed.
+- **No `inverse:` parameter on `checkIns`.** We already declared the inverse on `CheckIn.tags`. Declaring it on both sides causes a compiler error. One side declares the inverse — the other is the target.
 - **`predefined` is a tuple array, not `@Model` instances.** You cannot create SwiftData objects statically. We seed these into the database at first launch, just like we would with Core Data.
 
-### DailyInsight.swift
+### RecoveryInsight.swift
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class DailyInsight {
+final class RecoveryInsight {
     @Attribute(.unique) var id: UUID
     var date: Date
     var summary: String
@@ -202,9 +203,9 @@ final class DailyInsight {
 
 This is the simplest model. No relationships — insights are derived data, not relational. A few notes:
 
-- **`date` is the calendar day the insight covers.** We will query by date range. In a production app you would normalize this to `startOfDay` before saving. We handle that in the repository.
-- **`sentimentScore` is a `Double` from 0.0 to 1.0.** Like `moodLevel`, the range is enforced in the repository, not the model. SwiftData models are data containers, not validation layers.
-- **`generatedAt` defaults to `.now`.** This tracks when the AI generated the insight, useful for cache invalidation.
+- **`date` is the calendar day the insight covers.** We will query by date range. In a production app you would normalize this to `startOfDay` before saving. We handle that in the service.
+- **`sentimentScore` is a `Double` from 0.0 to 1.0.** Like `recoveryStatus`, the range is enforced in the service, not the model. SwiftData models are data containers, not validation layers.
+- **`generatedAt` defaults to `.now`.** This tracks when the on-device ML generated the insight, useful for cache invalidation.
 
 ### AI Output Review
 
@@ -215,112 +216,112 @@ Here is how I evaluate what the AI generated:
 - **No force unwraps anywhere** — every property is either non-optional with a default or genuinely required in the init
 - **`@Attribute(.unique)` on id fields** — good practice, though SwiftData generates its own `persistentModelID` internally. The unique constraint prevents accidental duplicates during sync or migration
 
-One thing to watch: the AI might generate `var tags: [MoodTag]?` as an optional array. If it does, change it to a non-optional `[MoodTag]` initialized to `[]`. Optional arrays in SwiftData relationships create unnecessary nil-checking in every query and view.
+One thing to watch: the AI might generate `var tags: [RecoveryTag]?` as an optional array. If it does, change it to a non-optional `[RecoveryTag]` initialized to `[]`. Optional arrays in SwiftData relationships create unnecessary nil-checking in every query and view.
 
 ## Iteration
 
-The initial generation is solid, but we need the repository and the container configuration. Here is the follow-up prompt:
+The initial generation is solid, but we need the service and the container configuration. Here is the follow-up prompt:
 
 ```
 Now create two things:
 
-1. A MoodRepository protocol in Repositories/MoodRepository.swift
+1. A RecoveryService protocol in Services/RecoveryService.swift
    with these methods:
-   - addEntry(moodLevel:emoji:note:tags:) -> MoodEntry
-   - deleteEntry(_ entry: MoodEntry)
-   - fetchEntries(from:to:) -> [MoodEntry] using #Predicate
-   - fetchEntries(moodLevel:) -> [MoodEntry] using #Predicate
-   - fetchAllTags() -> [MoodTag]
-   - addTag(name:color:) -> MoodTag
-   - fetchInsight(for date: Date) -> DailyInsight?
-   - saveInsight(date:summary:sentimentScore:) -> DailyInsight
+   - addCheckIn(recoveryStatus:emoji:note:tags:) -> CheckIn
+   - deleteCheckIn(_ checkIn: CheckIn)
+   - fetchCheckIns(from:to:) -> [CheckIn] using #Predicate
+   - fetchCheckIns(recoveryStatus:) -> [CheckIn] using #Predicate
+   - fetchAllTags() -> [RecoveryTag]
+   - addTag(name:color:) -> RecoveryTag
+   - fetchInsight(for date: Date) -> RecoveryInsight?
+   - saveInsight(date:summary:sentimentScore:) -> RecoveryInsight
 
-2. A SwiftDataMoodRepository class that implements this
+2. A SwiftDataRecoveryService class that implements this
    protocol using a ModelContext. Mark it @MainActor since
    ModelContext is not Sendable.
 
-3. Update MoodbitApp.swift to configure a ModelContainer
-   with all three models and inject a SwiftDataMoodRepository
+3. Update BetAwayApp.swift to configure a ModelContainer
+   with all three models and inject a SwiftDataRecoveryService
    into the environment.
 
 Use #Predicate for all queries. Handle errors with
 os.Logger, not print(). Use Swift 6 strict concurrency.
 ```
 
-### MoodRepository Protocol and Implementation
+### RecoveryService Protocol and Implementation
 
 ```swift
 import Foundation
 import SwiftData
 import os
 
-protocol MoodRepository {
-    func addEntry(moodLevel: Int, emoji: String, note: String, tags: [MoodTag]) -> MoodEntry
-    func deleteEntry(_ entry: MoodEntry)
-    func fetchEntries(from startDate: Date, to endDate: Date) -> [MoodEntry]
-    func fetchEntries(moodLevel: Int) -> [MoodEntry]
-    func fetchAllTags() -> [MoodTag]
-    func addTag(name: String, color: String) -> MoodTag
-    func fetchInsight(for date: Date) -> DailyInsight?
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> DailyInsight
+protocol RecoveryService {
+    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn
+    func deleteCheckIn(_ checkIn: CheckIn)
+    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn]
+    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn]
+    func fetchAllTags() -> [RecoveryTag]
+    func addTag(name: String, color: String) -> RecoveryTag
+    func fetchInsight(for date: Date) -> RecoveryInsight?
+    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight
 }
 
 @MainActor
-final class SwiftDataMoodRepository: MoodRepository {
+final class SwiftDataRecoveryService: RecoveryService {
     private let modelContext: ModelContext
-    private let logger = Logger(subsystem: "com.moodbit", category: "MoodRepository")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
 
-    func addEntry(moodLevel: Int, emoji: String, note: String, tags: [MoodTag]) -> MoodEntry {
-        let entry = MoodEntry(moodLevel: moodLevel, emoji: emoji, note: note)
-        entry.tags = tags
-        modelContext.insert(entry)
+    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn {
+        let checkIn = CheckIn(recoveryStatus: recoveryStatus, emoji: emoji, note: note)
+        checkIn.tags = tags
+        modelContext.insert(checkIn)
         save()
-        return entry
+        return checkIn
     }
 
-    func deleteEntry(_ entry: MoodEntry) {
-        modelContext.delete(entry)
+    func deleteCheckIn(_ checkIn: CheckIn) {
+        modelContext.delete(checkIn)
         save()
     }
 
-    func fetchEntries(from startDate: Date, to endDate: Date) -> [MoodEntry] {
-        let predicate = #Predicate<MoodEntry> {
+    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn] {
+        let predicate = #Predicate<CheckIn> {
             $0.createdAt >= startDate && $0.createdAt <= endDate
         }
-        let descriptor = FetchDescriptor<MoodEntry>(
+        let descriptor = FetchDescriptor<CheckIn>(
             predicate: predicate,
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         do {
             return try modelContext.fetch(descriptor)
         } catch {
-            logger.error("Failed to fetch entries by date range: \(error.localizedDescription)")
+            logger.error("Failed to fetch check-ins by date range: \(error.localizedDescription)")
             return []
         }
     }
 
-    func fetchEntries(moodLevel: Int) -> [MoodEntry] {
-        let predicate = #Predicate<MoodEntry> {
-            $0.moodLevel == moodLevel
+    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn] {
+        let predicate = #Predicate<CheckIn> {
+            $0.recoveryStatus == recoveryStatus
         }
-        let descriptor = FetchDescriptor<MoodEntry>(
+        let descriptor = FetchDescriptor<CheckIn>(
             predicate: predicate,
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         do {
             return try modelContext.fetch(descriptor)
         } catch {
-            logger.error("Failed to fetch entries by mood level: \(error.localizedDescription)")
+            logger.error("Failed to fetch check-ins by recovery status: \(error.localizedDescription)")
             return []
         }
     }
 
-    func fetchAllTags() -> [MoodTag] {
-        let descriptor = FetchDescriptor<MoodTag>(
+    func fetchAllTags() -> [RecoveryTag] {
+        let descriptor = FetchDescriptor<RecoveryTag>(
             sortBy: [SortDescriptor(\.name)]
         )
         do {
@@ -331,21 +332,21 @@ final class SwiftDataMoodRepository: MoodRepository {
         }
     }
 
-    func addTag(name: String, color: String) -> MoodTag {
-        let tag = MoodTag(name: name, color: color)
+    func addTag(name: String, color: String) -> RecoveryTag {
+        let tag = RecoveryTag(name: name, color: color)
         modelContext.insert(tag)
         save()
         return tag
     }
 
-    func fetchInsight(for date: Date) -> DailyInsight? {
+    func fetchInsight(for date: Date) -> RecoveryInsight? {
         let startOfDay = Calendar.current.startOfDay(for: date)
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
 
-        let predicate = #Predicate<DailyInsight> {
+        let predicate = #Predicate<RecoveryInsight> {
             $0.date >= startOfDay && $0.date < endOfDay
         }
-        let descriptor = FetchDescriptor<DailyInsight>(predicate: predicate)
+        let descriptor = FetchDescriptor<RecoveryInsight>(predicate: predicate)
         do {
             return try modelContext.fetch(descriptor).first
         } catch {
@@ -354,9 +355,9 @@ final class SwiftDataMoodRepository: MoodRepository {
         }
     }
 
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> DailyInsight {
+    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight {
         let normalizedDate = Calendar.current.startOfDay(for: date)
-        let insight = DailyInsight(
+        let insight = RecoveryInsight(
             date: normalizedDate,
             summary: summary,
             sentimentScore: sentimentScore
@@ -380,9 +381,9 @@ final class SwiftDataMoodRepository: MoodRepository {
 
 This is the core of the lesson, so let us break down the decisions that matter.
 
-**Why a protocol at all?** Because in Module 6, we write unit tests. Tests need a mock repository that returns controlled data without touching a real database. If your views call `ModelContext` directly, you cannot test them without standing up a full SwiftData stack. The protocol gives us a seam to inject either the real implementation or a mock.
+**Why a protocol at all?** Because in Module 6, we write unit tests. Tests need a mock service that returns controlled data without touching a real database. If your views call `ModelContext` directly, you cannot test them without standing up a full SwiftData stack. The protocol gives us a seam to inject either the real implementation or a mock.
 
-**`@MainActor` on the class.** `ModelContext` is bound to the actor that created it. In SwiftUI apps, the main context lives on `@MainActor`. If you try to use it from a background thread under Swift 6 strict concurrency, the compiler stops you. Marking the repository `@MainActor` makes this explicit and safe.
+**`@MainActor` on the class.** `ModelContext` is bound to the actor that created it. In SwiftUI apps, the main context lives on `@MainActor`. If you try to use it from a background thread under Swift 6 strict concurrency, the compiler stops you. Marking the service `@MainActor` makes this explicit and safe.
 
 **`#Predicate` for every query.** This is SwiftData's compile-time-checked query syntax. Unlike Core Data's `NSPredicate` (which is a runtime string), `#Predicate` catches type errors at compile time. If you rename `createdAt` to `timestamp`, every `#Predicate` that references it will show a compiler error — no silent runtime failures.
 
@@ -397,15 +398,15 @@ import SwiftUI
 import SwiftData
 
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     let modelContainer: ModelContainer
 
     init() {
         do {
             let schema = Schema([
-                MoodEntry.self,
-                MoodTag.self,
-                DailyInsight.self,
+                CheckIn.self,
+                RecoveryTag.self,
+                RecoveryInsight.self,
             ])
             let configuration = ModelConfiguration(isStoredInMemoryOnly: false)
             modelContainer = try ModelContainer(for: schema, configurations: [configuration])
@@ -419,7 +420,7 @@ struct MoodbitApp: App {
         WindowGroup {
             ContentView()
                 .environment(
-                    SwiftDataMoodRepository(modelContext: modelContainer.mainContext)
+                    SwiftDataRecoveryService(modelContext: modelContainer.mainContext)
                 )
         }
         .modelContainer(modelContainer)
@@ -430,8 +431,8 @@ struct MoodbitApp: App {
         guard !hasSeeded else { return }
 
         let context = modelContainer.mainContext
-        for item in MoodTag.predefined {
-            let tag = MoodTag(name: item.name, color: item.color)
+        for item in RecoveryTag.predefined {
+            let tag = RecoveryTag(name: item.name, color: item.color)
             context.insert(tag)
         }
 
@@ -447,7 +448,7 @@ struct MoodbitApp: App {
 
 **`fatalError` in the catch block is intentional.** If the database cannot be created, the app has no persistence. There is no graceful recovery — this is the standard Apple pattern.
 
-**Repository injection via `.environment()`.** We create the repository once at the app level and inject it into the view hierarchy. Every view that needs data access reads it from the environment. This is dependency injection without any third-party framework.
+**Service injection via `.environment()`.** We create the service once at the app level and inject it into the view hierarchy. Every view that needs data access reads it from the environment. This is dependency injection without any third-party framework.
 
 **Tag seeding uses the same `UserDefaults` flag pattern** we used in the free course. Simple, reliable, one-time execution.
 
@@ -455,46 +456,46 @@ struct MoodbitApp: App {
 
 Before moving to the next lesson, verify these things manually:
 
-1. **Build the project.** All four files should compile with zero warnings under Swift 6 strict concurrency. If you see `Sendable` warnings on the repository, confirm that `@MainActor` is on the class declaration.
+1. **Build the project.** All four files should compile with zero warnings under Swift 6 strict concurrency. If you see `Sendable` warnings on the service, confirm that `@MainActor` is on the class declaration.
 
-2. **Check the relationship inverse.** Open `MoodEntry.swift` and confirm that `@Relationship(inverse: \MoodTag.entries)` points to the correct keypath. Open `MoodTag.swift` and confirm it does NOT also declare an `inverse:` parameter. Only one side declares the inverse.
+2. **Check the relationship inverse.** Open `CheckIn.swift` and confirm that `@Relationship(inverse: \RecoveryTag.checkIns)` points to the correct keypath. Open `RecoveryTag.swift` and confirm it does NOT also declare an `inverse:` parameter. Only one side declares the inverse.
 
-3. **Check delete rules.** Both relationships should use `.nullify`. If the AI generated `.cascade` on either side, change it. Cascade on a many-to-many means deleting one entry would delete all its tags — and those tags would then be removed from every other entry that used them. Cascade is almost never correct for many-to-many.
+3. **Check delete rules.** Both relationships should use `.nullify`. If the AI generated `.cascade` on either side, change it. Cascade on a many-to-many means deleting one check-in would delete all its tags — and those tags would then be removed from every other check-in that used them. Cascade is almost never correct for many-to-many.
 
 4. **Check that no property is force-unwrapped.** Search for `!` in all model files. There should be exactly one — the `endOfDay` calculation in `fetchInsight`, which is safe because `Calendar.date(byAdding:)` only returns nil for absurd inputs.
 
-5. **Test the repository.** Create a temporary button in ContentView that calls `repository.addEntry(moodLevel: 4, emoji: "😊", note: "Test", tags: [])`. Tap it, quit the app, relaunch. The entry should persist.
+5. **Test the service.** Create a temporary button in ContentView that calls `service.addCheckIn(recoveryStatus: 4, emoji: "💪", note: "Test", tags: [])`. Tap it, quit the app, relaunch. The check-in should persist.
 
 ## Final Code
 
 Here is every file, complete and compilable.
 
-**Models/MoodEntry.swift**
+**Models/CheckIn.swift**
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class MoodEntry {
+final class CheckIn {
     @Attribute(.unique) var id: UUID
-    var moodLevel: Int
+    var recoveryStatus: Int
     var emoji: String
     var note: String
     var createdAt: Date
 
-    @Relationship(deleteRule: .nullify, inverse: \MoodTag.entries)
-    var tags: [MoodTag]
+    @Relationship(deleteRule: .nullify, inverse: \RecoveryTag.checkIns)
+    var tags: [RecoveryTag]
 
     init(
         id: UUID = UUID(),
-        moodLevel: Int,
+        recoveryStatus: Int,
         emoji: String,
         note: String = "",
         createdAt: Date = .now
     ) {
         self.id = id
-        self.moodLevel = moodLevel
+        self.recoveryStatus = recoveryStatus
         self.emoji = emoji
         self.note = note
         self.createdAt = createdAt
@@ -503,20 +504,20 @@ final class MoodEntry {
 }
 ```
 
-**Models/MoodTag.swift**
+**Models/RecoveryTag.swift**
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class MoodTag {
+final class RecoveryTag {
     @Attribute(.unique) var id: UUID
     var name: String
     var color: String
 
     @Relationship(deleteRule: .nullify)
-    var entries: [MoodEntry]
+    var checkIns: [CheckIn]
 
     init(
         id: UUID = UUID(),
@@ -526,28 +527,28 @@ final class MoodTag {
         self.id = id
         self.name = name
         self.color = color
-        self.entries = []
+        self.checkIns = []
     }
 
     static let predefined: [(name: String, color: String)] = [
-        ("Work", "#4A90D9"),
+        ("Urge", "#E74C3C"),
+        ("Therapy", "#4A90D9"),
         ("Exercise", "#2ECC71"),
         ("Social", "#F39C12"),
-        ("Family", "#E74C3C"),
-        ("Health", "#1ABC9C"),
-        ("Creative", "#9B59B6"),
+        ("Financial", "#1ABC9C"),
+        ("Breathing", "#9B59B6"),
     ]
 }
 ```
 
-**Models/DailyInsight.swift**
+**Models/RecoveryInsight.swift**
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class DailyInsight {
+final class RecoveryInsight {
     @Attribute(.unique) var id: UUID
     var date: Date
     var summary: String
@@ -570,80 +571,80 @@ final class DailyInsight {
 }
 ```
 
-**Repositories/MoodRepository.swift**
+**Services/RecoveryService.swift**
 
 ```swift
 import Foundation
 import SwiftData
 import os
 
-protocol MoodRepository {
-    func addEntry(moodLevel: Int, emoji: String, note: String, tags: [MoodTag]) -> MoodEntry
-    func deleteEntry(_ entry: MoodEntry)
-    func fetchEntries(from startDate: Date, to endDate: Date) -> [MoodEntry]
-    func fetchEntries(moodLevel: Int) -> [MoodEntry]
-    func fetchAllTags() -> [MoodTag]
-    func addTag(name: String, color: String) -> MoodTag
-    func fetchInsight(for date: Date) -> DailyInsight?
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> DailyInsight
+protocol RecoveryService {
+    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn
+    func deleteCheckIn(_ checkIn: CheckIn)
+    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn]
+    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn]
+    func fetchAllTags() -> [RecoveryTag]
+    func addTag(name: String, color: String) -> RecoveryTag
+    func fetchInsight(for date: Date) -> RecoveryInsight?
+    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight
 }
 
 @MainActor
-final class SwiftDataMoodRepository: MoodRepository {
+final class SwiftDataRecoveryService: RecoveryService {
     private let modelContext: ModelContext
-    private let logger = Logger(subsystem: "com.moodbit", category: "MoodRepository")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
 
-    func addEntry(moodLevel: Int, emoji: String, note: String, tags: [MoodTag]) -> MoodEntry {
-        let entry = MoodEntry(moodLevel: moodLevel, emoji: emoji, note: note)
-        entry.tags = tags
-        modelContext.insert(entry)
+    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn {
+        let checkIn = CheckIn(recoveryStatus: recoveryStatus, emoji: emoji, note: note)
+        checkIn.tags = tags
+        modelContext.insert(checkIn)
         save()
-        return entry
+        return checkIn
     }
 
-    func deleteEntry(_ entry: MoodEntry) {
-        modelContext.delete(entry)
+    func deleteCheckIn(_ checkIn: CheckIn) {
+        modelContext.delete(checkIn)
         save()
     }
 
-    func fetchEntries(from startDate: Date, to endDate: Date) -> [MoodEntry] {
-        let predicate = #Predicate<MoodEntry> {
+    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn] {
+        let predicate = #Predicate<CheckIn> {
             $0.createdAt >= startDate && $0.createdAt <= endDate
         }
-        let descriptor = FetchDescriptor<MoodEntry>(
+        let descriptor = FetchDescriptor<CheckIn>(
             predicate: predicate,
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         do {
             return try modelContext.fetch(descriptor)
         } catch {
-            logger.error("Failed to fetch entries by date: \(error.localizedDescription)")
+            logger.error("Failed to fetch check-ins by date: \(error.localizedDescription)")
             return []
         }
     }
 
-    func fetchEntries(moodLevel: Int) -> [MoodEntry] {
-        let predicate = #Predicate<MoodEntry> {
-            $0.moodLevel == moodLevel
+    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn] {
+        let predicate = #Predicate<CheckIn> {
+            $0.recoveryStatus == recoveryStatus
         }
-        let descriptor = FetchDescriptor<MoodEntry>(
+        let descriptor = FetchDescriptor<CheckIn>(
             predicate: predicate,
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         do {
             return try modelContext.fetch(descriptor)
         } catch {
-            logger.error("Failed to fetch entries by level: \(error.localizedDescription)")
+            logger.error("Failed to fetch check-ins by status: \(error.localizedDescription)")
             return []
         }
     }
 
-    func fetchAllTags() -> [MoodTag] {
-        let descriptor = FetchDescriptor<MoodTag>(
+    func fetchAllTags() -> [RecoveryTag] {
+        let descriptor = FetchDescriptor<RecoveryTag>(
             sortBy: [SortDescriptor(\.name)]
         )
         do {
@@ -654,21 +655,21 @@ final class SwiftDataMoodRepository: MoodRepository {
         }
     }
 
-    func addTag(name: String, color: String) -> MoodTag {
-        let tag = MoodTag(name: name, color: color)
+    func addTag(name: String, color: String) -> RecoveryTag {
+        let tag = RecoveryTag(name: name, color: color)
         modelContext.insert(tag)
         save()
         return tag
     }
 
-    func fetchInsight(for date: Date) -> DailyInsight? {
+    func fetchInsight(for date: Date) -> RecoveryInsight? {
         let startOfDay = Calendar.current.startOfDay(for: date)
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
 
-        let predicate = #Predicate<DailyInsight> {
+        let predicate = #Predicate<RecoveryInsight> {
             $0.date >= startOfDay && $0.date < endOfDay
         }
-        let descriptor = FetchDescriptor<DailyInsight>(predicate: predicate)
+        let descriptor = FetchDescriptor<RecoveryInsight>(predicate: predicate)
         do {
             return try modelContext.fetch(descriptor).first
         } catch {
@@ -677,9 +678,9 @@ final class SwiftDataMoodRepository: MoodRepository {
         }
     }
 
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> DailyInsight {
+    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight {
         let normalizedDate = Calendar.current.startOfDay(for: date)
-        let insight = DailyInsight(
+        let insight = RecoveryInsight(
             date: normalizedDate,
             summary: summary,
             sentimentScore: sentimentScore
@@ -703,25 +704,25 @@ final class SwiftDataMoodRepository: MoodRepository {
 
 Before moving to Lesson 1.3, confirm all of these:
 
-- [ ] `MoodEntry`, `MoodTag`, and `DailyInsight` compile with zero warnings under Swift 6
-- [ ] The `MoodEntry.tags` relationship declares `inverse: \MoodTag.entries`
-- [ ] `MoodTag.entries` does NOT also declare an inverse (only one side does)
+- [ ] `CheckIn`, `RecoveryTag`, and `RecoveryInsight` compile with zero warnings under Swift 6
+- [ ] The `CheckIn.tags` relationship declares `inverse: \RecoveryTag.checkIns`
+- [ ] `RecoveryTag.checkIns` does NOT also declare an inverse (only one side does)
 - [ ] All delete rules are `.nullify`, not `.cascade`
-- [ ] `MoodRepository` protocol exists with eight methods
-- [ ] `SwiftDataMoodRepository` is marked `@MainActor`
+- [ ] `RecoveryService` protocol exists with eight methods
+- [ ] `SwiftDataRecoveryService` is marked `@MainActor`
 - [ ] All queries use `#Predicate`, not string-based predicates
-- [ ] `ModelContainer` is configured in `MoodbitApp.init()` with all three model types
+- [ ] `ModelContainer` is configured in `BetAwayApp.init()` with all three model types
 - [ ] Predefined tags are seeded on first launch
-- [ ] You can add an entry, quit, relaunch, and the entry persists
+- [ ] You can add a check-in, quit, relaunch, and the check-in persists
 
 ## Challenge
 
-**Add a `fetchRecentEntries(limit:)` method** to both the protocol and the implementation. It should return the most recent N entries, sorted by `createdAt` descending.
+**Add a `fetchRecentCheckIns(limit:)` method** to both the protocol and the implementation. It should return the most recent N check-ins, sorted by `createdAt` descending.
 
 Hint: `FetchDescriptor` has a `fetchLimit` property. Set it after creating the descriptor:
 
 ```swift
-var descriptor = FetchDescriptor<MoodEntry>(
+var descriptor = FetchDescriptor<CheckIn>(
     sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
 )
 descriptor.fetchLimit = limit

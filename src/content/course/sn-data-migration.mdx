@@ -7,7 +7,7 @@ moduleTitle: "Data Layer & Persistence"
 lesson: 3
 duration: "18 min read"
 difficulty: "advanced"
-topics: ["SwiftData", "Schema Versioning", "Migration", "Data Safety", "VersionedSchema", "MigrationPlan", "Moodbit"]
+topics: ["SwiftData", "Schema Versioning", "Migration", "Data Safety", "VersionedSchema", "MigrationPlan", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
@@ -15,15 +15,15 @@ pubDate: 2026-02-22
 
 Your data model will change. It is not a question of if — it is a question of when. You will add a property, rename a field, change a relationship. And when that happens, every user who already has data on their device is holding a database that no longer matches your code.
 
-If you handle this wrong, the app crashes on launch. The user loses their mood journal. They leave a one-star review. This is not hypothetical — it is the number one cause of data-loss complaints on the App Store.
+If you handle this wrong, the app crashes on launch. The user loses their recovery data. They leave a one-star review. This is not hypothetical — it is the number one cause of data-loss complaints on the App Store.
 
-In this lesson, we set up SwiftData schema versioning and migration plans for Moodbit so that every future model change is safe, tested, and invisible to the user.
+In this lesson, we set up SwiftData schema versioning and migration plans for BetAway so that every future model change is safe, tested, and invisible to the user.
 
 ## What You'll Learn
 
 - How `VersionedSchema` and `SchemaMigrationPlan` work in SwiftData
 - The difference between lightweight (automatic) and custom (manual) migrations
-- How to version Moodbit's `MoodEntry` model from V1 to V2
+- How to version BetAway's `CheckIn` model from V1 to V2
 - How to configure `ModelContainer` to use a migration plan
 - How to test migrations with sample data before shipping
 - When to use each migration type — and when you are in trouble
@@ -32,7 +32,7 @@ In this lesson, we set up SwiftData schema versioning and migration plans for Mo
 
 SwiftData handles a lot of persistence work for you. But it does not handle model evolution automatically. If you add a new property to a `@Model` class without a default value and without a migration plan, SwiftData cannot open the existing database. The store fails to load. Your app is dead on arrival for every existing user.
 
-This is especially dangerous with AI-assisted development. You ask Claude Code to "add a streakCount property to MoodEntry" and it adds the property, compiles, runs great on the simulator — because the simulator has no existing data. You ship it. And then your users, who have weeks of mood entries, open the app to a blank screen or a crash.
+This is especially dangerous with AI-assisted development. You ask Claude Code to "add a streakCount property to CheckIn" and it adds the property, compiles, runs great on the simulator — because the simulator has no existing data. You ship it. And then your users, who have weeks of recovery check-ins, open the app to a blank screen or a crash.
 
 The fix is straightforward: version your schema from day one, write migration plans, and test them before every release. It takes 15 minutes to set up. It saves you from disaster.
 
@@ -43,16 +43,16 @@ The fix is straightforward: version your schema from day one, write migration pl
 Here is the prompt I send to Claude Code to plan the migration architecture:
 
 ```
-I need to set up SwiftData schema versioning for Moodbit.
+I need to set up SwiftData schema versioning for BetAway.
 Before writing code, think through:
 
 1. What does VersionedSchema look like for our current
-   MoodEntry model? Call it MoodSchemaV1.
+   CheckIn model? Call it BetAwaySchemaV1.
 2. For V2, I want to add two new properties:
    - streakCount: Int (default 0) — tracks consecutive
-     days of logging
+     days of check-ins
    - sentiment: String (default "neutral") — stores the
-     AI-analyzed sentiment label
+     on-device ML-analyzed sentiment label
 3. What migration stages do we need?
 4. Should these be lightweight or custom migrations?
 5. How do we configure ModelContainer to use the plan?
@@ -66,7 +66,7 @@ Notice what this prompt does. It asks the AI to reason before coding — chain-o
 
 Claude Code responds with a solid analysis. The key points:
 
-- **V1** captures the current MoodEntry shape exactly as it exists in the database today
+- **V1** captures the current CheckIn shape exactly as it exists in the database today
 - **V2** adds `streakCount` and `sentiment` with default values
 - Both new properties have defaults, so SwiftData can perform a **lightweight migration** — it maps old columns to new columns and fills in defaults automatically
 - If we were renaming a property or transforming data, we would need a **custom migration**
@@ -79,16 +79,16 @@ Here is the pattern I see constantly in AI-generated code, and it is the one tha
 ```swift
 // DANGEROUS — no versioning, no migration plan
 @Model
-final class MoodEntry {
+final class CheckIn {
     var date: Date
-    var mood: Int
+    var recoveryStatus: Int
     var note: String
     var streakCount: Int  // Added in v1.1
     var sentiment: String // Added in v1.1
 
-    init(date: Date, mood: Int, note: String) {
+    init(date: Date, recoveryStatus: Int, note: String) {
         self.date = date
-        self.mood = mood
+        self.recoveryStatus = recoveryStatus
         self.note = note
         self.streakCount = 0
         self.sentiment = "neutral"
@@ -96,7 +96,7 @@ final class MoodEntry {
 }
 ```
 
-This compiles. It runs. But if a user has a V1 database, SwiftData sees two columns that do not exist in the store. Without a migration plan telling it how to handle the mismatch, it fails. The init defaults do not matter — they are for new objects, not for migrating existing rows.
+This compiles. It runs. But if a user has a V1 database, SwiftData sees two columns that do not exist in the store. Without a migration plan telling it how to handle the mismatch, it fails. The init defaults do not matter -- they are for new objects, not for migrating existing rows.
 
 **Never add properties to a shipped `@Model` without a versioned schema and migration plan.**
 
@@ -105,60 +105,60 @@ This compiles. It runs. But if a user has a V1 database, SwiftData sees two colu
 ### The Prompt
 
 ```
-Implement the SwiftData migration architecture for Moodbit.
+Implement the SwiftData migration architecture for BetAway.
 
 Create three files:
-1. MoodSchemaV1.swift — VersionedSchema with the current
-   MoodEntry model (date: Date, mood: Int, note: String,
+1. BetAwaySchemaV1.swift — VersionedSchema with the current
+   CheckIn model (date: Date, recoveryStatus: Int, note: String,
    tags: [String], isFavorite: Bool)
-2. MoodSchemaV2.swift — VersionedSchema adding streakCount
+2. BetAwaySchemaV2.swift — VersionedSchema adding streakCount
    (Int, default 0) and sentiment (String, default "neutral")
-3. MoodbitMigrationPlan.swift — SchemaMigrationPlan with
+3. BetAwayMigrationPlan.swift — SchemaMigrationPlan with
    a lightweight migration stage from V1 to V2
 
 Use Swift 6 conventions. Each schema should use an enum
-conforming to VersionedSchema. The MoodEntry inside each
+conforming to VersionedSchema. The CheckIn inside each
 schema should be a @Model class with the exact properties
 for that version.
 
 Also show how to update the ModelContainer configuration
-to use MoodbitMigrationPlan.
+to use BetAwayMigrationPlan.
 ```
 
 ### AI Review
 
 Here is what Claude Code generates. Let me walk through each file and call out what matters.
 
-**MoodSchemaV1.swift** — the baseline:
+**BetAwaySchemaV1.swift** — the baseline:
 
 ```swift
 import SwiftData
 import Foundation
 
-enum MoodSchemaV1: VersionedSchema {
+enum BetAwaySchemaV1: VersionedSchema {
     static var versionIdentifier = Schema.Version(1, 0, 0)
 
     static var models: [any PersistentModel.Type] {
-        [MoodEntry.self]
+        [CheckIn.self]
     }
 
     @Model
-    final class MoodEntry {
+    final class CheckIn {
         var date: Date
-        var mood: Int
+        var recoveryStatus: Int
         var note: String
         var tags: [String]
         var isFavorite: Bool
 
         init(
             date: Date,
-            mood: Int,
+            recoveryStatus: Int,
             note: String = "",
             tags: [String] = [],
             isFavorite: Bool = false
         ) {
             self.date = date
-            self.mood = mood
+            self.recoveryStatus = recoveryStatus
             self.note = note
             self.tags = tags
             self.isFavorite = isFavorite
@@ -171,27 +171,27 @@ Review checklist:
 
 - ✅ `VersionedSchema` conformance on an enum — correct pattern. Enums cannot be instantiated, which is exactly what we want for a schema definition.
 - ✅ `versionIdentifier` uses `Schema.Version(1, 0, 0)` — semantic versioning for your data model.
-- ✅ `models` returns an array of all model types in this schema version. If you had multiple models (MoodEntry, UserProfile, etc.), they would all go here.
-- ✅ The `MoodEntry` class inside the enum is scoped to V1. This is the snapshot of what the model looked like at launch.
-- ⚠️ Make sure this matches your actual shipped model exactly. If your production MoodEntry has a property that is missing here, the migration will fail. Compare property-by-property.
+- ✅ `models` returns an array of all model types in this schema version. If you had multiple models (CheckIn, UserProfile, etc.), they would all go here.
+- ✅ The `CheckIn` class inside the enum is scoped to V1. This is the snapshot of what the model looked like at launch.
+- ⚠️ Make sure this matches your actual shipped model exactly. If your production CheckIn has a property that is missing here, the migration will fail. Compare property-by-property.
 
-**MoodSchemaV2.swift** — the evolution:
+**BetAwaySchemaV2.swift** — the evolution:
 
 ```swift
 import SwiftData
 import Foundation
 
-enum MoodSchemaV2: VersionedSchema {
+enum BetAwaySchemaV2: VersionedSchema {
     static var versionIdentifier = Schema.Version(2, 0, 0)
 
     static var models: [any PersistentModel.Type] {
-        [MoodEntry.self]
+        [CheckIn.self]
     }
 
     @Model
-    final class MoodEntry {
+    final class CheckIn {
         var date: Date
-        var mood: Int
+        var recoveryStatus: Int
         var note: String
         var tags: [String]
         var isFavorite: Bool
@@ -200,7 +200,7 @@ enum MoodSchemaV2: VersionedSchema {
 
         init(
             date: Date,
-            mood: Int,
+            recoveryStatus: Int,
             note: String = "",
             tags: [String] = [],
             isFavorite: Bool = false,
@@ -208,7 +208,7 @@ enum MoodSchemaV2: VersionedSchema {
             sentiment: String = "neutral"
         ) {
             self.date = date
-            self.mood = mood
+            self.recoveryStatus = recoveryStatus
             self.note = note
             self.tags = tags
             self.isFavorite = isFavorite
@@ -226,14 +226,14 @@ Review checklist:
 - ✅ `streakCount` and `sentiment` have default values in the init. This is critical for the lightweight migration — SwiftData uses these defaults to populate existing rows.
 - ✅ The model is a complete snapshot of V2. Someone reading this file knows exactly what the database looks like at version 2.
 
-**MoodbitMigrationPlan.swift** — the bridge:
+**BetAwayMigrationPlan.swift** — the bridge:
 
 ```swift
 import SwiftData
 
-enum MoodbitMigrationPlan: SchemaMigrationPlan {
+enum BetAwayMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [MoodSchemaV1.self, MoodSchemaV2.self]
+        [BetAwaySchemaV1.self, BetAwaySchemaV2.self]
     }
 
     static var stages: [MigrationStage] {
@@ -241,8 +241,8 @@ enum MoodbitMigrationPlan: SchemaMigrationPlan {
     }
 
     static let migrateV1toV2 = MigrationStage.lightweight(
-        fromVersion: MoodSchemaV1.self,
-        toVersion: MoodSchemaV2.self
+        fromVersion: BetAwaySchemaV1.self,
+        toVersion: BetAwaySchemaV2.self
     )
 }
 ```
@@ -252,7 +252,7 @@ Review checklist:
 - ✅ `schemas` lists every version in order — V1 first, V2 second. SwiftData walks this list to determine the migration path.
 - ✅ `stages` lists every migration step. Right now there is one: V1 to V2.
 - ✅ `.lightweight` is the correct choice here because we are only adding new properties with default values. SwiftData handles this automatically — no custom code needed.
-- ❌ One thing to watch: if you later need V3, you add `MoodSchemaV3.self` to `schemas` and a new stage to `stages`. The plan grows linearly with each version. Do not skip versions — SwiftData migrates one stage at a time.
+- ❌ One thing to watch: if you later need V3, you add `BetAwaySchemaV3.self` to `schemas` and a new stage to `stages`. The plan grows linearly with each version. Do not skip versions — SwiftData migrates one stage at a time.
 
 **ModelContainer configuration:**
 
@@ -261,14 +261,14 @@ import SwiftUI
 import SwiftData
 
 @main
-struct MoodbitApp: App {
+struct BetAwayApp: App {
     let modelContainer: ModelContainer
 
     init() {
         do {
             modelContainer = try ModelContainer(
-                for: MoodSchemaV2.MoodEntry.self,
-                migrationPlan: MoodbitMigrationPlan.self
+                for: BetAwaySchemaV2.CheckIn.self,
+                migrationPlan: BetAwayMigrationPlan.self
             )
         } catch {
             fatalError("Failed to create ModelContainer: \(error)")
@@ -284,51 +284,51 @@ struct MoodbitApp: App {
 }
 ```
 
-Notice the key change: `ModelContainer` now takes `MoodSchemaV2.MoodEntry.self` — always the latest schema version — and `migrationPlan: MoodbitMigrationPlan.self`. This tells SwiftData: "The current model looks like V2. If the database is older, use this plan to bring it up to date."
+Notice the key change: `ModelContainer` now takes `BetAwaySchemaV2.CheckIn.self` — always the latest schema version — and `migrationPlan: BetAwayMigrationPlan.self`. This tells SwiftData: "The current model looks like V2. If the database is older, use this plan to bring it up to date."
 
 ## Iteration
 
 The lightweight migration handles our V1-to-V2 case. But what if you need a custom migration — one that transforms data, not just adds columns?
 
-Let me show you what that looks like. Suppose in V3 we want to replace the `mood: Int` (a 1-5 scale) with a `moodLabel: String` ("terrible", "bad", "okay", "good", "great"). This is not adding a column — it is transforming existing data. Lightweight migration cannot do this.
+Let me show you what that looks like. Suppose in V3 we want to replace the `recoveryStatus: Int` (a 1-5 scale) with a `recoveryLabel: String` ("crisis", "struggling", "managing", "steady", "strong"). This is not adding a column — it is transforming existing data. Lightweight migration cannot do this.
 
 Here is the prompt:
 
 ```
 Add a V3 to our migration plan. In V3, we replace the
-mood: Int property (1-5 scale) with moodLabel: String.
+recoveryStatus: Int property (1-5 scale) with recoveryLabel: String.
 
 The custom migration should map:
-1 -> "terrible", 2 -> "bad", 3 -> "okay",
-4 -> "good", 5 -> "great"
+1 -> "crisis", 2 -> "struggling", 3 -> "managing",
+4 -> "steady", 5 -> "strong"
 
 Use MigrationStage.custom for this stage. Keep the V1->V2
 stage as lightweight.
 ```
 
-And here is the custom migration stage that gets added to `MoodbitMigrationPlan`:
+And here is the custom migration stage that gets added to `BetAwayMigrationPlan`:
 
 ```swift
 static let migrateV2toV3 = MigrationStage.custom(
-    fromVersion: MoodSchemaV2.self,
-    toVersion: MoodSchemaV3.self,
+    fromVersion: BetAwaySchemaV2.self,
+    toVersion: BetAwaySchemaV3.self,
     willMigrate: { context in
-        guard let entries = try? context.fetch(
-            FetchDescriptor<MoodSchemaV2.MoodEntry>()
+        guard let checkIns = try? context.fetch(
+            FetchDescriptor<BetAwaySchemaV2.CheckIn>()
         ) else { return }
 
-        for entry in entries {
+        for checkIn in checkIns {
             let label: String
-            switch entry.mood {
-            case 1: label = "terrible"
-            case 2: label = "bad"
-            case 3: label = "okay"
-            case 4: label = "good"
-            case 5: label = "great"
-            default: label = "okay"
+            switch checkIn.recoveryStatus {
+            case 1: label = "crisis"
+            case 2: label = "struggling"
+            case 3: label = "managing"
+            case 4: label = "steady"
+            case 5: label = "strong"
+            default: label = "managing"
             }
             // The new property is set during migration
-            entry.setValue(forKey: "moodLabel", to: label)
+            checkIn.setValue(forKey: "recoveryLabel", to: label)
         }
 
         try? context.save()
@@ -341,7 +341,7 @@ The updated `schemas` and `stages`:
 
 ```swift
 static var schemas: [any VersionedSchema.Type] {
-    [MoodSchemaV1.self, MoodSchemaV2.self, MoodSchemaV3.self]
+    [BetAwaySchemaV1.self, BetAwaySchemaV2.self, BetAwaySchemaV3.self]
 }
 
 static var stages: [MigrationStage] {
@@ -377,36 +377,36 @@ Here is how I test migrations:
 ```swift
 import Testing
 import SwiftData
-@testable import Moodbit
+@testable import BetAway
 
-@Test("V1 to V2 migration preserves existing entries")
+@Test("V1 to V2 migration preserves existing check-ins")
 func testV1toV2Migration() throws {
     // Create an in-memory container with V1 schema
     let v1Config = ModelConfiguration(isStoredInMemoryOnly: true)
     let v1Container = try ModelContainer(
-        for: MoodSchemaV1.MoodEntry.self,
+        for: BetAwaySchemaV1.CheckIn.self,
         configurations: v1Config
     )
 
     // Insert V1 data
     let context = v1Container.mainContext
-    let entry = MoodSchemaV1.MoodEntry(
+    let checkIn = BetAwaySchemaV1.CheckIn(
         date: Date.now,
-        mood: 4,
-        note: "Great day",
-        tags: ["work", "exercise"],
+        recoveryStatus: 4,
+        note: "Strong day in recovery",
+        tags: ["exercise", "support group"],
         isFavorite: true
     )
-    context.insert(entry)
+    context.insert(checkIn)
     try context.save()
 
     // Verify V1 data exists
-    let v1Entries = try context.fetch(
-        FetchDescriptor<MoodSchemaV1.MoodEntry>()
+    let v1CheckIns = try context.fetch(
+        FetchDescriptor<BetAwaySchemaV1.CheckIn>()
     )
-    #expect(v1Entries.count == 1)
-    #expect(v1Entries[0].mood == 4)
-    #expect(v1Entries[0].note == "Great day")
+    #expect(v1CheckIns.count == 1)
+    #expect(v1CheckIns[0].recoveryStatus == 4)
+    #expect(v1CheckIns[0].note == "Strong day in recovery")
 }
 ```
 
@@ -415,28 +415,28 @@ func testV1toV2Migration() throws {
 After running the migration, verify that every field carried over and that new fields got their defaults:
 
 ```swift
-@Test("Migrated entries have correct default values")
+@Test("Migrated check-ins have correct default values")
 func testMigratedDefaults() throws {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try ModelContainer(
-        for: MoodSchemaV2.MoodEntry.self,
-        migrationPlan: MoodbitMigrationPlan.self,
+        for: BetAwaySchemaV2.CheckIn.self,
+        migrationPlan: BetAwayMigrationPlan.self,
         configurations: config
     )
 
     let context = container.mainContext
-    let entries = try context.fetch(
-        FetchDescriptor<MoodSchemaV2.MoodEntry>()
+    let checkIns = try context.fetch(
+        FetchDescriptor<BetAwaySchemaV2.CheckIn>()
     )
 
-    for entry in entries {
+    for checkIn in checkIns {
         // New fields should have defaults
-        #expect(entry.streakCount == 0)
-        #expect(entry.sentiment == "neutral")
+        #expect(checkIn.streakCount == 0)
+        #expect(checkIn.sentiment == "neutral")
 
         // Existing fields should be preserved
-        #expect(!entry.note.isEmpty || entry.note == "")
-        #expect(entry.mood >= 1 && entry.mood <= 5)
+        #expect(!checkIn.note.isEmpty || checkIn.note == "")
+        #expect(checkIn.recoveryStatus >= 1 && checkIn.recoveryStatus <= 5)
     }
 }
 ```
@@ -445,10 +445,10 @@ func testMigratedDefaults() throws {
 
 Test with edge-case data that might trip up the migration:
 
-- An entry with an empty note and no tags
-- An entry with the maximum mood value (5)
-- An entry with a date far in the past
-- A large number of entries (1,000+) to verify performance
+- A check-in with an empty note and no tags
+- A check-in with the maximum recovery status value (5)
+- A check-in with a date far in the past
+- A large number of check-ins (1,000+) to verify performance
 
 If any of these tests fail, you have a migration bug. Fix it before shipping. There is no "we will fix it in the next update" for data corruption — the damage is done the moment the user opens the app.
 
@@ -456,36 +456,36 @@ If any of these tests fail, you have a migration bug. Fix it before shipping. Th
 
 Here are the three production files, ready to drop into your project.
 
-**Models/Migration/MoodSchemaV1.swift**
+**Models/Migration/BetAwaySchemaV1.swift**
 
 ```swift
 import SwiftData
 import Foundation
 
-enum MoodSchemaV1: VersionedSchema {
+enum BetAwaySchemaV1: VersionedSchema {
     static var versionIdentifier = Schema.Version(1, 0, 0)
 
     static var models: [any PersistentModel.Type] {
-        [MoodEntry.self]
+        [CheckIn.self]
     }
 
     @Model
-    final class MoodEntry {
+    final class CheckIn {
         var date: Date
-        var mood: Int
+        var recoveryStatus: Int
         var note: String
         var tags: [String]
         var isFavorite: Bool
 
         init(
             date: Date,
-            mood: Int,
+            recoveryStatus: Int,
             note: String = "",
             tags: [String] = [],
             isFavorite: Bool = false
         ) {
             self.date = date
-            self.mood = mood
+            self.recoveryStatus = recoveryStatus
             self.note = note
             self.tags = tags
             self.isFavorite = isFavorite
@@ -494,23 +494,23 @@ enum MoodSchemaV1: VersionedSchema {
 }
 ```
 
-**Models/Migration/MoodSchemaV2.swift**
+**Models/Migration/BetAwaySchemaV2.swift**
 
 ```swift
 import SwiftData
 import Foundation
 
-enum MoodSchemaV2: VersionedSchema {
+enum BetAwaySchemaV2: VersionedSchema {
     static var versionIdentifier = Schema.Version(2, 0, 0)
 
     static var models: [any PersistentModel.Type] {
-        [MoodEntry.self]
+        [CheckIn.self]
     }
 
     @Model
-    final class MoodEntry {
+    final class CheckIn {
         var date: Date
-        var mood: Int
+        var recoveryStatus: Int
         var note: String
         var tags: [String]
         var isFavorite: Bool
@@ -519,7 +519,7 @@ enum MoodSchemaV2: VersionedSchema {
 
         init(
             date: Date,
-            mood: Int,
+            recoveryStatus: Int,
             note: String = "",
             tags: [String] = [],
             isFavorite: Bool = false,
@@ -527,7 +527,7 @@ enum MoodSchemaV2: VersionedSchema {
             sentiment: String = "neutral"
         ) {
             self.date = date
-            self.mood = mood
+            self.recoveryStatus = recoveryStatus
             self.note = note
             self.tags = tags
             self.isFavorite = isFavorite
@@ -538,14 +538,14 @@ enum MoodSchemaV2: VersionedSchema {
 }
 ```
 
-**Models/Migration/MoodbitMigrationPlan.swift**
+**Models/Migration/BetAwayMigrationPlan.swift**
 
 ```swift
 import SwiftData
 
-enum MoodbitMigrationPlan: SchemaMigrationPlan {
+enum BetAwayMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [MoodSchemaV1.self, MoodSchemaV2.self]
+        [BetAwaySchemaV1.self, BetAwaySchemaV2.self]
     }
 
     static var stages: [MigrationStage] {
@@ -553,8 +553,8 @@ enum MoodbitMigrationPlan: SchemaMigrationPlan {
     }
 
     static let migrateV1toV2 = MigrationStage.lightweight(
-        fromVersion: MoodSchemaV1.self,
-        toVersion: MoodSchemaV2.self
+        fromVersion: BetAwaySchemaV1.self,
+        toVersion: BetAwaySchemaV2.self
     )
 }
 ```
@@ -563,27 +563,27 @@ enum MoodbitMigrationPlan: SchemaMigrationPlan {
 
 Before moving on, confirm:
 
-1. **MoodSchemaV1 matches your shipped model exactly** — every property, every type. If there is a mismatch, the migration will fail on real user data.
-2. **MoodSchemaV2 includes all V1 properties plus the new ones** — do not drop properties without handling it in a migration stage.
+1. **BetAwaySchemaV1 matches your shipped model exactly** — every property, every type. If there is a mismatch, the migration will fail on real user data.
+2. **BetAwaySchemaV2 includes all V1 properties plus the new ones** — do not drop properties without handling it in a migration stage.
 3. **New properties in V2 have default values** — this is what makes the lightweight migration work. Without defaults, SwiftData cannot fill in existing rows.
-4. **MoodbitMigrationPlan lists schemas in order** — V1 first, V2 second. Order matters.
+4. **BetAwayMigrationPlan lists schemas in order** — V1 first, V2 second. Order matters.
 5. **ModelContainer uses the migration plan** — if you forget to pass `migrationPlan:`, SwiftData does not know your versions exist and the store will fail to open when the schema changes.
 6. **You have at least one test** that creates V1 data and verifies it survives the migration to V2 with correct defaults.
 
-If all six are true, your data layer is production-safe. Your users can update the app without losing a single mood entry.
+If all six are true, your data layer is production-safe. Your users can update the app without losing a single recovery check-in.
 
 ## Challenge
 
 **Add a V3 migration (30 minutes):**
 
-Moodbit V3 needs a new property: `location: String?` — an optional string storing the city name where the mood was logged. Since it is optional, no default value is needed. This is a lightweight migration.
+BetAway V3 needs a new property: `location: String?` — an optional string storing the city name where the check-in was logged. Since it is optional, no default value is needed. This is a lightweight migration.
 
-1. Create `MoodSchemaV3.swift` with the updated model
-2. Add a `migrateV2toV3` lightweight stage to `MoodbitMigrationPlan`
+1. Create `BetAwaySchemaV3.swift` with the updated model
+2. Add a `migrateV2toV3` lightweight stage to `BetAwayMigrationPlan`
 3. Update `schemas` and `stages` to include V3
-4. Update `ModelContainer` to use `MoodSchemaV3.MoodEntry.self`
+4. Update `ModelContainer` to use `BetAwaySchemaV3.CheckIn.self`
 5. Write a test that creates V2 data and verifies it migrates to V3 with `location == nil`
 
-**Stretch goal:** Add a custom migration from V3 to V4 that splits the `tags: [String]` array into a separate `Tag` model with a relationship back to `MoodEntry`. This requires a custom stage because you are moving data between models. Think through how `willMigrate` would iterate over entries, create `Tag` objects, and establish the relationships.
+**Stretch goal:** Add a custom migration from V3 to V4 that splits the `tags: [String]` array into a separate `Tag` model with a relationship back to `CheckIn`. This requires a custom stage because you are moving data between models. Think through how `willMigrate` would iterate over check-ins, create `Tag` objects, and establish the relationships.
 
 This is the hardest migration pattern you will encounter. If you can do this, you can handle anything.

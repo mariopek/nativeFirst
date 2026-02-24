@@ -1,66 +1,66 @@
 ---
-title: "Mood Entry Flow"
-description: "Create the multi-step mood logging experience with a custom mood slider, emoji picker, text input, and tag selection — complete with haptic feedback and smooth animations."
+title: "Check-In Flow"
+description: "Create the multi-step recovery check-in experience with a custom status slider, emoji picker, text input, and tag selection — complete with haptic feedback and smooth animations."
 courseSlug: "ship-native"
 module: 2
 moduleTitle: "Core UI with SwiftUI"
 lesson: 3
 duration: "26 min read"
 difficulty: "intermediate"
-topics: ["SwiftUI", "Multi-Step Form", "Custom Slider", "Haptic Feedback", "Animation", "User Input", "UX Design", "Moodbit"]
+topics: ["SwiftUI", "Multi-Step Form", "Custom Slider", "Haptic Feedback", "Animation", "User Input", "UX Design", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-The timeline shows existing moods. The design system makes them look consistent. Now we build the screen where users actually create a mood entry — the single most important interaction in Moodbit.
+The dashboard shows existing check-ins. The design system makes them look consistent. Now we build the screen where users actually create a recovery check-in — the single most important interaction in BetAway.
 
-This is not a simple form. A mood entry is an emotional moment. The user is pausing their day to check in with themselves. The UX needs to respect that. It should feel smooth, guided, and satisfying — not like filling out a survey. We are going to build a multi-step flow with a custom slider, emoji picker, free-text input, tag selection, haptic feedback at every transition, and animations that make each step feel intentional.
+This is not a simple form. A recovery check-in is a vulnerable moment. The user is pausing their day to reflect on their progress and urges. The UX needs to respect that. It should feel smooth, guided, and supportive — not like filling out a survey. We are going to build a multi-step flow with a custom slider, emoji picker, free-text input, tag selection, haptic feedback at every transition, and animations that make each step feel intentional.
 
 ## What You'll Learn
 
 - How to architect a multi-step form with discrete steps and animated transitions
-- Building a custom `MoodSlider` with a gradient track and haptic feedback on each level
-- Creating an `EmojiPicker` grid for quick mood association
+- Building a custom `RecoverySlider` with a gradient track and haptic feedback on each level
+- Creating an `EmojiPicker` grid for quick status association
 - Managing form state and validation with a dedicated ViewModel
 - Handling keyboard appearance with the `.focused` modifier
-- Wiring the save action through the repository pattern
+- Wiring the save action through the service layer pattern
 - Prompting AI for complex, multi-file features using the Plan-Execute-Verify workflow
 
 ## Why This Matters
 
-Most mood tracking apps use a single screen with a basic slider and a text field. It works, but it feels clinical. Users log one entry and never come back.
+Most recovery apps use a single screen with a basic slider and a text field. It works, but it feels clinical. Users log one check-in and never come back.
 
-The multi-step approach solves this. Each step is focused — one decision at a time. The user never feels overwhelmed. The haptic feedback and animations create a tactile loop that makes the interaction feel rewarding. And the tag selection at the end gives structure to the entry without requiring effort.
+The multi-step approach solves this. Each step is focused — one decision at a time. The user never feels overwhelmed. The haptic feedback and animations create a tactile loop that makes the interaction feel supportive. And the tag selection at the end gives structure to the check-in without requiring effort.
 
-This pattern applies far beyond mood tracking. Onboarding flows, checkout processes, survey experiences — any time you need to collect multiple pieces of input from a user, a stepped flow with transitions and feedback will outperform a single monolithic form.
+This pattern applies far beyond recovery tracking. Onboarding flows, checkout processes, survey experiences — any time you need to collect multiple pieces of input from a user, a stepped flow with transitions and feedback will outperform a single monolithic form.
 
 ## Plan Phase: Defining What We Build
 
-Before we touch any code, we need a plan. Open Claude Code in the Moodbit project and send this:
+Before we touch any code, we need a plan. Open Claude Code in the BetAway project and send this:
 
 ```
-I need to build the mood entry flow for Moodbit — a multi-step
-form that lets users log their mood. Before writing code, help me
-plan the architecture.
+I need to build the check-in flow for BetAway — a multi-step
+form that lets users log their recovery status. Before writing code,
+help me plan the architecture.
 
 The flow has four steps:
-1. Mood Level — a custom slider from 1 (very low) to 5 (great),
+1. Recovery Status — a custom slider from 1 (crisis) to 5 (thriving),
    with a gradient track and haptic feedback when the value changes
-2. Emoji — a grid of emoji options that map to mood categories
-   (happy, sad, anxious, calm, energized, tired, etc.)
+2. Emoji — a grid of emoji options that map to recovery states
+   (hopeful, struggling, anxious, calm, determined, tired, etc.)
 3. Note — a free-text field where the user can write about their
-   mood, with keyboard handling
-4. Tags — a selectable grid of predefined tags like "Work",
-   "Exercise", "Family", "Weather", "Sleep", "Social"
+   recovery progress, with keyboard handling
+4. Tags — a selectable grid of predefined tags like "Urge",
+   "Exercise", "Therapy", "Trigger", "Sleep", "Support Group"
 
 Requirements:
 - Each step has a "Next" button and a "Back" button
 - Step 4 has a "Save" button instead of "Next"
 - Smooth horizontal slide transition between steps
-- The flow is presented as a sheet from the timeline
-- State is managed by a MoodEntryViewModel (@Observable)
-- Save goes through the MoodRepository
+- The flow is presented as a sheet from the dashboard
+- State is managed by a CheckInFlowViewModel (@Observable)
+- Save goes through the RecoveryService
 
 Think through:
 1. What files do we need?
@@ -73,29 +73,29 @@ Give me the plan, no code yet.
 
 Claude Code will come back with a file breakdown and architecture sketch. Review it. The pieces we need are:
 
-- **MoodEntryView.swift** — the container that manages step transitions
-- **MoodEntryViewModel.swift** — all form state, validation, and save logic
-- **MoodSlider.swift** — the custom slider component for step 1
+- **CheckInFlowView.swift** — the container that manages step transitions
+- **CheckInFlowViewModel.swift** — all form state, validation, and save logic
+- **RecoverySlider.swift** — the custom slider component for step 1
 - **EmojiPicker.swift** — the emoji grid component for step 2
 
-Steps 3 and 4 are simple enough to live inside `MoodEntryView` as inline sections. No need to extract them into separate files unless they grow.
+Steps 3 and 4 are simple enough to live inside `CheckInFlowView` as inline sections. No need to extract them into separate files unless they grow.
 
 ### The Anti-Pattern: One Giant Form
 
-Here is what happens when you skip the planning step and just prompt "build a mood entry form":
+Here is what happens when you skip the planning step and just prompt "build a check-in form":
 
 ```swift
 // What AI generates without guidance — do NOT do this
-struct MoodEntryView: View {
-    @State private var moodLevel: Double = 3
+struct CheckInFlowView: View {
+    @State private var statusLevel: Double = 3
     @State private var emoji = ""
     @State private var note = ""
     @State private var tags: [String] = []
 
     var body: some View {
         Form {
-            Section("Mood Level") {
-                Slider(value: $moodLevel, in: 1...5, step: 1)
+            Section("Recovery Status") {
+                Slider(value: $statusLevel, in: 1...5, step: 1)
             }
             Section("Emoji") {
                 TextField("Pick an emoji", text: $emoji)
@@ -122,41 +122,41 @@ The difference between this and what we are going to build is the plan. Let us e
 
 Now we build. We are going to send one focused prompt per file, review the output, and iterate where needed.
 
-### MoodEntryViewModel
+### CheckInFlowViewModel
 
 The ViewModel comes first. It owns all the state, so every view depends on it.
 
 ```
-Create MoodEntryViewModel.swift for the Moodbit mood entry flow.
+Create CheckInFlowViewModel.swift for the BetAway check-in flow.
 
-This is an @Observable class that manages a 4-step mood entry form.
+This is an @Observable class that manages a 4-step recovery check-in form.
 
 State:
 - currentStep: Int (1 through 4)
-- moodLevel: Int (1 through 5, default 3)
+- statusLevel: Int (1 through 5, default 3)
 - selectedEmoji: String? (optional, a single emoji character)
 - noteText: String (default empty)
 - selectedTags: Set<String>
 - isSaving: Bool (default false)
 
 Available tags (static let):
-["Work", "Exercise", "Family", "Weather", "Sleep", "Social",
- "Food", "Health", "Travel", "Creative", "Relax", "Stress"]
+["Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
+ "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"]
 
 Computed:
 - canAdvance: Bool — step 1 always true, step 2 requires an emoji,
   step 3 always true, step 4 always true
 - isFirstStep: Bool
 - isLastStep: Bool
-- stepTitle: String — "How are you feeling?", "Pick an emoji",
+- stepTitle: String — "How are you doing?", "Pick an emoji",
   "Add a note", "Add tags"
 - stepSubtitle: String — short description for each step
 
 Methods:
 - advance() — go to next step if canAdvance
 - goBack() — go to previous step
-- save(using repository: MoodRepository) async — creates a
-  MoodEntry from the current state and saves via repository.
+- save(using service: RecoveryService) async — creates a
+  CheckIn from the current state and saves via service.
   Sets isSaving during the operation.
 - reset() — clears all state back to defaults
 
@@ -170,7 +170,7 @@ import Foundation
 import os
 
 @Observable
-final class MoodEntryViewModel {
+final class CheckInFlowViewModel {
     // MARK: - Step State
 
     var currentStep = 1
@@ -178,7 +178,7 @@ final class MoodEntryViewModel {
 
     // MARK: - Form State
 
-    var moodLevel = 3
+    var statusLevel = 3
     var selectedEmoji: String?
     var noteText = ""
     var selectedTags: Set<String> = []
@@ -187,11 +187,11 @@ final class MoodEntryViewModel {
     // MARK: - Constants
 
     static let availableTags = [
-        "Work", "Exercise", "Family", "Weather", "Sleep", "Social",
-        "Food", "Health", "Travel", "Creative", "Relax", "Stress"
+        "Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
+        "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"
     ]
 
-    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
 
     // MARK: - Computed Properties
 
@@ -210,7 +210,7 @@ final class MoodEntryViewModel {
 
     var stepTitle: String {
         switch currentStep {
-        case 1: "How are you feeling?"
+        case 1: "How are you doing?"
         case 2: "Pick an emoji"
         case 3: "Add a note"
         case 4: "Add tags"
@@ -220,7 +220,7 @@ final class MoodEntryViewModel {
 
     var stepSubtitle: String {
         switch currentStep {
-        case 1: "Slide to match your mood"
+        case 1: "Slide to match your current state"
         case 2: "Choose one that fits"
         case 3: "Optional — write anything"
         case 4: "Optional — what's on your mind?"
@@ -240,12 +240,12 @@ final class MoodEntryViewModel {
         currentStep -= 1
     }
 
-    func save(using repository: MoodRepository) async {
+    func save(using service: RecoveryService) async {
         isSaving = true
         defer { isSaving = false }
 
-        let entry = MoodEntry(
-            moodLevel: moodLevel,
+        let checkIn = CheckIn(
+            statusLevel: statusLevel,
             emoji: selectedEmoji ?? "😐",
             note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
             tags: Array(selectedTags),
@@ -253,16 +253,16 @@ final class MoodEntryViewModel {
         )
 
         do {
-            try await repository.save(entry)
-            logger.info("Mood entry saved: level \(self.moodLevel)")
+            try await service.save(checkIn)
+            logger.info("Check-in saved: status \(self.statusLevel)")
         } catch {
-            logger.error("Failed to save mood entry: \(error.localizedDescription)")
+            logger.error("Failed to save check-in: \(error.localizedDescription)")
         }
     }
 
     func reset() {
         currentStep = 1
-        moodLevel = 3
+        statusLevel = 3
         selectedEmoji = nil
         noteText = ""
         selectedTags = []
@@ -283,13 +283,13 @@ final class MoodEntryViewModel {
 
 This ViewModel is clean. No iteration needed. Let us move to the custom slider.
 
-### MoodSlider
+### RecoverySlider
 
-This is the centerpiece of step 1. A stock `Slider` will not do — we need a gradient track that shifts color based on the mood level and haptic feedback on each discrete stop.
+This is the centerpiece of step 1. A stock `Slider` will not do — we need a gradient track that shifts color based on the recovery status and haptic feedback on each discrete stop.
 
 ```
-Create MoodSlider.swift — a custom SwiftUI slider for selecting
-a mood level from 1 to 5.
+Create RecoverySlider.swift — a custom SwiftUI slider for selecting
+a recovery status from 1 to 5.
 
 Requirements:
 - Horizontal track with rounded ends
@@ -300,8 +300,8 @@ Requirements:
   in-between values
 - Trigger UIImpactFeedbackGenerator (.light) when the value
   changes to a new level
-- A row of labels below the track: "Awful", "Low", "Okay",
-  "Good", "Great"
+- A row of labels below the track: "Crisis", "Struggling",
+  "Stable", "Strong", "Thriving"
 - Use a DragGesture for the interaction, not a Slider view
 - Binding to an Int value
 
@@ -313,11 +313,11 @@ Target iOS 17+. Use GeometryReader for track width calculation.
 import SwiftUI
 import UIKit
 
-struct MoodSlider: View {
+struct RecoverySlider: View {
     @Binding var value: Int
 
     private let range = 1...5
-    private let labels = ["Awful", "Low", "Okay", "Good", "Great"]
+    private let labels = ["Crisis", "Struggling", "Stable", "Strong", "Thriving"]
     private let thumbSize: CGFloat = 44
 
     @State private var isDragging = false
@@ -432,8 +432,8 @@ struct MoodSlider: View {
 }
 
 #Preview {
-    @Previewable @State var mood = 3
-    MoodSlider(value: $mood)
+    @Previewable @State var status = 3
+    RecoverySlider(value: $status)
         .padding(32)
 }
 ```
@@ -451,11 +451,11 @@ struct MoodSlider: View {
 
 ### EmojiPicker
 
-Step 2 needs a grid of emojis the user can tap to associate with their mood.
+Step 2 needs a grid of emojis the user can tap to associate with their recovery status.
 
 ```
-Create EmojiPicker.swift — a grid of emoji options for the Moodbit
-mood entry flow.
+Create EmojiPicker.swift — a grid of emoji options for the BetAway
+check-in flow.
 
 Requirements:
 - Display a grid of emojis in a LazyVGrid with 4 columns
@@ -585,27 +585,27 @@ The fix is two lines inside the `Button` label:
 
 Small change, big impact for accessibility. This is the kind of detail that AI misses in the first pass but handles perfectly when you point it out.
 
-### MoodEntryView — The Container
+### CheckInFlowView — The Container
 
 Now we assemble everything. This is the view that manages the step transitions and calls into the ViewModel.
 
 ```
-Create MoodEntryView.swift — the container for the Moodbit mood
-entry flow. It is presented as a sheet.
+Create CheckInFlowView.swift — the container for the BetAway
+check-in flow. It is presented as a sheet.
 
 Requirements:
-- Takes a MoodRepository as a parameter for saving
-- Creates a @State MoodEntryViewModel
+- Takes a RecoveryService as a parameter for saving
+- Creates a @State CheckInFlowViewModel
 - Shows a navigation bar with "X" dismiss button, step indicator
   (e.g., "Step 2 of 4"), and the step title
 - Content area switches between 4 steps based on
   viewModel.currentStep:
-  Step 1: MoodSlider bound to viewModel.moodLevel
+  Step 1: RecoverySlider bound to viewModel.statusLevel
   Step 2: EmojiPicker bound to viewModel.selectedEmoji
   Step 3: TextEditor for viewModel.noteText with placeholder,
           using @FocusState for keyboard management
   Step 4: Tag grid — a LazyVGrid of toggleable capsule buttons
-          from MoodEntryViewModel.availableTags, binding to
+          from CheckInFlowViewModel.availableTags, binding to
           viewModel.selectedTags
 - Footer with Back and Next/Save buttons
 - Step transitions use .asymmetric transition: slide in from
@@ -623,11 +623,11 @@ note text field. Trigger a success haptic on save.
 import SwiftUI
 import UIKit
 
-struct MoodEntryView: View {
-    let repository: MoodRepository
+struct CheckInFlowView: View {
+    let service: RecoveryService
 
     @Environment(\.dismiss) private var dismiss
-    @State private var viewModel = MoodEntryViewModel()
+    @State private var viewModel = CheckInFlowViewModel()
     @FocusState private var isNoteFieldFocused: Bool
     @State private var direction: NavigationDirection = .forward
 
@@ -717,7 +717,7 @@ struct MoodEntryView: View {
     private var stepContent: some View {
         switch viewModel.currentStep {
         case 1:
-            moodLevelStep
+            statusLevelStep
         case 2:
             emojiStep
         case 3:
@@ -729,10 +729,10 @@ struct MoodEntryView: View {
         }
     }
 
-    private var moodLevelStep: some View {
+    private var statusLevelStep: some View {
         VStack {
             Spacer()
-            MoodSlider(value: $viewModel.moodLevel)
+            RecoverySlider(value: $viewModel.statusLevel)
                 .padding(.horizontal, 32)
             Spacer()
         }
@@ -781,7 +781,7 @@ struct MoodEntryView: View {
 
         return ScrollView {
             LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(MoodEntryViewModel.availableTags, id: \.self) { tag in
+                ForEach(CheckInFlowViewModel.availableTags, id: \.self) { tag in
                     let isSelected = viewModel.selectedTags.contains(tag)
 
                     Button {
@@ -879,7 +879,7 @@ struct MoodEntryView: View {
 
     private func saveEntry() {
         Task {
-            await viewModel.save(using: repository)
+            await viewModel.save(using: service)
             if !viewModel.isSaving {
                 triggerSuccessHaptic()
                 dismiss()
@@ -899,7 +899,7 @@ struct MoodEntryView: View {
 }
 
 #Preview {
-    MoodEntryView(repository: PreviewMoodRepository())
+    CheckInFlowView(service: PreviewRecoveryService())
 }
 ```
 
@@ -919,7 +919,7 @@ struct MoodEntryView: View {
 
 Build the project. Run it in the simulator and verify each step:
 
-1. **Step 1 — Mood Slider.** Drag the thumb across all five levels. You should feel a light haptic tap at each stop. The gradient track should fill proportionally. The label below should highlight the current level.
+1. **Step 1 — Recovery Slider.** Drag the thumb across all five levels. You should feel a light haptic tap at each stop. The gradient track should fill proportionally. The label below should highlight the current level.
 
 2. **Step 2 — Emoji Picker.** Tap an emoji. It should scale up and show a colored ring. Tap it again to deselect. The "Next" button should be disabled until an emoji is selected.
 
@@ -937,29 +937,29 @@ If any step fails, the ViewModel is the first place to look. Every piece of stat
 
 Here is the complete set of files we built. Each file is self-contained and follows our architecture.
 
-### MoodEntryViewModel.swift
+### CheckInFlowViewModel.swift
 
 ```swift
 import Foundation
 import os
 
 @Observable
-final class MoodEntryViewModel {
+final class CheckInFlowViewModel {
     var currentStep = 1
     let totalSteps = 4
 
-    var moodLevel = 3
+    var statusLevel = 3
     var selectedEmoji: String?
     var noteText = ""
     var selectedTags: Set<String> = []
     var isSaving = false
 
     static let availableTags = [
-        "Work", "Exercise", "Family", "Weather", "Sleep", "Social",
-        "Food", "Health", "Travel", "Creative", "Relax", "Stress"
+        "Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
+        "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"
     ]
 
-    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
 
     var canAdvance: Bool {
         switch currentStep {
@@ -976,7 +976,7 @@ final class MoodEntryViewModel {
 
     var stepTitle: String {
         switch currentStep {
-        case 1: "How are you feeling?"
+        case 1: "How are you doing?"
         case 2: "Pick an emoji"
         case 3: "Add a note"
         case 4: "Add tags"
@@ -986,7 +986,7 @@ final class MoodEntryViewModel {
 
     var stepSubtitle: String {
         switch currentStep {
-        case 1: "Slide to match your mood"
+        case 1: "Slide to match your current state"
         case 2: "Choose one that fits"
         case 3: "Optional — write anything"
         case 4: "Optional — what's on your mind?"
@@ -1004,12 +1004,12 @@ final class MoodEntryViewModel {
         currentStep -= 1
     }
 
-    func save(using repository: MoodRepository) async {
+    func save(using service: RecoveryService) async {
         isSaving = true
         defer { isSaving = false }
 
-        let entry = MoodEntry(
-            moodLevel: moodLevel,
+        let checkIn = CheckIn(
+            statusLevel: statusLevel,
             emoji: selectedEmoji ?? "😐",
             note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
             tags: Array(selectedTags),
@@ -1017,16 +1017,16 @@ final class MoodEntryViewModel {
         )
 
         do {
-            try await repository.save(entry)
-            logger.info("Mood entry saved: level \(self.moodLevel)")
+            try await service.save(checkIn)
+            logger.info("Check-in saved: status \(self.statusLevel)")
         } catch {
-            logger.error("Failed to save mood entry: \(error.localizedDescription)")
+            logger.error("Failed to save check-in: \(error.localizedDescription)")
         }
     }
 
     func reset() {
         currentStep = 1
-        moodLevel = 3
+        statusLevel = 3
         selectedEmoji = nil
         noteText = ""
         selectedTags = []
@@ -1035,17 +1035,17 @@ final class MoodEntryViewModel {
 }
 ```
 
-### MoodSlider.swift
+### RecoverySlider.swift
 
 ```swift
 import SwiftUI
 import UIKit
 
-struct MoodSlider: View {
+struct RecoverySlider: View {
     @Binding var value: Int
 
     private let range = 1...5
-    private let labels = ["Awful", "Low", "Okay", "Good", "Great"]
+    private let labels = ["Crisis", "Struggling", "Stable", "Strong", "Thriving"]
     private let thumbSize: CGFloat = 44
 
     @State private var isDragging = false
@@ -1152,8 +1152,8 @@ struct MoodSlider: View {
 }
 
 #Preview {
-    @Previewable @State var mood = 3
-    MoodSlider(value: $mood)
+    @Previewable @State var status = 3
+    RecoverySlider(value: $status)
         .padding(32)
 }
 ```
@@ -1246,17 +1246,17 @@ struct EmojiPicker: View {
 }
 ```
 
-### MoodEntryView.swift
+### CheckInFlowView.swift
 
 ```swift
 import SwiftUI
 import UIKit
 
-struct MoodEntryView: View {
-    let repository: MoodRepository
+struct CheckInFlowView: View {
+    let service: RecoveryService
 
     @Environment(\.dismiss) private var dismiss
-    @State private var viewModel = MoodEntryViewModel()
+    @State private var viewModel = CheckInFlowViewModel()
     @FocusState private var isNoteFieldFocused: Bool
     @State private var direction: NavigationDirection = .forward
 
@@ -1341,7 +1341,7 @@ struct MoodEntryView: View {
     @ViewBuilder
     private var stepContent: some View {
         switch viewModel.currentStep {
-        case 1: moodLevelStep
+        case 1: statusLevelStep
         case 2: emojiStep
         case 3: noteStep
         case 4: tagsStep
@@ -1349,10 +1349,10 @@ struct MoodEntryView: View {
         }
     }
 
-    private var moodLevelStep: some View {
+    private var statusLevelStep: some View {
         VStack {
             Spacer()
-            MoodSlider(value: $viewModel.moodLevel)
+            RecoverySlider(value: $viewModel.statusLevel)
                 .padding(.horizontal, 32)
             Spacer()
         }
@@ -1401,7 +1401,7 @@ struct MoodEntryView: View {
 
         return ScrollView {
             LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(MoodEntryViewModel.availableTags, id: \.self) { tag in
+                ForEach(CheckInFlowViewModel.availableTags, id: \.self) { tag in
                     let isSelected = viewModel.selectedTags.contains(tag)
 
                     Button {
@@ -1499,7 +1499,7 @@ struct MoodEntryView: View {
 
     private func saveEntry() {
         Task {
-            await viewModel.save(using: repository)
+            await viewModel.save(using: service)
             if !viewModel.isSaving {
                 triggerSuccessHaptic()
                 dismiss()
@@ -1519,7 +1519,7 @@ struct MoodEntryView: View {
 }
 
 #Preview {
-    MoodEntryView(repository: PreviewMoodRepository())
+    CheckInFlowView(service: PreviewRecoveryService())
 }
 ```
 
@@ -1527,13 +1527,13 @@ struct MoodEntryView: View {
 
 Let us confirm what we built and why each piece matters.
 
-**MoodEntryViewModel** owns all form state. No state lives in the view. This means the view is purely declarative — it reads from the ViewModel and sends actions to it. If you need to unit test the mood entry logic (and you will, in Module 6), you test the ViewModel directly without touching any UI.
+**CheckInFlowViewModel** owns all form state. No state lives in the view. This means the view is purely declarative — it reads from the ViewModel and sends actions to it. If you need to unit test the check-in logic (and you will, in Module 6), you test the ViewModel directly without touching any UI.
 
-**MoodSlider** replaces the stock `Slider` with a custom control that has personality. The gradient track, discrete snapping, and haptic feedback make a 1-5 selection feel physical. Users remember how an app feels more than how it looks.
+**RecoverySlider** replaces the stock `Slider` with a custom control that has personality. The gradient track, discrete snapping, and haptic feedback make a 1-5 selection feel physical. Users remember how an app feels more than how it looks.
 
 **EmojiPicker** uses a grid instead of a text field. This is a critical UX choice — giving users options to tap is always faster and more accessible than asking them to type. The accessibility labels ensure VoiceOver users get the same experience.
 
-**MoodEntryView** orchestrates the flow with directional transitions. The `.id` modifier combined with `.transition` is the pattern for animated view switching in SwiftUI. The `NavigationDirection` enum ensures the slides always match the user's mental model — forward goes left, backward goes right.
+**CheckInFlowView** orchestrates the flow with directional transitions. The `.id` modifier combined with `.transition` is the pattern for animated view switching in SwiftUI. The `NavigationDirection` enum ensures the slides always match the user's mental model — forward goes left, backward goes right.
 
 **Haptic feedback** appears at three levels: light impact on the slider, selection tick on emoji and tag changes, and a success notification on save. These are not random — they follow Apple's haptic design guidelines where impact means adjustment, selection means choice, and notification means completion.
 
@@ -1541,13 +1541,13 @@ Let us confirm what we built and why each piece matters.
 
 ## Challenge
 
-You have the mood entry flow. Now extend it.
+You have the check-in flow. Now extend it.
 
-**Add a fifth step: "Activity."** Between the current step 3 (note) and step 4 (tags), insert a new step that lets the user pick what they were doing when they logged this mood. Show a 2-column grid of activities with SF Symbol icons: Reading (book), Working (laptopcomputer), Exercising (figure.run), Eating (fork.knife), Commuting (car), Socializing (person.2), Resting (bed.double), Outdoors (sun.max).
+**Add a fifth step: "Coping Strategy."** Between the current step 3 (note) and step 4 (tags), insert a new step that lets the user pick what coping strategy they used. Show a 2-column grid of strategies with SF Symbol icons: Breathing (wind), Journaling (book), Exercising (figure.run), CBT Exercise (brain.head.profile), Calling Sponsor (phone), Support Group (person.2), Meditation (bed.double), Walking Outdoors (sun.max).
 
 This requires changes in three places:
-1. The ViewModel — add `selectedActivity: String?`, update `totalSteps` to 5, shift step titles and `canAdvance` logic
-2. The view — add the activity step content and adjust step numbering
-3. The model — add the activity field to `MoodEntry`
+1. The ViewModel — add `selectedStrategy: String?`, update `totalSteps` to 5, shift step titles and `canAdvance` logic
+2. The view — add the strategy step content and adjust step numbering
+3. The model — add the strategy field to `CheckIn`
 
 Prompt Claude Code for each change separately. Review each diff. This is the iterative workflow in action — one focused change at a time, not one giant prompt for everything.

@@ -7,15 +7,15 @@ moduleTitle: "Production Polish"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Error Handling", "Typed Throws", "Loading State", "Empty State", "Graceful Degradation", "Retry Logic", "UX", "Moodbit"]
+topics: ["Error Handling", "Typed Throws", "Loading State", "Empty State", "Graceful Degradation", "Retry Logic", "UX", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Your Moodbit app works. The happy path is solid — the user logs a mood, the AI generates an insight, the chart updates. Ship it, right?
+Your BetAway app works. The happy path is solid — the user logs a check-in, the AI generates an insight, the chart updates. Ship it, right?
 
-Not yet. Open airplane mode and tap "Log Mood." What happens? Force quit the app mid-save and reopen it. What happens? Let the OpenAI API key expire. What happens?
+Not yet. Open airplane mode and tap "Log Check-In." What happens? Force quit the app mid-save and reopen it. What happens? Let the OpenAI API key expire. What happens?
 
 If the answer to any of those is "I am not sure," this lesson is going to fix that. Error handling is not cleanup work you do after the features are done. It is architecture. And in Swift 6, we have better tools for it than ever — specifically typed throws, which let the compiler enforce that every error is handled explicitly.
 
@@ -23,21 +23,21 @@ If the answer to any of those is "I am not sure," this lesson is going to fix th
 
 - Build an `AppError` enum with typed throws so the compiler catches unhandled failure modes
 - Create a `LoadingState` enum that eliminates impossible states from your views
-- Implement graceful degradation so Moodbit falls back to on-device analysis when OpenAI is unreachable
+- Implement graceful degradation so BetAway falls back to on-device analysis when OpenAI is unreachable
 - Build reusable `ErrorView` and `EmptyStateView` components with retry logic and exponential backoff
 
 ## Why This Matters
 
 App Store reviewers test edge cases. They turn off Wi-Fi. They deny permissions. They tap buttons rapidly. Users do the same — except they leave one-star reviews when something breaks. The difference between a 3.5-star app and a 4.8-star app is almost never features. It is how the app behaves when things go wrong.
 
-Moodbit talks to an external AI service. That service will go down. The network will drop. The device will run out of storage. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
+BetAway talks to an external AI service. That service will go down. The network will drop. The device will run out of storage. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
 
 ## Plan Phase: Defining What We Build
 
 Before writing any code, let us get a plan from the AI. Send this prompt to Claude Code:
 
 ```
-I need to add production-quality error handling to Moodbit.
+I need to add production-quality error handling to BetAway.
 Do NOT write code yet — just create a plan.
 
 The app has these failure points:
@@ -77,7 +77,7 @@ This is what you will see in most AI-generated code if you do not ask for better
 
 ```swift
 // Do NOT do this
-func loadMoodEntries() async {
+func loadCheckIns() async {
     do {
         let entries = try await service.fetchEntries()
         self.entries = entries
@@ -94,7 +94,7 @@ func loadMoodEntries() async {
 Now we build. Send this prompt:
 
 ```
-Implement the error handling system for Moodbit based on our plan.
+Implement the error handling system for BetAway based on our plan.
 
 1. Create Models/AppError.swift — a typed AppError enum with
    cases for each failure mode. Group into nested enums:
@@ -114,7 +114,7 @@ Implement the error handling system for Moodbit based on our plan.
    view using ContentUnavailableView with a retry button.
 
 5. Create Views/Components/EmptyStateView.swift — for when the
-   user has no mood entries yet.
+   user has no recovery check-ins yet.
 
 6. Create Utilities/RetryUtility.swift — async retry with
    exponential backoff, max 3 attempts, only retries transient
@@ -162,7 +162,7 @@ enum AppError: Error, Sendable, LocalizedError {
     var userMessage: String {
         switch self {
         case .network(.noConnection):
-            "No internet connection. Your mood will be saved locally and synced when you are back online."
+            "No internet connection. Your check-in will be saved locally and synced when you are back online."
         case .network(.timeout):
             "The request timed out. Check your connection and try again."
         case .network(.rateLimited(let retryAfter)):
@@ -174,15 +174,15 @@ enum AppError: Error, Sendable, LocalizedError {
         case .network(.decodingFailed):
             "Received an unexpected response. Please try again."
         case .persistence(.saveFailed):
-            "Could not save your mood entry. Please free up some storage and try again."
+            "Could not save your check-in. Please free up some storage and try again."
         case .persistence(.fetchFailed):
-            "Could not load your mood history. Pull down to retry."
+            "Could not load your recovery history. Pull down to retry."
         case .persistence(.storageFull):
-            "Your device storage is full. Free up space to continue logging moods."
+            "Your device storage is full. Free up space to continue logging check-ins."
         case .persistence(.migrationFailed):
-            "There was a problem updating the app data. Please restart Moodbit."
+            "There was a problem updating the app data. Please restart BetAway."
         case .health(.permissionDenied):
-            "Moodbit needs Health access to correlate mood with activity. Open Settings to grant permission."
+            "BetAway needs Health access to correlate check-in with activity. Open Settings to grant permission."
         case .health(.notAvailable):
             "Health data is not available on this device."
         case .health(.queryFailed):
@@ -274,32 +274,32 @@ struct FallbackAnalyzer: Sendable {
         return score  // -1.0 (negative) to 1.0 (positive)
     }
 
-    func generateFallbackInsight(moodScore: Int, note: String?) -> String {
+    func generateFallbackInsight(recoveryScore: Int, note: String?) -> String {
         guard let note, !note.isEmpty else {
-            return moodLevelInsight(for: moodScore)
+            return recoveryStatusInsight(for: recoveryScore)
         }
 
         let sentiment = analyzeSentiment(for: note)
 
-        if sentiment > 0.3 && moodScore >= 7 {
+        if sentiment > 0.3 && recoveryScore >= 7 {
             return "Your note reflects a positive mindset. Keep building on what is working well today."
-        } else if sentiment < -0.3 && moodScore <= 4 {
+        } else if sentiment < -0.3 && recoveryScore <= 4 {
             return "It sounds like a tough moment. Remember that difficult feelings are temporary — consider a short walk or breathing exercise."
         } else {
-            return moodLevelInsight(for: moodScore)
+            return recoveryStatusInsight(for: recoveryScore)
         }
     }
 
-    private func moodLevelInsight(for score: Int) -> String {
+    private func recoveryStatusInsight(for score: Int) -> String {
         switch score {
         case 1...3:
-            "Low mood is a signal, not a verdict. What is one small thing that usually helps you feel a bit better?"
+            "Low recovery score is a signal, not a verdict. What is one small thing that usually helps you feel a bit better?"
         case 4...6:
-            "A neutral mood is perfectly normal. Notice what is present in your day — sometimes calm is underrated."
+            "A neutral score is perfectly normal. Notice what is present in your day — sometimes calm is underrated."
         case 7...10:
             "Great energy today. Take a moment to appreciate what is contributing to this feeling."
         default:
-            "Mood logged. Check back later for insights on your patterns."
+            "Check-in logged. Check back later for insights on your patterns."
         }
     }
 }
@@ -320,7 +320,7 @@ func withRetry<T: Sendable>(
     initialDelay: TimeInterval = 1.0,
     operation: @Sendable () async throws(AppError) -> T
 ) async throws(AppError) -> T {
-    let logger = Logger(subsystem: "com.moodbit", category: "Retry")
+    let logger = Logger(subsystem: "com.nativefirst.betaway", category: "Retry")
     var lastError: AppError?
 
     for attempt in 1...maxAttempts {
@@ -358,18 +358,18 @@ func withRetry<T: Sendable>(
 The initial implementation covers individual error handling. Now we need to wire it into the ViewModel with graceful degradation. Send this follow-up:
 
 ```
-Now update MoodEntryViewModel to use the error handling system.
+Now update CheckInViewModel to use the error handling system.
 
-When the user logs a mood:
+When the user logs a check-in:
 1. Try to get an AI insight from OpenAI using withRetry
 2. If that fails with a transient network error, fall back to
    FallbackAnalyzer for an on-device insight — do NOT show an
    error to the user. Log the fallback silently.
-3. Save the mood entry with whatever insight we got
+3. Save the check-in with whatever insight we got
 4. If saving fails, THEN show the error
 
-For loading the mood history:
-1. Use LoadingState<[MoodEntry]> — handle all four states
+For loading the recovery history:
+1. Use LoadingState<[CheckIn]> — handle all four states
 2. On error, show ErrorView with retry
 
 Add a StateHandlingModifier ViewModifier that takes a
@@ -384,28 +384,28 @@ import SwiftUI
 import os
 
 @Observable
-final class MoodEntryViewModel: @unchecked Sendable {
-    var historyState: LoadingState<[MoodEntry]> = .idle
+final class CheckInViewModel: @unchecked Sendable {
+    var historyState: LoadingState<[CheckIn]> = .idle
     var isSaving = false
     var saveError: AppError?
 
     private let aiService: AIServiceProtocol
     private let fallbackAnalyzer = FallbackAnalyzer()
-    private let repository: MoodRepository
-    private let logger = Logger(subsystem: "com.moodbit", category: "MoodEntry")
+    private let service: RecoveryService
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
 
-    init(aiService: AIServiceProtocol, repository: MoodRepository) {
+    init(aiService: AIServiceProtocol, service: RecoveryService) {
         self.aiService = aiService
-        self.repository = repository
+        self.service = service
     }
 
-    func saveMood(score: Int, note: String?, emoji: String) async {
+    func saveCheckIn(recoveryScore: Int, note: String?, emoji: String) async {
         isSaving = true
         defer { isSaving = false }
 
         let insight = await generateInsight(score: score, note: note)
 
-        let entry = MoodEntry(
+        let entry = CheckIn(
             score: score,
             note: note,
             emoji: emoji,
@@ -414,8 +414,8 @@ final class MoodEntryViewModel: @unchecked Sendable {
         )
 
         do {
-            try repository.save(entry)
-            logger.info("Mood entry saved. Insight source: \(insight.source.rawValue)")
+            try service.save(entry)
+            logger.info("Check-in saved. Insight source: \(insight.source.rawValue)")
             await loadHistory()
         } catch {
             saveError = .persistence(.saveFailed(underlying: error.localizedDescription))
@@ -427,7 +427,7 @@ final class MoodEntryViewModel: @unchecked Sendable {
         historyState = .loading
 
         do {
-            let entries = try repository.fetchAll()
+            let entries = try service.fetchAll()
             historyState = .loaded(entries)
         } catch {
             historyState = .error(
@@ -445,7 +445,7 @@ final class MoodEntryViewModel: @unchecked Sendable {
         do {
             let aiInsight = try await withRetry {
                 try await self.aiService.generateInsight(
-                    moodScore: score,
+                    recoveryScore: score,
                     note: note
                 )
             }
@@ -453,7 +453,7 @@ final class MoodEntryViewModel: @unchecked Sendable {
         } catch {
             logger.info("AI unavailable, using on-device fallback: \(error.userMessage)")
             let fallback = fallbackAnalyzer.generateFallbackInsight(
-                moodScore: score,
+                recoveryScore: score,
                 note: note
             )
             return (fallback, .onDevice)
@@ -467,7 +467,7 @@ enum InsightSource: String, Codable, Sendable {
 }
 ```
 
-Notice the degradation strategy: the user taps "Save," the app tries OpenAI with retries, and if all attempts fail, it silently falls back to `NLTagger`. The user still gets an insight. They still get their mood saved. They never see an error for the AI failure because it is not their problem to solve.
+Notice the degradation strategy: the user taps "Save," the app tries OpenAI with retries, and if all attempts fail, it silently falls back to `NLTagger`. The user still gets an insight. They still get their check-in saved. They never see an error for the AI failure because it is not their problem to solve.
 
 This is the difference between "error handling" and "graceful degradation." Error handling shows the user a message. Graceful degradation makes the problem invisible.
 
@@ -534,10 +534,10 @@ struct StateHandlingModifier<T: Sendable, LoadedContent: View>: ViewModifier {
 
 Before moving on, verify each of these scenarios manually:
 
-1. **Airplane mode** — Log a mood. The app should fall back to on-device analysis, save successfully, and show no error
+1. **Airplane mode** — Log a check-in. The app should fall back to on-device analysis, save successfully, and show no error
 2. **Invalid API key** — The retry utility should bail immediately (non-transient), fall back to on-device analysis
-3. **Empty state** — Delete all mood entries. The EmptyStateView should appear with a prompt to log the first mood
-4. **Storage full** (simulate by throwing in the repository) — The user should see a specific "free up space" message, not "Something went wrong"
+3. **Empty state** — Delete all recovery check-ins. The EmptyStateView should appear with a prompt to log the first check-in
+4. **Storage full** (simulate by throwing in the service) — The user should see a specific "free up space" message, not "Something went wrong"
 5. **Rapid taps** — Tap "Save" five times quickly. The `isSaving` flag should prevent duplicate entries
 6. **Kill and reopen** — Force quit during a save. On reopen, `loadHistory` should recover cleanly with no corrupt state
 
@@ -643,10 +643,10 @@ struct EmptyStateView: View {
 
 #Preview("No Entries") {
     EmptyStateView(
-        "No Moods Yet",
+        "No Check-Ins Yet",
         systemImage: "face.smiling",
-        description: "Log your first mood to start tracking patterns.",
-        actionTitle: "Log Mood"
+        description: "Log your first check-in to start tracking patterns.",
+        actionTitle: "Log Check-In"
     ) {
         print("Tapped")
     }
@@ -659,13 +659,13 @@ Test these before continuing to the next lesson:
 
 - [ ] `AppError` compiles with typed throws — calling a function that `throws(AppError)` and catching with `catch let error as AppError` works correctly
 - [ ] `LoadingState` handles all four states and the View never shows a blank screen
-- [ ] Turning off Wi-Fi and logging a mood produces an on-device insight silently — no error shown to the user
+- [ ] Turning off Wi-Fi and logging a check-in produces an on-device insight silently — no error shown to the user
 - [ ] Every error message answers "what happened" and "what to do next"
 - [ ] The retry utility backs off exponentially and does not retry non-transient errors
-- [ ] `EmptyStateView` appears when the mood history is empty
+- [ ] `EmptyStateView` appears when the recovery history is empty
 
 ## Challenge
 
-**Add offline queueing:** When a mood is saved with an on-device fallback insight, queue it for AI re-analysis. When the network comes back (use `NWPathMonitor`), automatically re-analyze queued entries with OpenAI and update the insights in the background. The user should never need to do anything — the upgrade from on-device to AI insight happens silently.
+**Add offline queueing:** When a check-in is saved with an on-device fallback insight, queue it for AI re-analysis. When the network comes back (use `NWPathMonitor`), automatically re-analyze queued entries with OpenAI and update the insights in the background. The user should never need to do anything — the upgrade from on-device to AI insight happens silently.
 
-*Hint:* Add an `InsightSource` field to `MoodEntry`. Query for entries where `insightSource == .onDevice`. Use a background `Task` that monitors `NWPathMonitor` and triggers re-analysis when the path becomes `.satisfied`.
+*Hint:* Add an `InsightSource` field to `CheckIn`. Query for entries where `insightSource == .onDevice`. Use a background `Task` that monitors `NWPathMonitor` and triggers re-analysis when the path becomes `.satisfied`.
