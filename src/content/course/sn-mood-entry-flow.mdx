@@ -1,71 +1,82 @@
 ---
-title: "Check-In Flow"
-description: "Create the multi-step recovery check-in experience with a custom status slider, emoji picker, text input, and tag selection — complete with haptic feedback and smooth animations."
+title: "Check-In & Urge Flow"
+description: "Build BetFree's dual check-in system — Morning Pledge and Evening Check-in — plus a full urge resistance flow with a 15-minute breathing timer, coping toolkit, and structured logging using SwiftData."
 courseSlug: "ship-native"
 module: 2
 moduleTitle: "Core UI with SwiftUI"
 lesson: 3
 duration: "26 min read"
 difficulty: "intermediate"
-topics: ["SwiftUI", "Multi-Step Form", "Custom Slider", "Haptic Feedback", "Animation", "User Input", "UX Design", "BetAway"]
+topics: ["SwiftUI", "Multi-Step Form", "SwiftData", "Haptic Feedback", "Animation", "Timer", "Urge Resistance", "BetFree"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-The dashboard shows existing check-ins. The design system makes them look consistent. Now we build the screen where users actually create a recovery check-in — the single most important interaction in BetAway.
+The dashboard shows existing check-ins. The design system makes them look consistent. Now we build the screens where users actually check in and resist urges — the two most important interactions in BetFree.
 
-This is not a simple form. A recovery check-in is a vulnerable moment. The user is pausing their day to reflect on their progress and urges. The UX needs to respect that. It should feel smooth, guided, and supportive — not like filling out a survey. We are going to build a multi-step flow with a custom slider, emoji picker, free-text input, tag selection, haptic feedback at every transition, and animations that make each step feel intentional.
+BetFree has a dual check-in system. In the morning, users take a **pledge** — a commitment to stay gambling-free for the day, paired with a mood rating and a reason. In the evening, they complete a **check-in** — reflecting on whether they stayed gambling-free, their mood, any triggers they encountered, and optional notes. Beyond check-ins, BetFree has a full **urge resistance flow** — when a user feels the pull to gamble, they can start a 15-minute timer with guided breathing, access a distraction toolkit (breathing exercises, grounding, movement, emergency contacts), and log the urge with intensity, trigger, and coping strategy.
+
+This is not a simple form. A recovery check-in is a vulnerable moment. The user is pausing their day to reflect on their progress and urges. The UX needs to respect that. It should feel smooth, guided, and supportive — not like filling out a survey.
 
 ## What You'll Learn
 
-- How to architect a multi-step form with discrete steps and animated transitions
-- Building a custom `RecoverySlider` with a gradient track and haptic feedback on each level
-- Creating an `EmojiPicker` grid for quick status association
-- Managing form state and validation with a dedicated ViewModel
-- Handling keyboard appearance with the `.focused` modifier
-- Wiring the save action through the service layer pattern
+- How to architect a container view that routes between Morning Pledge, Evening Check-in, and "All Done" states based on user progress
+- Building mood selection with emoji-mapped `MoodRating` enum values (1-5) and `matchedGeometryEffect` for smooth selection highlighting
+- Creating the `PledgeViewModel` — an `@Observable` class managing both pledge and check-in submission with SwiftData persistence
+- Building a full urge resistance flow: acknowledgement phase, 15-minute timer with breathing animation, distraction toolkit, structured logging, and completion celebration
+- Using `HapticManager` for centralized haptic feedback across success, warning, and impact levels
+- Wiring `FlowLayout` — a custom `Layout` that wraps chips to new lines — for trigger and coping strategy selection
 - Prompting AI for complex, multi-file features using the Plan-Execute-Verify workflow
 
 ## Why This Matters
 
 Most recovery apps use a single screen with a basic slider and a text field. It works, but it feels clinical. Users log one check-in and never come back.
 
-The multi-step approach solves this. Each step is focused — one decision at a time. The user never feels overwhelmed. The haptic feedback and animations create a tactile loop that makes the interaction feel supportive. And the tag selection at the end gives structure to the check-in without requiring effort.
+BetFree's approach solves this with two focused moments per day — morning and evening — each with a distinct purpose. The morning pledge sets intention. The evening check-in builds accountability. The urge flow provides real-time support during the hardest moments. Together they create a rhythm that keeps users engaged without feeling like homework.
 
-This pattern applies far beyond recovery tracking. Onboarding flows, checkout processes, survey experiences — any time you need to collect multiple pieces of input from a user, a stepped flow with transitions and feedback will outperform a single monolithic form.
+This dual check-in pattern applies beyond recovery tracking. Any app that benefits from repeated daily engagement — habit trackers, mood journals, fitness apps — can use a time-gated, purpose-specific check-in model to boost retention.
 
 ## Plan Phase: Defining What We Build
 
-Before we touch any code, we need a plan. Open Claude Code in the BetAway project and send this:
+Before we touch any code, we need a plan. Open Claude Code in the BetFree project and send this:
 
 ```
-I need to build the check-in flow for BetAway — a multi-step
-form that lets users log their recovery status. Before writing code,
-help me plan the architecture.
+I need to build the check-in system for BetFree — a gambling
+recovery app. Before writing code, help me plan the architecture.
 
-The flow has four steps:
-1. Recovery Status — a custom slider from 1 (crisis) to 5 (thriving),
-   with a gradient track and haptic feedback when the value changes
-2. Emoji — a grid of emoji options that map to recovery states
-   (hopeful, struggling, anxious, calm, determined, tired, etc.)
-3. Note — a free-text field where the user can write about their
-   recovery progress, with keyboard handling
-4. Tags — a selectable grid of predefined tags like "Urge",
-   "Exercise", "Therapy", "Trigger", "Sleep", "Support Group"
+The app has TWO check-in types:
+1. Morning Pledge — user commits to stay gambling-free today,
+   selects a mood (1-5 with emoji), picks a reason from
+   predefined options like "For my family", "For my financial
+   freedom", "For my mental health"
+2. Evening Check-in — user reports whether they stayed
+   gambling-free (yes/no), selects mood, writes optional
+   reflection notes. If they relapsed, they can log the amount
+   spent and see helpline info.
+
+The app also needs an urge resistance flow:
+1. Acknowledge phase — reassuring message, option to start timer
+2. Timer phase — 15-minute countdown with breathing animation,
+   progress bar, encouragement text that changes over time,
+   distraction toolkit (breathing, grounding, movement, call)
+3. Log phase — intensity slider (1-10), trigger selection,
+   coping strategy selection, did-you-resist toggle, notes
+4. Complete phase — celebration with stats
 
 Requirements:
-- Each step has a "Next" button and a "Back" button
-- Step 4 has a "Save" button instead of "Next"
-- Smooth horizontal slide transition between steps
-- The flow is presented as a sheet from the dashboard
-- State is managed by a CheckInFlowViewModel (@Observable)
-- Save goes through the RecoveryService
+- A container view decides which check-in to show based on
+  what the user has already completed today
+- State is managed by PledgeViewModel (@Observable) for
+  check-ins and UrgeViewModel (@Observable) for urges
+- Both save to SwiftData via ModelContext
+- HapticManager for centralized haptic feedback
+- Custom FlowLayout for wrapping chip selection
 
 Think through:
 1. What files do we need?
-2. What state does the ViewModel manage?
-3. How do we handle step transitions and validation?
+2. What enums and models support this?
+3. How does the container route between states?
 4. What are the edge cases?
 
 Give me the plan, no code yet.
@@ -73,12 +84,23 @@ Give me the plan, no code yet.
 
 Claude Code will come back with a file breakdown and architecture sketch. Review it. The pieces we need are:
 
-- **CheckInFlowView.swift** — the container that manages step transitions
-- **CheckInFlowViewModel.swift** — all form state, validation, and save logic
-- **RecoverySlider.swift** — the custom slider component for step 1
-- **EmojiPicker.swift** — the emoji grid component for step 2
+**Models:**
+- **Enums.swift** — `MoodRating`, `CheckinType`, `CopingStrategy`, `PredefinedTrigger`, `RiskLevel`
+- **DailyCheckin.swift** — SwiftData `@Model` for both morning pledges and evening check-ins
+- **UrgeLog.swift** — SwiftData `@Model` for urge resistance entries
 
-Steps 3 and 4 are simple enough to live inside `CheckInFlowView` as inline sections. No need to extract them into separate files unless they grow.
+**ViewModels:**
+- **PledgeViewModel.swift** — form state for both morning and evening flows, submission logic
+- **UrgeViewModel.swift** — phase management, timer, breathing animation, submission logic
+
+**Views:**
+- **PledgeContainerView.swift** — routes between morning pledge, evening check-in, or "all done"
+- **MorningPledgeView.swift** — the morning pledge form
+- **EveningCheckinView.swift** — the evening check-in form
+- **DashboardPledgeCard.swift** — the dashboard card that opens the pledge flow
+- **UrgeContainerView.swift** — routes between urge phases
+- **UrgeAcknowledgeView.swift**, **UrgeTimerView.swift**, **UrgeLogView.swift**, **UrgeCompleteView.swift** — one view per urge phase
+- **BreathingExerciseView.swift**, **GroundingExerciseView.swift**, **MovementSuggestionsView.swift** — distraction toolkit sheets
 
 ### The Anti-Pattern: One Giant Form
 
@@ -86,25 +108,21 @@ Here is what happens when you skip the planning step and just prompt "build a ch
 
 ```swift
 // What AI generates without guidance — do NOT do this
-struct CheckInFlowView: View {
-    @State private var statusLevel: Double = 3
-    @State private var emoji = ""
+struct CheckInView: View {
+    @State private var mood: Double = 3
     @State private var note = ""
-    @State private var tags: [String] = []
+    @State private var gamblingFree = true
 
     var body: some View {
         Form {
-            Section("Recovery Status") {
-                Slider(value: $statusLevel, in: 1...5, step: 1)
+            Section("Mood") {
+                Slider(value: $mood, in: 1...5, step: 1)
             }
-            Section("Emoji") {
-                TextField("Pick an emoji", text: $emoji)
+            Section("Gambling Free?") {
+                Toggle("Yes", isOn: $gamblingFree)
             }
             Section("Note") {
                 TextEditor(text: $note)
-            }
-            Section("Tags") {
-                // 15 toggles in a row...
             }
             Button("Save") { /* save everything */ }
         }
@@ -112,1442 +130,1751 @@ struct CheckInFlowView: View {
 }
 ```
 
-This is the default AI output for "build a form." It is a single scrolling view with every input crammed together. No steps. No transitions. No haptic feedback. The slider is a stock `Slider` — no gradient, no personality. The emoji input is a `TextField` where the user has to type an emoji. The keyboard covers the note field. There is no validation.
+This is the default AI output for "build a form." It is a single scrolling view with every input crammed together. No time-gating. No distinct morning vs. evening purpose. No urge support. The mood is a stock `Slider` with no emoji, no personality. There is no validation, no haptic feedback, no celebration on completion.
 
-It compiles. It "works." But no user would enjoy using it, and no one would come back to it a second time.
-
-The difference between this and what we are going to build is the plan. Let us execute it.
+It compiles. It "works." But no user would build a daily habit around it. The difference between this and what we are going to build is the plan. Let us execute it.
 
 ## Execute Phase: Implementation
 
-Now we build. We are going to send one focused prompt per file, review the output, and iterate where needed.
+Now we build. We start with the models and enums, then the ViewModels, then the views.
 
-### CheckInFlowViewModel
+### Models: The Foundation
 
-The ViewModel comes first. It owns all the state, so every view depends on it.
-
-```
-Create CheckInFlowViewModel.swift for the BetAway check-in flow.
-
-This is an @Observable class that manages a 4-step recovery check-in form.
-
-State:
-- currentStep: Int (1 through 4)
-- statusLevel: Int (1 through 5, default 3)
-- selectedEmoji: String? (optional, a single emoji character)
-- noteText: String (default empty)
-- selectedTags: Set<String>
-- isSaving: Bool (default false)
-
-Available tags (static let):
-["Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
- "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"]
-
-Computed:
-- canAdvance: Bool — step 1 always true, step 2 requires an emoji,
-  step 3 always true, step 4 always true
-- isFirstStep: Bool
-- isLastStep: Bool
-- stepTitle: String — "How are you doing?", "Pick an emoji",
-  "Add a note", "Add tags"
-- stepSubtitle: String — short description for each step
-
-Methods:
-- advance() — go to next step if canAdvance
-- goBack() — go to previous step
-- save(using service: RecoveryService) async — creates a
-  CheckIn from the current state and saves via service.
-  Sets isSaving during the operation.
-- reset() — clears all state back to defaults
-
-Use Swift 6 conventions. Do not import UIKit.
-```
-
-Here is what Claude Code generates. Let me walk through the review.
+The enum types define the domain vocabulary. Every check-in has a type, a mood rating, and optional triggers. Every urge has an intensity, a trigger, and a coping strategy.
 
 ```swift
+// Enums.swift — domain vocabulary for BetFree
+
+// MARK: - Mood Rating
+
+enum MoodRating: Int, Codable, CaseIterable, Identifiable {
+    case veryBad = 1
+    case bad = 2
+    case neutral = 3
+    case good = 4
+    case veryGood = 5
+
+    var id: Int { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .veryBad: return "😣"
+        case .bad: return "😔"
+        case .neutral: return "😐"
+        case .good: return "🙂"
+        case .veryGood: return "😊"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .veryBad: return LanguageManager.shared.localized("Very Bad")
+        case .bad: return LanguageManager.shared.localized("Bad")
+        case .neutral: return LanguageManager.shared.localized("Okay")
+        case .good: return LanguageManager.shared.localized("Good")
+        case .veryGood: return LanguageManager.shared.localized("Great")
+        }
+    }
+}
+
+// MARK: - Check-in Type
+
+enum CheckinType: String, Codable {
+    case morningPledge = "Morning Pledge"
+    case eveningCheckin = "Evening Check-in"
+}
+
+// MARK: - Coping Strategy
+
+enum CopingStrategy: String, Codable, CaseIterable, Identifiable {
+    case breathingExercise = "Breathing Exercise"
+    case groundingExercise = "Grounding Exercise"
+    case calledSomeone = "Called Someone"
+    case physicalActivity = "Physical Activity"
+    case journaled = "Journaled"
+    case distraction = "Distraction Activity"
+    case other = "Other"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .breathingExercise: return "wind"
+        case .groundingExercise: return "leaf.fill"
+        case .calledSomeone: return "phone.fill"
+        case .physicalActivity: return "figure.walk"
+        case .journaled: return "book.fill"
+        case .distraction: return "gamecontroller.fill"
+        case .other: return "ellipsis.circle.fill"
+        }
+    }
+}
+
+// MARK: - Predefined Triggers
+
+enum PredefinedTrigger: String, Codable, CaseIterable, Identifiable {
+    case liveSports = "Watching live sports"
+    case bettingPromo = "Betting app promotion"
+    case stressed = "Feeling stressed"
+    case bored = "Feeling bored"
+    case gamblingAds = "Seeing gambling ads"
+    case friendsTalking = "Friends talking about bets"
+    case payday = "Payday / received money"
+    case argument = "Argument with someone"
+    case alcohol = "Drinking alcohol"
+    case lateNight = "Late night / can't sleep"
+    case winningMemory = "Remembering a win"
+    case chasingLosses = "Wanting to chase losses"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .liveSports: return "sportscourt.fill"
+        case .bettingPromo: return "bell.badge.fill"
+        case .stressed: return "brain.head.profile"
+        case .bored: return "clock.fill"
+        case .gamblingAds: return "rectangle.on.rectangle.angled"
+        case .friendsTalking: return "person.2.fill"
+        case .payday: return "banknote.fill"
+        case .argument: return "exclamationmark.bubble.fill"
+        case .alcohol: return "wineglass.fill"
+        case .lateNight: return "moon.fill"
+        case .winningMemory: return "star.fill"
+        case .chasingLosses: return "arrow.uturn.backward.circle.fill"
+        }
+    }
+}
+```
+
+**Review:**
+
+- `MoodRating` is an `Int`-backed enum (1-5) with both an `emoji` and a `label`. The raw value maps directly to the SwiftData `mood: Int` field — no conversion needed.
+- `CheckinType` distinguishes morning from evening at the model level. The container view uses `UserProfile.hasPledgedToday()` and `hasCheckedInToday()` to decide which to show.
+- `PredefinedTrigger` has 12 gambling-specific triggers. Each has an SF Symbol `icon` for the chip UI. These are `CaseIterable` so we can iterate them in a `ForEach`.
+- `CopingStrategy` mirrors the distraction toolkit in the urge flow — breathing, grounding, calling someone, physical activity, journaling, distraction.
+
+Now the SwiftData models.
+
+```swift
+// DailyCheckin.swift — SwiftData model for both pledge and check-in
+
 import Foundation
-import os
+import SwiftData
 
-@Observable
-final class CheckInFlowViewModel {
-    // MARK: - Step State
+@Model
+final class DailyCheckin {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var checkinTypeRaw: String = CheckinType.morningPledge.rawValue
+    var mood: Int = MoodRating.neutral.rawValue
+    var gamblingFree: Bool = true
+    var amountGambled: Double?
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var triggersRaw: [String] = []
+    var riskLevelRaw: String = RiskLevel.low.rawValue
+    var createdAt: Date = Date()
 
-    var currentStep = 1
-    let totalSteps = 4
-
-    // MARK: - Form State
-
-    var statusLevel = 3
-    var selectedEmoji: String?
-    var noteText = ""
-    var selectedTags: Set<String> = []
-    var isSaving = false
-
-    // MARK: - Constants
-
-    static let availableTags = [
-        "Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
-        "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"
-    ]
-
-    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
+    @Relationship(inverse: \UserProfile.checkins) var userProfile: UserProfile?
 
     // MARK: - Computed Properties
 
-    var canAdvance: Bool {
-        switch currentStep {
-        case 1: true
-        case 2: selectedEmoji != nil
-        case 3: true
-        case 4: true
-        default: false
+    var checkinType: CheckinType {
+        get { CheckinType(rawValue: checkinTypeRaw) ?? .morningPledge }
+        set { checkinTypeRaw = newValue.rawValue }
+    }
+
+    var moodRating: MoodRating {
+        get { MoodRating(rawValue: mood) ?? .neutral }
+        set { mood = newValue.rawValue }
+    }
+
+    var triggers: [PredefinedTrigger] {
+        get { triggersRaw.compactMap { PredefinedTrigger(rawValue: $0) } }
+        set { triggersRaw = newValue.map(\.rawValue) }
+    }
+
+    // MARK: - Init
+
+    init(
+        checkinType: CheckinType,
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        pledgeReason: String = "",
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.date = Date()
+        self.checkinTypeRaw = checkinType.rawValue
+        self.mood = mood.rawValue
+        self.gamblingFree = gamblingFree
+        self.pledgeReason = pledgeReason
+        self.notes = notes
+        self.createdAt = Date()
+    }
+}
+```
+
+```swift
+// UrgeLog.swift — SwiftData model for urge resistance entries
+
+import Foundation
+import SwiftData
+
+@Model
+final class UrgeLog {
+    var id: UUID = UUID()
+    var timestamp: Date = Date()
+    var intensity: Int = 5
+    var durationSeconds: TimeInterval = 0
+    var triggerRaw: String = ""
+    var copingStrategyRaw: String = ""
+    var didResist: Bool = true
+    var notes: String = ""
+
+    @Relationship(inverse: \UserProfile.urgeLogs) var userProfile: UserProfile?
+
+    var trigger: PredefinedTrigger? {
+        get { PredefinedTrigger(rawValue: triggerRaw) }
+        set { triggerRaw = newValue?.rawValue ?? "" }
+    }
+
+    var copingStrategy: CopingStrategy? {
+        get { CopingStrategy(rawValue: copingStrategyRaw) }
+        set { copingStrategyRaw = newValue?.rawValue ?? "" }
+    }
+
+    init(
+        intensity: Int = 5,
+        trigger: PredefinedTrigger? = nil,
+        copingStrategy: CopingStrategy? = nil,
+        didResist: Bool = true,
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.timestamp = Date()
+        self.intensity = intensity
+        self.triggerRaw = trigger?.rawValue ?? ""
+        self.copingStrategyRaw = copingStrategy?.rawValue ?? ""
+        self.didResist = didResist
+        self.notes = notes
+    }
+}
+```
+
+**Key design decision:** Both models store enums as raw `String` values (e.g., `checkinTypeRaw`, `triggerRaw`). SwiftData cannot persist Swift enums directly, so we use raw-value storage with computed property wrappers that convert back and forth. The `triggersRaw: [String]` array stores multiple triggers — SwiftData handles `[String]` natively.
+
+The `DailyCheckin` model serves both morning pledges and evening check-ins. The `checkinType` field distinguishes them. This is intentional — it lets `UserProfile` maintain a single `checkins` relationship and makes queries simpler ("give me all check-ins this week" works without joining two tables).
+
+### PledgeViewModel
+
+The ViewModel comes first. It owns all form state for both morning and evening flows, so every view depends on it.
+
+```swift
+// PledgeViewModel.swift
+
+import SwiftUI
+import SwiftData
+
+@Observable
+final class PledgeViewModel {
+    var selectedMood: MoodRating = .neutral
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var gamblingFree: Bool = true
+    var amountGambled: String = ""
+    var selectedTriggers: Set<PredefinedTrigger> = []
+
+    var isPledgeTaken: Bool = false
+    var isCheckinDone: Bool = false
+    var showCelebration: Bool = false
+    var isSubmitting: Bool = false
+
+    enum TimeOfDay {
+        case morning
+        case evening
+        case outsideWindow
+    }
+
+    var timeOfDay: TimeOfDay {
+        let hour = Calendar.current.component(.hour, from: Date())
+        if (AppConfig.morningPledgeWindowStart..<AppConfig.morningPledgeWindowEnd).contains(hour) {
+            return .morning
+        } else if (AppConfig.eveningCheckinWindowStart..<AppConfig.eveningCheckinWindowEnd).contains(hour) {
+            return .evening
+        }
+        return .outsideWindow
+    }
+
+    // Pledge reasons for quick selection
+    static var pledgeReasons: [String] {
+        [
+            LanguageManager.shared.localized("For my family"),
+            LanguageManager.shared.localized("For my financial freedom"),
+            LanguageManager.shared.localized("For my mental health"),
+            LanguageManager.shared.localized("To prove I can do this"),
+            LanguageManager.shared.localized("For a better future"),
+            LanguageManager.shared.localized("Because I deserve peace"),
+        ]
+    }
+
+    // MARK: - Morning Pledge
+
+    func submitPledge(profile: UserProfile, context: ModelContext) {
+        isSubmitting = true
+
+        let checkin = DailyCheckin(
+            checkinType: .morningPledge,
+            mood: selectedMood,
+            pledgeReason: pledgeReason,
+            notes: notes
+        )
+        checkin.userProfile = profile
+        context.insert(checkin)
+
+        withAnimation(AnimationPresets.bouncy) {
+            isPledgeTaken = true
+            showCelebration = true
+        }
+
+        HapticManager.success()
+        isSubmitting = false
+    }
+
+    // MARK: - Evening Check-in
+
+    func submitCheckin(profile: UserProfile, context: ModelContext) {
+        isSubmitting = true
+
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: selectedMood,
+            gamblingFree: gamblingFree,
+            notes: notes
+        )
+
+        if !gamblingFree, let amount = Double(amountGambled) {
+            checkin.amountGambled = amount
+        }
+
+        checkin.triggers = Array(selectedTriggers)
+        checkin.userProfile = profile
+        context.insert(checkin)
+
+        withAnimation(AnimationPresets.bouncy) {
+            isCheckinDone = true
+            if gamblingFree {
+                showCelebration = true
+                HapticManager.success()
+            }
+        }
+
+        isSubmitting = false
+    }
+
+    // MARK: - Reset
+
+    func reset() {
+        selectedMood = .neutral
+        pledgeReason = ""
+        notes = ""
+        gamblingFree = true
+        amountGambled = ""
+        selectedTriggers = []
+        isPledgeTaken = false
+        isCheckinDone = false
+        showCelebration = false
+    }
+}
+```
+
+**Review:**
+
+- `@Observable` with `final class` — correct modern pattern, not `ObservableObject`
+- **Single ViewModel for both flows.** The morning pledge and evening check-in share `selectedMood` and `notes`, but have different additional fields (`pledgeReason` for morning, `gamblingFree`/`amountGambled`/`selectedTriggers` for evening). One ViewModel keeps them synchronized and makes the container simpler.
+- **`submitPledge` vs `submitCheckin`** — two separate methods, not a single `save()` with conditionals. Each creates a `DailyCheckin` with the appropriate `checkinType`. This is explicit and easy to trace.
+- **Haptic feedback is conditional.** `submitPledge` always fires `HapticManager.success()`. `submitCheckin` only fires it when `gamblingFree` is true. If the user relapsed, we do not celebrate — we respect the moment. This is a UX detail that matters deeply in a recovery app.
+- **`TimeOfDay`** — the ViewModel knows what time window we are in. The container uses `hasPledgedToday()` / `hasCheckedInToday()` on the profile instead, which is more reliable (it checks actual data, not just the clock).
+- **`pledgeReasons` is a static property** — localized strings for the quick-select chips. These are not user-editable; they are curated reasons that resonate with gambling recovery.
+
+### PledgeContainerView — The Router
+
+This is the view that decides what to show. It checks the user's profile to determine which check-in is needed.
+
+```swift
+// PledgeContainerView.swift
+
+import SwiftUI
+import SwiftData
+
+struct PledgeContainerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = PledgeViewModel()
+
+    private var profile: UserProfile? { profiles.first }
+
+    private var navigationTitle: String {
+        guard let profile else { return LanguageManager.shared.localized("Daily Check-in") }
+        if profile.hasPledgedToday() && profile.hasCheckedInToday() {
+            return LanguageManager.shared.localized("Daily Check-in")
+        } else if !profile.hasPledgedToday() {
+            return LanguageManager.shared.localized("Morning Pledge")
+        } else {
+            return LanguageManager.shared.localized("Evening Check-in")
         }
     }
 
-    var isFirstStep: Bool { currentStep == 1 }
-    var isLastStep: Bool { currentStep == totalSteps }
+    var body: some View {
+        Group {
+            if let profile {
+                if profile.hasPledgedToday() && profile.hasCheckedInToday() {
+                    // Both done for today
+                    AllDoneView(profile: profile)
+                } else if !profile.hasPledgedToday() {
+                    // Morning pledge needed
+                    MorningPledgeView(viewModel: viewModel, profile: profile)
+                } else {
+                    // Pledge done, evening check-in needed
+                    EveningCheckinView(viewModel: viewModel, profile: profile)
+                }
+            } else {
+                SwiftUI.ProgressView()
+            }
+        }
+        .background(ColorPalette.background)
+        .navigationTitle(navigationTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: AppConfig.Icons.close)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(ColorPalette.textSecondary)
+                }
+            }
+        }
+    }
+}
+```
 
-    var stepTitle: String {
-        switch currentStep {
-        case 1: "How are you doing?"
-        case 2: "Pick an emoji"
-        case 3: "Add a note"
-        case 4: "Add tags"
-        default: ""
+**Review:**
+
+- The routing logic is a simple if/else chain: both done → `AllDoneView`, pledge not taken → `MorningPledgeView`, pledge taken → `EveningCheckinView`. No enum-based state machine needed — the `UserProfile` is the source of truth.
+- `@Query private var profiles: [UserProfile]` fetches the profile from SwiftData. The app has a single profile, so `profiles.first` is always the right one.
+- `@State private var viewModel = PledgeViewModel()` — the ViewModel is created fresh each time the sheet presents. When the sheet dismisses and re-presents, state is clean.
+- The `navigationTitle` updates dynamically based on what the user needs to do. The user sees "Morning Pledge" or "Evening Check-in" — never a generic "Check-in."
+
+### MorningPledgeView — The Pledge
+
+The morning flow has three sections: a header with the day count, a mood selector, and pledge reason chips.
+
+```swift
+// MorningPledgeView.swift
+
+import SwiftUI
+import SwiftData
+
+struct MorningPledgeView: View {
+    @Bindable var viewModel: PledgeViewModel
+    let profile: UserProfile
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @State private var isVisible = false
+    @State private var showToast = false
+    @Namespace private var moodNamespace
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xxl) {
+                pledgeFormView
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .onAppear { isVisible = true }
+        .overlay {
+            if showToast {
+                ZStack {
+                    ColorPalette.background.opacity(0.85)
+                        .ignoresSafeArea()
+
+                    PledgeSuccessToast(
+                        icon: AppConfig.Icons.checkmark,
+                        iconColor: ColorPalette.success,
+                        title: LanguageManager.shared.localized("Pledge taken!"),
+                        subtitle: LanguageManager.shared.localized(
+                            "Come back tonight for your check-in."
+                        ),
+                        emoji: viewModel.selectedMood.emoji
+                    )
+                }
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: viewModel.isPledgeTaken) { _, taken in
+            if taken {
+                withAnimation(AnimationPresets.smooth) {
+                    showToast = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    dismiss()
+                }
+            }
         }
     }
 
-    var stepSubtitle: String {
-        switch currentStep {
-        case 1: "Slide to match your current state"
-        case 2: "Choose one that fits"
-        case 3: "Optional — write anything"
-        case 4: "Optional — what's on your mind?"
-        default: ""
+    // MARK: - Pledge Form
+
+    @ViewBuilder
+    private var pledgeFormView: some View {
+        // Header
+        VStack(spacing: Spacing.xs) {
+            Image(systemName: AppConfig.Icons.sun)
+                .font(.system(size: 50))
+                .foregroundStyle(ColorPalette.warning)
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+            Text("Day \(profile.currentStreak + 1)")
+                .font(Typography.title3())
+                .foregroundStyle(ColorPalette.textSecondary)
+                .staggeredAppear(index: 1, isVisible: isVisible)
+        }
+
+        // Pledge text
+        Text("I pledge to stay\ngambling-free today.")
+            .font(Typography.pledgeText)
+            .foregroundStyle(ColorPalette.textPrimary)
+            .multilineTextAlignment(.center)
+            .staggeredAppear(index: 2, isVisible: isVisible)
+
+        // Mood selector
+        VStack(spacing: Spacing.sm) {
+            Text("How are you feeling?")
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            HStack(spacing: Spacing.md) {
+                ForEach(MoodRating.allCases) { mood in
+                    MoodButton(
+                        mood: mood,
+                        isSelected: viewModel.selectedMood == mood,
+                        namespace: moodNamespace
+                    ) {
+                        withAnimation(AnimationPresets.snappy) {
+                            viewModel.selectedMood = mood
+                        }
+                    }
+                }
+            }
+        }
+        .staggeredAppear(index: 3, isVisible: isVisible)
+
+        // Reason chips
+        VStack(spacing: Spacing.sm) {
+            Text("Why are you staying bet-free?")
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            FlowLayout(spacing: Spacing.xs) {
+                ForEach(PledgeViewModel.pledgeReasons, id: \.self) { reason in
+                    ReasonChip(
+                        text: reason,
+                        isSelected: viewModel.pledgeReason == reason
+                    ) {
+                        withAnimation(AnimationPresets.snappy) {
+                            viewModel.pledgeReason =
+                                viewModel.pledgeReason == reason ? "" : reason
+                        }
+                    }
+                }
+            }
+        }
+        .staggeredAppear(index: 4, isVisible: isVisible)
+
+        // Pledge button
+        BFButton(
+            title: "Take My Pledge",
+            icon: AppConfig.Icons.pledge,
+            isLoading: viewModel.isSubmitting
+        ) {
+            viewModel.submitPledge(profile: profile, context: modelContext)
+        }
+        .staggeredAppear(index: 5, isVisible: isVisible)
+    }
+}
+```
+
+**Key patterns to notice:**
+
+- **`@Namespace private var moodNamespace`** — used by `MoodButton` for `matchedGeometryEffect`. When the user taps a different mood, the highlight background animates smoothly from one emoji to the next instead of popping.
+- **`staggeredAppear(index:isVisible:)`** — a custom view modifier that delays each section's entrance animation by its index. The header appears first, then the pledge text, then mood, then reasons, then the button. This creates a cascading reveal that feels intentional.
+- **Toast pattern for success.** After `submitPledge` sets `isPledgeTaken = true`, the `onChange` handler shows a full-screen toast with the pledge emoji and a message ("Come back tonight for your check-in"). After 2.5 seconds, it auto-dismisses.
+- **`FlowLayout`** — a custom `Layout` that wraps chips to the next line when they exceed the available width. This is essential because the pledge reasons have variable lengths and a `LazyVGrid` would create ugly gaps.
+
+Here is the `MoodButton` component that makes the mood selector feel physical:
+
+```swift
+// MoodButton — used in MorningPledgeView
+
+private struct MoodButton: View {
+    let mood: MoodRating
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: Spacing.xxs) {
+                Text(mood.emoji)
+                    .font(.system(size: isSelected ? 36 : 28))
+
+                if isSelected {
+                    Text(mood.label)
+                        .font(Typography.caption(weight: .medium))
+                        .foregroundStyle(ColorPalette.accent)
+                }
+            }
+            .padding(.vertical, Spacing.xs)
+            .padding(.horizontal, Spacing.xs)
+            .background(
+                Group {
+                    if isSelected {
+                        RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium,
+                            style: .continuous
+                        )
+                        .fill(ColorPalette.accent.opacity(0.1))
+                        .matchedGeometryEffect(id: "moodHighlight", in: namespace)
+                    }
+                }
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+The `matchedGeometryEffect` on the background `RoundedRectangle` is the key detail. When the user taps a different mood, SwiftUI smoothly animates the highlight rectangle from the old position to the new one. This is far better than a simple opacity fade — it communicates which option was selected through motion.
+
+### EveningCheckinView — The Reflection
+
+The evening flow adds the gambling-free question, a conditional relapse section, and trigger selection.
+
+```swift
+// EveningCheckinView.swift
+
+import SwiftUI
+import SwiftData
+
+struct EveningCheckinView: View {
+    @Bindable var viewModel: PledgeViewModel
+    let profile: UserProfile
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @State private var isVisible = false
+    @State private var showToast = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xxl) {
+                checkinFormView
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .onAppear { isVisible = true }
+        .overlay {
+            if showToast {
+                ZStack {
+                    ColorPalette.background.opacity(0.85)
+                        .ignoresSafeArea()
+
+                    PledgeSuccessToast(
+                        icon: viewModel.gamblingFree
+                            ? AppConfig.Icons.checkmark : AppConfig.Icons.heart,
+                        iconColor: viewModel.gamblingFree
+                            ? ColorPalette.success : ColorPalette.accent,
+                        title: viewModel.gamblingFree
+                            ? LanguageManager.shared.localized("Another great day!")
+                            : LanguageManager.shared.localized("Tomorrow is a new day"),
+                        subtitle: viewModel.gamblingFree
+                            ? LanguageManager.shared.localized(
+                                "You stayed strong. Rest well tonight."
+                            )
+                            : LanguageManager.shared.localized(
+                                "Your honesty takes real courage."
+                            ),
+                        emoji: viewModel.selectedMood.emoji
+                    )
+                }
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: viewModel.isCheckinDone) { _, done in
+            if done {
+                withAnimation(AnimationPresets.smooth) {
+                    showToast = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var checkinFormView: some View {
+        // Header
+        VStack(spacing: Spacing.xs) {
+            Image(systemName: AppConfig.Icons.moon)
+                .font(.system(size: 50))
+                .foregroundStyle(ColorPalette.accent)
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+            Text("How was your day?")
+                .font(Typography.title1())
+                .foregroundStyle(ColorPalette.textPrimary)
+                .staggeredAppear(index: 1, isVisible: isVisible)
+        }
+
+        // Gambling-free question
+        VStack(spacing: Spacing.sm) {
+            Text("Did you stay gambling-free today?")
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            HStack(spacing: Spacing.md) {
+                GamblingFreeButton(
+                    title: "Yes!",
+                    icon: AppConfig.Icons.checkmark,
+                    isSelected: viewModel.gamblingFree,
+                    color: ColorPalette.success
+                ) {
+                    withAnimation(AnimationPresets.snappy) {
+                        viewModel.gamblingFree = true
+                    }
+                }
+
+                GamblingFreeButton(
+                    title: "No",
+                    icon: AppConfig.Icons.close,
+                    isSelected: !viewModel.gamblingFree,
+                    color: ColorPalette.danger
+                ) {
+                    withAnimation(AnimationPresets.snappy) {
+                        viewModel.gamblingFree = false
+                    }
+                }
+            }
+        }
+        .staggeredAppear(index: 2, isVisible: isVisible)
+
+        // Relapse section (if applicable)
+        if !viewModel.gamblingFree {
+            relapseSection
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+
+        // Mood selector
+        VStack(spacing: Spacing.sm) {
+            Text("Rate your mood")
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            HStack(spacing: Spacing.lg) {
+                ForEach(MoodRating.allCases) { mood in
+                    Button {
+                        withAnimation(AnimationPresets.snappy) {
+                            viewModel.selectedMood = mood
+                        }
+                    } label: {
+                        VStack(spacing: Spacing.xxs) {
+                            Text(mood.emoji)
+                                .font(.system(size: viewModel.selectedMood == mood ? 36 : 28))
+
+                            if viewModel.selectedMood == mood {
+                                Text(mood.label)
+                                    .font(Typography.caption(weight: .medium))
+                                    .foregroundStyle(ColorPalette.accent)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .staggeredAppear(index: 3, isVisible: isVisible)
+
+        // Notes
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text("Reflection (optional)")
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            TextField("How are you feeling?", text: $viewModel.notes, axis: .vertical)
+                .font(Typography.body())
+                .lineLimit(3...6)
+                .padding(Spacing.sm)
+                .background(ColorPalette.surfaceSecondary)
+                .clipShape(RoundedRectangle(
+                    cornerRadius: Spacing.Radius.medium, style: .continuous
+                ))
+        }
+        .staggeredAppear(index: 4, isVisible: isVisible)
+
+        // Submit
+        BFButton(
+            title: "Complete Check-in",
+            icon: AppConfig.Icons.moon,
+            isLoading: viewModel.isSubmitting
+        ) {
+            viewModel.submitCheckin(profile: profile, context: modelContext)
+        }
+        .staggeredAppear(index: 5, isVisible: isVisible)
+    }
+
+    // MARK: - Relapse Section
+
+    @ViewBuilder
+    private var relapseSection: some View {
+        BFCard(padding: Spacing.lg) {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                Text("It's okay. Relapse is part of recovery.")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+
+                Text("What matters is that you're here, being honest. "
+                   + "That takes real courage.")
+                    .font(Typography.subheadline())
+                    .foregroundStyle(ColorPalette.textSecondary)
+
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("How much did you spend?")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    TextField("Amount", text: $viewModel.amountGambled)
+                        .font(Typography.body())
+                        .keyboardType(.decimalPad)
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.small, style: .continuous
+                        ))
+                }
+
+                if let helpline = AppConfig
+                    .helplines(for: LanguageManager.shared.currentLanguage).first
+                {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: AppConfig.Icons.info)
+                            .foregroundStyle(ColorPalette.infoBadge)
+                        Text("Need help? Call \(helpline.number)")
+                            .font(Typography.caption())
+                            .foregroundStyle(ColorPalette.textSecondary)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Critical UX decisions in the evening flow:**
+
+- **The relapse section appears conditionally** — `if !viewModel.gamblingFree { relapseSection }` with `.transition(.opacity.combined(with: .move(edge: .top)))`. When the user taps "No," the section slides in from above with a fade. It contains an empathetic message ("Relapse is part of recovery"), an amount field, and a helpline number. This is not judgmental — it is supportive.
+- **Different toast messages for success vs. relapse.** If gambling-free: "Another great day! You stayed strong." If not: "Tomorrow is a new day. Your honesty takes real courage." The icon changes from a checkmark to a heart. The color changes from success green to accent. These details communicate that the app is not punishing the user for honesty.
+- **No celebration haptic on relapse.** The `submitCheckin` method only fires `HapticManager.success()` when `gamblingFree` is true. If the user relapsed, the haptic would feel tone-deaf.
+
+### UrgeViewModel — Timer, Breathing, and Phase Management
+
+The urge flow is the most complex ViewModel in the app. It manages four phases, a 15-minute timer with async Task, breathing animation, and submission.
+
+```swift
+// UrgeViewModel.swift
+
+import SwiftUI
+import SwiftData
+
+@Observable
+final class UrgeViewModel {
+    // MARK: - State
+    var phase: UrgePhase = .acknowledge
+    var timerSeconds: Int = 0
+    var isTimerRunning: Bool = false
+    var breathPhase: BreathPhase = .inhale
+    var selectedIntensity: Int = 5
+    var selectedTrigger: PredefinedTrigger?
+    var selectedStrategy: CopingStrategy?
+    var notes: String = ""
+    var didResist: Bool = true
+    var showCompletionCelebration: Bool = false
+
+    // Distraction toolkit
+    var showBreathingExercise: Bool = false
+    var showGroundingExercise: Bool = false
+    var showMovementSuggestions: Bool = false
+    var showCallHelpline: Bool = false
+    var showEmergencyContacts: Bool = false
+
+    private var timerTask: Task<Void, Never>?
+
+    // MARK: - Constants
+    static let urgeTimerDuration: Int = 15 * 60 // 15 minutes
+    static let breathCycleDuration: Double = 8.0 // 4s in, 4s out
+
+    enum UrgePhase: CaseIterable {
+        case acknowledge
+        case timer
+        case log
+        case complete
+    }
+
+    enum BreathPhase {
+        case inhale
+        case exhale
+    }
+
+    // MARK: - Computed
+
+    var timerProgress: Double {
+        Double(timerSeconds) / Double(Self.urgeTimerDuration)
+    }
+
+    var timerDisplay: String {
+        let remaining = max(0, Self.urgeTimerDuration - timerSeconds)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var timerMinutesElapsed: Int {
+        timerSeconds / 60
+    }
+
+    var encouragementText: String {
+        switch timerSeconds {
+        case 0..<60:
+            return LanguageManager.shared.localized(
+                "You're doing great. Stay with it."
+            )
+        case 60..<180:
+            return LanguageManager.shared.localized(
+                "The first minutes are the hardest. Keep breathing."
+            )
+        case 180..<300:
+            return LanguageManager.shared.localized(
+                "Almost halfway through the peak. Stay strong."
+            )
+        case 300..<600:
+            return LanguageManager.shared.localized(
+                "The peak is passing. You've got this."
+            )
+        case 600..<900:
+            return LanguageManager.shared.localized(
+                "You're nearly there. The urge is fading."
+            )
+        default:
+            return LanguageManager.shared.localized(
+                "Incredible strength. The urge has passed."
+            )
         }
     }
 
     // MARK: - Actions
 
-    func advance() {
-        guard canAdvance, currentStep < totalSteps else { return }
-        currentStep += 1
+    func startTimer() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .timer
+            isTimerRunning = true
+        }
+
+        timerTask = Task { @MainActor in
+            while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+                try? await Task.sleep(for: .seconds(1))
+                if !Task.isCancelled {
+                    timerSeconds += 1
+                }
+            }
+            if !Task.isCancelled {
+                isTimerRunning = false
+                HapticManager.timerComplete()
+                moveToLog()
+            }
+        }
+
+        // Start breathing animation cycle
+        startBreathCycle()
     }
 
-    func goBack() {
-        guard currentStep > 1 else { return }
-        currentStep -= 1
+    func skipTimer() {
+        timerTask?.cancel()
+        isTimerRunning = false
+        moveToLog()
     }
 
-    func save(using service: RecoveryService) async {
-        isSaving = true
-        defer { isSaving = false }
+    func moveToLog() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .log
+        }
+    }
 
-        let checkIn = CheckIn(
-            statusLevel: statusLevel,
-            emoji: selectedEmoji ?? "😐",
-            note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
-            tags: Array(selectedTags),
-            createdAt: .now
+    func submitUrge(profile: UserProfile, context: ModelContext) {
+        let urge = UrgeLog(
+            intensity: selectedIntensity,
+            trigger: selectedTrigger,
+            copingStrategy: selectedStrategy,
+            didResist: didResist,
+            notes: notes
         )
+        urge.durationSeconds = TimeInterval(timerSeconds)
+        urge.userProfile = profile
+        context.insert(urge)
 
-        do {
-            try await service.save(checkIn)
-            logger.info("Check-in saved: status \(self.statusLevel)")
-        } catch {
-            logger.error("Failed to save check-in: \(error.localizedDescription)")
+        withAnimation(AnimationPresets.bouncy) {
+            phase = .complete
+            showCompletionCelebration = true
+        }
+
+        if didResist {
+            HapticManager.mediumImpact()
         }
     }
 
     func reset() {
-        currentStep = 1
-        statusLevel = 3
-        selectedEmoji = nil
-        noteText = ""
-        selectedTags = []
-        isSaving = false
+        timerTask?.cancel()
+        phase = .acknowledge
+        timerSeconds = 0
+        isTimerRunning = false
+        breathPhase = .inhale
+        selectedIntensity = 5
+        selectedTrigger = nil
+        selectedStrategy = nil
+        notes = ""
+        didResist = true
+        showCompletionCelebration = false
+        showBreathingExercise = false
+        showGroundingExercise = false
+        showMovementSuggestions = false
+        showCallHelpline = false
+        showEmergencyContacts = false
     }
-}
-```
 
-**Review:**
+    // MARK: - Breath Cycle
 
-- ✅ `@Observable` with `final class` — correct modern pattern, not `ObservableObject`
-- ✅ `Logger` instead of `print()` — follows our CLAUDE.md
-- ✅ `canAdvance` uses a clean switch — step 2 requires emoji selection, others are permissive
-- ✅ `save` is async with `defer` for `isSaving` — ensures the flag resets even on error
-- ✅ `reset()` clears everything — we call this after a successful save or on dismiss
-- ✅ Note text is trimmed before saving — good defensive code
-- ⚠️ The fallback emoji `"😐"` in `save` is a reasonable default, but we should ensure the UI prevents reaching save without an emoji. Our `canAdvance` on step 2 handles this, so the fallback is just a safety net. Acceptable.
-
-This ViewModel is clean. No iteration needed. Let us move to the custom slider.
-
-### RecoverySlider
-
-This is the centerpiece of step 1. A stock `Slider` will not do — we need a gradient track that shifts color based on the recovery status and haptic feedback on each discrete stop.
-
-```
-Create RecoverySlider.swift — a custom SwiftUI slider for selecting
-a recovery status from 1 to 5.
-
-Requirements:
-- Horizontal track with rounded ends
-- Track fills with a gradient that shifts based on the current value:
-  level 1 = deep blue/indigo, level 3 = yellow, level 5 = green
-- A circular thumb that shows the current level number
-- The thumb snaps to discrete values (1, 2, 3, 4, 5) — no
-  in-between values
-- Trigger UIImpactFeedbackGenerator (.light) when the value
-  changes to a new level
-- A row of labels below the track: "Crisis", "Struggling",
-  "Stable", "Strong", "Thriving"
-- Use a DragGesture for the interaction, not a Slider view
-- Binding to an Int value
-
-The component should be self-contained and reusable.
-Target iOS 17+. Use GeometryReader for track width calculation.
-```
-
-```swift
-import SwiftUI
-import UIKit
-
-struct RecoverySlider: View {
-    @Binding var value: Int
-
-    private let range = 1...5
-    private let labels = ["Crisis", "Struggling", "Stable", "Strong", "Thriving"]
-    private let thumbSize: CGFloat = 44
-
-    @State private var isDragging = false
-
-    var body: some View {
-        VStack(spacing: 16) {
-            GeometryReader { geometry in
-                let trackWidth = geometry.size.width - thumbSize
-                let stepWidth = trackWidth / CGFloat(range.count - 1)
-                let thumbOffset = CGFloat(value - range.lowerBound) * stepWidth
-
-                ZStack(alignment: .leading) {
-                    // Background track
-                    Capsule()
-                        .fill(Color(.systemGray5))
-                        .frame(height: 8)
-                        .padding(.horizontal, thumbSize / 2)
-
-                    // Filled track with gradient
-                    Capsule()
-                        .fill(trackGradient)
-                        .frame(width: thumbOffset + thumbSize / 2, height: 8)
-                        .padding(.leading, thumbSize / 2)
-
-                    // Thumb
-                    Circle()
-                        .fill(.white)
-                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-                        .frame(width: thumbSize, height: thumbSize)
-                        .overlay {
-                            Text("\(value)")
-                                .font(.system(.title3, design: .rounded, weight: .bold))
-                                .foregroundStyle(thumbColor)
-                        }
-                        .scaleEffect(isDragging ? 1.1 : 1.0)
-                        .offset(x: thumbOffset)
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { gesture in
-                                    isDragging = true
-                                    let newValue = calculateValue(
-                                        from: gesture.location.x,
-                                        trackWidth: trackWidth,
-                                        stepWidth: stepWidth
-                                    )
-                                    if newValue != value {
-                                        value = newValue
-                                        triggerHaptic()
-                                    }
-                                }
-                                .onEnded { _ in
-                                    isDragging = false
-                                }
-                        )
+    private func startBreathCycle() {
+        Task { @MainActor in
+            while isTimerRunning && !Task.isCancelled {
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .inhale
                 }
-                .frame(height: thumbSize)
-            }
-            .frame(height: thumbSize)
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
 
-            // Labels
-            HStack {
-                ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
-                    Text(label)
-                        .font(.caption2)
-                        .fontWeight(index + 1 == value ? .semibold : .regular)
-                        .foregroundStyle(index + 1 == value ? thumbColor : .secondary)
-                        .frame(maxWidth: .infinity)
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .exhale
                 }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: value)
-        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isDragging)
-    }
-
-    // MARK: - Gradient
-
-    private var trackGradient: LinearGradient {
-        LinearGradient(
-            colors: [.indigo, .blue, .yellow, .orange, .green],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
-
-    private var thumbColor: Color {
-        switch value {
-        case 1: .indigo
-        case 2: .blue
-        case 3: .yellow.opacity(0.9)
-        case 4: .orange
-        case 5: .green
-        default: .gray
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func calculateValue(
-        from locationX: CGFloat,
-        trackWidth: CGFloat,
-        stepWidth: CGFloat
-    ) -> Int {
-        let clamped = min(max(locationX - thumbSize / 2, 0), trackWidth)
-        let rawValue = Int(round(clamped / stepWidth)) + range.lowerBound
-        return min(max(rawValue, range.lowerBound), range.upperBound)
-    }
-
-    private func triggerHaptic() {
-        let generator = UIImpactFeedbackGenerator(style: .light)
-        generator.impactOccurred()
     }
 }
-
-#Preview {
-    @Previewable @State var status = 3
-    RecoverySlider(value: $status)
-        .padding(32)
-}
 ```
 
-**Review:**
+**This ViewModel is worth studying in detail:**
 
-- ✅ Uses `DragGesture` instead of stock `Slider` — full control over appearance and behavior
-- ✅ Discrete snapping — `calculateValue` rounds to the nearest integer, no in-between values
-- ✅ Haptic feedback on every level change — `triggerHaptic()` fires only when `newValue != value`
-- ✅ Gradient track fills proportionally — the `Capsule` width grows with the thumb offset
-- ✅ Labels highlight the current selection with matching color and weight
-- ✅ Spring animations on thumb scale and position — satisfying feel
-- ✅ Thumb meets the 44pt minimum tap target
-- ⚠️ We import `UIKit` for `UIImpactFeedbackGenerator`. There is no pure SwiftUI haptic API that covers this use case. The iOS 17 `.sensoryFeedback` modifier is tied to value changes on views, not programmatic triggers during gestures. UIKit is the right call here.
+- **Phase-based state machine.** The `UrgePhase` enum (`.acknowledge` -> `.timer` -> `.log` -> `.complete`) drives the entire flow. The container view switches on `phase` to show the right view. This is cleaner than step-numbering because the phases have semantic meaning.
+- **Async timer with `Task`.** The `startTimer()` method creates a `Task` that increments `timerSeconds` every second. The `@MainActor` annotation ensures UI updates happen on the main thread. `Task.isCancelled` is checked in the loop condition AND after the sleep — this is defensive coding against Task cancellation during sleep.
+- **Breathing animation runs in a parallel Task.** `startBreathCycle()` creates a separate `Task` that alternates between `.inhale` and `.exhale` every 4 seconds. The `withAnimation(.easeInOut)` wrapper means SwiftUI animates the `breathPhase` change. The timer view reads `breathPhase` to scale a circle up and down — creating a guided breathing visual.
+- **Encouragement text changes over time.** The `encouragementText` computed property returns different messages based on `timerSeconds`. At 0-60s: "You're doing great." At 600-900s: "You're nearly there. The urge is fading." This is based on clinical research that gambling urges peak at 10-15 minutes and then subside.
+- **`reset()` cancels the timer Task.** If the user dismisses the flow mid-timer, we must cancel the background Task to prevent memory leaks and stale state updates.
 
-### EmojiPicker
+### UrgeContainerView and Phase Views
 
-Step 2 needs a grid of emojis the user can tap to associate with their recovery status.
-
-```
-Create EmojiPicker.swift — a grid of emoji options for the BetAway
-check-in flow.
-
-Requirements:
-- Display a grid of emojis in a LazyVGrid with 4 columns
-- Emojis: 😊 😔 😰 😌 ⚡ 😴 😡 🥰 😂 🤔 😢 🎉
-- Each emoji is a tappable circle that highlights when selected
-- Only one emoji can be selected at a time
-- Binding to an optional String
-- Selected state: emoji scales up slightly and gets a colored
-  background ring
-- Trigger UISelectionFeedbackGenerator when selection changes
-- The component should be self-contained and reusable
-
-Target iOS 17+.
-```
+The container routes between the four urge phases:
 
 ```swift
+// UrgeContainerView.swift
+
 import SwiftUI
-import UIKit
+import SwiftData
 
-struct EmojiPicker: View {
-    @Binding var selection: String?
-
-    private let emojis = [
-        "😊", "😔", "😰", "😌",
-        "⚡", "😴", "😡", "🥰",
-        "😂", "🤔", "😢", "🎉"
-    ]
-
-    private let columns = Array(
-        repeating: GridItem(.flexible(), spacing: 12),
-        count: 4
-    )
-
-    var body: some View {
-        LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(emojis, id: \.self) { emoji in
-                let isSelected = selection == emoji
-
-                Button {
-                    if selection == emoji {
-                        selection = nil
-                    } else {
-                        selection = emoji
-                        triggerHaptic()
-                    }
-                } label: {
-                    Text(emoji)
-                        .font(.system(size: 36))
-                        .frame(width: 64, height: 64)
-                        .background(
-                            Circle()
-                                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
-                        )
-                        .overlay(
-                            Circle()
-                                .strokeBorder(
-                                    isSelected ? Color.accentColor : .clear,
-                                    lineWidth: 2.5
-                                )
-                        )
-                        .scaleEffect(isSelected ? 1.1 : 1.0)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(accessibilityName(for: emoji))
-            }
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selection)
-    }
-
-    private func triggerHaptic() {
-        let generator = UISelectionFeedbackGenerator()
-        generator.selectionChanged()
-    }
-
-    private func accessibilityName(for emoji: String) -> String {
-        switch emoji {
-        case "😊": "Happy"
-        case "😔": "Sad"
-        case "😰": "Anxious"
-        case "😌": "Calm"
-        case "⚡": "Energized"
-        case "😴": "Tired"
-        case "😡": "Angry"
-        case "🥰": "Loved"
-        case "😂": "Amused"
-        case "🤔": "Thoughtful"
-        case "😢": "Tearful"
-        case "🎉": "Excited"
-        default: emoji
-        }
-    }
-}
-
-#Preview {
-    @Previewable @State var selected: String?
-    EmojiPicker(selection: $selected)
-        .padding()
-}
-```
-
-**Review:**
-
-- ✅ `LazyVGrid` with 4 columns — clean grid layout
-- ✅ Single selection with toggle-off — tapping a selected emoji deselects it
-- ✅ Accessibility labels — VoiceOver reads "Happy" instead of a raw emoji codepoint
-- ✅ `UISelectionFeedbackGenerator` — the lighter, "tick" haptic that matches selection actions
-- ✅ Spring animation on selection — the scale and ring feel responsive
-- ✅ 64pt tap targets — exceeds the 44pt minimum
-- ❌ Missing: the accessibility label should include the selected state. A VoiceOver user should hear "Happy, selected" when an emoji is chosen.
-
-That last point is worth an iteration.
-
-## Iteration
-
-```
-In EmojiPicker.swift, update the accessibility so that VoiceOver
-announces "Happy, selected" when an emoji is chosen. Add
-.accessibilityAddTraits(.isSelected) when isSelected is true.
-```
-
-The fix is two lines inside the `Button` label:
-
-```swift
-.accessibilityLabel(accessibilityName(for: emoji))
-.accessibilityAddTraits(isSelected ? .isSelected : [])
-```
-
-Small change, big impact for accessibility. This is the kind of detail that AI misses in the first pass but handles perfectly when you point it out.
-
-### CheckInFlowView — The Container
-
-Now we assemble everything. This is the view that manages the step transitions and calls into the ViewModel.
-
-```
-Create CheckInFlowView.swift — the container for the BetAway
-check-in flow. It is presented as a sheet.
-
-Requirements:
-- Takes a RecoveryService as a parameter for saving
-- Creates a @State CheckInFlowViewModel
-- Shows a navigation bar with "X" dismiss button, step indicator
-  (e.g., "Step 2 of 4"), and the step title
-- Content area switches between 4 steps based on
-  viewModel.currentStep:
-  Step 1: RecoverySlider bound to viewModel.statusLevel
-  Step 2: EmojiPicker bound to viewModel.selectedEmoji
-  Step 3: TextEditor for viewModel.noteText with placeholder,
-          using @FocusState for keyboard management
-  Step 4: Tag grid — a LazyVGrid of toggleable capsule buttons
-          from CheckInFlowViewModel.availableTags, binding to
-          viewModel.selectedTags
-- Footer with Back and Next/Save buttons
-- Step transitions use .asymmetric transition: slide in from
-  trailing, slide out to leading (forward), reverse for back
-- Animate transitions with .easeInOut(duration: 0.25)
-- "Save" button calls viewModel.save and dismisses on success
-- Disable "Next" when viewModel.canAdvance is false
-- Show a ProgressView overlay when viewModel.isSaving
-
-Use @Environment(\.dismiss). Use .focused modifier for the
-note text field. Trigger a success haptic on save.
-```
-
-```swift
-import SwiftUI
-import UIKit
-
-struct CheckInFlowView: View {
-    let service: RecoveryService
-
+struct UrgeContainerView: View {
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @State private var viewModel = CheckInFlowViewModel()
-    @FocusState private var isNoteFieldFocused: Bool
-    @State private var direction: NavigationDirection = .forward
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = UrgeViewModel()
 
-    enum NavigationDirection {
-        case forward, backward
-    }
+    private var profile: UserProfile? { profiles.first }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                // Step indicator
-                stepHeader
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
 
-                // Content
-                ZStack {
-                    stepContent
-                        .id(viewModel.currentStep)
-                        .transition(stepTransition)
-                }
-                .frame(maxHeight: .infinity)
-                .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
-
-                // Footer buttons
-                footerButtons
-            }
-            .navigationTitle(viewModel.stepTitle)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+            VStack {
+                // Close button
+                HStack {
+                    Spacer()
                     Button {
+                        viewModel.reset()
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
-                            .font(.title3)
+                        Image(systemName: AppConfig.Icons.close)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(ColorPalette.textSecondary)
+                            .frame(width: 36, height: 36)
+                            .background(ColorPalette.surfaceSecondary)
+                            .clipShape(Circle())
                     }
+                    .padding(.trailing, Spacing.lg)
+                    .padding(.top, Spacing.sm)
                 }
 
-                ToolbarItem(placement: .principal) {
-                    Text("Step \(viewModel.currentStep) of \(viewModel.totalSteps)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .overlay {
-                if viewModel.isSaving {
-                    Color.black.opacity(0.2)
-                        .ignoresSafeArea()
-                        .overlay { ProgressView() }
-                }
-            }
-            .interactiveDismissDisabled(viewModel.isSaving)
-        }
-    }
-
-    // MARK: - Step Header
-
-    private var stepHeader: some View {
-        VStack(spacing: 4) {
-            // Progress bar
-            GeometryReader { geometry in
-                let progress = CGFloat(viewModel.currentStep) / CGFloat(viewModel.totalSteps)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color(.systemGray5))
-                    Capsule()
-                        .fill(Color.accentColor)
-                        .frame(width: geometry.size.width * progress)
-                }
-            }
-            .frame(height: 4)
-            .padding(.horizontal)
-            .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
-
-            Text(viewModel.stepSubtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.top, 8)
-        }
-        .padding(.top, 8)
-    }
-
-    // MARK: - Step Content
-
-    @ViewBuilder
-    private var stepContent: some View {
-        switch viewModel.currentStep {
-        case 1:
-            statusLevelStep
-        case 2:
-            emojiStep
-        case 3:
-            noteStep
-        case 4:
-            tagsStep
-        default:
-            EmptyView()
-        }
-    }
-
-    private var statusLevelStep: some View {
-        VStack {
-            Spacer()
-            RecoverySlider(value: $viewModel.statusLevel)
-                .padding(.horizontal, 32)
-            Spacer()
-        }
-    }
-
-    private var emojiStep: some View {
-        VStack {
-            Spacer()
-            EmojiPicker(selection: $viewModel.selectedEmoji)
-                .padding(.horizontal, 24)
-            Spacer()
-        }
-    }
-
-    private var noteStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack(alignment: .topLeading) {
-                if viewModel.noteText.isEmpty {
-                    Text("What's on your mind?")
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 8)
-                        .padding(.leading, 5)
-                }
-
-                TextEditor(text: $viewModel.noteText)
-                    .focused($isNoteFieldFocused)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 120)
-            }
-            .padding()
-            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
-
-            Text("\(viewModel.noteText.count)/280")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 24)
-        .onAppear { isNoteFieldFocused = true }
-        .onDisappear { isNoteFieldFocused = false }
-    }
-
-    private var tagsStep: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
-
-        return ScrollView {
-            LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(CheckInFlowViewModel.availableTags, id: \.self) { tag in
-                    let isSelected = viewModel.selectedTags.contains(tag)
-
-                    Button {
-                        if isSelected {
-                            viewModel.selectedTags.remove(tag)
-                        } else {
-                            viewModel.selectedTags.insert(tag)
-                            triggerSelectionHaptic()
-                        }
-                    } label: {
-                        Text(tag)
-                            .font(.subheadline)
-                            .fontWeight(isSelected ? .semibold : .regular)
-                            .foregroundStyle(isSelected ? .white : .primary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(
-                                isSelected ? Color.accentColor : Color(.systemGray6),
-                                in: Capsule()
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(isSelected ? .isSelected : [])
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 24)
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: viewModel.selectedTags)
-    }
-
-    // MARK: - Transition
-
-    private var stepTransition: AnyTransition {
-        switch direction {
-        case .forward:
-            .asymmetric(
-                insertion: .move(edge: .trailing).combined(with: .opacity),
-                removal: .move(edge: .leading).combined(with: .opacity)
-            )
-        case .backward:
-            .asymmetric(
-                insertion: .move(edge: .leading).combined(with: .opacity),
-                removal: .move(edge: .trailing).combined(with: .opacity)
-            )
-        }
-    }
-
-    // MARK: - Footer
-
-    private var footerButtons: some View {
-        HStack(spacing: 16) {
-            if !viewModel.isFirstStep {
-                Button {
-                    direction = .backward
-                    isNoteFieldFocused = false
-                    viewModel.goBack()
-                } label: {
-                    Label("Back", systemImage: "chevron.left")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                }
-                .buttonStyle(.bordered)
-                .tint(.secondary)
-            }
-
-            Button {
-                if viewModel.isLastStep {
-                    saveEntry()
-                } else {
-                    direction = .forward
-                    isNoteFieldFocused = false
-                    viewModel.advance()
-                }
-            } label: {
+                // Content
                 Group {
-                    if viewModel.isLastStep {
-                        Label("Save", systemImage: "checkmark")
-                    } else {
-                        Label("Next", systemImage: "chevron.right")
+                    switch viewModel.phase {
+                    case .acknowledge:
+                        UrgeAcknowledgeView(viewModel: viewModel)
+                    case .timer:
+                        UrgeTimerView(viewModel: viewModel, profile: profile)
+                    case .log:
+                        if let profile {
+                            UrgeLogView(viewModel: viewModel, profile: profile)
+                        }
+                    case .complete:
+                        UrgeCompleteView(viewModel: viewModel) {
+                            viewModel.reset()
+                            dismiss()
+                        }
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!viewModel.canAdvance || viewModel.isSaving)
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
-        .background(.bar)
-    }
-
-    // MARK: - Actions
-
-    private func saveEntry() {
-        Task {
-            await viewModel.save(using: service)
-            if !viewModel.isSaving {
-                triggerSuccessHaptic()
-                dismiss()
+                .animation(AnimationPresets.smooth, value: viewModel.phase)
             }
         }
     }
-
-    private func triggerSelectionHaptic() {
-        let generator = UISelectionFeedbackGenerator()
-        generator.selectionChanged()
-    }
-
-    private func triggerSuccessHaptic() {
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
-    }
-}
-
-#Preview {
-    CheckInFlowView(service: PreviewRecoveryService())
 }
 ```
 
-**Review:**
+The acknowledge phase provides reassurance and the option to start the timer:
 
-- ✅ Step transitions use `.asymmetric` with direction tracking — sliding forward goes left-to-right, backward goes right-to-left
-- ✅ `.id(viewModel.currentStep)` forces SwiftUI to re-render the content area, which triggers the transition
-- ✅ `@FocusState` for keyboard management — the note field auto-focuses on appear and dismisses on navigation
-- ✅ `.interactiveDismissDisabled` during save — prevents accidental swipe-dismiss while saving
-- ✅ Progress bar at the top gives spatial awareness of where the user is in the flow
-- ✅ Back button only appears after step 1 — no confusion on the first step
-- ✅ Footer has `.background(.bar)` — the system material that adapts to light/dark mode and provides the translucent bar effect
-- ✅ Tags use `Set<String>` for O(1) lookups on selection state
-- ⚠️ The note step auto-focuses the keyboard. On step transition back from step 4, the keyboard will flash briefly. We should add a short delay or only focus when the step is fully visible. This is a polish item we can address later.
+```swift
+// UrgeAcknowledgeView.swift
+
+import SwiftUI
+
+struct UrgeAcknowledgeView: View {
+    let viewModel: UrgeViewModel
+    @State private var isVisible = false
+
+    var body: some View {
+        VStack(spacing: Spacing.xxl) {
+            Spacer()
+
+            // Pulse animation
+            ZStack {
+                Circle()
+                    .fill(ColorPalette.accent.opacity(0.1))
+                    .frame(width: 160, height: 160)
+                    .scaleEffect(isVisible ? 1.2 : 0.8)
+                    .opacity(isVisible ? 0.3 : 0.6)
+                    .animation(
+                        .easeInOut(duration: 2.0).repeatForever(autoreverses: true),
+                        value: isVisible
+                    )
+
+                Circle()
+                    .fill(ColorPalette.accent.opacity(0.2))
+                    .frame(width: 120, height: 120)
+
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(ColorPalette.accent)
+            }
+            .staggeredAppear(index: 0, isVisible: isVisible)
+
+            VStack(spacing: Spacing.sm) {
+                Text("It's okay.")
+                    .font(Typography.title1())
+                    .foregroundStyle(ColorPalette.textPrimary)
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+
+                Text("Urges are normal and temporary.")
+                    .font(Typography.title3(weight: .medium))
+                    .foregroundStyle(ColorPalette.textSecondary)
+                    .staggeredAppear(index: 2, isVisible: isVisible)
+
+                Text("The average urge lasts 15-20 minutes.\n"
+                   + "Let's ride this one out together.")
+                    .font(Typography.callout())
+                    .foregroundStyle(ColorPalette.textTertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, Spacing.xs)
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+            }
+
+            Spacer()
+
+            BFButton(title: "Start Urge Timer", icon: "timer") {
+                viewModel.startTimer()
+            }
+            .padding(.horizontal, Spacing.xl)
+            .staggeredAppear(index: 4, isVisible: isVisible)
+
+            BFButton(title: "I can handle this — skip timer", style: .ghost) {
+                viewModel.moveToLog()
+            }
+            .padding(.horizontal, Spacing.xl)
+            .staggeredAppear(index: 5, isVisible: isVisible)
+
+            Spacer()
+                .frame(height: Spacing.xxl)
+        }
+        .onAppear { isVisible = true }
+    }
+}
+```
+
+The timer phase is the most visually rich — a breathing circle that expands and contracts, a countdown timer with `.contentTransition(.numericText())`, a progress bar, time-dependent encouragement text, and the distraction toolkit:
+
+```swift
+// UrgeTimerView.swift (key sections)
+
+import SwiftUI
+
+struct UrgeTimerView: View {
+    @Bindable var viewModel: UrgeViewModel
+    let profile: UserProfile?
+
+    private var breathScale: CGFloat {
+        viewModel.breathPhase == .inhale ? 1.3 : 0.8
+    }
+
+    private var breathText: String {
+        viewModel.breathPhase == .inhale
+            ? LanguageManager.shared.localized("Breathe in...")
+            : LanguageManager.shared.localized("Breathe out...")
+    }
+
+    var body: some View {
+        VStack(spacing: Spacing.xl) {
+            Spacer()
+
+            // Breathing circle
+            ZStack {
+                Circle()
+                    .fill(ColorPalette.accent.opacity(0.05))
+                    .frame(width: 240, height: 240)
+                    .scaleEffect(breathScale * 1.1)
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                ColorPalette.accent.opacity(0.3),
+                                ColorPalette.accent.opacity(0.05)
+                            ],
+                            center: .center,
+                            startRadius: 20,
+                            endRadius: 100
+                        )
+                    )
+                    .frame(width: 200, height: 200)
+                    .scaleEffect(breathScale)
+
+                VStack(spacing: Spacing.xs) {
+                    Text(viewModel.timerDisplay)
+                        .font(Typography.largeTitle())
+                        .foregroundStyle(ColorPalette.textPrimary)
+                        .contentTransition(.numericText())
+                        .animation(AnimationPresets.snappy, value: viewModel.timerSeconds)
+
+                    Text("remaining")
+                        .font(Typography.caption(weight: .medium))
+                        .foregroundStyle(ColorPalette.textTertiary)
+                }
+            }
+
+            Text(breathText)
+                .font(Typography.title3(weight: .medium))
+                .foregroundStyle(ColorPalette.accent)
+                .animation(AnimationPresets.fade, value: viewModel.breathPhase)
+
+            // Progress bar
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(ColorPalette.surfaceSecondary)
+                        .frame(height: 6)
+
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(ColorPalette.primaryGradient)
+                        .frame(
+                            width: geometry.size.width * viewModel.timerProgress,
+                            height: 6
+                        )
+                        .animation(AnimationPresets.smooth, value: viewModel.timerProgress)
+                }
+            }
+            .frame(height: 6)
+            .padding(.horizontal, Spacing.xxl)
+
+            Text(viewModel.encouragementText)
+                .font(Typography.callout(weight: .medium))
+                .foregroundStyle(ColorPalette.textSecondary)
+                .multilineTextAlignment(.center)
+                .contentTransition(.opacity)
+                .animation(AnimationPresets.slowFade, value: viewModel.encouragementText)
+
+            Spacer()
+
+            // Distraction toolkit
+            VStack(spacing: Spacing.sm) {
+                Text("Distraction Toolkit")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+
+                HStack(spacing: Spacing.sm) {
+                    DistractionButton(icon: "wind", title: "Breathe",
+                                      color: ColorPalette.accent) {
+                        viewModel.showBreathingExercise = true
+                    }
+                    DistractionButton(icon: "eye", title: "Ground",
+                                      color: ColorPalette.infoBadge) {
+                        viewModel.showGroundingExercise = true
+                    }
+                    DistractionButton(icon: "figure.walk", title: "Move",
+                                      color: ColorPalette.success) {
+                        viewModel.showMovementSuggestions = true
+                    }
+                    DistractionButton(icon: "phone.fill", title: "Call",
+                                      color: ColorPalette.warning) {
+                        viewModel.showEmergencyContacts = true
+                    }
+                }
+            }
+
+            // Skip button
+            Button {
+                viewModel.skipTimer()
+            } label: {
+                Text("I'm feeling better — log this urge")
+                    .font(Typography.subheadline(weight: .medium))
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+            .padding(.top, Spacing.md)
+        }
+    }
+}
+```
+
+The distraction toolkit buttons open sheets for each activity — `BreathingExerciseView` (4-7-8 breathing technique with animated circle), `GroundingExerciseView` (5-4-3-2-1 senses exercise), `MovementSuggestionsView` (walk, stretch, push-ups, dance, clean), and `EmergencyContactsSheetView`. Each sheet can be dismissed independently — the timer keeps running underneath.
+
+### UrgeLogView — Structured Logging
+
+After the timer (or if skipped), the user logs the urge details:
+
+```swift
+// UrgeLogView.swift (key sections)
+
+import SwiftUI
+import SwiftData
+
+struct UrgeLogView: View {
+    @Bindable var viewModel: UrgeViewModel
+    let profile: UserProfile
+    @Environment(\.modelContext) private var modelContext
+    @State private var isVisible = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xl) {
+                // Header with time endured
+                VStack(spacing: Spacing.xs) {
+                    Text("Log This Urge")
+                        .font(Typography.title1())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    if viewModel.timerSeconds > 0 {
+                        Text("You held on for \(viewModel.timerMinutesElapsed) "
+                           + "minute\(viewModel.timerMinutesElapsed == 1 ? "" : "s"). "
+                           + "That's strength.")
+                            .font(Typography.callout())
+                            .foregroundStyle(ColorPalette.accent)
+                    }
+                }
+
+                // Intensity slider (1-10)
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    HStack {
+                        Text("Urge Intensity")
+                            .font(Typography.headline())
+                        Spacer()
+                        Text("\(viewModel.selectedIntensity)/10")
+                            .font(Typography.headline())
+                            .foregroundStyle(intensityColor)
+                            .contentTransition(.numericText())
+                    }
+
+                    Slider(
+                        value: Binding(
+                            get: { Double(viewModel.selectedIntensity) },
+                            set: { viewModel.selectedIntensity = Int($0) }
+                        ),
+                        in: 1...10,
+                        step: 1
+                    )
+                    .tint(intensityColor)
+
+                    HStack {
+                        Text("Mild")
+                            .font(Typography.caption())
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        Spacer()
+                        Text("Overwhelming")
+                            .font(Typography.caption())
+                            .foregroundStyle(ColorPalette.textTertiary)
+                    }
+                }
+
+                // Trigger selection
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("What triggered this?")
+                        .font(Typography.headline())
+
+                    FlowLayout(spacing: Spacing.xs) {
+                        ForEach(PredefinedTrigger.allCases) { trigger in
+                            TriggerChip(
+                                trigger: trigger,
+                                isSelected: viewModel.selectedTrigger == trigger
+                            ) {
+                                withAnimation(AnimationPresets.snappy) {
+                                    viewModel.selectedTrigger =
+                                        viewModel.selectedTrigger == trigger ? nil : trigger
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Coping strategy selection
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("What helped you cope?")
+                        .font(Typography.headline())
+
+                    FlowLayout(spacing: Spacing.xs) {
+                        ForEach(CopingStrategy.allCases) { strategy in
+                            StrategyChip(
+                                strategy: strategy,
+                                isSelected: viewModel.selectedStrategy == strategy
+                            ) {
+                                withAnimation(AnimationPresets.snappy) {
+                                    viewModel.selectedStrategy =
+                                        viewModel.selectedStrategy == strategy
+                                            ? nil : strategy
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Did you resist?
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("Did you resist?")
+                        .font(Typography.headline())
+
+                    HStack(spacing: Spacing.md) {
+                        ResistButton(title: "Yes!", isSelected: viewModel.didResist,
+                                     color: ColorPalette.success) {
+                            withAnimation(AnimationPresets.snappy) {
+                                viewModel.didResist = true
+                            }
+                        }
+                        ResistButton(title: "No", isSelected: !viewModel.didResist,
+                                     color: ColorPalette.danger) {
+                            withAnimation(AnimationPresets.snappy) {
+                                viewModel.didResist = false
+                            }
+                        }
+                    }
+                }
+
+                // Notes and submit
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("Notes (optional)")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+
+                    TextField("How are you feeling now?", text: $viewModel.notes,
+                              axis: .vertical)
+                        .font(Typography.body())
+                        .lineLimit(2...4)
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                }
+
+                BFButton(title: "Save Urge Log", icon: AppConfig.Icons.checkmark) {
+                    viewModel.submitUrge(profile: profile, context: modelContext)
+                }
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+    }
+
+    private var intensityColor: Color {
+        switch viewModel.selectedIntensity {
+        case 1...3: return ColorPalette.success
+        case 4...6: return ColorPalette.warning
+        case 7...10: return ColorPalette.danger
+        default: return ColorPalette.warning
+        }
+    }
+}
+```
+
+The `intensityColor` computed property changes the slider tint based on the value — green for mild (1-3), yellow for moderate (4-6), red for severe (7-10). This is immediate visual feedback that communicates severity without the user reading a number.
+
+The `TriggerChip` and `StrategyChip` components follow the same pattern — icon + text in a capsule, with toggle selection:
+
+```swift
+// TriggerChip — used in UrgeLogView
+
+private struct TriggerChip: View {
+    let trigger: PredefinedTrigger
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Spacing.xxs) {
+                Image(systemName: trigger.icon)
+                    .font(.system(size: 12))
+                Text(trigger.localizedName)
+                    .font(Typography.caption(weight: .medium))
+            }
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .foregroundStyle(isSelected
+                ? ColorPalette.textOnPrimary : ColorPalette.textPrimary)
+            .background(isSelected
+                ? ColorPalette.accent : ColorPalette.surfaceSecondary)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(BFButtonPressStyle())
+    }
+}
+```
+
+### DashboardPledgeCard — The Entry Point
+
+The dashboard card is how users access the check-in flow. It shows completion status for both morning and evening, the current mood, and a contextual CTA button.
+
+```swift
+// DashboardPledgeCard.swift
+
+import SwiftUI
+import SwiftData
+
+struct DashboardPledgeCard: View {
+    let profile: UserProfile
+    @State private var showPledgeFlow = false
+
+    private var hasPledged: Bool { profile.hasPledgedToday() }
+    private var hasCheckedIn: Bool { profile.hasCheckedInToday() }
+    private var allDone: Bool { hasPledged && hasCheckedIn }
+
+    var body: some View {
+        Button {
+            if !allDone {
+                showPledgeFlow = true
+            }
+        } label: {
+            BFCard {
+                VStack(spacing: Spacing.sm) {
+                    HStack {
+                        Text("Daily Check-in")
+                            .font(Typography.headline())
+                            .foregroundStyle(ColorPalette.textPrimary)
+                        Spacer()
+                        if allDone {
+                            Label("Complete", systemImage: AppConfig.Icons.checkmark)
+                                .font(Typography.caption(weight: .semibold))
+                                .foregroundStyle(ColorPalette.success)
+                        }
+                    }
+
+                    PledgeStatusRow(icon: AppConfig.Icons.sun,
+                                    iconColor: ColorPalette.warning,
+                                    title: "Morning Pledge",
+                                    isCompleted: hasPledged)
+                    Divider()
+                    PledgeStatusRow(icon: AppConfig.Icons.moon,
+                                    iconColor: ColorPalette.accent,
+                                    title: "Evening Check-in",
+                                    isCompleted: hasCheckedIn)
+
+                    if let mood = profile.todaysMood() {
+                        Divider()
+                        HStack(spacing: Spacing.xs) {
+                            Text("Mood")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                            Spacer()
+                            Text(mood.emoji)
+                                .font(.system(size: 22))
+                            Text(mood.label)
+                                .font(Typography.subheadline(weight: .medium))
+                                .foregroundStyle(ColorPalette.textPrimary)
+                        }
+                    }
+
+                    if !allDone {
+                        HStack(spacing: Spacing.xs) {
+                            Image(systemName: ctaIcon)
+                                .font(.system(size: 14, weight: .semibold))
+                            Text(ctaText)
+                                .font(Typography.subheadline(weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Spacing.sm)
+                        .background(ctaColor)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                    }
+                }
+            }
+        }
+        .buttonStyle(BFButtonPressStyle())
+        .disabled(allDone)
+        .sheet(isPresented: $showPledgeFlow) {
+            NavigationStack {
+                PledgeContainerView()
+            }
+        }
+    }
+
+    private var ctaText: String {
+        if !hasPledged {
+            return LanguageManager.shared.localized("Take Today's Pledge")
+        } else {
+            return LanguageManager.shared.localized("Complete Evening Check-in")
+        }
+    }
+
+    private var ctaIcon: String {
+        !hasPledged ? AppConfig.Icons.pledge : AppConfig.Icons.moon
+    }
+
+    private var ctaColor: Color {
+        !hasPledged ? ColorPalette.accent : ColorPalette.accent.opacity(0.85)
+    }
+}
+```
+
+The card is a `Button` that opens the pledge flow as a `.sheet`. The CTA text and icon change based on what the user needs to do next — "Take Today's Pledge" in the morning, "Complete Evening Check-in" in the evening. When both are done, the button is disabled and a "Complete" label appears in the header.
+
+### HapticManager — Centralized Feedback
+
+All haptic feedback goes through a single `HapticManager` enum. This respects the user's setting and provides consistent naming:
+
+```swift
+// HapticManager.swift
+
+import UIKit
+
+enum HapticManager {
+    static func lightImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    static func mediumImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    static func success() {
+        guard isEnabled else { return }
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(.success)
+    }
+
+    static func badgeUnlocked() {
+        guard isEnabled else { return }
+        heavyImpact()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            success()
+        }
+    }
+
+    static func timerComplete() {
+        success()
+    }
+
+    private static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hapticFeedbackEnabled)
+    }
+}
+```
+
+Every method checks `isEnabled` first — if the user has disabled haptics in settings, all methods become no-ops. The `badgeUnlocked()` method is a compound effect: heavy impact followed by success notification after a 150ms delay. This creates a satisfying "thunk + chime" feel.
 
 ## Verify Phase
 
-Build the project. Run it in the simulator and verify each step:
+Build the project. Run it in the simulator and verify each flow:
 
-1. **Step 1 — Recovery Slider.** Drag the thumb across all five levels. You should feel a light haptic tap at each stop. The gradient track should fill proportionally. The label below should highlight the current level.
+1. **Morning Pledge.** Open the dashboard card. The morning pledge should appear. Select a mood — the `matchedGeometryEffect` should smoothly move the highlight. Pick a reason chip. Tap "Take My Pledge." You should feel a success haptic, see the toast ("Pledge taken!"), and the sheet should auto-dismiss after 2.5 seconds.
 
-2. **Step 2 — Emoji Picker.** Tap an emoji. It should scale up and show a colored ring. Tap it again to deselect. The "Next" button should be disabled until an emoji is selected.
+2. **Evening Check-in.** Open the card again. The evening check-in should now appear. The "Did you stay gambling-free?" question should show "Yes!" selected by default. Tap "No" — the relapse section should slide in with the amount field and helpline info. Tap "Yes!" again — it should slide back out. Select a mood, write optional notes, and submit. If gambling-free, you should see the celebration toast.
 
-3. **Step 3 — Note.** The keyboard should appear automatically. Type a few words. Tap "Next" — the keyboard should dismiss. Tap "Back" — the keyboard should reappear. The character count should update in real time.
+3. **All Done state.** Open the card a third time. You should see the "All done for today!" screen with a checkmark and today's mood. The dashboard card should show "Complete" and be non-tappable.
 
-4. **Step 4 — Tags.** Tap several tags. They should toggle between filled and outlined. Tap "Save" — you should feel a success haptic and the sheet should dismiss.
+4. **Urge flow — full path.** Open the urge flow. The acknowledge screen should show a pulsing circle with "It's okay." Tap "Start Urge Timer." The breathing circle should expand and contract on a 4-second cycle. The timer should count down from 15:00. The encouragement text should change as time passes. Tap a distraction toolkit button — the sheet should open while the timer continues. Skip the timer. The log screen should show your elapsed time. Select an intensity, trigger, strategy, and tap "Save." The completion screen should show a celebration.
 
-5. **Transitions.** Tap "Next" and "Back" repeatedly. The content should slide horizontally. Forward slides left-to-right out, right-to-left in. Backward is the reverse. No visual glitches.
-
-6. **Edge cases.** Dismiss the sheet mid-flow. Present it again — the state should be fresh (the ViewModel is recreated as `@State`). Try saving with an empty note — it should work. Try saving with no tags — it should work.
-
-If any step fails, the ViewModel is the first place to look. Every piece of state flows through it, so bugs in display or behavior almost always trace back to a state issue.
-
-## Final Code
-
-Here is the complete set of files we built. Each file is self-contained and follows our architecture.
-
-### CheckInFlowViewModel.swift
-
-```swift
-import Foundation
-import os
-
-@Observable
-final class CheckInFlowViewModel {
-    var currentStep = 1
-    let totalSteps = 4
-
-    var statusLevel = 3
-    var selectedEmoji: String?
-    var noteText = ""
-    var selectedTags: Set<String> = []
-    var isSaving = false
-
-    static let availableTags = [
-        "Urge", "Exercise", "Therapy", "Trigger", "Sleep", "Support Group",
-        "Finances", "Health", "Mindfulness", "CBT Exercise", "Relax", "Stress"
-    ]
-
-    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
-
-    var canAdvance: Bool {
-        switch currentStep {
-        case 1: true
-        case 2: selectedEmoji != nil
-        case 3: true
-        case 4: true
-        default: false
-        }
-    }
-
-    var isFirstStep: Bool { currentStep == 1 }
-    var isLastStep: Bool { currentStep == totalSteps }
-
-    var stepTitle: String {
-        switch currentStep {
-        case 1: "How are you doing?"
-        case 2: "Pick an emoji"
-        case 3: "Add a note"
-        case 4: "Add tags"
-        default: ""
-        }
-    }
-
-    var stepSubtitle: String {
-        switch currentStep {
-        case 1: "Slide to match your current state"
-        case 2: "Choose one that fits"
-        case 3: "Optional — write anything"
-        case 4: "Optional — what's on your mind?"
-        default: ""
-        }
-    }
-
-    func advance() {
-        guard canAdvance, currentStep < totalSteps else { return }
-        currentStep += 1
-    }
-
-    func goBack() {
-        guard currentStep > 1 else { return }
-        currentStep -= 1
-    }
-
-    func save(using service: RecoveryService) async {
-        isSaving = true
-        defer { isSaving = false }
-
-        let checkIn = CheckIn(
-            statusLevel: statusLevel,
-            emoji: selectedEmoji ?? "😐",
-            note: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
-            tags: Array(selectedTags),
-            createdAt: .now
-        )
-
-        do {
-            try await service.save(checkIn)
-            logger.info("Check-in saved: status \(self.statusLevel)")
-        } catch {
-            logger.error("Failed to save check-in: \(error.localizedDescription)")
-        }
-    }
-
-    func reset() {
-        currentStep = 1
-        statusLevel = 3
-        selectedEmoji = nil
-        noteText = ""
-        selectedTags = []
-        isSaving = false
-    }
-}
-```
-
-### RecoverySlider.swift
-
-```swift
-import SwiftUI
-import UIKit
-
-struct RecoverySlider: View {
-    @Binding var value: Int
-
-    private let range = 1...5
-    private let labels = ["Crisis", "Struggling", "Stable", "Strong", "Thriving"]
-    private let thumbSize: CGFloat = 44
-
-    @State private var isDragging = false
-
-    var body: some View {
-        VStack(spacing: 16) {
-            GeometryReader { geometry in
-                let trackWidth = geometry.size.width - thumbSize
-                let stepWidth = trackWidth / CGFloat(range.count - 1)
-                let thumbOffset = CGFloat(value - range.lowerBound) * stepWidth
-
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color(.systemGray5))
-                        .frame(height: 8)
-                        .padding(.horizontal, thumbSize / 2)
-
-                    Capsule()
-                        .fill(trackGradient)
-                        .frame(width: thumbOffset + thumbSize / 2, height: 8)
-                        .padding(.leading, thumbSize / 2)
-
-                    Circle()
-                        .fill(.white)
-                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-                        .frame(width: thumbSize, height: thumbSize)
-                        .overlay {
-                            Text("\(value)")
-                                .font(.system(.title3, design: .rounded, weight: .bold))
-                                .foregroundStyle(thumbColor)
-                        }
-                        .scaleEffect(isDragging ? 1.1 : 1.0)
-                        .offset(x: thumbOffset)
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { gesture in
-                                    isDragging = true
-                                    let newValue = calculateValue(
-                                        from: gesture.location.x,
-                                        trackWidth: trackWidth,
-                                        stepWidth: stepWidth
-                                    )
-                                    if newValue != value {
-                                        value = newValue
-                                        triggerHaptic()
-                                    }
-                                }
-                                .onEnded { _ in
-                                    isDragging = false
-                                }
-                        )
-                }
-                .frame(height: thumbSize)
-            }
-            .frame(height: thumbSize)
-
-            HStack {
-                ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
-                    Text(label)
-                        .font(.caption2)
-                        .fontWeight(index + 1 == value ? .semibold : .regular)
-                        .foregroundStyle(index + 1 == value ? thumbColor : .secondary)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: value)
-        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isDragging)
-    }
-
-    private var trackGradient: LinearGradient {
-        LinearGradient(
-            colors: [.indigo, .blue, .yellow, .orange, .green],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
-
-    private var thumbColor: Color {
-        switch value {
-        case 1: .indigo
-        case 2: .blue
-        case 3: .yellow.opacity(0.9)
-        case 4: .orange
-        case 5: .green
-        default: .gray
-        }
-    }
-
-    private func calculateValue(
-        from locationX: CGFloat,
-        trackWidth: CGFloat,
-        stepWidth: CGFloat
-    ) -> Int {
-        let clamped = min(max(locationX - thumbSize / 2, 0), trackWidth)
-        let rawValue = Int(round(clamped / stepWidth)) + range.lowerBound
-        return min(max(rawValue, range.lowerBound), range.upperBound)
-    }
-
-    private func triggerHaptic() {
-        let generator = UIImpactFeedbackGenerator(style: .light)
-        generator.impactOccurred()
-    }
-}
-
-#Preview {
-    @Previewable @State var status = 3
-    RecoverySlider(value: $status)
-        .padding(32)
-}
-```
-
-### EmojiPicker.swift
-
-```swift
-import SwiftUI
-import UIKit
-
-struct EmojiPicker: View {
-    @Binding var selection: String?
-
-    private let emojis = [
-        "😊", "😔", "😰", "😌",
-        "⚡", "😴", "😡", "🥰",
-        "😂", "🤔", "😢", "🎉"
-    ]
-
-    private let columns = Array(
-        repeating: GridItem(.flexible(), spacing: 12),
-        count: 4
-    )
-
-    var body: some View {
-        LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(emojis, id: \.self) { emoji in
-                let isSelected = selection == emoji
-
-                Button {
-                    if selection == emoji {
-                        selection = nil
-                    } else {
-                        selection = emoji
-                        triggerHaptic()
-                    }
-                } label: {
-                    Text(emoji)
-                        .font(.system(size: 36))
-                        .frame(width: 64, height: 64)
-                        .background(
-                            Circle()
-                                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
-                        )
-                        .overlay(
-                            Circle()
-                                .strokeBorder(
-                                    isSelected ? Color.accentColor : .clear,
-                                    lineWidth: 2.5
-                                )
-                        )
-                        .scaleEffect(isSelected ? 1.1 : 1.0)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(accessibilityName(for: emoji))
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
-            }
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selection)
-    }
-
-    private func triggerHaptic() {
-        let generator = UISelectionFeedbackGenerator()
-        generator.selectionChanged()
-    }
-
-    private func accessibilityName(for emoji: String) -> String {
-        switch emoji {
-        case "😊": "Happy"
-        case "😔": "Sad"
-        case "😰": "Anxious"
-        case "😌": "Calm"
-        case "⚡": "Energized"
-        case "😴": "Tired"
-        case "😡": "Angry"
-        case "🥰": "Loved"
-        case "😂": "Amused"
-        case "🤔": "Thoughtful"
-        case "😢": "Tearful"
-        case "🎉": "Excited"
-        default: emoji
-        }
-    }
-}
-
-#Preview {
-    @Previewable @State var selected: String?
-    EmojiPicker(selection: $selected)
-        .padding()
-}
-```
-
-### CheckInFlowView.swift
-
-```swift
-import SwiftUI
-import UIKit
-
-struct CheckInFlowView: View {
-    let service: RecoveryService
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var viewModel = CheckInFlowViewModel()
-    @FocusState private var isNoteFieldFocused: Bool
-    @State private var direction: NavigationDirection = .forward
-
-    enum NavigationDirection {
-        case forward, backward
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                stepHeader
-
-                ZStack {
-                    stepContent
-                        .id(viewModel.currentStep)
-                        .transition(stepTransition)
-                }
-                .frame(maxHeight: .infinity)
-                .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
-
-                footerButtons
-            }
-            .navigationTitle(viewModel.stepTitle)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
-                            .font(.title3)
-                    }
-                }
-
-                ToolbarItem(placement: .principal) {
-                    Text("Step \(viewModel.currentStep) of \(viewModel.totalSteps)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .overlay {
-                if viewModel.isSaving {
-                    Color.black.opacity(0.2)
-                        .ignoresSafeArea()
-                        .overlay { ProgressView() }
-                }
-            }
-            .interactiveDismissDisabled(viewModel.isSaving)
-        }
-    }
-
-    // MARK: - Step Header
-
-    private var stepHeader: some View {
-        VStack(spacing: 4) {
-            GeometryReader { geometry in
-                let progress = CGFloat(viewModel.currentStep) / CGFloat(viewModel.totalSteps)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color(.systemGray5))
-                    Capsule()
-                        .fill(Color.accentColor)
-                        .frame(width: geometry.size.width * progress)
-                }
-            }
-            .frame(height: 4)
-            .padding(.horizontal)
-            .animation(.easeInOut(duration: 0.25), value: viewModel.currentStep)
-
-            Text(viewModel.stepSubtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.top, 8)
-        }
-        .padding(.top, 8)
-    }
-
-    // MARK: - Step Content
-
-    @ViewBuilder
-    private var stepContent: some View {
-        switch viewModel.currentStep {
-        case 1: statusLevelStep
-        case 2: emojiStep
-        case 3: noteStep
-        case 4: tagsStep
-        default: EmptyView()
-        }
-    }
-
-    private var statusLevelStep: some View {
-        VStack {
-            Spacer()
-            RecoverySlider(value: $viewModel.statusLevel)
-                .padding(.horizontal, 32)
-            Spacer()
-        }
-    }
-
-    private var emojiStep: some View {
-        VStack {
-            Spacer()
-            EmojiPicker(selection: $viewModel.selectedEmoji)
-                .padding(.horizontal, 24)
-            Spacer()
-        }
-    }
-
-    private var noteStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack(alignment: .topLeading) {
-                if viewModel.noteText.isEmpty {
-                    Text("What's on your mind?")
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 8)
-                        .padding(.leading, 5)
-                }
-
-                TextEditor(text: $viewModel.noteText)
-                    .focused($isNoteFieldFocused)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 120)
-            }
-            .padding()
-            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
-
-            Text("\(viewModel.noteText.count)/280")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 24)
-        .onAppear { isNoteFieldFocused = true }
-        .onDisappear { isNoteFieldFocused = false }
-    }
-
-    private var tagsStep: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
-
-        return ScrollView {
-            LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(CheckInFlowViewModel.availableTags, id: \.self) { tag in
-                    let isSelected = viewModel.selectedTags.contains(tag)
-
-                    Button {
-                        if isSelected {
-                            viewModel.selectedTags.remove(tag)
-                        } else {
-                            viewModel.selectedTags.insert(tag)
-                            triggerSelectionHaptic()
-                        }
-                    } label: {
-                        Text(tag)
-                            .font(.subheadline)
-                            .fontWeight(isSelected ? .semibold : .regular)
-                            .foregroundStyle(isSelected ? .white : .primary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(
-                                isSelected ? Color.accentColor : Color(.systemGray6),
-                                in: Capsule()
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(isSelected ? .isSelected : [])
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 24)
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: viewModel.selectedTags)
-    }
-
-    // MARK: - Transition
-
-    private var stepTransition: AnyTransition {
-        switch direction {
-        case .forward:
-            .asymmetric(
-                insertion: .move(edge: .trailing).combined(with: .opacity),
-                removal: .move(edge: .leading).combined(with: .opacity)
-            )
-        case .backward:
-            .asymmetric(
-                insertion: .move(edge: .leading).combined(with: .opacity),
-                removal: .move(edge: .trailing).combined(with: .opacity)
-            )
-        }
-    }
-
-    // MARK: - Footer
-
-    private var footerButtons: some View {
-        HStack(spacing: 16) {
-            if !viewModel.isFirstStep {
-                Button {
-                    direction = .backward
-                    isNoteFieldFocused = false
-                    viewModel.goBack()
-                } label: {
-                    Label("Back", systemImage: "chevron.left")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                }
-                .buttonStyle(.bordered)
-                .tint(.secondary)
-            }
-
-            Button {
-                if viewModel.isLastStep {
-                    saveEntry()
-                } else {
-                    direction = .forward
-                    isNoteFieldFocused = false
-                    viewModel.advance()
-                }
-            } label: {
-                Group {
-                    if viewModel.isLastStep {
-                        Label("Save", systemImage: "checkmark")
-                    } else {
-                        Label("Next", systemImage: "chevron.right")
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!viewModel.canAdvance || viewModel.isSaving)
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
-        .background(.bar)
-    }
-
-    // MARK: - Actions
-
-    private func saveEntry() {
-        Task {
-            await viewModel.save(using: service)
-            if !viewModel.isSaving {
-                triggerSuccessHaptic()
-                dismiss()
-            }
-        }
-    }
-
-    private func triggerSelectionHaptic() {
-        let generator = UISelectionFeedbackGenerator()
-        generator.selectionChanged()
-    }
-
-    private func triggerSuccessHaptic() {
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
-    }
-}
-
-#Preview {
-    CheckInFlowView(service: PreviewRecoveryService())
-}
-```
+5. **Edge cases.** Dismiss the urge flow mid-timer — the timer Task should cancel cleanly. Start the urge flow again — state should be fresh. Log an urge where you did not resist — no celebration haptic, but an empathetic message.
 
 ## Checkpoint
 
 Let us confirm what we built and why each piece matters.
 
-**CheckInFlowViewModel** owns all form state. No state lives in the view. This means the view is purely declarative — it reads from the ViewModel and sends actions to it. If you need to unit test the check-in logic (and you will, in Module 6), you test the ViewModel directly without touching any UI.
+**PledgeViewModel** manages both morning and evening flows in a single `@Observable` class. It has separate `submitPledge` and `submitCheckin` methods that create `DailyCheckin` records with the appropriate `CheckinType`. Haptic feedback is conditional — success for gambling-free days, silence for relapses.
 
-**RecoverySlider** replaces the stock `Slider` with a custom control that has personality. The gradient track, discrete snapping, and haptic feedback make a 1-5 selection feel physical. Users remember how an app feels more than how it looks.
+**PledgeContainerView** routes between states using `hasPledgedToday()` and `hasCheckedInToday()` on the `UserProfile`. This is data-driven routing, not time-based — if the user pledges at 11pm, the morning pledge still works.
 
-**EmojiPicker** uses a grid instead of a text field. This is a critical UX choice — giving users options to tap is always faster and more accessible than asking them to type. The accessibility labels ensure VoiceOver users get the same experience.
+**UrgeViewModel** manages a four-phase flow with an async timer, breathing animation, and structured logging. The timer runs in a `Task` that checks cancellation at every step. The encouragement text changes over 15 minutes based on clinical urge duration research.
 
-**CheckInFlowView** orchestrates the flow with directional transitions. The `.id` modifier combined with `.transition` is the pattern for animated view switching in SwiftUI. The `NavigationDirection` enum ensures the slides always match the user's mental model — forward goes left, backward goes right.
+**HapticManager** centralizes all haptic feedback behind a user-controllable setting. Every view calls `HapticManager.success()` or `HapticManager.mediumImpact()` instead of creating generators directly.
 
-**Haptic feedback** appears at three levels: light impact on the slider, selection tick on emoji and tag changes, and a success notification on save. These are not random — they follow Apple's haptic design guidelines where impact means adjustment, selection means choice, and notification means completion.
+**The design system (ColorPalette, Typography, Spacing, AnimationPresets, BFCard, BFButton)** keeps every screen visually consistent. The `staggeredAppear` modifier creates cascading entrance animations. The `FlowLayout` custom `Layout` wraps chips naturally.
 
 ---
 
 ## Challenge
 
-You have the check-in flow. Now extend it.
+You have the check-in and urge flows. Now extend them.
 
-**Add a fifth step: "Coping Strategy."** Between the current step 3 (note) and step 4 (tags), insert a new step that lets the user pick what coping strategy they used. Show a 2-column grid of strategies with SF Symbol icons: Breathing (wind), Journaling (book), Exercising (figure.run), CBT Exercise (brain.head.profile), Calling Sponsor (phone), Support Group (person.2), Meditation (bed.double), Walking Outdoors (sun.max).
+**Add trigger selection to the evening check-in.** The `PledgeViewModel` already has `selectedTriggers: Set<PredefinedTrigger>`, and `DailyCheckin` already stores `triggersRaw: [String]`. But the evening check-in UI currently does not show trigger chips. Add a "What triggered you today?" section between the mood selector and the reflection notes, using the same `FlowLayout` + `TriggerChip` pattern from the urge log. Only show it when `gamblingFree` is false.
 
-This requires changes in three places:
-1. The ViewModel — add `selectedStrategy: String?`, update `totalSteps` to 5, shift step titles and `canAdvance` logic
-2. The view — add the strategy step content and adjust step numbering
-3. The model — add the strategy field to `CheckIn`
+This requires changes in one place:
+1. `EveningCheckinView` — add the trigger selection section inside the `if !viewModel.gamblingFree` block
 
-Prompt Claude Code for each change separately. Review each diff. This is the iterative workflow in action — one focused change at a time, not one giant prompt for everything.
+Prompt Claude Code for the change. Review the diff. Verify that selected triggers are saved to the `DailyCheckin` model. This is the iterative workflow in action — one focused change at a time, not one giant prompt for everything.

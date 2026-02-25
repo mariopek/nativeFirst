@@ -1,827 +1,1204 @@
 ---
 title: "Search, Filter & Sort"
-description: "Add powerful data querying to BetAway with SwiftData predicates, date range filters, recovery status filtering, tag-based search, and multi-criteria sorting."
+description: "Build BetFree's journal list, progress analytics, and time-range filtering using SwiftData @Query, SwiftUI Charts, and client-side filtering with ProgressViewModel."
 courseSlug: "ship-native"
 module: 3
 moduleTitle: "Data Layer & Persistence"
 lesson: 2
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["SwiftData", "Predicate", "Filtering", "Sorting", "Search", "FetchDescriptor", "Query Optimization", "BetAway"]
+topics: ["SwiftData", "Query", "Filtering", "Sorting", "Search", "Charts", "Progress Analytics", "BetFree"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Our service layer can create, read, update, and delete recovery check-ins. That is necessary, but not sufficient. Users do not browse raw lists of data — they search for last Tuesday's crisis moment, filter to only their hardest days, or sort check-ins to spot patterns. This lesson adds that querying power using SwiftData's `#Predicate` macro, `FetchDescriptor`, and `SortDescriptor`.
+Our models can create, read, update, and delete recovery check-ins, journal entries, and urge logs. That is necessary, but not sufficient. Users do not browse raw lists of data — they want to see their mood trends over the last week, filter journal entries by mood, spot their most common triggers, and sort entries to find patterns. This lesson adds that querying and visualization power using SwiftData's `@Query` macro, `SortDescriptor`, SwiftUI Charts, and a `ProgressViewModel` that computes analytics from raw data.
 
-We are going to build a `RecoveryFilter` struct that captures every possible query the user might want, a service extension that turns those filters into efficient SwiftData fetches, and a `FilteredTimelineView` with a search bar and filter chips. By the end, BetAway's timeline will feel like a real tool for recovery insight — not just a chronological dump.
+We are going to build three things: a `JournalView` with a sorted, searchable list of journal entries; a `ProgressAnalyticsView` with mood trend charts, urge frequency charts, trigger breakdowns, and summary stats; and a `ProgressViewModel` that transforms raw SwiftData model arrays into chart-ready data points with configurable time ranges. By the end, BetFree will feel like a real tool for recovery insight — not just a data dump.
 
 ## What You'll Learn
 
-- How to use the `#Predicate` macro to write type-safe, compile-checked queries
-- Building a composable `RecoveryFilter` value type that models every filtering dimension
-- Combining multiple predicates into a single `FetchDescriptor`
-- Full-text search across check-in notes
-- Using `fetchLimit` and `fetchOffset` for pagination
-- Wiring filter controls into the UI with a search bar and interactive chips
+- How to use SwiftData's `@Query` macro with `sort` and `order` parameters for declarative data fetching
+- Building a `ProgressViewModel` that computes mood trends, urge frequency, trigger rankings, and summary statistics from raw model arrays
+- Using SwiftUI Charts (`LineMark`, `AreaMark`, `PointMark`, `BarMark`) to visualize recovery data
+- Implementing time-range filtering (7D, 30D, 90D) with client-side `Calendar`-based date math
+- Creating a journal list with `NavigationLink`, context menus for deletion, and staggered entrance animations
+- Building a journal entry form with mood selection, writing prompts, and edit/create modes
 
 ## Why This Matters
 
-BetAway is a recovery app. Recovery check-ins accumulate fast — a user who logs twice a day has 730 check-ins after a year. Showing all of them in a flat list is useless. The value of a recovery app is in the ability to ask questions: "Show me every check-in where I was struggling in January" or "What were my strongest days last month?" Without filtering and search, the data exists but the insight does not.
+BetFree is a recovery app. Recovery data accumulates fast — a user who checks in twice daily and logs urges has hundreds of records after a few months. Showing all of them in a flat list is useless. The value of a recovery app is in the ability to ask questions: "Is my mood trending up?" "How many urges did I resist this week?" "What are my top triggers?" Without filtering and visualization, the data exists but the insight does not.
 
-On the technical side, this is where SwiftData's `#Predicate` macro earns its place. The old `NSPredicate` API was string-based and type-unsafe — a typo in a key path crashed at runtime, not compile time. `#Predicate` fixes all of that. It is Swift-native, generic, and the compiler verifies every property access. If you rename a model property, `#Predicate` produces a compiler error instead of a silent runtime failure.
+On the technical side, this is where SwiftData's `@Query` macro earns its place. It provides declarative, reactive data fetching — when a new check-in is inserted, the query automatically updates and SwiftUI re-renders. Combined with SwiftUI Charts for visualization and a ViewModel for computed analytics, we get a full data-to-insight pipeline with minimal boilerplate.
 
 ## Plan Phase
 
 ### The Prompt
 
 ```
-I need to add search, filter, and sort capabilities to BetAway's
-recovery check-in timeline. Before writing any code, think through:
+I need to add journal browsing and progress analytics to BetFree.
+Before writing any code, think through:
 
-1. What filter criteria should users have? Consider date ranges,
-   recovery status levels, tags, and free-text search on notes.
-2. How should we model these filters? I want a single value type
-   that captures every filtering dimension.
-3. How do we translate that filter model into SwiftData #Predicate
-   queries efficiently?
-4. How should sorting work? Users should be able to sort by date,
-   recovery status, or both.
-5. For performance, how do we paginate instead of loading every
-   check-in at once?
+1. Journal: How should we display journal entries? Sorted by date,
+   with mood emoji, title preview, content preview, and prompt tag.
+   Users need to create, edit, and delete entries.
+
+2. Progress analytics: What metrics matter for gambling recovery?
+   - Mood trend over time (line chart from check-in mood data)
+   - Urge frequency over time (bar chart from urge logs)
+   - Top triggers (ranked list from urge logs)
+   - Summary stats: resist rate, total urges, journal entries, pledges
+
+3. Time-range filtering: Users should switch between 7-day, 30-day,
+   and 90-day views. How do we filter the data?
+
+4. What data structures does the ViewModel need to produce for
+   the chart views?
 
 Then outline the files we need and their responsibilities.
 ```
 
 ### Analysis
 
-Claude Code's plan should identify three pieces:
+Claude Code's plan should identify these pieces:
 
-1. **RecoveryFilter.swift** — A struct that holds `dateRange: ClosedRange<Date>?`, `recoveryStatuses: Set<Int>`, `tagIds: Set<PersistentIdentifier>`, and `searchText: String`. All optional or defaulted to empty. This is pure data — no SwiftData dependency, trivially testable.
+1. **JournalView.swift** — A list of journal entries using `@Query(sort: \JournalEntry.createdAt, order: .reverse)`. Each row shows mood emoji, title, content preview, date, and prompt tag. Tapping navigates to detail. Context menu for deletion.
 
-2. **RecoveryService extensions** — Methods on the service that accept a `RecoveryFilter` and a `[SortDescriptor<CheckIn>]`, build a `FetchDescriptor`, and return results. The predicate logic lives here.
+2. **JournalEntryView.swift** — The create/edit form with mood selection, writing prompts, title, and content. Handles both new entries and editing existing ones.
 
-3. **FilteredTimelineView.swift** — The SwiftUI view that owns a `RecoveryFilter` as `@State`, presents filter controls, and passes the filter to the service through the ViewModel.
+3. **JournalDetailView.swift** — Full-screen view of a single journal entry with edit and delete actions.
 
-This is the correct separation. The filter model knows nothing about SwiftData. The service knows SwiftData but nothing about the UI. The view knows both through the ViewModel. If the AI suggests putting `#Predicate` logic inside the view or directly querying `ModelContext` from the view, push back — that couples the UI to the persistence layer.
+4. **ProgressAnalyticsView.swift** — The analytics dashboard with time-range picker, summary stats, mood chart, urge chart, and trigger breakdown.
 
-### Anti-Pattern: Client-Side Filtering
+5. **ProgressViewModel.swift** — An `@Observable` class that takes raw `[DailyCheckin]`, `[UrgeLog]`, and `[JournalEntry]` arrays and computes chart-ready data structures for each time range.
+
+This separation is correct. The `@Query` macro in the views fetches raw data. The ViewModel transforms it into chart-compatible structures. The views render the charts. If the AI suggests putting chart computation logic inside the view, push back — that couples presentation to data transformation.
+
+### Anti-Pattern: Client-Side Over-Fetching
 
 Here is what we are NOT going to do:
 
 ```swift
-// BAD — fetches everything, then filters in memory
-let all = try context.fetch(FetchDescriptor<CheckIn>())
-let filtered = all.filter { $0.recoveryLevel >= 7 && $0.notes.contains("urge") }
+// BAD — fetching everything, no sorting at the database level
+@Query private var entries: [JournalEntry]
+
+// Then manually sorting in the view
+var sortedEntries: [JournalEntry] {
+    entries.sorted { $0.createdAt > $1.createdAt }
+}
 ```
 
-This loads every check-in into memory and then throws most of them away. With 730 check-ins it is fine. With 5,000 it is sluggish. With 50,000 it is a memory spike that gets your app terminated on older devices. SwiftData predicates push the filtering down to the SQLite layer — only matching rows are loaded. Always filter at the database level, not in Swift.
+SwiftData's `@Query` macro accepts `sort` and `order` parameters that push sorting down to the SQLite layer. Use them. Sorting in Swift after fetching is O(n log n) on every re-render. Sorting at the database level is O(n log n) once, cached by SQLite. For a journal with 500 entries, the difference is measurable.
 
-The second anti-pattern is string-based `NSPredicate`:
+The second anti-pattern is computing analytics on every frame:
 
 ```swift
-// BAD — string-based, no type safety
-let predicate = NSPredicate(format: "recoveryLevel >= %d AND notes CONTAINS[cd] %@", 7, "urge")
+// BAD — recomputing chart data inside the view body
+var body: some View {
+    let moodData = computeMoodTrend(from: checkins) // Called on EVERY render
+    Chart(moodData) { ... }
+}
 ```
 
-This compiles. It might even work. But rename `recoveryLevel` to `level` and it silently returns zero results instead of producing a compile error. The `#Predicate` macro exists to eliminate this entire class of bug. Use it.
+Move chart computation into the ViewModel so it can be called explicitly when the time range changes, not on every SwiftUI render cycle.
 
 ## Execute Phase
 
-### The Prompt
+### JournalEntry Model
 
-```
-Create the following files for BetAway's search, filter, and
-sort feature. Follow our MVVM + Service Layer architecture.
-
-1. Models/RecoveryFilter.swift
-   - Struct with: dateRange (ClosedRange<Date>?),
-     recoveryStatuses (Set<Int>), tagIds (Set<PersistentIdentifier>),
-     searchText (String)
-   - Static property .empty for default state
-   - Computed property isEmpty: Bool
-   - Conform to Equatable
-
-2. Services/RecoveryService+Filtering.swift
-   - Extension on RecoveryService
-   - func fetchFiltered(filter: RecoveryFilter,
-     sortBy: [SortDescriptor<CheckIn>],
-     limit: Int?, offset: Int?) throws -> [CheckIn]
-   - Build #Predicate<CheckIn> from each non-empty filter field
-   - Combine predicates with logical AND
-   - Use FetchDescriptor with fetchLimit and fetchOffset
-   - Full-text search should use localizedStandardContains
-     on the notes property
-
-3. Views/FilteredTimelineView.swift
-   - @State var filter: RecoveryFilter = .empty
-   - .searchable modifier bound to filter.searchText
-   - Horizontal ScrollView of filter chips for recovery statuses
-     and active tags
-   - Tapping a chip toggles it in the filter
-   - Results update reactively when any filter changes
-
-Use #Predicate (not NSPredicate). Use Swift 6 strict
-concurrency. Use os.Logger for any error logging.
-```
-
-### Review
-
-Here is what the AI should generate. Let us walk through each file.
-
-**RecoveryFilter.swift:**
+The journal entry model stores mood, title, content, and an optional writing prompt. It relates to `UserProfile` through a SwiftData relationship.
 
 ```swift
+// JournalEntry.swift
+
 import Foundation
 import SwiftData
 
-struct RecoveryFilter: Equatable {
-    var dateRange: ClosedRange<Date>?
-    var recoveryStatuses: Set<Int> = []
-    var tagIds: Set<PersistentIdentifier> = []
-    var searchText: String = ""
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
 
-    static let empty = RecoveryFilter()
+    @Relationship(inverse: \UserProfile.journalEntries) var userProfile: UserProfile?
 
-    var isEmpty: Bool {
-        dateRange == nil
-            && recoveryStatuses.isEmpty
-            && tagIds.isEmpty
-            && searchText.trimmingCharacters(in: .whitespaces).isEmpty
+    var moodRating: MoodRating? {
+        get { MoodRating(rawValue: mood) }
+        set { mood = newValue?.rawValue ?? 3 }
+    }
+
+    init(
+        title: String = "",
+        content: String = "",
+        mood: MoodRating = .neutral,
+        promptUsed: String = ""
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.title = title
+        self.content = content
+        self.mood = mood.rawValue
+        self.promptUsed = promptUsed
     }
 }
 ```
 
-Check these details:
+**Review:**
 
-- **`Set<Int>` for recovery statuses** — not an array. Sets give us constant-time `contains` checks and automatic deduplication. When the user taps a "Level 7" chip twice, the second tap removes it cleanly via `toggle` logic. An array would let duplicates creep in.
+- The `mood` field stores the raw `Int` value from `MoodRating`. The computed `moodRating` property converts back and forth. This is the same pattern used in `DailyCheckin` — raw storage with type-safe computed access.
+- `promptUsed` stores the raw value of a `JournalPrompt` enum case (e.g., "What am I grateful for?"). This records which prompt the user chose, so the detail view can display it as a tag.
+- The init takes `MoodRating` directly — no raw value conversion needed at the call site.
 
-- **`Set<PersistentIdentifier>` for tag IDs** — we reference tags by their SwiftData persistent identifier, not by the tag object itself. This avoids retaining model objects in a value type, which would be a layering violation.
+### JournalView — The Sorted List
 
-- **`searchText` trimming in `isEmpty`** — a search field containing only spaces should count as empty. Without the trim, the UI would show a "clear filters" button when the user has only typed a space. Small detail, but it matters.
-
-- **`Equatable` conformance** — all stored properties are already `Equatable`, so Swift synthesizes the conformance. We need it so SwiftUI can diff the filter and skip unnecessary re-renders when the filter has not actually changed.
-
-**RecoveryService+Filtering.swift:**
+This view uses `@Query` with sorting to display journal entries in reverse chronological order.
 
 ```swift
-import Foundation
+// JournalView.swift
+
+import SwiftUI
 import SwiftData
-import os
 
-extension RecoveryService {
-    private static let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "RecoveryService+Filtering"
-    )
+struct JournalView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var entries: [JournalEntry]
+    @Query private var profiles: [UserProfile]
+    @State private var showNewEntry = false
+    @State private var isVisible = false
 
-    func fetchFiltered(
-        filter: RecoveryFilter,
-        sortBy: [SortDescriptor<CheckIn>] = [SortDescriptor(\.date, order: .reverse)],
-        limit: Int? = nil,
-        offset: Int? = nil
-    ) throws -> [CheckIn] {
-        var descriptor = FetchDescriptor<CheckIn>()
+    private var profile: UserProfile? { profiles.first }
 
-        // Build predicate
-        if !filter.isEmpty {
-            let searchText = filter.searchText
-                .trimmingCharacters(in: .whitespaces)
-                .lowercased()
-            let recoveryStatuses = filter.recoveryStatuses
-            let dateRange = filter.dateRange
-            let tagIds = filter.tagIds
+    var body: some View {
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
 
-            descriptor.predicate = #Predicate<CheckIn> { checkIn in
-                // Date range
-                (dateRange == nil
-                    || (checkIn.date >= (dateRange?.lowerBound ?? .distantPast)
-                        && checkIn.date <= (dateRange?.upperBound ?? .distantFuture)))
-                // Recovery statuses
-                && (recoveryStatuses.isEmpty || recoveryStatuses.contains(checkIn.recoveryLevel))
-                // Search text
-                && (searchText.isEmpty
-                    || checkIn.notes.localizedStandardContains(searchText))
+            if entries.isEmpty {
+                emptyState
+            } else {
+                entryList
             }
         }
-
-        descriptor.sortBy = sortBy
-
-        if let limit {
-            descriptor.fetchLimit = limit
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showNewEntry = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(ColorPalette.accent)
+                }
+            }
         }
-        if let offset {
-            descriptor.fetchOffset = offset
+        .sheet(isPresented: $showNewEntry) {
+            NavigationStack {
+                JournalEntryView(profile: profile)
+            }
         }
+        .onAppear { isVisible = true }
+    }
 
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            Self.logger.error("Filtered fetch failed: \(error.localizedDescription)")
-            throw error
+    // MARK: - Empty State
+
+    private var emptyState: some View {
+        VStack(spacing: Spacing.lg) {
+            Image(systemName: AppConfig.Icons.journal)
+                .font(.system(size: 48))
+                .foregroundStyle(ColorPalette.textTertiary)
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+            VStack(spacing: Spacing.xs) {
+                Text("Your journal is empty")
+                    .font(Typography.title3())
+                    .foregroundStyle(ColorPalette.textPrimary)
+
+                Text("Writing about your feelings helps\nprocess emotions and track patterns.")
+                    .font(Typography.callout())
+                    .foregroundStyle(ColorPalette.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .staggeredAppear(index: 1, isVisible: isVisible)
+
+            BFButton(title: "Write First Entry", icon: "pencil.line") {
+                showNewEntry = true
+            }
+            .padding(.horizontal, Spacing.xxl)
+            .staggeredAppear(index: 2, isVisible: isVisible)
         }
+    }
+
+    // MARK: - Entry List
+
+    private var entryList: some View {
+        ScrollView {
+            LazyVStack(spacing: Spacing.sm) {
+                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                    NavigationLink(destination: JournalDetailView(entry: entry)) {
+                        JournalEntryCard(entry: entry)
+                    }
+                    .buttonStyle(.plain)
+                    .staggeredAppear(index: index, isVisible: isVisible)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            withAnimation(AnimationPresets.smooth) {
+                                modelContext.delete(entry)
+                            }
+                        } label: {
+                            Label("Delete Entry", systemImage: AppConfig.Icons.trash)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.sm)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
     }
 }
 ```
 
-This is the core of the feature. Let me walk through the important decisions.
-
-**The `#Predicate` macro.** Everything inside the closure is translated to a SQL `WHERE` clause by SwiftData at compile time. The property accesses (`checkIn.date`, `checkIn.recoveryLevel`, `checkIn.notes`) are verified against the `CheckIn` model — rename a property and you get a compiler error. This is the entire point of `#Predicate` over `NSPredicate`.
-
-**`localizedStandardContains` for search.** This is Apple's recommended method for user-facing text search. It handles case insensitivity, diacritics (so searching "cafe" matches "cafe"), and locale-specific rules. Do not use `contains` — it is case-sensitive and accent-sensitive, which makes search feel broken for users.
-
-**Variable capture outside the closure.** Notice we extract `searchText`, `recoveryStatuses`, `dateRange`, and `tagIds` into local variables before the `#Predicate` closure. This is not cosmetic — the `#Predicate` macro has restrictions on what it can capture. It cannot access properties through `filter.searchText` inside the closure because the macro needs to translate each expression to a database query. Local variable capture works; property access through a struct does not.
-
-**Tag filtering is intentionally omitted from the predicate.** You might notice we are not filtering by `tagIds` inside `#Predicate`. This is because SwiftData's `#Predicate` has limited support for querying across relationships and set membership on persistent identifiers. The tag filtering is better handled as a post-fetch step or via a dedicated relationship query. Here is the pragmatic approach:
+**The critical line is the `@Query` declaration:**
 
 ```swift
-// After the fetch, filter by tags if needed
-var results = try modelContext.fetch(descriptor)
+@Query(sort: \JournalEntry.createdAt, order: .reverse) private var entries: [JournalEntry]
+```
 
-if !filter.tagIds.isEmpty {
-    results = results.filter { checkIn in
-        let checkInTagIds = Set(checkIn.tags.map(\.persistentModelID))
-        return !checkInTagIds.isDisjoint(with: filter.tagIds)
+This tells SwiftData to fetch all `JournalEntry` records sorted by `createdAt` in reverse order (newest first). The sort happens at the SQLite level, not in Swift. The query is **reactive** — when a new entry is inserted anywhere in the app, SwiftUI automatically re-renders this list with the new entry at the top. No manual refresh needed.
+
+**Other patterns worth noting:**
+
+- **`LazyVStack` instead of `List`** — we use `LazyVStack` inside a `ScrollView` for full control over styling. `List` imposes its own cell styling, separators, and background colors that would clash with our design system.
+- **`contextMenu` for deletion** — long-pressing a journal card shows a context menu with "Delete Entry." The deletion is wrapped in `withAnimation(AnimationPresets.smooth)` so the card animates out instead of popping.
+- **`staggeredAppear(index:isVisible:)`** — each card gets its index, creating a cascading entrance animation when the view first appears. The `LazyVStack` means only visible cards are rendered, so the stagger only applies to the initial viewport.
+
+### JournalEntryCard — The Row Component
+
+Each journal entry in the list is displayed as a card:
+
+```swift
+// JournalEntryCard — used in JournalView
+
+struct JournalEntryCard: View {
+    let entry: JournalEntry
+
+    private var dateFormatted: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: entry.createdAt)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack {
+                if let mood = entry.moodRating {
+                    Text(mood.emoji)
+                        .font(.system(size: 20))
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.title.isEmpty ? "Untitled" : entry.title)
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+                        .lineLimit(1)
+
+                    Text(dateFormatted)
+                        .font(Typography.caption())
+                        .foregroundStyle(ColorPalette.textTertiary)
+                }
+
+                Spacer()
+
+                Image(systemName: AppConfig.Icons.chevronRight)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+
+            if !entry.content.isEmpty {
+                Text(entry.content)
+                    .font(Typography.callout())
+                    .foregroundStyle(ColorPalette.textSecondary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }
+
+            if !entry.promptUsed.isEmpty {
+                HStack(spacing: Spacing.xxs) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10))
+                    Text(entry.promptUsed)
+                        .font(Typography.caption())
+                        .lineLimit(1)
+                }
+                .foregroundStyle(ColorPalette.accent.opacity(0.7))
+            }
+        }
+        .padding(Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.medium, style: .continuous))
     }
 }
 ```
 
-Is this client-side filtering? Yes — but only for the tag dimension, and only after the database has already narrowed results by date, recovery status, and search text. The number of rows reaching this filter is small. This is a reasonable trade-off when the predicate macro does not support the operation you need.
+The card shows four pieces of information in a compact layout: mood emoji + title + date in the header row, content preview (3-line limit) in the body, and the prompt tag at the bottom (only if a prompt was used). The sparkles icon next to the prompt tag signals "this entry was prompted" — a visual cue that helps users spot patterns in what prompts resonate.
 
-**`fetchLimit` and `fetchOffset` for pagination.** These two properties on `FetchDescriptor` let you implement "load more" pagination without fetching the entire dataset. Set `fetchLimit` to 20 and `fetchOffset` to 0 for the first page, then increment `fetchOffset` by 20 for each subsequent page. SwiftData translates this to SQL `LIMIT` and `OFFSET`, so only the requested rows leave the database.
+### JournalEntryView — Create and Edit
 
-**Review Checklist:**
-
-- Uses `#Predicate`, not `NSPredicate` or client-side filtering
-- `localizedStandardContains` for search, not `contains`
-- Variables captured locally for predicate macro compatibility
-- `fetchLimit` and `fetchOffset` for pagination
-- `os.Logger` for errors, not `print`
-- Default sort is newest-first, which matches the timeline UX
-
-## Iteration
-
-The first pass works, but there are two things worth refining.
-
-**Iteration 1 — Sort options enum.**
-
-```
-The sortBy parameter is an array of SortDescriptor, which is
-flexible but hard to use from the UI. Create a RecoverySortOption
-enum with cases: newestFirst, oldestFirst, statusHighToLow,
-statusLowToHigh. Each case should have a computed property that
-returns the corresponding [SortDescriptor<CheckIn>] array.
-Add this to RecoveryFilter.swift so the filter and sort live together.
-```
+The journal entry form handles both creating new entries and editing existing ones. The same view, different modes.
 
 ```swift
-enum RecoverySortOption: String, CaseIterable, Identifiable {
-    case newestFirst
-    case oldestFirst
-    case statusHighToLow
-    case statusLowToHigh
+// JournalEntryView.swift
+
+import SwiftUI
+import SwiftData
+
+struct JournalEntryView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    let profile: UserProfile?
+    var editingEntry: JournalEntry?
+
+    @State private var title = ""
+    @State private var content = ""
+    @State private var selectedMood: MoodRating = .neutral
+    @State private var selectedPrompt: JournalPrompt?
+    @State private var isVisible = false
+
+    private var isEditing: Bool { editingEntry != nil }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xl) {
+                // Mood selector
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("How are you feeling?")
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    HStack(spacing: Spacing.md) {
+                        ForEach(MoodRating.allCases) { mood in
+                            Button {
+                                withAnimation(AnimationPresets.snappy) {
+                                    selectedMood = mood
+                                }
+                            } label: {
+                                VStack(spacing: Spacing.xxs) {
+                                    Text(mood.emoji)
+                                        .font(.system(size: selectedMood == mood ? 36 : 28))
+
+                                    Text(mood.label)
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(
+                                            selectedMood == mood
+                                                ? ColorPalette.accent
+                                                : ColorPalette.textTertiary
+                                        )
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, Spacing.xs)
+                                .background(
+                                    selectedMood == mood
+                                        ? ColorPalette.accent.opacity(0.1)
+                                        : Color.clear
+                                )
+                                .clipShape(RoundedRectangle(
+                                    cornerRadius: Spacing.Radius.small, style: .continuous
+                                ))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+                // Prompts (hide when editing)
+                if !isEditing {
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Need a prompt?")
+                            .font(Typography.headline())
+                            .foregroundStyle(ColorPalette.textPrimary)
+
+                        FlowLayout(spacing: Spacing.xs) {
+                            ForEach(JournalPrompt.allCases) { prompt in
+                                Button {
+                                    withAnimation(AnimationPresets.snappy) {
+                                        if selectedPrompt == prompt {
+                                            selectedPrompt = nil
+                                        } else {
+                                            selectedPrompt = prompt
+                                            if title.isEmpty {
+                                                title = prompt.localizedName
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Text(prompt.localizedName)
+                                        .font(Typography.caption(weight: .medium))
+                                        .padding(.horizontal, Spacing.sm)
+                                        .padding(.vertical, Spacing.xs)
+                                        .foregroundStyle(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.textOnPrimary
+                                                : ColorPalette.textPrimary
+                                        )
+                                        .background(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.accent
+                                                : ColorPalette.surfaceSecondary
+                                        )
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(BFButtonPressStyle())
+                            }
+                        }
+                    }
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+                }
+
+                // Title
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("Title (optional)")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+
+                    TextField("What's on your mind?", text: $title)
+                        .font(Typography.body())
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                }
+
+                // Content
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("Write your thoughts")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+
+                    TextField("Start writing...", text: $content, axis: .vertical)
+                        .font(Typography.body())
+                        .lineLimit(6...12)
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                }
+
+                // Save button
+                BFButton(
+                    title: isEditing ? LocalizedStringKey("Save Changes")
+                                     : LocalizedStringKey("Save Entry"),
+                    icon: AppConfig.Icons.checkmark
+                ) {
+                    saveEntry()
+                }
+                .disabled(content.isEmpty)
+                .opacity(content.isEmpty ? 0.5 : 1.0)
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationTitle(isEditing ? "Edit Entry" : "New Entry")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { dismiss() }
+                    .foregroundStyle(ColorPalette.textSecondary)
+            }
+        }
+        .onAppear {
+            if let entry = editingEntry {
+                title = entry.title
+                content = entry.content
+                selectedMood = entry.moodRating ?? .neutral
+                if !entry.promptUsed.isEmpty {
+                    selectedPrompt = JournalPrompt.allCases
+                        .first { $0.rawValue == entry.promptUsed }
+                }
+            }
+            isVisible = true
+        }
+    }
+
+    private func saveEntry() {
+        if let entry = editingEntry {
+            entry.title = title
+            entry.content = content
+            entry.moodRating = selectedMood
+            entry.promptUsed = selectedPrompt?.rawValue ?? entry.promptUsed
+        } else {
+            let entry = JournalEntry(
+                title: title,
+                content: content,
+                mood: selectedMood,
+                promptUsed: selectedPrompt?.rawValue ?? ""
+            )
+            entry.userProfile = profile
+            modelContext.insert(entry)
+        }
+        dismiss()
+    }
+}
+
+// MARK: - Journal Prompts
+
+enum JournalPrompt: String, CaseIterable, Identifiable {
+    case gratitude = "What am I grateful for?"
+    case trigger = "What triggered me today?"
+    case wins = "What went well today?"
+    case feelings = "How am I feeling right now?"
+    case future = "What do I look forward to?"
+    case challenge = "What challenged me?"
+    case growth = "How have I grown?"
+    case support = "Who supports me?"
 
     var id: String { rawValue }
 
-    var descriptors: [SortDescriptor<CheckIn>] {
-        switch self {
-        case .newestFirst:
-            [SortDescriptor(\.date, order: .reverse)]
-        case .oldestFirst:
-            [SortDescriptor(\.date, order: .forward)]
-        case .statusHighToLow:
-            [SortDescriptor(\.recoveryLevel, order: .reverse),
-             SortDescriptor(\.date, order: .reverse)]
-        case .statusLowToHigh:
-            [SortDescriptor(\.recoveryLevel, order: .forward),
-             SortDescriptor(\.date, order: .reverse)]
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .newestFirst: "Newest"
-        case .oldestFirst: "Oldest"
-        case .statusHighToLow: "Strongest days"
-        case .statusLowToHigh: "Hardest days"
-        }
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(
+            forKey: rawValue, value: nil, table: nil
+        )
     }
 }
 ```
 
-Now update `RecoveryFilter` to include the sort option:
+**Key design decisions:**
+
+- **Single view for create and edit.** The `editingEntry` parameter is optional. If nil, it creates a new entry. If provided, it populates the fields from the existing entry and saves changes to it. This avoids duplicating the entire form.
+- **Prompt auto-fills the title.** When the user selects a prompt (e.g., "What am I grateful for?"), the title field auto-fills with that prompt text — but only if the title is empty. If the user already typed a title, the prompt does not overwrite it.
+- **The save button is disabled when content is empty.** Title is optional, prompt is optional, but content is required. The button dims to 50% opacity with `.disabled(content.isEmpty)`. This is a visual + functional guard.
+- **Prompts section is hidden in edit mode.** When editing an existing entry, the prompts are not relevant — the user already picked one (or did not) when they created the entry.
+
+## Iteration: ProgressViewModel
+
+The journal list handles fetching and display with `@Query`. But progress analytics requires computation — we need to transform raw arrays of check-ins and urge logs into chart-ready data structures. That is the ProgressViewModel's job.
 
 ```swift
-struct RecoveryFilter: Equatable {
-    var dateRange: ClosedRange<Date>?
-    var recoveryStatuses: Set<Int> = []
-    var tagIds: Set<PersistentIdentifier> = []
-    var searchText: String = ""
-    var sortOption: RecoverySortOption = .newestFirst
+// ProgressViewModel.swift
 
-    // ...
+import SwiftUI
+import SwiftData
+
+@Observable
+final class ProgressViewModel {
+    var selectedTimeRange: TimeRange = .week
+
+    enum TimeRange: String, CaseIterable, Identifiable {
+        case week = "7D"
+        case month = "30D"
+        case threeMonths = "90D"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(
+                forKey: rawValue, value: nil, table: nil
+            )
+        }
+
+        var days: Int {
+            switch self {
+            case .week: return 7
+            case .month: return 30
+            case .threeMonths: return 90
+            }
+        }
+    }
+
+    // MARK: - Mood Chart Data
+
+    struct MoodDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let value: Double
+        let label: String
+    }
+
+    func moodData(from checkins: [DailyCheckin], days: Int) -> [MoodDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today)
+            else { return nil }
+
+            let dayCheckins = checkins.filter {
+                calendar.isDate($0.date, inSameDayAs: date)
+            }
+            guard !dayCheckins.isEmpty else { return nil }
+
+            let avgMood = Double(dayCheckins.map(\.mood).reduce(0, +))
+                        / Double(dayCheckins.count)
+            let label = MoodRating(rawValue: Int(avgMood.rounded())) ?? .neutral
+
+            return MoodDataPoint(date: date, value: avgMood, label: label.emoji)
+        }
+        .reversed()
+    }
+
+    // MARK: - Urge Chart Data
+
+    struct UrgeDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let count: Int
+        let avgIntensity: Double
+    }
+
+    func urgeData(from urgeLogs: [UrgeLog], days: Int) -> [UrgeDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today)
+            else { return nil }
+
+            let dayUrges = urgeLogs.filter {
+                calendar.isDate($0.timestamp, inSameDayAs: date)
+            }
+            let avgIntensity = dayUrges.isEmpty
+                ? 0
+                : Double(dayUrges.map(\.intensity).reduce(0, +))
+                  / Double(dayUrges.count)
+
+            return UrgeDataPoint(
+                date: date, count: dayUrges.count, avgIntensity: avgIntensity
+            )
+        }
+        .reversed()
+    }
+
+    // MARK: - Trigger Stats
+
+    struct TriggerStat: Identifiable {
+        let id = UUID()
+        let trigger: PredefinedTrigger
+        let count: Int
+        let percentage: Double
+    }
+
+    func topTriggers(from urgeLogs: [UrgeLog], limit: Int = 5) -> [TriggerStat] {
+        let triggeredLogs = urgeLogs.filter { !$0.triggerRaw.isEmpty }
+        guard !triggeredLogs.isEmpty else { return [] }
+
+        var counts: [String: Int] = [:]
+        for log in triggeredLogs {
+            counts[log.triggerRaw, default: 0] += 1
+        }
+
+        let total = Double(triggeredLogs.count)
+
+        return counts
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .compactMap { key, value in
+                guard let trigger = PredefinedTrigger(rawValue: key)
+                else { return nil }
+                return TriggerStat(
+                    trigger: trigger,
+                    count: value,
+                    percentage: Double(value) / total
+                )
+            }
+    }
+
+    // MARK: - Summary Stats
+
+    struct SummaryStats {
+        let totalUrges: Int
+        let resistedUrges: Int
+        let resistRate: Double
+        let avgMood: Double
+        let journalEntries: Int
+        let pledgesMade: Int
+    }
+
+    func summaryStats(
+        urgeLogs: [UrgeLog],
+        checkins: [DailyCheckin],
+        journalEntries: [JournalEntry],
+        days: Int
+    ) -> SummaryStats {
+        let calendar = Calendar.current
+        let cutoff = calendar.date(byAdding: .day, value: -days, to: Date())
+                   ?? Date()
+
+        let periodUrges = urgeLogs.filter { $0.timestamp >= cutoff }
+        let periodCheckins = checkins.filter { $0.date >= cutoff }
+        let periodJournals = journalEntries.filter { $0.createdAt >= cutoff }
+
+        let resisted = periodUrges.filter(\.didResist).count
+        let resistRate = periodUrges.isEmpty
+            ? 1.0
+            : Double(resisted) / Double(periodUrges.count)
+
+        let moodCheckins = periodCheckins.filter { $0.mood > 0 }
+        let avgMood = moodCheckins.isEmpty
+            ? 3.0
+            : Double(moodCheckins.map(\.mood).reduce(0, +))
+              / Double(moodCheckins.count)
+
+        let pledges = periodCheckins
+            .filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }
+            .count
+
+        return SummaryStats(
+            totalUrges: periodUrges.count,
+            resistedUrges: resisted,
+            resistRate: resistRate,
+            avgMood: avgMood,
+            journalEntries: periodJournals.count,
+            pledgesMade: pledges
+        )
+    }
 }
 ```
 
-The sort-by-status cases include a secondary sort by date. Without it, all check-ins with the same recovery status would appear in arbitrary order. The secondary sort guarantees a deterministic, predictable result.
+**This ViewModel is the data transformation layer.** Let me walk through each method.
 
-**Iteration 2 — Convenience methods on RecoveryFilter.**
+**`moodData(from:days:)`** iterates backward from today through the specified number of days. For each day, it finds all check-ins that fall on that date using `calendar.isDate(_:inSameDayAs:)`, averages their mood values, and produces a `MoodDataPoint`. Days with no check-ins are skipped (`compactMap` + `guard !dayCheckins.isEmpty`), which creates gaps in the chart where the user did not check in. The result is reversed so the chart reads left-to-right (oldest to newest).
 
-```
-Add helper methods to RecoveryFilter for toggling filter values
-from the UI:
-- mutating func toggleRecoveryStatus(_ level: Int)
-- mutating func toggleTag(_ id: PersistentIdentifier)
-- mutating func setDateRange(last days: Int)
-- mutating func clearAll()
-```
+**`urgeData(from:days:)`** follows the same pattern but counts urges per day instead of averaging mood. Days with zero urges still produce a data point with `count: 0` — these show as zero-height bars in the chart, which is meaningful ("no urges today" is worth displaying).
+
+**`topTriggers(from:limit:)`** counts how many times each trigger appears across all urge logs, sorts by frequency, and takes the top 5. The `percentage` field is used by the view to render proportional progress bars. This is a simple frequency analysis that surfaces which triggers are most dangerous for this user.
+
+**`summaryStats(urgeLogs:checkins:journalEntries:days:)`** computes four key metrics filtered to the selected time range: resist rate (urges resisted / total urges), total urges, journal entries written, and pledges taken. The default resist rate is 1.0 (100%) when there are no urges — because the user never gave in.
+
+### ProgressAnalyticsView — The Dashboard
+
+This is the main analytics view. It combines the time-range picker, summary cards, mood chart, urge chart, and trigger breakdown.
 
 ```swift
-extension RecoveryFilter {
-    mutating func toggleRecoveryStatus(_ level: Int) {
-        if recoveryStatuses.contains(level) {
-            recoveryStatuses.remove(level)
-        } else {
-            recoveryStatuses.insert(level)
+// ProgressAnalyticsView.swift (key sections)
+
+import SwiftUI
+import SwiftData
+import Charts
+
+struct ProgressAnalyticsView: View {
+    @Query private var profiles: [UserProfile]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse)
+        private var journalEntries: [JournalEntry]
+    @State private var viewModel = ProgressViewModel()
+    @State private var isVisible = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                timeRangePicker
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+                summaryCards
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+                moodChart
+                    .staggeredAppear(index: 2, isVisible: isVisible)
+                urgeChart
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+                triggersSection
+                    .staggeredAppear(index: 4, isVisible: isVisible)
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
         }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { isVisible = true }
     }
 
-    mutating func toggleTag(_ id: PersistentIdentifier) {
-        if tagIds.contains(id) {
-            tagIds.remove(id)
-        } else {
-            tagIds.insert(id)
+    // MARK: - Time Range Picker
+
+    private var timeRangePicker: some View {
+        HStack(spacing: Spacing.xs) {
+            ForEach(ProgressViewModel.TimeRange.allCases) { range in
+                Button {
+                    withAnimation(AnimationPresets.snappy) {
+                        viewModel.selectedTimeRange = range
+                    }
+                } label: {
+                    Text(range.localizedName)
+                        .font(Typography.subheadline(weight: .semibold))
+                        .padding(.horizontal, Spacing.md)
+                        .padding(.vertical, Spacing.xs)
+                        .foregroundStyle(
+                            viewModel.selectedTimeRange == range
+                                ? ColorPalette.textOnPrimary
+                                : ColorPalette.textSecondary
+                        )
+                        .background(
+                            viewModel.selectedTimeRange == range
+                                ? ColorPalette.accent
+                                : ColorPalette.surfaceSecondary
+                        )
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(BFButtonPressStyle())
+            }
+            Spacer()
         }
-    }
-
-    mutating func setDateRange(lastDays days: Int) {
-        let now = Date.now
-        let start = Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now
-        dateRange = start...now
-    }
-
-    mutating func clearAll() {
-        self = .empty
     }
 }
 ```
 
-These are small but they make the view code dramatically cleaner. Instead of inline set manipulation scattered across button actions, the view calls `filter.toggleRecoveryStatus(7)`. The intent is clear, the logic is encapsulated, and it is testable without any UI.
+**The three `@Query` declarations are the data pipeline:**
+
+```swift
+@Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+@Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+@Query(sort: \JournalEntry.createdAt, order: .reverse) private var journalEntries: [JournalEntry]
+```
+
+Each `@Query` fetches all records of that type, sorted newest-first at the database level. The ViewModel's methods then filter these arrays by the selected time range. This approach — fetch all, filter in the ViewModel — works well for the data volumes in a personal recovery app (hundreds to low thousands of records). For larger datasets, you would use `#Predicate` in a `FetchDescriptor` instead.
+
+### Mood Trend Chart
+
+The mood chart uses SwiftUI Charts to render a line with an area fill and point marks:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var moodChart: some View {
+    let data = viewModel.moodData(
+        from: checkins, days: viewModel.selectedTimeRange.days
+    )
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "face.smiling")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Mood Trend")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if data.isEmpty {
+                emptyChartState(message: "Check in daily to see your mood trends")
+            } else {
+                Chart(data) { point in
+                    LineMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .interpolationMethod(.catmullRom)
+
+                    AreaMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                ColorPalette.accent.opacity(0.3),
+                                ColorPalette.accent.opacity(0.05)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .symbolSize(30)
+                }
+                .chartYScale(domain: 1...5)
+                .chartYAxis {
+                    AxisMarks(values: [1, 2, 3, 4, 5]) { value in
+                        AxisValueLabel {
+                            if let intVal = value.as(Int.self) {
+                                Text(MoodRating(rawValue: intVal)?.emoji ?? "")
+                                    .font(.system(size: 12))
+                            }
+                        }
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .frame(height: 180)
+            }
+        }
+    }
+}
+```
+
+**Chart construction details:**
+
+- **Three mark types layered:** `LineMark` draws the trend line. `AreaMark` fills below it with a gradient fade. `PointMark` adds dots at each data point. This layering creates a polished chart that is more visually appealing than a plain line.
+- **`.interpolationMethod(.catmullRom)`** — smooth curves instead of straight line segments between points. Catmull-Rom interpolation passes through every data point (unlike Bezier, which approximates), so the chart is both smooth and accurate.
+- **Y-axis uses emoji labels.** Instead of numbers 1-5, the Y-axis shows the mood emoji at each level. `AxisMarks(values: [1, 2, 3, 4, 5])` with a custom `AxisValueLabel` maps each integer to `MoodRating(rawValue:)?.emoji`. This makes the chart instantly readable — you can see your mood trend without reading numbers.
+- **`.chartYScale(domain: 1...5)`** — fixed Y-axis range. Without this, the chart would auto-scale to the data range, making a user who is always in the 3-4 range look like they are swinging between extremes. The fixed 1-5 range preserves context.
+
+### Urge Frequency Chart
+
+The urge chart uses bar marks, colored by whether urges occurred:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var urgeChart: some View {
+    let data = viewModel.urgeData(
+        from: urgeLogs, days: viewModel.selectedTimeRange.days
+    )
+    let hasData = data.contains { $0.count > 0 }
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(ColorPalette.danger)
+                Text("Urge Frequency")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if !hasData {
+                emptyChartState(message: "No urges logged yet — that's great!")
+            } else {
+                Chart(data) { point in
+                    BarMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Count", point.count)
+                    )
+                    .foregroundStyle(
+                        point.count == 0
+                            ? ColorPalette.success.opacity(0.3)
+                            : ColorPalette.danger.opacity(0.7)
+                    )
+                    .cornerRadius(4)
+                }
+                .chartYAxis {
+                    AxisMarks { _ in
+                        AxisValueLabel()
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                    }
+                }
+                .frame(height: 150)
+            }
+        }
+    }
+}
+```
+
+The color coding is significant: days with urges are red (`ColorPalette.danger`), days without are faint green (`ColorPalette.success.opacity(0.3)`). This means zero-urge days are still visible as subtle green bars — a visual reward for clean days. The empty state message ("No urges logged yet — that's great!") frames the absence of data positively.
+
+### Top Triggers Section
+
+The trigger breakdown shows a ranked list with proportional progress bars:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var triggersSection: some View {
+    let triggers = viewModel.topTriggers(from: urgeLogs)
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "bolt.fill")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Top Triggers")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if triggers.isEmpty {
+                emptyChartState(message: "Triggers will appear as you log urges")
+            } else {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(triggers) { stat in
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: stat.trigger.icon)
+                                .font(.system(size: 14))
+                                .foregroundStyle(ColorPalette.warning)
+                                .frame(width: 24)
+
+                            Text(stat.trigger.localizedName)
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textPrimary)
+                                .lineLimit(1)
+
+                            Spacer()
+
+                            Text("\(stat.count)x")
+                                .font(Typography.subheadline(weight: .semibold))
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.surfaceSecondary)
+                                    .frame(height: 4)
+
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.warning)
+                                    .frame(
+                                        width: geo.size.width * stat.percentage,
+                                        height: 4
+                                    )
+                            }
+                        }
+                        .frame(height: 4)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Each trigger shows its SF Symbol icon, localized name, occurrence count, and a proportional bar. The bar width is `geo.size.width * stat.percentage` — so the most frequent trigger fills the full width, and others are proportional. This gives an instant visual ranking without needing to compare numbers.
+
+### Summary Stats Cards
+
+The summary cards show four key metrics in a 2x2 grid:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var summaryCards: some View {
+    let stats = viewModel.summaryStats(
+        urgeLogs: urgeLogs,
+        checkins: checkins,
+        journalEntries: journalEntries,
+        days: viewModel.selectedTimeRange.days
+    )
+
+    return VStack(spacing: Spacing.sm) {
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: "shield.checkered",
+                title: "Resist Rate",
+                value: "\(Int(stats.resistRate * 100))%",
+                color: stats.resistRate >= 0.8
+                    ? ColorPalette.success : ColorPalette.warning
+            )
+            StatMiniCard(
+                icon: "exclamationmark.shield.fill",
+                title: "Urges",
+                value: "\(stats.totalUrges)",
+                color: ColorPalette.danger
+            )
+        }
+
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: AppConfig.Icons.journal,
+                title: "Journal",
+                value: "\(stats.journalEntries)",
+                color: ColorPalette.infoBadge
+            )
+            StatMiniCard(
+                icon: AppConfig.Icons.pledge,
+                title: "Pledges",
+                value: "\(stats.pledgesMade)",
+                color: ColorPalette.accent
+            )
+        }
+    }
+}
+```
+
+The resist rate card color-codes itself: green when 80%+ ("you're doing great"), yellow below 80% ("room for improvement"). This is a subtle but motivating visual cue. The `.contentTransition(.numericText())` modifier on the `StatMiniCard` value text means switching time ranges animates the number change instead of popping.
+
+### X-Axis Stride
+
+The X-axis label density adjusts based on the selected time range:
+
+```swift
+private var xAxisStride: Int {
+    switch viewModel.selectedTimeRange {
+    case .week: return 1      // Label every day
+    case .month: return 7     // Label every 7 days
+    case .threeMonths: return 14  // Label every 14 days
+    }
+}
+```
+
+Without this, the 90-day view would have 90 X-axis labels overlapping each other. The stride ensures labels are always readable — daily for the week view, weekly for the month, biweekly for the quarter.
 
 ## Verify Phase
 
 Build and run. Here is what to test:
 
-1. **Empty filter returns all check-ins.** With `RecoveryFilter.empty`, the predicate should be `nil` and you get every check-in sorted newest-first. Verify the count matches your test data.
+1. **Journal — empty state.** With no journal entries, the empty state should show with "Your journal is empty" and a "Write First Entry" button.
 
-2. **Search text filters on notes.** Type a word you know appears in one check-in's notes. Only that check-in should appear. Type gibberish — zero results.
+2. **Journal — create entry.** Tap the + button. Select a mood. Pick a prompt — the title should auto-fill. Write content. Save. The entry should appear at the top of the list with the mood emoji, title, content preview, and prompt tag.
 
-3. **Recovery status chips.** Tap "Level 7". Only check-ins with `recoveryLevel == 7` appear. Tap "Level 3" additionally. Both 7 and 3 check-ins appear (it is an OR within recovery statuses, AND across filter dimensions). Tap "Level 7" again to deselect. Only 3 remains.
+3. **Journal — edit and delete.** Tap an entry to see the detail view. Tap the menu → Edit. Change the content. Save. The list should reflect the update. Long-press an entry → Delete. The card should animate out.
 
-4. **Date range.** Select "Last 7 Days". Check-ins older than 7 days disappear. Select "Last 30 Days" — more check-ins appear. Clear the date range — everything is back.
+4. **Progress — time range switching.** Open the progress tab. Tap 7D, 30D, 90D. The summary stats should change with each range. The charts should update. Verify the resist rate percentage changes when switching ranges.
 
-5. **Sort options.** Switch to "Hardest days". Check-ins with the lowest recovery levels appear first. Switch to "Newest" — back to chronological.
+5. **Progress — mood chart.** With multiple check-ins at different mood levels, the mood chart should show a line with emoji Y-axis labels. Verify the Catmull-Rom interpolation creates smooth curves.
 
-6. **Pagination.** If you have more than 20 check-ins, scroll to the bottom. A "Load More" action should fetch the next page. Verify no duplicate check-ins appear.
+6. **Progress — urge chart.** With some urge logs, the bar chart should show red bars on urge days and subtle green on clean days. Verify the "No urges logged" empty state appears when there are no urge logs.
 
-7. **Combined filters.** Apply a date range AND a recovery status AND search text simultaneously. Each filter should narrow the results further. Clearing one filter should widen results back.
-
-If any of these fail, check the predicate logic. The most common bug is getting the AND/OR logic wrong — recovery statuses within the set are OR'd (any of these levels), but across dimensions (date AND status AND search) the logic is AND. If the AI mixed these up, correct it.
-
-## Final Code
-
-Here are the three production files.
-
-**Models/RecoveryFilter.swift:**
-
-```swift
-import Foundation
-import SwiftData
-
-struct RecoveryFilter: Equatable {
-    var dateRange: ClosedRange<Date>?
-    var recoveryStatuses: Set<Int> = []
-    var tagIds: Set<PersistentIdentifier> = []
-    var searchText: String = ""
-    var sortOption: RecoverySortOption = .newestFirst
-
-    static let empty = RecoveryFilter()
-
-    var isEmpty: Bool {
-        dateRange == nil
-            && recoveryStatuses.isEmpty
-            && tagIds.isEmpty
-            && searchText.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-}
-
-// MARK: - Sort Options
-
-enum RecoverySortOption: String, CaseIterable, Identifiable, Equatable {
-    case newestFirst
-    case oldestFirst
-    case statusHighToLow
-    case statusLowToHigh
-
-    var id: String { rawValue }
-
-    var descriptors: [SortDescriptor<CheckIn>] {
-        switch self {
-        case .newestFirst:
-            [SortDescriptor(\.date, order: .reverse)]
-        case .oldestFirst:
-            [SortDescriptor(\.date, order: .forward)]
-        case .statusHighToLow:
-            [SortDescriptor(\.recoveryLevel, order: .reverse),
-             SortDescriptor(\.date, order: .reverse)]
-        case .statusLowToHigh:
-            [SortDescriptor(\.recoveryLevel, order: .forward),
-             SortDescriptor(\.date, order: .reverse)]
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .newestFirst: "Newest"
-        case .oldestFirst: "Oldest"
-        case .statusHighToLow: "Strongest days"
-        case .statusLowToHigh: "Hardest days"
-        }
-    }
-}
-
-// MARK: - Filter Mutations
-
-extension RecoveryFilter {
-    mutating func toggleRecoveryStatus(_ level: Int) {
-        if recoveryStatuses.contains(level) {
-            recoveryStatuses.remove(level)
-        } else {
-            recoveryStatuses.insert(level)
-        }
-    }
-
-    mutating func toggleTag(_ id: PersistentIdentifier) {
-        if tagIds.contains(id) {
-            tagIds.remove(id)
-        } else {
-            tagIds.insert(id)
-        }
-    }
-
-    mutating func setDateRange(lastDays days: Int) {
-        let now = Date.now
-        let start = Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now
-        dateRange = start...now
-    }
-
-    mutating func clearAll() {
-        self = .empty
-    }
-}
-```
-
-**Services/RecoveryService+Filtering.swift:**
-
-```swift
-import Foundation
-import SwiftData
-import os
-
-extension RecoveryService {
-    private static let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "RecoveryService+Filtering"
-    )
-
-    /// Fetches check-ins matching the given filter and sort criteria.
-    /// Uses SwiftData #Predicate for type-safe, database-level filtering.
-    func fetchFiltered(
-        filter: RecoveryFilter,
-        limit: Int? = nil,
-        offset: Int? = nil
-    ) throws -> [CheckIn] {
-        var descriptor = FetchDescriptor<CheckIn>()
-
-        if !filter.isEmpty {
-            let searchText = filter.searchText
-                .trimmingCharacters(in: .whitespaces)
-                .lowercased()
-            let recoveryStatuses = filter.recoveryStatuses
-            let startDate = filter.dateRange?.lowerBound ?? .distantPast
-            let endDate = filter.dateRange?.upperBound ?? .distantFuture
-            let hasDateRange = filter.dateRange != nil
-
-            descriptor.predicate = #Predicate<CheckIn> { checkIn in
-                (!hasDateRange || (checkIn.date >= startDate && checkIn.date <= endDate))
-                && (recoveryStatuses.isEmpty || recoveryStatuses.contains(checkIn.recoveryLevel))
-                && (searchText.isEmpty
-                    || checkIn.notes.localizedStandardContains(searchText))
-            }
-        }
-
-        descriptor.sortBy = filter.sortOption.descriptors
-
-        if let limit {
-            descriptor.fetchLimit = limit
-        }
-        if let offset {
-            descriptor.fetchOffset = offset
-        }
-
-        do {
-            var results = try modelContext.fetch(descriptor)
-
-            // Tag filtering — handled post-fetch because #Predicate
-            // has limited support for relationship set membership
-            if !filter.tagIds.isEmpty {
-                results = results.filter { checkIn in
-                    let checkInTagIds = Set(checkIn.tags.map(\.persistentModelID))
-                    return !checkInTagIds.isDisjoint(with: filter.tagIds)
-                }
-            }
-
-            return results
-        } catch {
-            Self.logger.error("Filtered fetch failed: \(error.localizedDescription)")
-            throw error
-        }
-    }
-
-    /// Returns the total count of check-ins matching the filter,
-    /// useful for displaying result counts without loading all data.
-    func fetchFilteredCount(filter: RecoveryFilter) throws -> Int {
-        let results = try fetchFiltered(filter: filter)
-        return results.count
-    }
-}
-```
-
-**Views/FilteredTimelineView.swift:**
-
-```swift
-import SwiftUI
-import SwiftData
-
-struct FilteredTimelineView: View {
-    @Environment(\.modelContext) private var modelContext
-    @State private var filter: RecoveryFilter = .empty
-    @State private var checkIns: [CheckIn] = []
-    @State private var isLoadingMore = false
-
-    private let pageSize = 20
-
-    @Query private var allTags: [Tag]
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if !filter.isEmpty {
-                    activeFiltersSection
-                }
-
-                if checkIns.isEmpty {
-                    ContentUnavailableView.search
-                } else {
-                    ForEach(checkIns) { checkIn in
-                        NavigationLink(value: checkIn) {
-                            CheckInRow(checkIn: checkIn)
-                        }
-                    }
-
-                    if checkIns.count >= pageSize && !isLoadingMore {
-                        loadMoreButton
-                    }
-                }
-            }
-            .navigationTitle("Timeline")
-            .searchable(
-                text: $filter.searchText,
-                prompt: "Search notes..."
-            )
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    sortMenu
-                }
-            }
-            .safeAreaInset(edge: .top) {
-                if !allTags.isEmpty || true {
-                    filterChipsBar
-                }
-            }
-            .onChange(of: filter) {
-                loadCheckIns(reset: true)
-            }
-            .onAppear {
-                loadCheckIns(reset: true)
-            }
-        }
-    }
-
-    // MARK: - Filter Chips
-
-    private var filterChipsBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                // Date range chips
-                dateChip("7 days", days: 7)
-                dateChip("30 days", days: 30)
-                dateChip("90 days", days: 90)
-
-                Divider()
-                    .frame(height: 24)
-
-                // Recovery status chips
-                ForEach(1...10, id: \.self) { level in
-                    FilterChip(
-                        label: "\(level)",
-                        isActive: filter.recoveryStatuses.contains(level)
-                    ) {
-                        filter.toggleRecoveryStatus(level)
-                    }
-                }
-
-                if !allTags.isEmpty {
-                    Divider()
-                        .frame(height: 24)
-
-                    // Tag chips
-                    ForEach(allTags) { tag in
-                        FilterChip(
-                            label: tag.name,
-                            isActive: filter.tagIds.contains(tag.persistentModelID)
-                        ) {
-                            filter.toggleTag(tag.persistentModelID)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-        }
-        .background(.bar)
-    }
-
-    // MARK: - Active Filters
-
-    private var activeFiltersSection: some View {
-        Section {
-            Button("Clear All Filters", role: .destructive) {
-                filter.clearAll()
-            }
-        }
-    }
-
-    // MARK: - Sort Menu
-
-    private var sortMenu: some View {
-        Menu {
-            ForEach(RecoverySortOption.allCases) { option in
-                Button {
-                    filter.sortOption = option
-                } label: {
-                    if filter.sortOption == option {
-                        Label(option.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(option.displayName)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "arrow.up.arrow.down")
-        }
-    }
-
-    // MARK: - Load More
-
-    private var loadMoreButton: some View {
-        Button {
-            loadCheckIns(reset: false)
-        } label: {
-            HStack {
-                Spacer()
-                if isLoadingMore {
-                    ProgressView()
-                } else {
-                    Text("Load More")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-        }
-    }
-
-    // MARK: - Data Loading
-
-    private func loadCheckIns(reset: Bool) {
-        let service = RecoveryService(modelContext: modelContext)
-        let currentOffset = reset ? 0 : checkIns.count
-
-        do {
-            let fetched = try service.fetchFiltered(
-                filter: filter,
-                limit: pageSize,
-                offset: currentOffset
-            )
-
-            if reset {
-                checkIns = fetched
-            } else {
-                checkIns.append(contentsOf: fetched)
-            }
-        } catch {
-            // Error is already logged by the service
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func dateChip(_ label: String, days: Int) -> some View {
-        let isActive: Bool = {
-            guard let range = filter.dateRange else { return false }
-            let expected = Calendar.current.date(
-                byAdding: .day, value: -days, to: .now
-            ) ?? .now
-            return Calendar.current.isDate(
-                range.lowerBound, inSameDayAs: expected
-            )
-        }()
-
-        return FilterChip(label: label, isActive: isActive) {
-            if isActive {
-                filter.dateRange = nil
-            } else {
-                filter.setDateRange(lastDays: days)
-            }
-        }
-    }
-}
-
-// MARK: - FilterChip
-
-struct FilterChip: View {
-    let label: String
-    let isActive: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(label)
-                .font(.subheadline)
-                .fontWeight(isActive ? .semibold : .regular)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(isActive ? Color.accentColor.opacity(0.15) : Color(.systemGray6))
-                .foregroundStyle(isActive ? Color.accentColor : .primary)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .sensoryFeedback(.selection, trigger: isActive)
-    }
-}
-
-#Preview {
-    FilteredTimelineView()
-        .modelContainer(for: [CheckIn.self, Tag.self], inMemory: true)
-}
-```
-
-Let me highlight the decisions that matter in this view:
-
-**`.searchable` bound directly to `filter.searchText`.** SwiftUI's `.searchable` modifier provides the standard search bar with cancel button, keyboard management, and animated appearance -- all for free. By binding it directly to the filter's `searchText`, every keystroke updates the filter, which triggers `onChange(of: filter)`, which re-fetches. No manual debouncing needed for SwiftData because the fetch is fast against a local database. If you were hitting a network API, you would debounce -- but for on-device queries, immediate updates feel better.
-
-**`safeAreaInset(edge: .top)` for the chips bar.** This places the filter chips below the navigation bar and search bar, but above the list content. The list scrolls underneath the chips bar. This is the same pattern Apple uses in the App Store's search results. Do not put the chips inside the list — they should be sticky, always visible.
-
-**`.sensoryFeedback(.selection, trigger: isActive)` on FilterChip.** iOS 17+ provides this declarative haptics modifier. It fires a light selection haptic whenever `isActive` changes. The user feels a tap when they select or deselect a chip. Small detail, significant UX improvement. This replaces the old `UIImpactFeedbackGenerator` approach.
-
-**The `loadCheckIns(reset:)` pattern.** When `reset` is `true`, we start from offset 0 and replace the array. When `false`, we append. This is the simplest pagination model — no fancy infinite scroll, just a "Load More" button. For a recovery app, this is the right level of complexity. Infinite scroll with prefetching is overkill here and adds real state management complexity.
+7. **Progress — triggers.** With urge logs that have different triggers selected, the top triggers section should show a ranked list with proportional bars.
 
 ## Checkpoint
 
-At this point in BetAway, the data layer is fully capable:
+At this point in BetFree, the data layer and visualization are fully capable:
 
-- Recovery check-ins can be created, read, updated, and deleted (Lesson 3.1)
-- The timeline can be searched by text, filtered by date range, recovery statuses, and tags, sorted by four criteria, and paginated (this lesson)
-- All queries run at the database level via `#Predicate` and `FetchDescriptor`
-- The filter model is a simple value type, testable without any UI
+- Journal entries can be created, edited, and deleted with mood, prompts, and full-text content
+- The journal list uses `@Query` with database-level sorting for reactive, efficient display
+- Progress analytics show mood trends (line chart), urge frequency (bar chart), trigger rankings, and summary statistics
+- Time-range filtering (7D, 30D, 90D) works through Calendar-based date math in the ViewModel
+- SwiftUI Charts renders publication-quality visualizations with custom axis labels, gradients, and color coding
 
 Before moving on, verify:
 
 1. Build succeeds with zero warnings
-2. The timeline shows all check-ins with an empty filter
-3. Typing in the search bar narrows results to matching notes
-4. Recovery status chips toggle correctly and combine with search
-5. Sorting changes the order instantly
-6. "Load More" fetches the next page without duplicates
+2. Journal list shows entries sorted newest-first
+3. Creating a new entry immediately appears at the top of the list (reactive `@Query`)
+4. Progress charts render correctly for each time range
+5. Summary stats update when switching time ranges
+6. Empty states display correctly when there is no data
 
-If all six pass, you are ready for Lesson 3.3 — migrations.
+If all six pass, you are ready for the next lesson.
 
 ## Challenge
 
-**Add a "Favorites" filter dimension.**
+**Add a mood filter to the journal list.**
 
-Assume `CheckIn` has a `isFavorited: Bool` property. Extend `RecoveryFilter` with a `showFavoritesOnly: Bool` field (defaulting to `false`). Update the service's `fetchFiltered` method to include this in the `#Predicate`. Add a star-shaped filter chip to `FilteredTimelineView` that toggles it.
+Right now, `JournalView` shows all entries. Add a horizontal row of mood emoji filter chips (one per `MoodRating` case) above the list. When a chip is active, filter the list to only show entries with that mood. When no chip is active, show all entries.
 
-This exercises the full loop — model, service predicate, and UI — in under 10 minutes. If your predicate compiles on the first try and the chip toggles correctly, you have internalized the pattern.
+This requires:
+1. A `@State private var selectedMoodFilter: MoodRating?` in `JournalView`
+2. A computed property that filters `entries` by the selected mood (or returns all if nil)
+3. A `ScrollView(.horizontal)` of mood emoji buttons above the `LazyVStack`
+
+The filtering happens in Swift (not at the query level) because `@Query` does not support dynamic predicates that change at runtime. For the data volumes in a personal journal (hundreds of entries), client-side filtering is instant. If you need database-level filtering with dynamic criteria, use a `FetchDescriptor` with `#Predicate` inside a service method — but for this use case, client-side is the right call.

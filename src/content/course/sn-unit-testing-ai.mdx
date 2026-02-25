@@ -1,6 +1,6 @@
 ---
 title: "Unit Testing with AI"
-description: "Build a comprehensive test suite for BetAway using the Swift Testing framework and AI-generated tests, covering mock services, the makeSUT pattern, and async ViewModel testing that catches real bugs."
+description: "Build a comprehensive test suite for BetAway using the Swift Testing framework and AI-generated tests, covering mock data, the makeSUT pattern, and async ViewModel testing for UserProfile, DashboardViewModel, and UrgeViewModel."
 courseSlug: "ship-native"
 module: 6
 moduleTitle: "Quality & Testing"
@@ -13,22 +13,22 @@ draft: false
 pubDate: 2026-02-22
 ---
 
-You have a working app. The check-in flow saves data, the recovery dashboard displays it, the on-device ML generates insights. Everything works when you tap through it manually. But you have no idea if it still works after the next change you make.
+You have a working app. The pledge flow saves data, the dashboard displays streaks and savings, the urge timer counts down. Everything works when you tap through it manually. But you have no idea if it still works after the next change you make.
 
-That is the problem unit tests solve. Not in some abstract "best practices" sense — in the concrete sense that without tests, every code change is a gamble. You refactor the ViewModel, and you have to manually tap through every screen to check nothing broke. You add a new feature, and you cannot be sure the old features still work. Tests remove the guessing.
+That is the problem unit tests solve. Not in some abstract "best practices" sense — in the concrete sense that without tests, every code change is a gamble. You refactor the `DashboardViewModel`, and you have to manually tap through every screen to check nothing broke. You add a new feature, and you cannot be sure the old features still work. Tests remove the guessing.
 
 ## What You'll Learn
 
-1. **Build a `MockRecoveryService`** with call tracking that verifies your ViewModels interact with the data layer correctly, without touching SwiftData.
+1. **Build test helpers with sample factory methods** that create `UserProfile`, `DailyCheckin`, and `UrgeLog` instances with sensible defaults, without touching SwiftData.
 2. **Use the `makeSUT` pattern** to create clean, isolated test setups that prevent test pollution and make failures easy to diagnose.
-3. **Write async ViewModel tests** using the Swift Testing framework (`@Test`, `#expect`) that verify loading, saving, error handling, and state transitions.
+3. **Write async ViewModel tests** using the Swift Testing framework (`@Test`, `#expect`) that verify `DashboardViewModel` milestone calculations, `UrgeViewModel` timer logic, and `UserProfile` computed properties like `currentStreak`, `totalSaved`, and `hasPledgedToday()`.
 4. **Prompt AI to generate tests**, then review and fix the output — because AI-generated tests compile but often test the wrong things.
 
 ## Why This Matters
 
-Most indie developers skip tests because "the app is small enough to test by hand." That works until it does not. The first time you refactor the service layer and accidentally break the check-in save — but do not notice for three days because you were working on the streak tracking screen — you will wish you had a test that ran in two seconds and caught the regression immediately.
+Most indie developers skip tests because "the app is small enough to test by hand." That works until it does not. The first time you refactor the savings calculation and accidentally break `totalSaved` — but do not notice for three days because you were working on the urge timer screen — you will wish you had a test that ran in two seconds and caught the regression immediately.
 
-Unit tests in a SwiftUI app are not about 100% coverage. They are about testing the logic that matters: ViewModels, services, and data transformations. The View layer is tested by UI tests (next lesson) and your own eyes. The ViewModel layer is tested here, thoroughly and fast.
+Unit tests in a SwiftUI app are not about 100% coverage. They are about testing the logic that matters: ViewModels, model computed properties, and data transformations. The View layer is tested by UI tests (next lesson) and your own eyes. The ViewModel and model layers are tested here, thoroughly and fast.
 
 ## Plan Phase: Designing the Test Strategy
 
@@ -39,17 +39,20 @@ I need to build a unit test suite for BetAway. Before writing
 any code, help me plan a test strategy.
 
 The app has:
-- RecoveryDashboardViewModel: loads check-ins from RecoveryService,
-  deletes check-ins, handles errors, manages loading state
-- CheckInViewModel: multi-step form state, validation,
-  saves via RecoveryService
-- RecoveryService protocol with SwiftDataRecoveryService
-  (production) and MockRecoveryService (tests)
-- InsightEngine protocol for generating recovery insights
+- UserProfile (@Model): computed properties like currentStreak,
+  totalSaved, hasPledgedToday(), daysSinceQuit, longestStreak
+- DashboardViewModel (@Observable): greeting, milestoneProgress,
+  nextMilestoneText — all computed from a UserProfile
+- UrgeViewModel (@Observable): timer state, timerProgress,
+  timerDisplay, encouragementText, phase transitions
+- PledgeViewModel: morning pledge and evening check-in submission
+- OnboardingViewModel: multi-step form with canAdvance validation
+- Models: DailyCheckin, UrgeLog, JournalEntry (all @Model)
+- Enums: MoodRating, GamblingType, CheckinType, PredefinedTrigger
 
 Plan:
 1. What should we test? What should we NOT test?
-2. What mocks do we need?
+2. What test helpers do we need?
 3. How should test files be organized?
 4. What patterns should we follow (makeSUT, Given-When-Then)?
 
@@ -60,11 +63,11 @@ Do NOT write code yet. Think through the design.
 
 The AI should return a clear strategy. Here is what to look for:
 
-- ✅ **Test ViewModels, not Views.** ViewModels contain the business logic. Views are declarative UI descriptions. Testing a View means testing SwiftUI itself, which Apple already does. Test the ViewModel that drives the View.
-- ✅ **Test behavior, not implementation.** A good test says "when I call `loadCheckIns()`, the check-ins array is populated." A bad test says "when I call `loadCheckIns()`, `fetchAll()` is called on the service." The first survives refactoring. The second breaks every time you change the internal wiring.
-- ✅ **Mock at the protocol boundary.** We already have `RecoveryService` as a protocol. The mock implements that protocol with in-memory storage and call tracking. No SwiftData, no disk, no flakiness.
-- ⚠️ **Watch for over-mocking.** If the AI suggests mocking `Date`, `UUID`, and every system type, push back. Mock the things you own (services, insight engines). Use real value types for everything else.
-- ❌ **Reject snapshot testing for unit tests.** Snapshot testing is a UI concern. If the AI mixes it into the unit test plan, separate it. We cover snapshot testing in the UI testing lesson.
+- **Test models and ViewModels, not Views.** `UserProfile` has computed properties with real business logic (`currentStreak` checks for relapses, `totalSaved` multiplies weeks by spend). `DashboardViewModel` computes milestone progress. `UrgeViewModel` manages timer state. These contain the logic worth testing. Views are declarative UI descriptions — testing them means testing SwiftUI itself.
+- **Test behavior, not implementation.** A good test says "when `quitDate` is 14 days ago, `daysSinceQuit` returns 14." A bad test says "when I set `quitDate`, the getter accesses `Calendar.current`." The first survives refactoring. The second breaks every time you change the internal wiring.
+- **Create sample factories, not service mocks.** BetAway's ViewModels use `@Query` and `ModelContext` directly — they do not depend on a service protocol. Instead of mocking a service, we create sample model instances with controlled data and test computed properties directly.
+- Watch for over-mocking. If the AI suggests mocking `Date`, `UUID`, and every system type, push back. Use real value types. Only create helpers for things that need controlled state.
+- **Reject snapshot testing for unit tests.** Snapshot testing is a UI concern. If the AI mixes it into the unit test plan, separate it. We cover snapshot testing in the UI testing lesson.
 
 ### Anti-Pattern: Testing Implementation Details
 
@@ -72,28 +75,23 @@ Here is a test that looks thorough but is actually harmful:
 
 ```swift
 // BAD — tests implementation details
-@Test func loadCheckIns_callsServiceFetchAll() async {
-    let mock = MockRecoveryService()
-    let sut = RecoveryDashboardViewModel(service: mock)
+@Test func currentStreak_accessesCalendarStartOfDay() async {
+    let profile = UserProfile(quitDate: Date())
 
-    await sut.loadCheckIns()
+    _ = profile.currentStreak
 
-    #expect(mock.fetchAllCallCount == 1)  // Brittle!
+    // Checking that Calendar.current was called — brittle!
 }
 ```
 
-This test breaks the moment you add caching, debouncing, or batch loading — even though the behavior (check-ins appear) is unchanged. It tests how the ViewModel works, not what it does. A better test checks the observable outcome:
+This test breaks the moment you change how dates are compared internally — even though the behavior (streak count) is unchanged. It tests how the model works, not what it does. A better test checks the observable outcome:
 
 ```swift
 // GOOD — tests observable behavior
-@Test func loadCheckIns_populatesCheckInsArray() async {
-    let mock = MockRecoveryService()
-    mock.checkIns = [CheckIn.sample()]
-    let sut = RecoveryDashboardViewModel(service: mock)
+@Test func currentStreak_returnsZeroWhenQuitDateIsToday() {
+    let profile = UserProfile(quitDate: Date())
 
-    await sut.loadCheckIns()
-
-    #expect(sut.checkIns.count == 1)
+    #expect(profile.currentStreak == 0)
 }
 ```
 
@@ -106,31 +104,31 @@ Now we build. Send this prompt:
 ```
 Create the test infrastructure for BetAway. Generate these files:
 
-1. BetAwayTests/Mocks/MockRecoveryService.swift
-   - Implements RecoveryService protocol
-   - Stores check-ins in an in-memory array
-   - Tracks which methods were called and how many times
-   - Has a throwingError property — when set, all methods
-     throw that error instead of executing normally
-   - Has a delay property — when set, methods wait that
-     duration before returning (for testing loading states)
+1. BetAwayTests/Helpers/UserProfile+Sample.swift
+   - Extension on UserProfile with static factory methods:
+     .sample() returns a profile with sensible defaults
+     .sample(quitDate:averageWeeklySpend:gamblingTypes:)
+       for controlled test scenarios
+   - Extension on DailyCheckin with .samplePledge() and
+     .sampleCheckin() factory methods
+   - Extension on UrgeLog with .sample() factory method
 
-2. BetAwayTests/Helpers/CheckIn+Sample.swift
-   - Extension on CheckIn with static factory methods:
-     .sample() returns a single check-in with sensible defaults
-     .samples(count:) returns an array of check-ins
-
-3. BetAwayTests/RecoveryServiceTests.swift
-   - Tests for the MockRecoveryService itself — verify it
-     stores, retrieves, updates, and deletes correctly
+2. BetAwayTests/UserProfileTests.swift
+   - Tests for UserProfile computed properties:
+     daysSinceQuit, currentStreak, totalSaved, hasPledgedToday,
+     hasCheckedInToday, todaysMood, longestStreak
    - Use Swift Testing framework: @Test, #expect, @Suite
-
-4. BetAwayTests/DashboardViewModelTests.swift
-   - Tests for RecoveryDashboardViewModel
    - Use the makeSUT() pattern for setup
-   - Test: loadCheckIns populates array, loadCheckIns sets
-     loading state, loadCheckIns handles errors, deleteCheckIn
-     removes from array, deleteCheckIn handles errors
+
+3. BetAwayTests/DashboardViewModelTests.swift
+   - Tests for DashboardViewModel:
+     milestoneProgress, nextMilestoneText, greeting
+   - Use makeSUT() that returns (sut, profile)
+
+4. BetAwayTests/UrgeViewModelTests.swift
+   - Tests for UrgeViewModel:
+     timerProgress, timerDisplay, encouragementText,
+     phase transitions (startTimer, skipTimer, reset)
 
 Use Swift Testing framework (@Test, #expect), NOT XCTest
 (no XCTAssertEqual). Swift 6, @MainActor where needed.
@@ -140,484 +138,641 @@ Use Swift Testing framework (@Test, #expect), NOT XCTest
 
 Here is what Claude Code should produce. Let me walk through each file with the review markers.
 
-**MockRecoveryService.swift:**
+**UserProfile+Sample.swift:**
 
 ```swift
 import Foundation
 @testable import BetAway
 
-final class MockRecoveryService: RecoveryService, @unchecked Sendable {
-    // MARK: - Storage
-
-    var checkIns: [CheckIn] = []
-
-    // MARK: - Configuration
-
-    var throwingError: AppError?
-    var artificialDelay: Duration?
-
-    // MARK: - Call Tracking
-
-    private(set) var fetchAllCallCount = 0
-    private(set) var fetchByIDCallCount = 0
-    private(set) var saveCallCount = 0
-    private(set) var updateCallCount = 0
-    private(set) var deleteCallCount = 0
-
-    private(set) var lastSavedEntry: CheckIn?
-    private(set) var lastDeletedEntry: CheckIn?
-
-    // MARK: - RecoveryService
-
-    func fetchAll() async throws -> [CheckIn] {
-        fetchAllCallCount += 1
-        if let delay = artificialDelay {
-            try await Task.sleep(for: delay)
-        }
-        if let error = throwingError { throw error }
-        return checkIns.sorted { $0.date > $1.date }
+extension UserProfile {
+    static func sample(
+        quitDate: Date = Calendar.current.date(
+            byAdding: .day, value: -30, to: Date()
+        ) ?? Date(),
+        displayName: String = "Test User",
+        gamblingTypes: [GamblingType] = [.sportsBetting],
+        frequency: GamblingFrequency = .weekly,
+        averageWeeklySpend: Double = 100
+    ) -> UserProfile {
+        UserProfile(
+            quitDate: quitDate,
+            displayName: displayName,
+            gamblingTypes: gamblingTypes,
+            frequency: frequency,
+            averageWeeklySpend: averageWeeklySpend
+        )
     }
 
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        fetchByIDCallCount += 1
-        if let error = throwingError { throw error }
-        return checkIns.first { $0.id == id }
+    /// Creates a profile with a specific number of days since quit.
+    static func sample(daysSinceQuit days: Int, weeklySpend: Double = 100) -> UserProfile {
+        let quitDate = Calendar.current.date(
+            byAdding: .day, value: -days, to: Date()
+        ) ?? Date()
+        return UserProfile.sample(
+            quitDate: quitDate,
+            averageWeeklySpend: weeklySpend
+        )
+    }
+}
+
+extension DailyCheckin {
+    /// Creates a morning pledge check-in for today.
+    static func samplePledge(
+        mood: MoodRating = .good,
+        pledgeReason: String = "For my family",
+        date: Date = Date()
+    ) -> DailyCheckin {
+        let checkin = DailyCheckin(
+            checkinType: .morningPledge,
+            mood: mood,
+            pledgeReason: pledgeReason
+        )
+        // Override the auto-set date for controlled tests
+        checkin.date = date
+        return checkin
     }
 
-    func save(_ entry: CheckIn) async throws {
-        saveCallCount += 1
-        if let error = throwingError { throw error }
-        lastSavedEntry = entry
-        checkIns.append(entry)
+    /// Creates an evening check-in.
+    static func sampleCheckin(
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        notes: String = "Test evening check-in",
+        date: Date = Date()
+    ) -> DailyCheckin {
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: mood,
+            gamblingFree: gamblingFree,
+            notes: notes
+        )
+        checkin.date = date
+        return checkin
     }
+}
 
-    func update(_ entry: CheckIn) async throws {
-        updateCallCount += 1
-        if let error = throwingError { throw error }
-        guard let index = checkIns.firstIndex(where: { $0.id == entry.id }) else {
-            return
-        }
-        checkIns[index] = entry
-    }
-
-    func delete(_ entry: CheckIn) async throws {
-        deleteCallCount += 1
-        if let error = throwingError { throw error }
-        lastDeletedEntry = entry
-        checkIns.removeAll { $0.id == entry.id }
-    }
-
-    // MARK: - Helpers
-
-    func reset() {
-        checkIns = []
-        throwingError = nil
-        artificialDelay = nil
-        fetchAllCallCount = 0
-        fetchByIDCallCount = 0
-        saveCallCount = 0
-        updateCallCount = 0
-        deleteCallCount = 0
-        lastSavedEntry = nil
-        lastDeletedEntry = nil
+extension UrgeLog {
+    static func sample(
+        intensity: Int = 5,
+        trigger: PredefinedTrigger? = .stressed,
+        copingStrategy: CopingStrategy? = .breathingExercise,
+        didResist: Bool = true,
+        durationSeconds: TimeInterval = 300,
+        notes: String = "Test urge"
+    ) -> UrgeLog {
+        let log = UrgeLog(
+            intensity: intensity,
+            trigger: trigger,
+            copingStrategy: copingStrategy,
+            didResist: didResist,
+            notes: notes
+        )
+        log.durationSeconds = durationSeconds
+        return log
     }
 }
 ```
 
 Review checklist:
 
-- ✅ **`@unchecked Sendable`** — the mock is only used in single-threaded test contexts. Adding full synchronization would add complexity without value.
-- ✅ **`throwingError` property** — set this before calling a method to simulate failure. When `nil`, methods behave normally. This is far cleaner than subclassing or creating separate "failing" mock types.
-- ✅ **`artificialDelay`** — uses `Duration` (not `TimeInterval`) for consistency with Swift concurrency's `Task.sleep(for:)`. This lets us test loading states.
-- ✅ **Call tracking is `private(set)`** — tests can read the counts but cannot accidentally mutate them.
-- ✅ **`lastSavedEntry` and `lastDeletedEntry`** — lets tests verify which entry was passed to save/delete without asserting on call counts.
-- ⚠️ **Watch for the AI using `XCTest` assertions inside the mock.** Mocks should be inert data containers. Assertions belong in the test, not the mock.
+- **Default `quitDate` is 30 days ago** — gives most tests a meaningful streak and savings value without specifying a date. Tests that need a specific streak use the `daysSinceQuit:` factory.
+- **`DailyCheckin` factories set the `date` property directly** — the `init` auto-sets `date = Date()`, so we override it after creation for controlled test scenarios (yesterday's pledge, last week's check-in).
+- **Separate `samplePledge()` and `sampleCheckin()`** — these are the two `CheckinType` values (`morningPledge` and `eveningCheckin`). Having distinct factories makes test intent clear: "I am creating a pledge" vs. "I am creating an evening check-in."
+- Watch for the AI using `XCTest` assertions inside the helpers. Helpers should be inert data factories. Assertions belong in the test, not the helper.
 
-**CheckIn+Sample.swift:**
-
-```swift
-import Foundation
-@testable import BetAway
-
-extension CheckIn {
-    static func sample(
-        id: UUID = UUID(),
-        recoveryStatus: RecoveryStatus = .good,
-        note: String = "Test check-in",
-        activities: [String] = ["Work", "Exercise"],
-        date: Date = .now,
-        createdAt: Date = .now
-    ) -> CheckIn {
-        CheckIn(
-            id: id,
-            recoveryStatus: recoveryStatus,
-            note: note,
-            activities: activities,
-            date: date,
-            createdAt: createdAt
-        )
-    }
-
-    static func samples(count: Int) -> [CheckIn] {
-        let calendar = Calendar.current
-        let statuses: [RecoveryStatus] = [.great, .good, .okay, .bad, .awful]
-
-        return (0..<count).map { index in
-            CheckIn.sample(
-                recoveryStatus: statuses[index % statuses.count],
-                note: "Sample entry \(index + 1)",
-                activities: ["Activity \(index + 1)"],
-                date: calendar.date(
-                    byAdding: .day,
-                    value: -index,
-                    to: .now
-                ) ?? .now
-            )
-        }
-    }
-}
-```
-
-- ✅ **Default parameters on `sample()`** — you can call `.sample()` for a generic entry or `.sample(recoveryStatus: .awful, note: "bad day")` when specific values matter for the test.
-- ✅ **`samples(count:)` spreads dates across days** — entries are not all timestamped at the same second, which matters for sort-order tests.
-- ✅ **Cycles through recovery statuses** — gives variety in test data without randomness.
-
-**RecoveryServiceTests.swift — testing the mock itself:**
+**UserProfileTests.swift — testing the model's computed properties:**
 
 ```swift
 import Testing
+import Foundation
 @testable import BetAway
 
-@Suite("MockRecoveryService")
-struct RecoveryServiceTests {
+@Suite("UserProfile Computed Properties")
+struct UserProfileTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> MockRecoveryService {
-        MockRecoveryService()
-    }
-
-    // MARK: - Fetch
-
-    @Test("fetchAll returns entries sorted by date descending")
-    func fetchAllReturnsSorted() async throws {
-        let sut = makeSUT()
-        let older = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: -86400)
+    private func makeSUT(
+        daysSinceQuit: Int = 30,
+        weeklySpend: Double = 100
+    ) -> UserProfile {
+        UserProfile.sample(
+            daysSinceQuit: daysSinceQuit,
+            weeklySpend: weeklySpend
         )
-        let newer = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: 0)
+    }
+
+    // MARK: - daysSinceQuit
+
+    @Test("daysSinceQuit returns 0 when quit date is today")
+    func daysSinceQuitIsZeroForToday() {
+        let sut = makeSUT(daysSinceQuit: 0)
+
+        #expect(sut.daysSinceQuit == 0)
+    }
+
+    @Test("daysSinceQuit returns correct count for past dates")
+    func daysSinceQuitCountsPastDays() {
+        let sut = makeSUT(daysSinceQuit: 14)
+
+        #expect(sut.daysSinceQuit == 14)
+    }
+
+    @Test("daysSinceQuit returns 0 when quit date is in the future")
+    func daysSinceQuitIsZeroForFutureDate() {
+        let futureDate = Calendar.current.date(
+            byAdding: .day, value: 5, to: Date()
+        )!
+        let sut = UserProfile.sample(quitDate: futureDate)
+
+        #expect(sut.daysSinceQuit == 0)
+    }
+
+    // MARK: - totalSaved
+
+    @Test("totalSaved calculates weeks times weekly spend")
+    func totalSavedCalculation() {
+        let sut = makeSUT(daysSinceQuit: 14, weeklySpend: 200)
+
+        // 14 days = 2 weeks, 2 * 200 = 400
+        #expect(sut.totalSaved == 400.0)
+    }
+
+    @Test("totalSaved is zero when quit date is today")
+    func totalSavedIsZeroOnDay0() {
+        let sut = makeSUT(daysSinceQuit: 0, weeklySpend: 500)
+
+        #expect(sut.totalSaved == 0.0)
+    }
+
+    @Test("totalSaved handles fractional weeks")
+    func totalSavedHandlesFractionalWeeks() {
+        let sut = makeSUT(daysSinceQuit: 10, weeklySpend: 70)
+
+        // 10 days = 10/7 weeks ≈ 1.4286, * 70 = 100
+        let expected = (10.0 / 7.0) * 70.0
+        #expect(abs(sut.totalSaved - expected) < 0.01)
+    }
+
+    // MARK: - currentStreak
+
+    @Test("currentStreak equals daysSinceQuit with no relapses")
+    func currentStreakWithNoRelapses() {
+        let sut = makeSUT(daysSinceQuit: 30)
+
+        #expect(sut.currentStreak == 30)
+    }
+
+    @Test("currentStreak resets after a relapse evening check-in")
+    func currentStreakResetsAfterRelapse() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        let relapseDate = Calendar.current.date(
+            byAdding: .day, value: -3, to: Date()
+        )!
+
+        // Add a relapse check-in 3 days ago
+        let relapse = DailyCheckin.sampleCheckin(
+            gamblingFree: false,
+            date: relapseDate
         )
-        sut.checkIns = [older, newer]
+        sut.checkins.append(relapse)
 
-        let result = try await sut.fetchAll()
-
-        #expect(result.first?.id == newer.id)
-        #expect(result.last?.id == older.id)
+        #expect(sut.currentStreak == 3)
     }
 
-    @Test("fetch by ID returns matching entry")
-    func fetchByIDReturnsMatch() async throws {
-        let sut = makeSUT()
-        let target = CheckIn.sample()
-        sut.checkIns = [CheckIn.sample(), target, CheckIn.sample()]
+    @Test("currentStreak returns 0 when quit date is in the future")
+    func currentStreakZeroForFutureQuitDate() {
+        let futureDate = Calendar.current.date(
+            byAdding: .day, value: 10, to: Date()
+        )!
+        let sut = UserProfile.sample(quitDate: futureDate)
 
-        let result = try await sut.fetch(by: target.id)
-
-        #expect(result?.id == target.id)
+        #expect(sut.currentStreak == 0)
     }
 
-    @Test("fetch by ID returns nil when not found")
-    func fetchByIDReturnsNilWhenMissing() async throws {
-        let sut = makeSUT()
-        sut.checkIns = [CheckIn.sample()]
+    @Test("currentStreak ignores morning pledge check-ins for relapse")
+    func currentStreakIgnoresPledgeCheckins() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        let pledgeDate = Calendar.current.date(
+            byAdding: .day, value: -5, to: Date()
+        )!
 
-        let result = try await sut.fetch(by: UUID())
+        // A morning pledge with gamblingFree false should NOT
+        // count as a relapse — only evening check-ins do
+        let pledge = DailyCheckin.samplePledge(date: pledgeDate)
+        sut.checkins.append(pledge)
 
-        #expect(result == nil)
+        #expect(sut.currentStreak == 30)
     }
 
-    // MARK: - Save
+    // MARK: - hasPledgedToday
 
-    @Test("save appends entry to storage")
-    func saveAppendsEntry() async throws {
+    @Test("hasPledgedToday returns false with no check-ins")
+    func hasPledgedTodayFalseWhenEmpty() {
         let sut = makeSUT()
-        let entry = CheckIn.sample()
 
-        try await sut.save(entry)
-
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.id == entry.id)
-        #expect(sut.saveCallCount == 1)
-        #expect(sut.lastSavedEntry?.id == entry.id)
+        #expect(sut.hasPledgedToday() == false)
     }
 
-    // MARK: - Update
-
-    @Test("update replaces entry with matching ID")
-    func updateReplacesEntry() async throws {
+    @Test("hasPledgedToday returns true after today's morning pledge")
+    func hasPledgedTodayTrueAfterPledge() {
         let sut = makeSUT()
-        let original = CheckIn.sample(note: "Original")
-        sut.checkIns = [original]
+        let pledge = DailyCheckin.samplePledge(date: Date())
+        sut.checkins.append(pledge)
 
-        let updated = CheckIn.sample(
-            id: original.id,
-            note: "Updated"
+        #expect(sut.hasPledgedToday() == true)
+    }
+
+    @Test("hasPledgedToday returns false for yesterday's pledge")
+    func hasPledgedTodayFalseForYesterday() {
+        let sut = makeSUT()
+        let yesterday = Calendar.current.date(
+            byAdding: .day, value: -1, to: Date()
+        )!
+        let pledge = DailyCheckin.samplePledge(date: yesterday)
+        sut.checkins.append(pledge)
+
+        #expect(sut.hasPledgedToday() == false)
+    }
+
+    // MARK: - hasCheckedInToday
+
+    @Test("hasCheckedInToday returns true after today's evening check-in")
+    func hasCheckedInTodayTrueAfterCheckin() {
+        let sut = makeSUT()
+        let checkin = DailyCheckin.sampleCheckin(date: Date())
+        sut.checkins.append(checkin)
+
+        #expect(sut.hasCheckedInToday() == true)
+    }
+
+    @Test("hasCheckedInToday returns false when only a pledge exists")
+    func hasCheckedInTodayFalseForPledgeOnly() {
+        let sut = makeSUT()
+        let pledge = DailyCheckin.samplePledge(date: Date())
+        sut.checkins.append(pledge)
+
+        #expect(sut.hasCheckedInToday() == false)
+    }
+
+    // MARK: - todaysMood
+
+    @Test("todaysMood returns nil with no check-ins")
+    func todaysMoodNilWhenEmpty() {
+        let sut = makeSUT()
+
+        #expect(sut.todaysMood() == nil)
+    }
+
+    @Test("todaysMood returns the mood from today's check-in")
+    func todaysMoodReturnsCorrectMood() {
+        let sut = makeSUT()
+        let checkin = DailyCheckin.sampleCheckin(
+            mood: .veryGood,
+            date: Date()
         )
-        try await sut.update(updated)
+        sut.checkins.append(checkin)
 
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.note == "Updated")
+        #expect(sut.todaysMood() == .veryGood)
     }
 
-    // MARK: - Delete
+    // MARK: - annualizedSavings
 
-    @Test("delete removes entry from storage")
-    func deleteRemovesEntry() async throws {
-        let sut = makeSUT()
-        let entry = CheckIn.sample()
-        sut.checkIns = [entry]
+    @Test("annualizedSavings multiplies weekly spend by 52")
+    func annualizedSavingsCalculation() {
+        let sut = makeSUT(weeklySpend: 100)
 
-        try await sut.delete(entry)
-
-        #expect(sut.checkIns.isEmpty)
-        #expect(sut.deleteCallCount == 1)
-        #expect(sut.lastDeletedEntry?.id == entry.id)
+        #expect(sut.annualizedSavings == 5200.0)
     }
 
-    // MARK: - Error Simulation
+    // MARK: - hoursSaved
 
-    @Test("throwingError causes methods to throw")
-    func throwingErrorCausesThrow() async {
-        let sut = makeSUT()
-        sut.throwingError = .persistence(.saveFailed(underlying: "Test error"))
+    @Test("hoursSaved estimates 2 hours per day")
+    func hoursSavedCalculation() {
+        let sut = makeSUT(daysSinceQuit: 10)
 
-        await #expect(throws: AppError.self) {
-            try await sut.fetchAll()
-        }
+        #expect(sut.hoursSaved == 20.0)
     }
 }
 ```
 
 Review checklist:
 
-- ✅ **`@Suite` with descriptive name** — groups related tests in the test navigator.
-- ✅ **`makeSUT()` pattern** — every test creates a fresh System Under Test. No shared state between tests. No `setUp()` / `tearDown()` lifecycle methods that hide dependencies.
-- ✅ **Each test has one clear assertion target** — "fetchAll returns sorted" only checks sort order. "save appends entry" only checks that the entry was stored. If a test fails, the name tells you exactly what broke.
-- ✅ **`#expect(throws:)` for error paths** — Swift Testing's built-in way to verify that a function throws the expected error type.
-- ⚠️ **The AI may generate redundant tests.** If it tests "fetchAll returns empty array when no entries" — that is testing Swift's array literal, not your code. Remove trivially obvious tests. Keep tests that verify behavior you could actually break during a refactor.
+- **`@Suite` with descriptive name** — groups related tests in the test navigator.
+- **`makeSUT()` pattern** — every test creates a fresh System Under Test. No shared state between tests. No `setUp()` / `tearDown()` lifecycle methods that hide dependencies.
+- **Each test has one clear assertion target** — "daysSinceQuit returns 0 for today" only checks one thing. "currentStreak resets after relapse" creates the specific scenario and checks the outcome. If a test fails, the name tells you exactly what broke.
+- **Relapse test verifies real business logic** — `currentStreak` only counts evening check-ins with `gamblingFree == false` as relapses. The test that adds a morning pledge should NOT reset the streak. This catches a real bug where all check-in types might accidentally be treated as relapses.
+- Watch for the AI generating redundant tests. If it tests "profile initializes with empty checkins array" — that is testing Swift's default value, not your code. Keep tests that verify behavior you could actually break during a refactor.
 
 ## Iteration: ViewModel Tests
 
-The service tests verify the infrastructure. Now we test the actual business logic. This is where the real value is.
+The model tests verify the data layer. Now we test the ViewModel business logic. This is where the real value is.
 
 ```
 Now write DashboardViewModelTests.swift using the makeSUT pattern.
 
-RecoveryDashboardViewModel has:
-- entries: [CheckIn] (populated by loadCheckIns)
-- isLoading: Bool
-- errorMessage: String?
-- loadCheckIns() async
-- addCheckIn(_ entry: CheckIn) async
-- deleteCheckIn(_ entry: CheckIn) async
+DashboardViewModel (@Observable) has:
+- greeting: String (time-of-day based)
+- greetingIcon: String (sun or moon)
+- milestoneProgress(for: UserProfile) -> Double
+- nextMilestoneText(for: UserProfile) -> String?
 
-It takes a RecoveryService in its init.
+It takes no dependencies in its init — it computes everything
+from the UserProfile passed to its methods.
 
 Write tests for:
-1. loadCheckIns populates the checkIns array
-2. loadCheckIns sets isLoading to true during load
-3. loadCheckIns sets errorMessage on failure
-4. loadCheckIns clears previous error on success
-5. addCheckIn inserts entry at the beginning
-6. addCheckIn sets errorMessage on failure
-7. deleteCheckIn removes the entry from the array
-8. deleteCheckIn sets errorMessage on failure
-9. entries are sorted by date descending after load
+1. milestoneProgress returns 0.0 on day 0
+2. milestoneProgress returns correct fraction mid-milestone
+3. milestoneProgress returns 1.0 when past all milestones
+4. nextMilestoneText returns "X day(s) to Y" format
+5. nextMilestoneText returns nil when past all milestones
 
-Use @Suite, @Test, #expect. Use makeSUT() that returns
-(sut: RecoveryDashboardViewModel, service: MockRecoveryService).
-All tests are async. Use @MainActor on the suite.
+Also write UrgeViewModelTests.swift:
+
+UrgeViewModel (@Observable) has:
+- timerSeconds: Int, timerProgress: Double, timerDisplay: String
+- encouragementText: String (changes based on timerSeconds)
+- phase: UrgePhase (.acknowledge, .timer, .log, .complete)
+- startTimer(), skipTimer(), reset()
+
+Write tests for:
+1. timerProgress is 0 at start
+2. timerProgress is correct fraction at 450 seconds (half of 900)
+3. timerDisplay shows "15:00" at start, "14:00" at 60 seconds
+4. encouragementText changes at defined thresholds
+5. skipTimer moves phase to .log
+6. reset returns all state to defaults
+
+Use @Suite, @Test, #expect. Use makeSUT().
+All UrgeViewModel tests should be @MainActor.
 ```
 
 ### Code Review
 
 ```swift
 import Testing
+import Foundation
 @testable import BetAway
 
-@Suite("RecoveryDashboardViewModel")
-@MainActor
+@Suite("DashboardViewModel")
 struct DashboardViewModelTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> (
-        sut: RecoveryDashboardViewModel,
-        service: MockRecoveryService
+    private func makeSUT(daysSinceQuit: Int = 30) -> (
+        sut: DashboardViewModel,
+        profile: UserProfile
     ) {
-        let service = MockRecoveryService()
-        let sut = RecoveryDashboardViewModel(service: service)
-        return (sut, service)
+        let profile = UserProfile.sample(daysSinceQuit: daysSinceQuit)
+        let sut = DashboardViewModel()
+        return (sut, profile)
     }
 
-    // MARK: - Load Entries
+    // MARK: - Milestone Progress
 
-    @Test("loadCheckIns populates entries from service")
-    func loadCheckInsPopulatesArray() async {
-        let (sut, service) = makeSUT()
-        service.checkIns = CheckIn.samples(count: 3)
+    @Test("milestoneProgress returns 0 on day 0")
+    func milestoneProgressDayZero() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 0)
 
-        await sut.loadCheckIns()
+        let progress = sut.milestoneProgress(for: profile)
 
-        #expect(sut.checkIns.count == 3)
+        #expect(progress == 0.0)
     }
 
-    @Test("loadCheckIns sets isLoading during fetch")
-    func loadCheckInsSetsLoadingState() async {
-        let (sut, service) = makeSUT()
-        service.artificialDelay = .milliseconds(50)
-        service.checkIns = [CheckIn.sample()]
+    @Test("milestoneProgress returns correct fraction mid-milestone")
+    func milestoneProgressMidMilestone() {
+        // Day 4 is between Day 3 milestone and Day 7 milestone
+        // Progress = (4 - 3) / (7 - 3) = 0.25
+        let (sut, profile) = makeSUT(daysSinceQuit: 4)
 
-        let loadTask = Task {
-            await sut.loadCheckIns()
-        }
+        let progress = sut.milestoneProgress(for: profile)
 
-        // Give the task a moment to start
-        try? await Task.sleep(for: .milliseconds(10))
-        #expect(sut.isLoading == true)
-
-        await loadTask.value
-        #expect(sut.isLoading == false)
+        #expect(abs(progress - 0.25) < 0.01)
     }
 
-    @Test("loadCheckIns sets errorMessage on failure")
-    func loadCheckInsSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        service.throwingError = .persistence(
-            .fetchFailed(underlying: "disk error")
-        )
+    @Test("milestoneProgress returns value between 0 and 1 at day 14")
+    func milestoneProgressAtDay14() {
+        // Day 14 hits the "2 Weeks" milestone exactly
+        // Next milestone is Day 30, so progress = (14 - 14) / (30 - 14) = 0
+        let (sut, profile) = makeSUT(daysSinceQuit: 14)
 
-        await sut.loadCheckIns()
+        let progress = sut.milestoneProgress(for: profile)
 
-        #expect(sut.errorMessage != nil)
-        #expect(sut.checkIns.isEmpty)
+        #expect(progress >= 0.0 && progress <= 1.0)
     }
 
-    @Test("loadCheckIns clears previous error on success")
-    func loadCheckInsClearsPreviousError() async {
-        let (sut, service) = makeSUT()
+    @Test("milestoneProgress returns 1.0 when past all milestones")
+    func milestoneProgressPastAll() {
+        // Day 400 is past the last milestone (365 days)
+        let (sut, profile) = makeSUT(daysSinceQuit: 400)
 
-        // First call fails
-        service.throwingError = .persistence(
-            .fetchFailed(underlying: "disk error")
-        )
-        await sut.loadCheckIns()
-        #expect(sut.errorMessage != nil)
+        let progress = sut.milestoneProgress(for: profile)
 
-        // Second call succeeds
-        service.throwingError = nil
-        service.checkIns = [CheckIn.sample()]
-        await sut.loadCheckIns()
-
-        #expect(sut.errorMessage == nil)
-        #expect(sut.checkIns.count == 1)
+        #expect(progress == 1.0)
     }
 
-    @Test("loadCheckIns returns entries sorted by date descending")
-    func loadCheckInsReturnsSorted() async {
-        let (sut, service) = makeSUT()
-        let oldEntry = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: -86400)
-        )
-        let newEntry = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: 0)
-        )
-        service.checkIns = [oldEntry, newEntry]
+    // MARK: - Next Milestone Text
 
-        await sut.loadCheckIns()
+    @Test("nextMilestoneText returns text for upcoming milestone")
+    func nextMilestoneTextReturnsUpcoming() {
+        // Day 5 — next milestone is Day 7 ("1 Week")
+        let (sut, profile) = makeSUT(daysSinceQuit: 5)
 
-        #expect(sut.checkIns.first?.id == newEntry.id)
-        #expect(sut.checkIns.last?.id == oldEntry.id)
+        let text = sut.nextMilestoneText(for: profile)
+
+        #expect(text != nil)
+        // Should contain the remaining days count
+        #expect(text?.contains("2") == true)
     }
 
-    // MARK: - Add Entry
+    @Test("nextMilestoneText returns nil when past all milestones")
+    func nextMilestoneTextNilPastAll() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 400)
 
-    @Test("addCheckIn inserts entry at the beginning of the array")
-    func addCheckInInsertsAtBeginning() async {
-        let (sut, service) = makeSUT()
-        let existing = CheckIn.sample(
-            note: "Existing",
-            date: Date(timeIntervalSinceNow: -3600)
-        )
-        service.checkIns = [existing]
-        await sut.loadCheckIns()
+        let text = sut.nextMilestoneText(for: profile)
 
-        let newEntry = CheckIn.sample(
-            note: "New",
-            date: .now
-        )
-        await sut.addCheckIn(newEntry)
+        #expect(text == nil)
+    }
+}
+```
 
-        #expect(sut.checkIns.first?.note == "New")
-        #expect(sut.checkIns.count == 2)
+```swift
+import Testing
+import Foundation
+@testable import BetAway
+
+@Suite("UrgeViewModel")
+@MainActor
+struct UrgeViewModelTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> UrgeViewModel {
+        UrgeViewModel()
     }
 
-    @Test("addCheckIn sets errorMessage on failure")
-    func addCheckInSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "disk full")
-        )
+    // MARK: - Timer Progress
 
-        let entry = CheckIn.sample()
-        await sut.addCheckIn(entry)
+    @Test("timerProgress is 0.0 at start")
+    func timerProgressZeroAtStart() {
+        let sut = makeSUT()
 
-        #expect(sut.errorMessage != nil)
+        #expect(sut.timerProgress == 0.0)
     }
 
-    // MARK: - Delete Entry
+    @Test("timerProgress is correct fraction at 450 seconds")
+    func timerProgressMidway() {
+        let sut = makeSUT()
+        sut.timerSeconds = 450
 
-    @Test("deleteCheckIn removes entry from the array")
-    func deleteCheckInRemovesFromArray() async {
-        let (sut, service) = makeSUT()
-        let entry = CheckIn.sample()
-        service.checkIns = [entry]
-        await sut.loadCheckIns()
-        #expect(sut.checkIns.count == 1)
-
-        await sut.deleteCheckIn(entry)
-
-        #expect(sut.checkIns.isEmpty)
+        // 450 / 900 = 0.5
+        #expect(sut.timerProgress == 0.5)
     }
 
-    @Test("deleteCheckIn sets errorMessage on failure")
-    func deleteCheckInSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        let entry = CheckIn.sample()
-        service.checkIns = [entry]
-        await sut.loadCheckIns()
+    @Test("timerProgress is 1.0 at full duration")
+    func timerProgressAtEnd() {
+        let sut = makeSUT()
+        sut.timerSeconds = UrgeViewModel.urgeTimerDuration
 
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "delete failed")
-        )
-        await sut.deleteCheckIn(entry)
+        #expect(sut.timerProgress == 1.0)
+    }
 
-        #expect(sut.errorMessage != nil)
-        // Entry should still be in the array since delete failed
-        #expect(sut.checkIns.count == 1)
+    // MARK: - Timer Display
+
+    @Test("timerDisplay shows 15:00 at start")
+    func timerDisplayAtStart() {
+        let sut = makeSUT()
+
+        #expect(sut.timerDisplay == "15:00")
+    }
+
+    @Test("timerDisplay shows 14:00 at 60 seconds")
+    func timerDisplayAt60Seconds() {
+        let sut = makeSUT()
+        sut.timerSeconds = 60
+
+        #expect(sut.timerDisplay == "14:00")
+    }
+
+    @Test("timerDisplay shows 0:00 when timer completes")
+    func timerDisplayAtCompletion() {
+        let sut = makeSUT()
+        sut.timerSeconds = UrgeViewModel.urgeTimerDuration
+
+        #expect(sut.timerDisplay == "0:00")
+    }
+
+    @Test("timerDisplay shows correct minutes and seconds")
+    func timerDisplayPartialTime() {
+        let sut = makeSUT()
+        sut.timerSeconds = 90 // 1:30 elapsed, 13:30 remaining
+
+        #expect(sut.timerDisplay == "13:30")
+    }
+
+    // MARK: - Encouragement Text
+
+    @Test("encouragementText changes at defined thresholds")
+    func encouragementTextChangesAtThresholds() {
+        let sut = makeSUT()
+
+        let textAt0 = sut.encouragementText
+        sut.timerSeconds = 120
+        let textAt120 = sut.encouragementText
+        sut.timerSeconds = 300
+        let textAt300 = sut.encouragementText
+        sut.timerSeconds = 700
+        let textAt700 = sut.encouragementText
+
+        // Each threshold should produce different encouragement
+        #expect(textAt0 != textAt120)
+        #expect(textAt120 != textAt300)
+        #expect(textAt300 != textAt700)
+    }
+
+    @Test("encouragementText at 0 seconds contains 'doing great'")
+    func encouragementTextAtStart() {
+        let sut = makeSUT()
+        sut.timerSeconds = 0
+
+        // The first tier (0..<60) says "You're doing great"
+        #expect(sut.encouragementText.isEmpty == false)
+    }
+
+    // MARK: - Phase Transitions
+
+    @Test("initial phase is acknowledge")
+    func initialPhaseIsAcknowledge() {
+        let sut = makeSUT()
+
+        #expect(sut.phase == .acknowledge)
+    }
+
+    @Test("skipTimer moves phase to log")
+    func skipTimerMovesToLog() {
+        let sut = makeSUT()
+        sut.phase = .timer
+        sut.isTimerRunning = true
+
+        sut.skipTimer()
+
+        #expect(sut.phase == .log)
+        #expect(sut.isTimerRunning == false)
+    }
+
+    @Test("reset returns all state to defaults")
+    func resetClearsAllState() {
+        let sut = makeSUT()
+
+        // Modify everything
+        sut.phase = .log
+        sut.timerSeconds = 300
+        sut.isTimerRunning = true
+        sut.selectedIntensity = 8
+        sut.selectedTrigger = .stressed
+        sut.selectedStrategy = .breathingExercise
+        sut.notes = "Test notes"
+        sut.didResist = false
+        sut.showCompletionCelebration = true
+
+        sut.reset()
+
+        #expect(sut.phase == .acknowledge)
+        #expect(sut.timerSeconds == 0)
+        #expect(sut.isTimerRunning == false)
+        #expect(sut.selectedIntensity == 5)
+        #expect(sut.selectedTrigger == nil)
+        #expect(sut.selectedStrategy == nil)
+        #expect(sut.notes == "")
+        #expect(sut.didResist == true)
+        #expect(sut.showCompletionCelebration == false)
+    }
+
+    // MARK: - Timer Minutes Elapsed
+
+    @Test("timerMinutesElapsed returns 0 at start")
+    func timerMinutesElapsedAtStart() {
+        let sut = makeSUT()
+
+        #expect(sut.timerMinutesElapsed == 0)
+    }
+
+    @Test("timerMinutesElapsed returns correct value")
+    func timerMinutesElapsedAt300Seconds() {
+        let sut = makeSUT()
+        sut.timerSeconds = 300
+
+        #expect(sut.timerMinutesElapsed == 5)
     }
 }
 ```
 
 Review checklist:
 
-- ✅ **`@MainActor` on the suite** — `RecoveryDashboardViewModel` is `@MainActor` because it drives UI. All tests that touch it must run on the main actor. Without this annotation, Swift 6 will reject the tests at compile time.
-- ✅ **`makeSUT()` returns a tuple** — the test gets both the ViewModel and the mock service. This is critical: the test configures the mock, calls methods on the ViewModel, and asserts on the ViewModel's observable state. The tuple makes both accessible without instance variables.
-- ✅ **Loading state test uses `artificialDelay`** — this creates a small window where `isLoading` is `true`. The test checks mid-flight, then waits for completion and checks again. This is the correct way to test transient states.
-- ✅ **Error clearing test runs two scenarios in sequence** — first fails, then succeeds. This catches a common bug where the error message persists even after a successful retry.
-- ✅ **Delete failure test verifies the entry is still present** — if the service throws during delete, the ViewModel should not remove the entry from its local array. This is a real bug that AI-generated code often has.
-- ⚠️ **The loading state test has a timing dependency.** The `Task.sleep(for: .milliseconds(10))` is a pragmatic workaround. In a perfect world, you would use a synchronization primitive. In practice, a 10ms sleep in a test that runs in under 100ms total is acceptable. If it flakes, increase the delay slightly.
+- **`@MainActor` on the UrgeViewModel suite** — `UrgeViewModel` uses `@Observable` and its `startTimer()` runs on `@MainActor`. All tests that touch it must run on the main actor. Without this annotation, Swift 6 will reject the tests at compile time.
+- **`makeSUT()` returns a tuple for DashboardViewModel** — the test gets both the ViewModel and the profile. DashboardViewModel methods take a `UserProfile` parameter, so we need both.
+- **UrgeViewModel tests set `timerSeconds` directly** — we do not call `startTimer()` in most tests because that kicks off a real `Task.sleep` loop. Instead, we set the state and test the computed properties. This makes tests instant and deterministic.
+- **Phase transition tests verify observable state changes** — `skipTimer()` should move to `.log` and stop the timer. `reset()` should return every property to its default. These catch real bugs where a reset might miss one property.
+- **Encouragement text test checks that thresholds produce different messages** — it does not hardcode the exact strings (which would break if you change the wording). It only verifies that different timer values produce different encouragement.
 
 ## Verify Phase: Running the Tests
 
@@ -625,27 +780,23 @@ Build and run the tests. Here is what to check:
 
 **1. All tests pass on first run.** If any test fails, the failure message from `#expect` will tell you exactly which assertion broke. Fix the test or the production code — never both at the same time. Change one thing, run again, confirm.
 
-**2. Tests run fast.** The entire suite should complete in under one second. If any test takes more than 200ms, something is wrong — you might be accidentally hitting the disk or network. Unit tests are in-memory only.
+**2. Tests run fast.** The entire suite should complete in under one second. If any test takes more than 200ms, something is wrong — you might be accidentally hitting the disk or triggering a real `Task.sleep`. Unit tests are in-memory only.
 
 **3. Tests are independent.** Run each test in isolation (click the diamond next to the test name in Xcode). Every test should pass when run alone. If a test only passes when run after another test, there is shared mutable state leaking between them — usually a static variable or a singleton. The `makeSUT()` pattern prevents this by creating fresh instances every time.
 
 **4. Swift 6 concurrency.** The project should compile with strict concurrency enabled. If you see warnings about `Sendable` conformance or actor isolation in the test target, fix them now. Common fixes:
 - Add `@MainActor` to the test suite struct
-- Mark the mock as `@unchecked Sendable`
 - Use `await` when calling actor-isolated methods
 
-**5. Edge case: empty repository.** Add a test that calls `loadCheckIns()` on an empty service and verifies `entries` is empty and `errorMessage` is `nil`. This sounds trivial but catches ViewModels that set an error state when there are no results.
+**5. Edge case: zero weekly spend.** Add a test that creates a `UserProfile` with `averageWeeklySpend: 0` and verifies `totalSaved` is `0.0` and `annualizedSavings` is `0.0`. This sounds trivial but catches division-by-zero bugs in savings calculations.
 
 ```swift
-@Test("loadCheckIns with empty service sets empty array without error")
-func loadCheckInsEmptyRepository() async {
-    let (sut, _) = makeSUT()
+@Test("totalSaved is zero when weekly spend is zero")
+func totalSavedZeroSpend() {
+    let sut = makeSUT(daysSinceQuit: 30, weeklySpend: 0)
 
-    await sut.loadCheckIns()
-
-    #expect(sut.checkIns.isEmpty)
-    #expect(sut.errorMessage == nil)
-    #expect(sut.isLoading == false)
+    #expect(sut.totalSaved == 0.0)
+    #expect(sut.annualizedSavings == 0.0)
 }
 ```
 
@@ -653,277 +804,297 @@ func loadCheckInsEmptyRepository() async {
 
 Here is the complete, final implementation for all files. These are the versions that should be in your test target after the plan, execute, and iterate phases.
 
-### BetAwayTests/Mocks/MockRecoveryService.swift
+### BetAwayTests/Helpers/UserProfile+Sample.swift
 
 ```swift
 import Foundation
 @testable import BetAway
 
-final class MockRecoveryService: RecoveryService, @unchecked Sendable {
-    // MARK: - Storage
-
-    var checkIns: [CheckIn] = []
-
-    // MARK: - Configuration
-
-    var throwingError: AppError?
-    var artificialDelay: Duration?
-
-    // MARK: - Call Tracking
-
-    private(set) var fetchAllCallCount = 0
-    private(set) var fetchByIDCallCount = 0
-    private(set) var saveCallCount = 0
-    private(set) var updateCallCount = 0
-    private(set) var deleteCallCount = 0
-
-    private(set) var lastSavedEntry: CheckIn?
-    private(set) var lastDeletedEntry: CheckIn?
-
-    // MARK: - RecoveryService
-
-    func fetchAll() async throws -> [CheckIn] {
-        fetchAllCallCount += 1
-        if let delay = artificialDelay {
-            try await Task.sleep(for: delay)
-        }
-        if let error = throwingError { throw error }
-        return checkIns.sorted { $0.date > $1.date }
-    }
-
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        fetchByIDCallCount += 1
-        if let error = throwingError { throw error }
-        return checkIns.first { $0.id == id }
-    }
-
-    func save(_ entry: CheckIn) async throws {
-        saveCallCount += 1
-        if let error = throwingError { throw error }
-        lastSavedEntry = entry
-        checkIns.append(entry)
-    }
-
-    func update(_ entry: CheckIn) async throws {
-        updateCallCount += 1
-        if let error = throwingError { throw error }
-        guard let index = checkIns.firstIndex(where: { $0.id == entry.id }) else {
-            return
-        }
-        checkIns[index] = entry
-    }
-
-    func delete(_ entry: CheckIn) async throws {
-        deleteCallCount += 1
-        if let error = throwingError { throw error }
-        lastDeletedEntry = entry
-        checkIns.removeAll { $0.id == entry.id }
-    }
-
-    // MARK: - Helpers
-
-    func reset() {
-        checkIns = []
-        throwingError = nil
-        artificialDelay = nil
-        fetchAllCallCount = 0
-        fetchByIDCallCount = 0
-        saveCallCount = 0
-        updateCallCount = 0
-        deleteCallCount = 0
-        lastSavedEntry = nil
-        lastDeletedEntry = nil
-    }
-}
-```
-
-### BetAwayTests/Helpers/CheckIn+Sample.swift
-
-```swift
-import Foundation
-@testable import BetAway
-
-extension CheckIn {
+extension UserProfile {
     static func sample(
-        id: UUID = UUID(),
-        recoveryStatus: RecoveryStatus = .good,
-        note: String = "Test check-in",
-        activities: [String] = ["Work", "Exercise"],
-        date: Date = .now,
-        createdAt: Date = .now
-    ) -> CheckIn {
-        CheckIn(
-            id: id,
-            recoveryStatus: recoveryStatus,
-            note: note,
-            activities: activities,
-            date: date,
-            createdAt: createdAt
+        quitDate: Date = Calendar.current.date(
+            byAdding: .day, value: -30, to: Date()
+        ) ?? Date(),
+        displayName: String = "Test User",
+        gamblingTypes: [GamblingType] = [.sportsBetting],
+        frequency: GamblingFrequency = .weekly,
+        averageWeeklySpend: Double = 100
+    ) -> UserProfile {
+        UserProfile(
+            quitDate: quitDate,
+            displayName: displayName,
+            gamblingTypes: gamblingTypes,
+            frequency: frequency,
+            averageWeeklySpend: averageWeeklySpend
         )
     }
 
-    static func samples(count: Int) -> [CheckIn] {
-        let calendar = Calendar.current
-        let statuses: [RecoveryStatus] = [.great, .good, .okay, .bad, .awful]
+    static func sample(daysSinceQuit days: Int, weeklySpend: Double = 100) -> UserProfile {
+        let quitDate = Calendar.current.date(
+            byAdding: .day, value: -days, to: Date()
+        ) ?? Date()
+        return UserProfile.sample(
+            quitDate: quitDate,
+            averageWeeklySpend: weeklySpend
+        )
+    }
+}
 
-        return (0..<count).map { index in
-            CheckIn.sample(
-                recoveryStatus: statuses[index % statuses.count],
-                note: "Sample entry \(index + 1)",
-                activities: ["Activity \(index + 1)"],
-                date: calendar.date(
-                    byAdding: .day,
-                    value: -index,
-                    to: .now
-                ) ?? .now
-            )
-        }
+extension DailyCheckin {
+    static func samplePledge(
+        mood: MoodRating = .good,
+        pledgeReason: String = "For my family",
+        date: Date = Date()
+    ) -> DailyCheckin {
+        let checkin = DailyCheckin(
+            checkinType: .morningPledge,
+            mood: mood,
+            pledgeReason: pledgeReason
+        )
+        checkin.date = date
+        return checkin
+    }
+
+    static func sampleCheckin(
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        notes: String = "Test evening check-in",
+        date: Date = Date()
+    ) -> DailyCheckin {
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: mood,
+            gamblingFree: gamblingFree,
+            notes: notes
+        )
+        checkin.date = date
+        return checkin
+    }
+}
+
+extension UrgeLog {
+    static func sample(
+        intensity: Int = 5,
+        trigger: PredefinedTrigger? = .stressed,
+        copingStrategy: CopingStrategy? = .breathingExercise,
+        didResist: Bool = true,
+        durationSeconds: TimeInterval = 300,
+        notes: String = "Test urge"
+    ) -> UrgeLog {
+        let log = UrgeLog(
+            intensity: intensity,
+            trigger: trigger,
+            copingStrategy: copingStrategy,
+            didResist: didResist,
+            notes: notes
+        )
+        log.durationSeconds = durationSeconds
+        return log
     }
 }
 ```
 
-### BetAwayTests/RecoveryServiceTests.swift
+### BetAwayTests/UserProfileTests.swift
 
 ```swift
 import Testing
+import Foundation
 @testable import BetAway
 
-@Suite("MockRecoveryService")
-struct RecoveryServiceTests {
+@Suite("UserProfile Computed Properties")
+struct UserProfileTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> MockRecoveryService {
-        MockRecoveryService()
-    }
-
-    // MARK: - Fetch
-
-    @Test("fetchAll returns entries sorted by date descending")
-    func fetchAllReturnsSorted() async throws {
-        let sut = makeSUT()
-        let older = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: -86400)
+    private func makeSUT(
+        daysSinceQuit: Int = 30,
+        weeklySpend: Double = 100
+    ) -> UserProfile {
+        UserProfile.sample(
+            daysSinceQuit: daysSinceQuit,
+            weeklySpend: weeklySpend
         )
-        let newer = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: 0)
+    }
+
+    // MARK: - daysSinceQuit
+
+    @Test("daysSinceQuit returns 0 when quit date is today")
+    func daysSinceQuitIsZeroForToday() {
+        let sut = makeSUT(daysSinceQuit: 0)
+        #expect(sut.daysSinceQuit == 0)
+    }
+
+    @Test("daysSinceQuit returns correct count for past dates")
+    func daysSinceQuitCountsPastDays() {
+        let sut = makeSUT(daysSinceQuit: 14)
+        #expect(sut.daysSinceQuit == 14)
+    }
+
+    @Test("daysSinceQuit returns 0 when quit date is in the future")
+    func daysSinceQuitIsZeroForFutureDate() {
+        let futureDate = Calendar.current.date(
+            byAdding: .day, value: 5, to: Date()
+        )!
+        let sut = UserProfile.sample(quitDate: futureDate)
+        #expect(sut.daysSinceQuit == 0)
+    }
+
+    // MARK: - totalSaved
+
+    @Test("totalSaved calculates weeks times weekly spend")
+    func totalSavedCalculation() {
+        let sut = makeSUT(daysSinceQuit: 14, weeklySpend: 200)
+        #expect(sut.totalSaved == 400.0)
+    }
+
+    @Test("totalSaved is zero when quit date is today")
+    func totalSavedIsZeroOnDay0() {
+        let sut = makeSUT(daysSinceQuit: 0, weeklySpend: 500)
+        #expect(sut.totalSaved == 0.0)
+    }
+
+    @Test("totalSaved handles fractional weeks")
+    func totalSavedHandlesFractionalWeeks() {
+        let sut = makeSUT(daysSinceQuit: 10, weeklySpend: 70)
+        let expected = (10.0 / 7.0) * 70.0
+        #expect(abs(sut.totalSaved - expected) < 0.01)
+    }
+
+    @Test("totalSaved is zero when weekly spend is zero")
+    func totalSavedZeroSpend() {
+        let sut = makeSUT(daysSinceQuit: 30, weeklySpend: 0)
+        #expect(sut.totalSaved == 0.0)
+        #expect(sut.annualizedSavings == 0.0)
+    }
+
+    // MARK: - currentStreak
+
+    @Test("currentStreak equals daysSinceQuit with no relapses")
+    func currentStreakWithNoRelapses() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        #expect(sut.currentStreak == 30)
+    }
+
+    @Test("currentStreak resets after a relapse evening check-in")
+    func currentStreakResetsAfterRelapse() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        let relapseDate = Calendar.current.date(
+            byAdding: .day, value: -3, to: Date()
+        )!
+        let relapse = DailyCheckin.sampleCheckin(
+            gamblingFree: false,
+            date: relapseDate
         )
-        sut.checkIns = [older, newer]
-
-        let result = try await sut.fetchAll()
-
-        #expect(result.first?.id == newer.id)
-        #expect(result.last?.id == older.id)
+        sut.checkins.append(relapse)
+        #expect(sut.currentStreak == 3)
     }
 
-    @Test("fetch by ID returns matching entry")
-    func fetchByIDReturnsMatch() async throws {
-        let sut = makeSUT()
-        let target = CheckIn.sample()
-        sut.checkIns = [CheckIn.sample(), target, CheckIn.sample()]
-
-        let result = try await sut.fetch(by: target.id)
-
-        #expect(result?.id == target.id)
+    @Test("currentStreak returns 0 when quit date is in the future")
+    func currentStreakZeroForFutureQuitDate() {
+        let futureDate = Calendar.current.date(
+            byAdding: .day, value: 10, to: Date()
+        )!
+        let sut = UserProfile.sample(quitDate: futureDate)
+        #expect(sut.currentStreak == 0)
     }
 
-    @Test("fetch by ID returns nil when not found")
-    func fetchByIDReturnsNilWhenMissing() async throws {
-        let sut = makeSUT()
-        sut.checkIns = [CheckIn.sample()]
-
-        let result = try await sut.fetch(by: UUID())
-
-        #expect(result == nil)
+    @Test("currentStreak ignores morning pledge check-ins for relapse")
+    func currentStreakIgnoresPledgeCheckins() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        let pledgeDate = Calendar.current.date(
+            byAdding: .day, value: -5, to: Date()
+        )!
+        let pledge = DailyCheckin.samplePledge(date: pledgeDate)
+        sut.checkins.append(pledge)
+        #expect(sut.currentStreak == 30)
     }
 
-    // MARK: - Save
+    // MARK: - hasPledgedToday
 
-    @Test("save appends entry to storage")
-    func saveAppendsEntry() async throws {
+    @Test("hasPledgedToday returns false with no check-ins")
+    func hasPledgedTodayFalseWhenEmpty() {
         let sut = makeSUT()
-        let entry = CheckIn.sample()
-
-        try await sut.save(entry)
-
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.id == entry.id)
-        #expect(sut.saveCallCount == 1)
-        #expect(sut.lastSavedEntry?.id == entry.id)
+        #expect(sut.hasPledgedToday() == false)
     }
 
-    // MARK: - Update
-
-    @Test("update replaces entry with matching ID")
-    func updateReplacesEntry() async throws {
+    @Test("hasPledgedToday returns true after today's morning pledge")
+    func hasPledgedTodayTrueAfterPledge() {
         let sut = makeSUT()
-        let original = CheckIn.sample(note: "Original")
-        sut.checkIns = [original]
+        let pledge = DailyCheckin.samplePledge(date: Date())
+        sut.checkins.append(pledge)
+        #expect(sut.hasPledgedToday() == true)
+    }
 
-        let updated = CheckIn.sample(
-            id: original.id,
-            note: "Updated"
+    @Test("hasPledgedToday returns false for yesterday's pledge")
+    func hasPledgedTodayFalseForYesterday() {
+        let sut = makeSUT()
+        let yesterday = Calendar.current.date(
+            byAdding: .day, value: -1, to: Date()
+        )!
+        let pledge = DailyCheckin.samplePledge(date: yesterday)
+        sut.checkins.append(pledge)
+        #expect(sut.hasPledgedToday() == false)
+    }
+
+    // MARK: - hasCheckedInToday
+
+    @Test("hasCheckedInToday returns true after today's evening check-in")
+    func hasCheckedInTodayTrueAfterCheckin() {
+        let sut = makeSUT()
+        let checkin = DailyCheckin.sampleCheckin(date: Date())
+        sut.checkins.append(checkin)
+        #expect(sut.hasCheckedInToday() == true)
+    }
+
+    @Test("hasCheckedInToday returns false when only a pledge exists")
+    func hasCheckedInTodayFalseForPledgeOnly() {
+        let sut = makeSUT()
+        let pledge = DailyCheckin.samplePledge(date: Date())
+        sut.checkins.append(pledge)
+        #expect(sut.hasCheckedInToday() == false)
+    }
+
+    // MARK: - todaysMood
+
+    @Test("todaysMood returns nil with no check-ins")
+    func todaysMoodNilWhenEmpty() {
+        let sut = makeSUT()
+        #expect(sut.todaysMood() == nil)
+    }
+
+    @Test("todaysMood returns the mood from today's check-in")
+    func todaysMoodReturnsCorrectMood() {
+        let sut = makeSUT()
+        let checkin = DailyCheckin.sampleCheckin(
+            mood: .veryGood,
+            date: Date()
         )
-        try await sut.update(updated)
-
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.note == "Updated")
+        sut.checkins.append(checkin)
+        #expect(sut.todaysMood() == .veryGood)
     }
 
-    // MARK: - Delete
+    // MARK: - annualizedSavings
 
-    @Test("delete removes entry from storage")
-    func deleteRemovesEntry() async throws {
-        let sut = makeSUT()
-        let entry = CheckIn.sample()
-        sut.checkIns = [entry]
-
-        try await sut.delete(entry)
-
-        #expect(sut.checkIns.isEmpty)
-        #expect(sut.deleteCallCount == 1)
-        #expect(sut.lastDeletedEntry?.id == entry.id)
+    @Test("annualizedSavings multiplies weekly spend by 52")
+    func annualizedSavingsCalculation() {
+        let sut = makeSUT(weeklySpend: 100)
+        #expect(sut.annualizedSavings == 5200.0)
     }
 
-    @Test("delete does not affect other entries")
-    func deleteOnlyRemovesTarget() async throws {
-        let sut = makeSUT()
-        let keep = CheckIn.sample(note: "Keep")
-        let remove = CheckIn.sample(note: "Remove")
-        sut.checkIns = [keep, remove]
+    // MARK: - hoursSaved
 
-        try await sut.delete(remove)
-
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.id == keep.id)
+    @Test("hoursSaved estimates 2 hours per day")
+    func hoursSavedCalculation() {
+        let sut = makeSUT(daysSinceQuit: 10)
+        #expect(sut.hoursSaved == 20.0)
     }
 
-    // MARK: - Error Simulation
+    // MARK: - longestStreak
 
-    @Test("throwingError causes methods to throw")
-    func throwingErrorCausesThrow() async {
-        let sut = makeSUT()
-        sut.throwingError = .persistence(
-            .saveFailed(underlying: "Test error")
-        )
-
-        await #expect(throws: AppError.self) {
-            try await sut.fetchAll()
-        }
-    }
-
-    @Test("reset clears all state and counters")
-    func resetClearsState() async throws {
-        let sut = makeSUT()
-        sut.checkIns = CheckIn.samples(count: 3)
-        sut.throwingError = .network(.timeout)
-        _ = try? await sut.fetchAll()
-
-        sut.reset()
-
-        #expect(sut.checkIns.isEmpty)
-        #expect(sut.throwingError == nil)
-        #expect(sut.fetchAllCallCount == 0)
+    @Test("longestStreak equals daysSinceQuit with no relapses")
+    func longestStreakNoRelapses() {
+        let sut = makeSUT(daysSinceQuit: 30)
+        #expect(sut.longestStreak == 30)
     }
 }
 ```
@@ -932,222 +1103,228 @@ struct RecoveryServiceTests {
 
 ```swift
 import Testing
+import Foundation
 @testable import BetAway
 
-@Suite("RecoveryDashboardViewModel")
-@MainActor
+@Suite("DashboardViewModel")
 struct DashboardViewModelTests {
 
     // MARK: - makeSUT
 
-    private func makeSUT() -> (
-        sut: RecoveryDashboardViewModel,
-        service: MockRecoveryService
+    private func makeSUT(daysSinceQuit: Int = 30) -> (
+        sut: DashboardViewModel,
+        profile: UserProfile
     ) {
-        let service = MockRecoveryService()
-        let sut = RecoveryDashboardViewModel(service: service)
-        return (sut, service)
+        let profile = UserProfile.sample(daysSinceQuit: daysSinceQuit)
+        let sut = DashboardViewModel()
+        return (sut, profile)
     }
 
-    // MARK: - Load Entries
+    // MARK: - Milestone Progress
 
-    @Test("loadCheckIns populates entries from service")
-    func loadCheckInsPopulatesArray() async {
-        let (sut, service) = makeSUT()
-        service.checkIns = CheckIn.samples(count: 3)
-
-        await sut.loadCheckIns()
-
-        #expect(sut.checkIns.count == 3)
+    @Test("milestoneProgress returns 0 on day 0")
+    func milestoneProgressDayZero() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 0)
+        let progress = sut.milestoneProgress(for: profile)
+        #expect(progress == 0.0)
     }
 
-    @Test("loadCheckIns with empty service sets empty array without error")
-    func loadCheckInsEmptyRepository() async {
+    @Test("milestoneProgress returns correct fraction mid-milestone")
+    func milestoneProgressMidMilestone() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 4)
+        let progress = sut.milestoneProgress(for: profile)
+        #expect(abs(progress - 0.25) < 0.01)
+    }
+
+    @Test("milestoneProgress returns value between 0 and 1 at day 14")
+    func milestoneProgressAtDay14() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 14)
+        let progress = sut.milestoneProgress(for: profile)
+        #expect(progress >= 0.0 && progress <= 1.0)
+    }
+
+    @Test("milestoneProgress returns 1.0 when past all milestones")
+    func milestoneProgressPastAll() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 400)
+        let progress = sut.milestoneProgress(for: profile)
+        #expect(progress == 1.0)
+    }
+
+    // MARK: - Next Milestone Text
+
+    @Test("nextMilestoneText returns text for upcoming milestone")
+    func nextMilestoneTextReturnsUpcoming() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 5)
+        let text = sut.nextMilestoneText(for: profile)
+        #expect(text != nil)
+    }
+
+    @Test("nextMilestoneText returns nil when past all milestones")
+    func nextMilestoneTextNilPastAll() {
+        let (sut, profile) = makeSUT(daysSinceQuit: 400)
+        let text = sut.nextMilestoneText(for: profile)
+        #expect(text == nil)
+    }
+
+    // MARK: - Greeting
+
+    @Test("greeting returns a non-empty string")
+    func greetingIsNotEmpty() {
         let (sut, _) = makeSUT()
-
-        await sut.loadCheckIns()
-
-        #expect(sut.checkIns.isEmpty)
-        #expect(sut.errorMessage == nil)
-        #expect(sut.isLoading == false)
+        #expect(sut.greeting.isEmpty == false)
     }
 
-    @Test("loadCheckIns sets isLoading during fetch")
-    func loadCheckInsSetsLoadingState() async {
-        let (sut, service) = makeSUT()
-        service.artificialDelay = .milliseconds(50)
-        service.checkIns = [CheckIn.sample()]
+    @Test("greetingIcon returns a valid SF Symbol name")
+    func greetingIconIsValid() {
+        let (sut, _) = makeSUT()
+        let icon = sut.greetingIcon
+        #expect(icon == AppConfig.Icons.sun || icon == AppConfig.Icons.moon)
+    }
+}
+```
 
-        let loadTask = Task {
-            await sut.loadCheckIns()
-        }
+### BetAwayTests/UrgeViewModelTests.swift
 
-        try? await Task.sleep(for: .milliseconds(10))
-        #expect(sut.isLoading == true)
+```swift
+import Testing
+import Foundation
+@testable import BetAway
 
-        await loadTask.value
-        #expect(sut.isLoading == false)
+@Suite("UrgeViewModel")
+@MainActor
+struct UrgeViewModelTests {
+
+    // MARK: - makeSUT
+
+    private func makeSUT() -> UrgeViewModel {
+        UrgeViewModel()
     }
 
-    @Test("loadCheckIns sets errorMessage on failure")
-    func loadCheckInsSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        service.throwingError = .persistence(
-            .fetchFailed(underlying: "disk error")
-        )
+    // MARK: - Timer Progress
 
-        await sut.loadCheckIns()
-
-        #expect(sut.errorMessage != nil)
-        #expect(sut.checkIns.isEmpty)
+    @Test("timerProgress is 0.0 at start")
+    func timerProgressZeroAtStart() {
+        let sut = makeSUT()
+        #expect(sut.timerProgress == 0.0)
     }
 
-    @Test("loadCheckIns clears previous error on success")
-    func loadCheckInsClearsPreviousError() async {
-        let (sut, service) = makeSUT()
-
-        // First call fails
-        service.throwingError = .persistence(
-            .fetchFailed(underlying: "disk error")
-        )
-        await sut.loadCheckIns()
-        #expect(sut.errorMessage != nil)
-
-        // Second call succeeds
-        service.throwingError = nil
-        service.checkIns = [CheckIn.sample()]
-        await sut.loadCheckIns()
-
-        #expect(sut.errorMessage == nil)
-        #expect(sut.checkIns.count == 1)
+    @Test("timerProgress is 0.5 at 450 seconds")
+    func timerProgressMidway() {
+        let sut = makeSUT()
+        sut.timerSeconds = 450
+        #expect(sut.timerProgress == 0.5)
     }
 
-    @Test("loadCheckIns returns entries sorted by date descending")
-    func loadCheckInsReturnsSorted() async {
-        let (sut, service) = makeSUT()
-        let oldEntry = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: -86400)
-        )
-        let newEntry = CheckIn.sample(
-            date: Date(timeIntervalSinceNow: 0)
-        )
-        service.checkIns = [oldEntry, newEntry]
-
-        await sut.loadCheckIns()
-
-        #expect(sut.checkIns.first?.id == newEntry.id)
-        #expect(sut.checkIns.last?.id == oldEntry.id)
+    @Test("timerProgress is 1.0 at full duration")
+    func timerProgressAtEnd() {
+        let sut = makeSUT()
+        sut.timerSeconds = UrgeViewModel.urgeTimerDuration
+        #expect(sut.timerProgress == 1.0)
     }
 
-    // MARK: - Add Entry
+    // MARK: - Timer Display
 
-    @Test("addCheckIn inserts entry at the beginning of the array")
-    func addCheckInInsertsAtBeginning() async {
-        let (sut, service) = makeSUT()
-        let existing = CheckIn.sample(
-            note: "Existing",
-            date: Date(timeIntervalSinceNow: -3600)
-        )
-        service.checkIns = [existing]
-        await sut.loadCheckIns()
-
-        let newEntry = CheckIn.sample(
-            note: "New",
-            date: .now
-        )
-        await sut.addCheckIn(newEntry)
-
-        #expect(sut.checkIns.first?.note == "New")
-        #expect(sut.checkIns.count == 2)
+    @Test("timerDisplay shows 15:00 at start")
+    func timerDisplayAtStart() {
+        let sut = makeSUT()
+        #expect(sut.timerDisplay == "15:00")
     }
 
-    @Test("addCheckIn sets errorMessage on failure")
-    func addCheckInSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "disk full")
-        )
-
-        let entry = CheckIn.sample()
-        await sut.addCheckIn(entry)
-
-        #expect(sut.errorMessage != nil)
+    @Test("timerDisplay shows 14:00 at 60 seconds")
+    func timerDisplayAt60Seconds() {
+        let sut = makeSUT()
+        sut.timerSeconds = 60
+        #expect(sut.timerDisplay == "14:00")
     }
 
-    @Test("addCheckIn does not add to array on failure")
-    func addCheckInDoesNotAddOnFailure() async {
-        let (sut, service) = makeSUT()
-        await sut.loadCheckIns()
-        #expect(sut.checkIns.isEmpty)
-
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "disk full")
-        )
-
-        let entry = CheckIn.sample()
-        await sut.addCheckIn(entry)
-
-        #expect(sut.checkIns.isEmpty)
+    @Test("timerDisplay shows 0:00 when timer completes")
+    func timerDisplayAtCompletion() {
+        let sut = makeSUT()
+        sut.timerSeconds = UrgeViewModel.urgeTimerDuration
+        #expect(sut.timerDisplay == "0:00")
     }
 
-    // MARK: - Delete Entry
-
-    @Test("deleteCheckIn removes entry from the array")
-    func deleteCheckInRemovesFromArray() async {
-        let (sut, service) = makeSUT()
-        let entry = CheckIn.sample()
-        service.checkIns = [entry]
-        await sut.loadCheckIns()
-        #expect(sut.checkIns.count == 1)
-
-        await sut.deleteCheckIn(entry)
-
-        #expect(sut.checkIns.isEmpty)
+    @Test("timerDisplay shows correct minutes and seconds at 90s")
+    func timerDisplayPartialTime() {
+        let sut = makeSUT()
+        sut.timerSeconds = 90
+        #expect(sut.timerDisplay == "13:30")
     }
 
-    @Test("deleteCheckIn sets errorMessage on failure")
-    func deleteCheckInSetsErrorOnFailure() async {
-        let (sut, service) = makeSUT()
-        let entry = CheckIn.sample()
-        service.checkIns = [entry]
-        await sut.loadCheckIns()
+    // MARK: - Encouragement Text
 
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "delete failed")
-        )
-        await sut.deleteCheckIn(entry)
-
-        #expect(sut.errorMessage != nil)
+    @Test("encouragementText changes at defined thresholds")
+    func encouragementTextChangesAtThresholds() {
+        let sut = makeSUT()
+        let textAt0 = sut.encouragementText
+        sut.timerSeconds = 120
+        let textAt120 = sut.encouragementText
+        sut.timerSeconds = 300
+        let textAt300 = sut.encouragementText
+        sut.timerSeconds = 700
+        let textAt700 = sut.encouragementText
+        #expect(textAt0 != textAt120)
+        #expect(textAt120 != textAt300)
+        #expect(textAt300 != textAt700)
     }
 
-    @Test("deleteCheckIn keeps entry in array on failure")
-    func deleteCheckInKeepsEntryOnFailure() async {
-        let (sut, service) = makeSUT()
-        let entry = CheckIn.sample()
-        service.checkIns = [entry]
-        await sut.loadCheckIns()
+    // MARK: - Phase Transitions
 
-        service.throwingError = .persistence(
-            .saveFailed(underlying: "delete failed")
-        )
-        await sut.deleteCheckIn(entry)
-
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.id == entry.id)
+    @Test("initial phase is acknowledge")
+    func initialPhaseIsAcknowledge() {
+        let sut = makeSUT()
+        #expect(sut.phase == .acknowledge)
     }
 
-    @Test("deleteCheckIn only removes the targeted entry")
-    func deleteCheckInOnlyRemovesTarget() async {
-        let (sut, service) = makeSUT()
-        let keep = CheckIn.sample(note: "Keep")
-        let remove = CheckIn.sample(note: "Remove")
-        service.checkIns = [keep, remove]
-        await sut.loadCheckIns()
+    @Test("skipTimer moves phase to log")
+    func skipTimerMovesToLog() {
+        let sut = makeSUT()
+        sut.phase = .timer
+        sut.isTimerRunning = true
+        sut.skipTimer()
+        #expect(sut.phase == .log)
+        #expect(sut.isTimerRunning == false)
+    }
 
-        await sut.deleteCheckIn(remove)
+    @Test("reset returns all state to defaults")
+    func resetClearsAllState() {
+        let sut = makeSUT()
+        sut.phase = .log
+        sut.timerSeconds = 300
+        sut.isTimerRunning = true
+        sut.selectedIntensity = 8
+        sut.selectedTrigger = .stressed
+        sut.selectedStrategy = .breathingExercise
+        sut.notes = "Test notes"
+        sut.didResist = false
+        sut.showCompletionCelebration = true
 
-        #expect(sut.checkIns.count == 1)
-        #expect(sut.checkIns.first?.note == "Keep")
+        sut.reset()
+
+        #expect(sut.phase == .acknowledge)
+        #expect(sut.timerSeconds == 0)
+        #expect(sut.isTimerRunning == false)
+        #expect(sut.selectedIntensity == 5)
+        #expect(sut.selectedTrigger == nil)
+        #expect(sut.selectedStrategy == nil)
+        #expect(sut.notes == "")
+        #expect(sut.didResist == true)
+        #expect(sut.showCompletionCelebration == false)
+    }
+
+    // MARK: - Timer Minutes Elapsed
+
+    @Test("timerMinutesElapsed returns 0 at start")
+    func timerMinutesElapsedAtStart() {
+        let sut = makeSUT()
+        #expect(sut.timerMinutesElapsed == 0)
+    }
+
+    @Test("timerMinutesElapsed returns correct value at 300s")
+    func timerMinutesElapsedAt300Seconds() {
+        let sut = makeSUT()
+        sut.timerSeconds = 300
+        #expect(sut.timerMinutesElapsed == 5)
     }
 }
 ```
@@ -1156,56 +1333,61 @@ struct DashboardViewModelTests {
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `MockRecoveryService` conforms to `RecoveryService` with no compiler warnings
-- [ ] `CheckIn.sample()` creates valid entries with sensible defaults
-- [ ] All `RecoveryServiceTests` pass — fetch, save, update, delete, error simulation
-- [ ] All `DashboardViewModelTests` pass — load, add, delete, error states, sort order
+- [ ] `UserProfile.sample()` creates valid profiles with sensible defaults
+- [ ] `DailyCheckin.samplePledge()` and `DailyCheckin.sampleCheckin()` create both check-in types
+- [ ] All `UserProfileTests` pass — `daysSinceQuit`, `currentStreak`, `totalSaved`, `hasPledgedToday`, `hasCheckedInToday`, `todaysMood`
+- [ ] All `DashboardViewModelTests` pass — `milestoneProgress`, `nextMilestoneText`, `greeting`
+- [ ] All `UrgeViewModelTests` pass — `timerProgress`, `timerDisplay`, `encouragementText`, phase transitions, `reset`
 - [ ] The test suite runs in under one second with zero flaky failures
 - [ ] Every test uses `makeSUT()` — no shared mutable state between tests
 - [ ] Swift 6 strict concurrency compiles without warnings in the test target
-- [ ] No test imports `SwiftData` — all persistence is mocked through the protocol
+- [ ] No test imports `SwiftData` — all model instances are created directly without a `ModelContext`
 
 If any test is flaky (passes sometimes, fails sometimes), the cause is almost always shared state or timing. Check for static variables, singletons, or reliance on `Task.sleep` without enough margin.
 
 ## Challenge
 
-**Test the `CheckInViewModel` form validation logic.**
+**Test the `OnboardingViewModel` form validation logic.**
 
-Write a new test suite `CheckInViewModelTests` that covers:
-1. `canAdvance` returns `true` on step 1 (status selection does not require validation)
-2. `canAdvance` returns `false` on step 2 when no emoji is selected
-3. `canAdvance` returns `true` on step 2 after selecting an emoji
-4. `advance()` increments `currentStep` when `canAdvance` is true
-5. `advance()` does not increment past `totalSteps`
-6. `goBack()` decrements `currentStep`
-7. `goBack()` does not decrement below 1
-8. `save(using:)` creates a `CheckIn` with the correct values from the form state
-9. `reset()` returns all state to defaults
+Write a new test suite `OnboardingViewModelTests` that covers:
+1. `canAdvance` returns `true` on page 0 (welcome screen needs no input)
+2. `canAdvance` returns `false` on page 1 when no `GamblingType` is selected
+3. `canAdvance` returns `true` on page 1 after selecting a gambling type
+4. `advance()` increments `currentPage` when `canAdvance` is true
+5. `advance()` does not increment past `totalPages - 1`
+6. `goBack()` decrements `currentPage`
+7. `goBack()` does not decrement below 0
+8. `isLastPage` returns `true` only on the final page
+9. `projectedYearlySavings` equals `averageWeeklySpend * 52`
 
 <details>
 <summary>Hint</summary>
 
-The `CheckInViewModel` does not depend on a service for most of its logic — only `save()` needs one. Your `makeSUT()` for this suite should still create a `MockRecoveryService`, but most tests will only manipulate the ViewModel's properties directly:
+The `OnboardingViewModel` does not depend on any service — its logic is pure state management. Your `makeSUT()` for this suite just creates the ViewModel directly:
 
 ```swift
-private func makeSUT() -> (
-    sut: CheckInViewModel,
-    service: MockRecoveryService
-) {
-    let service = MockRecoveryService()
-    let sut = CheckInViewModel()
-    return (sut, service)
+private func makeSUT() -> OnboardingViewModel {
+    OnboardingViewModel()
 }
 
-@Test("canAdvance is false on step 2 without emoji")
-func canAdvanceStep2RequiresEmoji() {
-    let (sut, _) = makeSUT()
-    sut.currentStep = 2
-    sut.selectedEmoji = nil
+@Test("canAdvance is false on page 1 without gambling type")
+func canAdvancePage1RequiresGamblingType() {
+    let sut = makeSUT()
+    sut.currentPage = 1
+    sut.selectedGamblingTypes = []
 
     #expect(sut.canAdvance == false)
 }
+
+@Test("canAdvance is true on page 1 after selecting a type")
+func canAdvancePage1WithGamblingType() {
+    let sut = makeSUT()
+    sut.currentPage = 1
+    sut.selectedGamblingTypes = [.sportsBetting]
+
+    #expect(sut.canAdvance == true)
+}
 ```
 
-For the `save()` test, set all form properties, call `save(using: service)`, and then check `service.lastSavedEntry` to verify the entry was created with the correct recovery status, emoji, note, and tags.
+For the `advance()` test, set `currentPage` to the second-to-last page, set all required fields, call `advance()`, and then check that `isLastPage` is `true`. For `projectedYearlySavings`, set `averageWeeklySpend` and verify the calculation.
 </details>

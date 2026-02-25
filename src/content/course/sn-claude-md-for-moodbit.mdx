@@ -1,6 +1,6 @@
 ---
 title: "CLAUDE.md for Your Project"
-description: "Write a project-specific CLAUDE.md that enforces architecture rules, naming conventions, and code standards — turning your AI coding assistant into a senior team member."
+description: "Write a CLAUDE.md for BetAway that enforces architecture rules, naming conventions, theme system usage, and code standards — turning your AI coding assistant into a senior team member."
 courseSlug: "ship-native"
 module: 1
 moduleTitle: "Project Foundation"
@@ -13,7 +13,7 @@ draft: false
 pubDate: 2026-02-22
 ---
 
-In the previous two lessons, we set up the Xcode project and defined our MVVM + Service Layer architecture with SwiftData models. We have the skeleton. Now we need the brain — a file that tells our AI assistant exactly how to build inside that skeleton, every single time.
+In the previous two lessons, we set up the Xcode project and defined our MVVM architecture with SwiftData models, `@Observable` ViewModels, and a theme system. We have the skeleton. Now we need the brain — a file that tells our AI assistant exactly how to build inside that skeleton, every single time.
 
 That file is `CLAUDE.md`.
 
@@ -44,22 +44,23 @@ gambling recovery app for iOS. Before writing the file, help me
 think through what sections we need.
 
 Here is the context:
-- Architecture: MVVM + Service Layer pattern
-- Persistence: SwiftData (services abstract all data access)
-- ViewModels never access SwiftData directly
+- Architecture: MVVM with @Observable ViewModels
+- Persistence: SwiftData — Views use @Query for reads,
+  modelContext for writes
+- ViewModels handle business logic and state, not persistence
 - Swift 6 with strict concurrency
-- iOS 17+, SwiftUI only
-- We use on-device ML (Apple's NaturalLanguage framework) for
-  recovery insights — completely offline-first, no external APIs
+- iOS 17+, SwiftUI only, dark mode only
+- Nunito custom font, 12 language support via LanguageManager
+- Design system: ColorPalette, Typography, Spacing, AnimationPresets
 - We need consistent naming conventions for Views, ViewModels,
-  Services, and Models
-- Testing with Swift Testing framework, mock services
+  Models, and Managers
+- Testing with Swift Testing framework
 
 List the sections this CLAUDE.md needs and what each section
 should cover. Do not write the file yet — just the outline.
 ```
 
-Claude Code will propose something like: Project Overview, Architecture, Naming Conventions, File Organization, Coding Standards, Data Layer Rules, Testing Rules, and a Do NOT section.
+Claude Code will propose something like: Project Overview, Architecture, Naming Conventions, File Organization, Theme System, Coding Standards, Testing Rules, and a Do NOT section.
 
 Review that outline. Make sure it covers architecture enforcement, naming conventions, Swift style rules, and explicit prohibitions. If it misses any of those, tell Claude to add them before moving on.
 
@@ -464,59 +465,63 @@ BetFree/
 
 Let me walk through why this works.
 
-**The architecture section is prescriptive, not descriptive.** It does not say "we use MVVM." It says exactly how data flows: `View → ViewModel → Service Protocol → SwiftDataService → SwiftData`. Any prompt Claude Code processes will follow that chain. If you ask for a new feature, the AI will create the service protocol first, then the implementation, then the ViewModel, then the view. Every time.
+**The architecture section is prescriptive, not descriptive.** It does not say "we use MVVM." It spells out how Views use `@Query` for reads and `@Environment(\.modelContext)` for writes, how ViewModels handle business logic, and how `AppRouter` manages navigation with a concrete `Tab` enum. Every prompt Claude Code processes will follow that pattern. If you ask for a new feature, the AI will define the model, add any enums, build the ViewModel, then create the View. Every time.
 
-**The naming conventions include examples for every pattern.** There is no ambiguity about whether a service should be called `RecoveryRepo`, `RecoveryDataStore`, or `RecoveryService`. The rule says `[Domain]Service`, the example says `RecoveryService`. Done.
+**The naming conventions include examples for every pattern.** There is no ambiguity about whether a view should be called `DashboardScreen`, `DashView`, or `DashboardView`. The rule says `[Feature]View`, the example says `DashboardView`. The same goes for ViewModels (`DashboardViewModel`) and models (`UserProfile`, `DailyCheckin`). Done.
 
-**The Do NOT section is long — and that is intentional.** Fourteen explicit prohibitions. Each one prevents a specific class of mistake that AI models commonly make. "No singletons" stops a pattern that appears in millions of training examples. "No AnyView" prevents a type erasure habit that kills SwiftUI performance. "No force unwraps" prevents runtime crashes. These lines will save you more debugging time than any other part of the file.
+**The Theme System section is a force multiplier.** By explicitly listing `ColorPalette`, `Typography`, `Spacing`, and `AnimationPresets` with concrete examples, you eliminate an entire class of inconsistency. Without it, the AI will hardcode `Color.white`, `Font.system(size: 17)`, and `Animation.spring(...)` everywhere. With it, every generated view uses `ColorPalette.textPrimary`, `Typography.body()`, and `AnimationPresets.smooth`. Consistency at scale.
+
+**The Do NOT section is long — and that is intentional.** Fifteen explicit prohibitions. Each one prevents a specific class of mistake that AI models commonly make. "No ObservableObject" stops a pattern that appears in millions of training examples. "No AnyView" prevents a type erasure habit that kills SwiftUI performance. "No hardcoded colors" ensures the design system is actually used. These lines will save you more debugging time than any other part of the file.
 
 ### Before and After
 
 Here is what the same prompt produces with a bad CLAUDE.md versus our production one.
 
-**Prompt:** "Add a way to delete a recovery check-in"
+**Prompt:** "Add a card showing the user's savings on the dashboard"
 
 **With the vague CLAUDE.md** ("write clean code, use MVVM"):
 ```swift
-// The AI might put this directly in the View
-struct DashboardView: View {
-    @Query var checkIns: [CheckIn]
-    @Environment(\.modelContext) var context
+// The AI might do this with hardcoded styles
+struct SavingsCard: View {
+    var amount: Double
 
-    func delete(_ checkIn: CheckIn) {
-        context.delete(checkIn)
-        try? context.save()  // force try, no error handling
+    var body: some View {
+        VStack {
+            Text("Money Saved")
+                .font(.system(size: 14))
+                .foregroundColor(.gray)
+            Text("$\(amount, specifier: "%.2f")")
+                .font(.system(size: 36, weight: .bold))
+                .foregroundColor(.green)
+        }
+        .padding(16)
+        .background(Color(hex: "#1C1C1E"))
+        .cornerRadius(12)
     }
 }
 ```
 
-Problems: SwiftData access in the View. No ViewModel. No service. Force try. No error handling. No separation of concerns.
+Problems: Hardcoded font sizes instead of `Typography`. Hardcoded colors instead of `ColorPalette`. Hardcoded spacing instead of `Spacing`. Hardcoded corner radius instead of `Spacing.Radius`. Wrong naming convention. No design system usage at all.
 
 **With our BetAway CLAUDE.md:**
 ```swift
-// Service protocol
-protocol RecoveryService {
-    func delete(_ checkIn: CheckIn) async throws
-}
+// View — uses the full theme system
+struct SavingsCardView: View {
+    let profile: UserProfile
 
-// ViewModel
-@Observable @MainActor
-class DashboardViewModel {
-    private let service: RecoveryService
-
-    func deleteCheckIn(_ checkIn: CheckIn) async {
-        do {
-            try await service.delete(checkIn)
-            checkIns.removeAll { $0.id == checkIn.id }
-        } catch {
-            self.error = error
+    var body: some View {
+        VStack(spacing: Spacing.xs) {
+            Text(LanguageManager.shared.localized("Money Saved"))
+                .font(Typography.caption())
+                .foregroundStyle(ColorPalette.textSecondary)
+            Text(profile.totalSaved, format: .currency(code: AppConfig.defaultCurrency))
+                .font(Typography.savingsCounter)
+                .foregroundStyle(ColorPalette.success)
         }
+        .padding(Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.medium))
     }
-}
-
-// View — just calls the ViewModel
-Button("Delete", role: .destructive) {
-    Task { await viewModel.deleteCheckIn(checkIn) }
 }
 ```
 
@@ -527,11 +532,12 @@ Same prompt. Radically different output. The CLAUDE.md did the work.
 Before moving on, verify:
 
 - [ ] `CLAUDE.md` exists in your BetAway project root
-- [ ] Architecture section specifies MVVM + Service Layer with the data flow chain
-- [ ] Naming conventions cover Views, ViewModels, Services, and Models with examples
-- [ ] Swift style rules include strict concurrency, guard-let, no force unwraps, enum constants
-- [ ] File organization shows the complete folder structure
-- [ ] Testing section specifies Swift Testing, mock services, and naming conventions
+- [ ] Architecture section specifies MVVM with `@Observable` ViewModels, `@Query` in Views, and `AppRouter` navigation
+- [ ] Naming conventions cover Views, ViewModels, Models, and Managers with examples
+- [ ] Theme System section covers ColorPalette, Typography, Spacing, and AnimationPresets
+- [ ] Swift style rules include strict concurrency, guard-let, no force unwraps, enum constants via AppConfig
+- [ ] File organization shows the complete folder structure (App, Core, Models, Navigation, ViewModels, Views)
+- [ ] Testing section specifies Swift Testing and naming conventions
 - [ ] Do NOT section has at least 10 specific prohibitions
 - [ ] You ran at least one test prompt and confirmed the AI follows the rules
 
@@ -549,8 +555,8 @@ BetAway will eventually include a Charts module for visualizing recovery trends 
 Add it to your existing CLAUDE.md and test it with this prompt:
 
 ```
-Create a RecoveryChartView that shows recovery scores over the last 7 days
-as a line chart.
+Create a MoodChartView that shows MoodRating values from DailyCheckin
+entries over the last 7 days as a line chart.
 ```
 
 Does the output follow your new rules?
@@ -558,8 +564,8 @@ Does the output follow your new rules?
 <details>
 <summary>Hint</summary>
 
-Think about where chart data transformation should happen. It is the same answer as every other data question in this architecture — the ViewModel. The View should receive ready-to-render data points, not raw CheckIn arrays. Your section should specify something like: "Chart ViewModels transform raw model data into chart-ready structs. Views never perform data aggregation."
+Think about where chart data transformation should happen. It is the same answer as every other data question in this architecture — the ViewModel. The View should receive ready-to-render data points, not raw `DailyCheckin` or `UrgeLog` arrays. Your section should specify something like: "Chart ViewModels transform raw model data into chart-ready structs. Views never perform data aggregation."
 
-Also consider: should the chart section specify `import Charts` only in Views, or is it acceptable in ViewModels too? Since Charts is a UI framework, it belongs in the View layer.
+Also consider: should the chart section specify `import Charts` only in Views, or is it acceptable in ViewModels too? Since Charts is a UI framework, it belongs in the View layer. And remember to specify that charts must use `ColorPalette` tokens for colors and `Typography` for any labels.
 
 </details>

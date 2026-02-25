@@ -1,6 +1,6 @@
 ---
 title: "CI/CD & Release"
-description: "Set up automated builds with GitHub Actions, distribute through TestFlight, implement semantic versioning, and establish the post-launch monitoring workflow."
+description: "Set up automated builds with GitHub Actions for BetAway, distribute through TestFlight, implement semantic versioning, and establish the post-launch monitoring workflow for UserProfile, DailyCheckin, and UrgeLog data integrity."
 courseSlug: "ship-native"
 module: 8
 moduleTitle: "Ship It"
@@ -13,9 +13,9 @@ draft: false
 pubDate: 2026-02-22
 ---
 
-You can build the app on your machine and upload it through Xcode. That works exactly once. The second time, you forget to increment the build number. The third time, you push a commit that breaks the tests but upload anyway because "it works on my machine." By the fifth time, you are dreading releases.
+You can build BetAway on your machine and upload it through Xcode. That works exactly once. The second time, you forget to increment the build number. The third time, you push a commit that breaks the `UserProfile` tests but upload anyway because "it works on my machine." By the fifth time, you are dreading releases.
 
-This lesson sets up the pipeline that removes you as the bottleneck. Push to `main`, and the machine takes over: build, test, archive, upload to TestFlight. Every time, the same way, with no human error.
+This lesson sets up the pipeline that removes you as the bottleneck. Push to `main`, and the machine takes over: build, test (the `UserProfileTests`, `DashboardViewModelTests`, `UrgeViewModelTests` from the previous lesson), archive, upload to TestFlight. Every time, the same way, with no human error.
 
 ## What You'll Learn
 
@@ -26,7 +26,7 @@ This lesson sets up the pipeline that removes you as the bottleneck. Push to `ma
 
 ## Why This Matters
 
-Manual release processes do not scale. Even for a solo developer, automating your pipeline saves hours per release and eliminates entire categories of mistakes — wrong provisioning profile, stale build number, untested code shipping to users. More importantly, a reliable pipeline means you can ship fixes fast. When your first user reports a crash, the difference between "I can push a fix in 20 minutes" and "let me figure out how to build and upload again" is the difference between keeping and losing that user.
+Manual release processes do not scale. Even for a solo developer, automating your pipeline saves hours per release and eliminates entire categories of mistakes — wrong provisioning profile, stale build number, untested code shipping to users. More importantly, a reliable pipeline means you can ship fixes fast. When your first beta tester reports that `currentStreak` shows the wrong value after a relapse check-in, the difference between "I can push a fix in 20 minutes" and "let me figure out how to build and upload again" is the difference between keeping and losing that user.
 
 ## Plan Phase: Defining What We Build
 
@@ -91,9 +91,11 @@ Generate a version management setup for BetAway:
 1. A Version.swift file that exposes the current version as a
    constant (read from the bundle)
 2. Explain the semantic versioning rules for our app:
-   - MAJOR: breaking changes (data model migration, dropped iOS version)
-   - MINOR: new features (new screen, new AI capability)
-   - PATCH: bug fixes and polish
+   - MAJOR: breaking changes (SwiftData model migration, dropped iOS version)
+   - MINOR: new features (e.g. adding ProgressAnalyticsView, new
+     GamblingType enum case, new CopingStrategy)
+   - PATCH: bug fixes and polish (e.g. fixing currentStreak
+     calculation, fixing totalSaved edge case)
 3. A shell script that sets CFBundleVersion to the GitHub Actions
    run number (passed as an environment variable)
 
@@ -128,7 +130,7 @@ Jobs:
    - Runner: macos-15
    - Steps: checkout, select Xcode 16, cache SPM packages, build
      for testing, run tests
-   - Use xcodebuild with -scheme BetAway -destination
+   - Use xcodebuild with -scheme BetFree -destination
      'platform=iOS Simulator,name=iPhone 16'
 
 2. "deploy" — runs only on pushes to main, after "test" passes
@@ -221,25 +223,31 @@ import Foundation
 import os
 
 /// Provides access to the app's version and build number from the bundle.
+/// BetAway already reads these from AppConfig.appVersion and
+/// AppConfig.buildNumber, but this enum adds logging and a
+/// combined display string for the Settings screen.
 enum AppVersion {
     private static let logger = Logger(
-        subsystem: "com.nativefirst.betaway.app",
+        subsystem: "com.pekmario.BetFree",
         category: "Version"
     )
 
     /// The marketing version (e.g., "1.0.0"). Set manually per release.
+    /// Equivalent to AppConfig.appVersion.
     static var marketing: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
             ?? "0.0.0"
     }
 
     /// The build number (e.g., "42"). Set by CI from the run number.
+    /// Equivalent to AppConfig.buildNumber.
     static var build: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String
             ?? "0"
     }
 
     /// Combined display string (e.g., "1.0.0 (42)").
+    /// Used by SettingsView to show the version label.
     static var display: String {
         "\(marketing) (\(build))"
     }
@@ -287,9 +295,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SCHEME: BetAway
+  SCHEME: BetFree
   DESTINATION: "platform=iOS Simulator,name=iPhone 16,OS=18.0"
-  ARCHIVE_PATH: build/BetAway.xcarchive
+  ARCHIVE_PATH: build/BetFree.xcarchive
   EXPORT_PATH: build/export
 
 jobs:
@@ -429,7 +437,7 @@ jobs:
             ~/.appstoreconnect/private_keys/AuthKey_${APPSTORE_CONNECT_KEY_ID}.p8
 
           xcrun altool --upload-app \
-            -f "$EXPORT_PATH/BetAway.ipa" \
+            -f "$EXPORT_PATH/BetFree.ipa" \
             -t ios \
             --apiKey "$APPSTORE_CONNECT_KEY_ID" \
             --apiIssuer "$APPSTORE_CONNECT_ISSUER_ID"
@@ -503,6 +511,9 @@ After your first TestFlight build goes live, establish these habits:
 ```
 Daily (first two weeks):
 - Check Xcode Organizer > Crashes for new crash reports
+  (pay attention to SwiftData migration crashes — UserProfile,
+  DailyCheckin, UrgeLog, and JournalEntry schema changes
+  can corrupt the database if migrations are missing)
 - Read TestFlight feedback in App Store Connect
 - Monitor the GitHub Actions dashboard for build health
 
@@ -510,6 +521,8 @@ Weekly:
 - Review crash-free user percentage (target: >99%)
 - Triage user feedback into: bug, feature request, or won't-fix
 - Bump the patch version if shipping a fix
+- Check that streak calculations (currentStreak, totalSaved)
+  are accurate across time zones in beta tester reports
 
 Per release:
 - Update the "What's New" text in App Store Connect

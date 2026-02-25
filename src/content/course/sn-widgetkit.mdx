@@ -1,6 +1,6 @@
 ---
 title: "WidgetKit — Home Screen Widget"
-description: "Create a home screen widget that shows today's recovery streak at a glance — with a timeline provider, App Groups for data sharing, and support for small, medium, and large widget families."
+description: "Build a home screen widget that shows the user's bet-free streak and savings at a glance — using a timeline provider, App Groups with UserDefaults for data sharing, and support for small and medium widget families. All code comes from the real BetAway production codebase."
 courseSlug: "ship-native"
 module: 5
 moduleTitle: "System Frameworks"
@@ -13,18 +13,19 @@ draft: false
 pubDate: 2026-02-22
 ---
 
-A home screen widget turns your app from something users open into something users glance at. No launch, no navigation, no waiting. The current recovery streak, right there on the home screen, always up to date.
+A home screen widget turns your app from something users open into something users glance at. No launch, no navigation, no waiting. The current bet-free streak, right there on the home screen, always up to date.
 
 WidgetKit is how you build this on iOS. It is not a mini version of your app — it is a completely separate target with its own lifecycle, its own rendering model, and its own data access constraints. Widgets are SwiftUI views rendered ahead of time from a timeline of snapshots. They cannot run arbitrary code on demand. They cannot access your main app's data directly. And if you do not understand these constraints, you will build a widget that shows stale data and frustrates your users.
 
-This lesson covers the full path: creating the widget extension, sharing data through App Groups, building the timeline provider, and designing views for small, medium, and large widget families.
+This lesson covers the full path: creating the widget extension, sharing data through App Groups, building the timeline provider, and designing views for small and medium widget families. Every code block below comes directly from BetAway's production codebase.
 
 ## What You'll Learn
 
 - Set up a WidgetKit extension target and configure App Groups for data sharing between the main app and the widget
-- Build a `TimelineProvider` that serves recovery data snapshots on a schedule
-- Design three widget layouts — small (today's streak count), medium (streak with status), large (weekly recovery trend) — using `WidgetFamily`
-- Configure a refresh policy that keeps the widget current without draining battery
+- Build a `SharedDataManager` that writes widget-relevant data to shared `UserDefaults` from the main app, and reads it from the widget
+- Build a `TimelineProvider` that serves bet-free streak snapshots on a schedule
+- Design two widget layouts — small (streak count with pledge status) and medium (streak, savings, and daily status dots) — using `WidgetFamily`
+- Trigger widget refreshes from the main app's `DashboardView` whenever the user completes a pledge or check-in
 
 ## Why This Matters
 
@@ -34,44 +35,52 @@ But widgets are also the feature most likely to show stale or placeholder data i
 
 ## Plan Phase: Defining What We Build
 
-We need a widget extension that reads from the same SwiftData store as the main app. The bridge between them is App Groups — a shared container that both the main app and the widget extension can access.
+We need a widget extension that reads data written by the main app. The bridge between them is App Groups — a shared `UserDefaults` suite that both the main app and the widget extension can access. BetAway uses `UserDefaults(suiteName:)` rather than a shared SwiftData container because the widget only needs a handful of scalar values: the streak count, savings total, currency symbol, and daily status flags.
 
 Here is the planning prompt:
 
 ```
 I'm adding a home screen widget to BetAway, my SwiftUI
-gambling recovery app. The app uses SwiftData with a CheckIn
-model (id, status 1-5, date, note).
+gambling recovery app. The app uses SwiftData with these models:
+- UserProfile (quitDate, averageWeeklySpend, currentStreak,
+  totalSaved, hasPledgedToday(), hasCheckedInToday())
+- DailyCheckin (checkinType, mood, gamblingFree, notes)
+- UrgeLog (intensity, trigger, copingStrategy, didResist)
 
 I need:
 1. A Widget extension target with a TimelineProvider
-2. App Groups configuration so the widget can read from the
-   same SwiftData store as the main app
-3. Three widget sizes:
-   - Small: shows today's recovery status as an icon + the
-     streak count
-   - Medium: shows today's status icon, streak count, and the
-     latest note (truncated)
-   - Large: shows today's status plus a mini bar chart of the
-     last 7 days
-4. A timeline that refreshes every 2 hours, or whenever the
-   user logs a new check-in (via WidgetCenter.shared.reloadTimelines)
-5. A placeholder view and snapshot for the widget gallery
+2. App Groups configuration so the widget can read data
+   written by the main app
+3. A SharedDataManager that uses UserDefaults(suiteName:)
+   to pass widget data — NOT a shared SwiftData container
+   (the widget only needs scalar values)
+4. Two widget sizes:
+   - Small: shows the bet-free streak count, a flame icon,
+     a pledge checkmark if completed today, and the savings
+     amount
+   - Medium: shows streak count, savings, and status dots
+     for pledge and evening check-in completion
+5. A timeline that refreshes every 30 minutes, or whenever the
+   user completes a pledge/check-in (via WidgetCenter.shared
+   .reloadAllTimelines)
+6. A placeholder view and snapshot for the widget gallery
+7. Dark themed to match BetAway's dark UI
 
 Technical constraints:
 - Target iOS 17+, Swift 6
-- Use the same CheckIn model in both targets
-- The SwiftData ModelContainer must use the App Group container
-  URL for its storage path
-- Do NOT hardcode any recovery data — read from the real store
+- App Group identifier: group.com.pekmario.betfreeapp
+- Do NOT share the SwiftData container with the widget —
+  use UserDefaults for lightweight data transfer
+- The main app's DashboardView should call SharedDataManager
+  .updateWidgetData() on appear
 
 What is the implementation plan? List every file, every target
 membership change, and every capability I need to enable.
 ```
 
-**What to look for in the plan.** The AI should mention: creating a new Widget Extension target in Xcode, enabling the App Groups capability on both the main app target and the widget target with the same group identifier, moving the `ModelConfiguration` to use a shared container URL, and putting the `CheckIn` model file into both targets. If the AI skips any of these, the widget will compile but show no data.
+**What to look for in the plan.** The AI should mention: creating a new Widget Extension target in Xcode, enabling the App Groups capability on both the main app target and the widget target with the same group identifier (`group.com.pekmario.betfreeapp`), creating a `SharedDataManager` that writes to `UserDefaults(suiteName:)`, and calling that manager from the main app whenever data changes. If the AI suggests sharing the full SwiftData `ModelContainer` with the widget, push back — the widget only needs five values, and sharing an entire database adds complexity and potential migration headaches for no benefit.
 
-**Anti-pattern: skipping App Groups.** This is the number one widget bug. The main app stores data in its default container. The widget extension is a separate process with its own sandbox. Without App Groups, the widget literally cannot see the main app's database. AI will sometimes generate a widget that creates its own `ModelContainer` without a shared URL, and you end up with two separate databases — the main app writes to one, the widget reads from an empty one.
+**Anti-pattern: sharing a SwiftData container.** Some AI-generated widget code will create a shared `ModelContainer` using the App Group container URL so the widget can query SwiftData directly. This works but is overkill for a widget that only shows a streak count and savings total. It also means the `UserProfile` model file must belong to both targets, along with every model it references through `@Relationship` (`DailyCheckin`, `UrgeLog`, `JournalEntry`). Using `UserDefaults` keeps the widget target minimal — it reads five flat values and renders them.
 
 ## Execute Phase: Implementation
 
@@ -79,29 +88,30 @@ membership change, and every capability I need to enable.
 Generate the complete widget implementation based on the plan.
 Use these specifics:
 
-- App Group identifier: group.com.betaway.shared
-- The shared ModelContainer helper should be in a file that
-  belongs to both targets: SharedModelContainer.swift
-- RecoveryWidgetEntry has: date (Date), currentStatus (Int?),
-  currentNote (String?), weeklyStatuses ([DailyStatus]) where
-  DailyStatus is (dayLetter: String, status: Int?)
-- Icon mapping: 1="🔴", 2="🟠", 3="🟡", 4="🟢", 5="💚"
-- The timeline provider should fetch the latest CheckIn for
-  today and the last 7 days of daily averages
+- App Group identifier: group.com.pekmario.betfreeapp
+- SharedDataManager writes these keys to UserDefaults:
+  widget_currentStreak (Int), widget_totalSaved (Double),
+  widget_currencySymbol (String), widget_hasPledgedToday (Bool),
+  widget_hasCheckedInToday (Bool), widget_quitDate (Date),
+  widget_lastUpdated (Date)
+- BetFreeEntry has: date, currentStreak, totalSaved,
+  currencySymbol, hasPledgedToday, hasCheckedInToday
+- The timeline provider reads from UserDefaults, not SwiftData
+- Dark theme: background color rgb(13, 13, 17), teal accent
+  rgb(0, 209, 209), white text
 - Use @ViewBuilder to switch on widget family
-- The placeholder should show a generic "BetAway" label with
-  redacted content
-- Include WidgetBundle if we plan to add more widgets later
+- The placeholder should show sample data (42 days, $600 saved)
+- Include WidgetBundle for future expansion
 
-Put widget files in BetAwayWidget/ directory.
+Put widget files in BetFreeWidget/ directory.
 ```
 
 Review the AI output for these specific issues:
 
-- **SharedModelContainer uses the App Group URL.** The code should call `FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.betaway.shared")` and pass that to `ModelConfiguration(url:)`. If it uses the default `ModelConfiguration()`, data sharing is broken.
-- **CheckIn.swift has both target memberships.** The model file must compile in both the main app and the widget extension. If it only belongs to one target, the other cannot decode the data.
-- **TimelineProvider.getTimeline() creates a ModelContainer, fetches, and builds entries.** Widget providers run in a limited environment. The provider must create its own container, fetch what it needs, build timeline entries, and return them. It cannot hold long-lived references.
-- **The snapshot uses sample data, not a real fetch.** The `getSnapshot()` method is called for the widget gallery preview. It must return immediately with representative data. If the AI does a database fetch here, the widget gallery will be slow or show empty content.
+- **SharedDataManager uses the correct App Group suite name.** The code should call `UserDefaults(suiteName: "group.com.pekmario.betfreeapp")`. If it uses `UserDefaults.standard`, the widget cannot see the data.
+- **The main app writes data; the widget reads it.** `SharedDataManager.updateWidgetData()` is called from the main app. The widget's `TimelineProvider` reads from the same `UserDefaults` suite. Data flows in one direction.
+- **TimelineProvider.getTimeline() reads from UserDefaults and builds entries.** The provider does not create a `ModelContainer` or run SwiftData queries. It reads flat values from `UserDefaults` and returns a timeline.
+- **The snapshot uses the same read logic as getTimeline, not hardcoded data.** In BetAway's production code, `getSnapshot` calls the same `currentEntry()` helper that `getTimeline` uses, so the widget gallery shows real user data when available.
 
 ## Iteration
 
@@ -110,22 +120,20 @@ The first pass usually nails the data flow but produces bland widget views. Send
 ```
 The widget data works but the views need improvement:
 
-1. Small widget: center the status icon vertically and
-   horizontally, show the streak count below it in caption font,
-   add a subtle background gradient based on the status color
-   (same color scheme as charts: red through green)
-2. Medium widget: left-align the status icon and streak count,
-   right-align the note text in secondary color. Add a divider
-   between them. Show "No check-in yet" if there is no check-in
-   logged today.
-3. Large widget: keep the top section like medium, add a row
-   of 7 small circles below, each colored by that day's
-   recovery status (gray if no check-in). Label each circle
-   with the day letter (M, T, W, etc.)
-4. All sizes: use .containerBackground for the gradient,
-   not a background modifier (required for iOS 17 widgets)
-5. Add .contentMarginsDisabled() if we want edge-to-edge
-   backgrounds
+1. Small widget: show a flame icon top-left, a pledge checkmark
+   top-right (green if pledged, hidden if not), the streak count
+   as a large bold rounded number, "days bet-free" as caption text,
+   and the savings amount in teal below
+2. Medium widget: left side shows flame icon with "BetAway" label,
+   streak count as large number, "days bet-free" caption. Right side
+   shows savings amount in teal, and two status dots — one for
+   pledge (hand.raised.fill), one for check-in (checkmark.circle
+   .fill) — green if done, dim if not, with tiny labels below each
+3. Both sizes: use .containerBackground for the dark background
+   (required for iOS 17 widgets), not a background modifier
+4. Use .contentMarginsDisabled() if we want edge-to-edge backgrounds
+5. The dark background should be Color(red: 13/255, green: 13/255,
+   blue: 17/255)
 ```
 
 The `.containerBackground` point is important. iOS 17 changed how widget backgrounds work. The old `.background()` modifier no longer reaches the edges of the widget. Apple introduced `.containerBackground(for: .widget)` as the replacement. AI trained on older code will use the deprecated approach, and your widget will have visible padding around its background.
@@ -135,433 +143,435 @@ The `.containerBackground` point is important. iOS 17 changed how widget backgro
 Widget testing is harder than regular view testing because you cannot see the widget in a normal preview run. Here is what to verify:
 
 1. **Add the widget to the home screen** in the simulator. Long-press, tap the "+" button, find BetAway, and add each size.
-2. **Log a check-in in the main app.** Does the widget update within a few minutes? If you added `WidgetCenter.shared.reloadAllTimelines()` after saving a check-in, it should update almost immediately.
-3. **Check the small widget.** Does the icon match today's logged recovery status? Is the background gradient the right color?
-4. **Check the medium widget.** Does the note text appear? Is it truncated properly for long notes?
-5. **Check the large widget.** Do the 7 day circles show the correct colors? Are days with no check-in shown in gray?
-6. **Remove all check-ins** (or test on a fresh simulator). Does the widget show a "No check-in yet" state, or is it blank?
-7. **Widget gallery preview.** Long-press and edit the widget. Does the preview in the gallery show sample data, not an empty or loading state?
-8. **Check the console for errors.** Widget extensions fail silently. If the `ModelContainer` cannot be created (wrong App Group ID, missing entitlement), the widget shows the placeholder forever with no visible error.
+2. **Log a morning pledge in the main app.** Does the widget update to show the green checkmark? The `DashboardView` calls `updateWidgetData()` on appear, which writes to `UserDefaults` and triggers `WidgetCenter.shared.reloadAllTimelines()`.
+3. **Check the small widget.** Does the streak count match the dashboard? Is the savings amount in teal? Is the flame icon visible?
+4. **Check the medium widget.** Do the pledge and check-in status dots show the correct state? Does the savings amount appear on the right?
+5. **Log an evening check-in.** Does the check-in dot turn green on the medium widget?
+6. **Test on a fresh simulator** with no data. Does the widget show 0 days and $0 saved, or placeholder data?
+7. **Widget gallery preview.** Long-press and edit the widget. Does the preview in the gallery show representative sample data?
+8. **Check the console for errors.** Widget extensions fail silently. If the `UserDefaults` suite name does not match the App Group identifier, the widget shows zeros forever with no visible error.
 
 ## Final Code
 
-### SharedModelContainer
+### SharedDataManager
 
-This file belongs to both the main app target and the widget target.
+This file lives in the main app at `BetFree/Core/Services/SharedDataManager.swift`. It writes widget-relevant data to the shared `UserDefaults` suite. The widget reads from the same suite using the same keys.
 
 ```swift
 import Foundation
-import SwiftData
 
-enum SharedModelContainer {
-    static let appGroupIdentifier = "group.com.betaway.shared"
+/// Manages shared data between the main app and widget extension via App Groups
+enum SharedDataManager {
+    static let appGroupID = "group.com.pekmario.betfreeapp"
+    static let suiteName = appGroupID
 
-    static func create() throws -> ModelContainer {
-        let schema = Schema([CheckIn.self])
+    private static var defaults: UserDefaults? {
+        UserDefaults(suiteName: suiteName)
+    }
 
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else {
-            fatalError("App Group container not found. Verify the App Group entitlement is configured.")
-        }
+    // MARK: - Keys
 
-        let storeURL = containerURL.appendingPathComponent("BetAway.store")
+    enum Keys {
+        static let currentStreak = "widget_currentStreak"
+        static let totalSaved = "widget_totalSaved"
+        static let quitDate = "widget_quitDate"
+        static let currencySymbol = "widget_currencySymbol"
+        static let hasPledgedToday = "widget_hasPledgedToday"
+        static let hasCheckedInToday = "widget_hasCheckedInToday"
+        static let lastUpdated = "widget_lastUpdated"
+    }
 
-        let configuration = ModelConfiguration(
-            "BetAway",
-            schema: schema,
-            url: storeURL
-        )
+    // MARK: - Write (called from main app)
 
-        return try ModelContainer(for: schema, configurations: [configuration])
+    static func updateWidgetData(
+        currentStreak: Int,
+        totalSaved: Double,
+        quitDate: Date,
+        hasPledgedToday: Bool,
+        hasCheckedInToday: Bool
+    ) {
+        defaults?.set(currentStreak, forKey: Keys.currentStreak)
+        defaults?.set(totalSaved, forKey: Keys.totalSaved)
+        defaults?.set(quitDate, forKey: Keys.quitDate)
+        defaults?.set(AppConfig.defaultCurrencySymbol, forKey: Keys.currencySymbol)
+        defaults?.set(hasPledgedToday, forKey: Keys.hasPledgedToday)
+        defaults?.set(hasCheckedInToday, forKey: Keys.hasCheckedInToday)
+        defaults?.set(Date(), forKey: Keys.lastUpdated)
+    }
+
+    // MARK: - Read (called from widget)
+
+    static var currentStreak: Int {
+        defaults?.integer(forKey: Keys.currentStreak) ?? 0
+    }
+
+    static var totalSaved: Double {
+        defaults?.double(forKey: Keys.totalSaved) ?? 0
+    }
+
+    static var quitDate: Date {
+        defaults?.object(forKey: Keys.quitDate) as? Date ?? Date()
+    }
+
+    static var currencySymbol: String {
+        defaults?.string(forKey: Keys.currencySymbol) ?? "$"
+    }
+
+    static var hasPledgedToday: Bool {
+        defaults?.bool(forKey: Keys.hasPledgedToday) ?? false
+    }
+
+    static var hasCheckedInToday: Bool {
+        defaults?.bool(forKey: Keys.hasCheckedInToday) ?? false
     }
 }
 ```
 
-### RecoveryWidgetEntry and Provider
+Notice the design: the main app calls `updateWidgetData()` with all five values at once. The widget reads individual properties. There is no two-way sync, no conflict resolution, no database. Just flat key-value pairs written by one process and read by another.
+
+### BetFreeEntry and Provider
+
+The timeline entry holds exactly the data the widget needs to render. The provider reads from the shared `UserDefaults` suite and builds entries. This lives in `BetFreeWidget/BetFreeWidget.swift`.
 
 ```swift
 import WidgetKit
-import SwiftData
+import SwiftUI
 
-struct DailyStatus {
-    let dayLetter: String
-    let status: Int?
-}
+// MARK: - Widget Data
 
-struct RecoveryWidgetEntry: TimelineEntry {
+struct BetFreeEntry: TimelineEntry {
     let date: Date
-    let currentStatus: Int?
-    let currentNote: String?
-    let weeklyStatuses: [DailyStatus]
+    let currentStreak: Int
+    let totalSaved: Double
+    let currencySymbol: String
+    let hasPledgedToday: Bool
+    let hasCheckedInToday: Bool
 
-    var statusIcon: String {
-        guard let status = currentStatus else { return "---" }
-        switch status {
-        case 1: return "🔴"
-        case 2: return "🟠"
-        case 3: return "🟡"
-        case 4: return "🟢"
-        case 5: return "💚"
-        default: return "🟡"
-        }
-    }
-
-    var statusLabel: String {
-        guard let status = currentStatus else { return "No check-in" }
-        switch status {
-        case 1: return "Crisis"
-        case 2: return "Struggling"
-        case 3: return "Coping"
-        case 4: return "Strong"
-        case 5: return "Thriving"
-        default: return "Unknown"
-        }
-    }
-
-    static var placeholder: RecoveryWidgetEntry {
-        RecoveryWidgetEntry(
-            date: .now,
-            currentStatus: 4,
-            currentNote: "Feeling strong in recovery today",
-            weeklyStatuses: ["M", "T", "W", "T", "F", "S", "S"].map {
-                DailyStatus(dayLetter: $0, status: Int.random(in: 2...5))
-            }
-        )
-    }
-
-    static var empty: RecoveryWidgetEntry {
-        RecoveryWidgetEntry(
-            date: .now,
-            currentStatus: nil,
-            currentNote: nil,
-            weeklyStatuses: ["M", "T", "W", "T", "F", "S", "S"].map {
-                DailyStatus(dayLetter: $0, status: nil)
-            }
+    static var placeholder: BetFreeEntry {
+        BetFreeEntry(
+            date: Date(),
+            currentStreak: 42,
+            totalSaved: 600.0,
+            currencySymbol: "$",
+            hasPledgedToday: true,
+            hasCheckedInToday: false
         )
     }
 }
-```
 
-```swift
-import WidgetKit
-import SwiftData
+// MARK: - Timeline Provider
 
-struct RecoveryWidgetProvider: TimelineProvider {
-    func placeholder(in context: Context) -> RecoveryWidgetEntry {
+struct BetFreeProvider: TimelineProvider {
+    private let appGroupID = "group.com.pekmario.betfreeapp"
+
+    func placeholder(in context: Context) -> BetFreeEntry {
         .placeholder
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (RecoveryWidgetEntry) -> Void) {
-        if context.isPreview {
-            completion(.placeholder)
-            return
-        }
-        let entry = fetchCurrentEntry()
-        completion(entry)
+    func getSnapshot(in context: Context, completion: @escaping (BetFreeEntry) -> Void) {
+        completion(currentEntry())
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<RecoveryWidgetEntry>) -> Void) {
-        let entry = fetchCurrentEntry()
-
-        let nextUpdate = Calendar.current.date(byAdding: .hour, value: 2, to: .now) ?? .now
+    func getTimeline(in context: Context, completion: @escaping (Timeline<BetFreeEntry>) -> Void) {
+        let entry = currentEntry()
+        let nextUpdate = Calendar.current.date(byAdding: .minute, value: 30, to: Date()) ?? Date()
         let timeline = Timeline(entries: [entry], policy: .after(nextUpdate))
         completion(timeline)
     }
 
-    private func fetchCurrentEntry() -> RecoveryWidgetEntry {
-        guard let container = try? SharedModelContainer.create() else {
-            return .empty
-        }
-
-        let context = ModelContext(container)
-        let calendar = Calendar.current
-        let todayStart = calendar.startOfDay(for: .now)
-
-        let todayPredicate = #Predicate<CheckIn> { checkIn in
-            checkIn.date >= todayStart
-        }
-
-        var todayDescriptor = FetchDescriptor<CheckIn>(
-            predicate: todayPredicate,
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        todayDescriptor.fetchLimit = 1
-
-        let todayCheckIn = try? context.fetch(todayDescriptor).first
-
-        let sevenDaysAgo = calendar.date(byAdding: .day, value: -6, to: todayStart) ?? todayStart
-        let weekPredicate = #Predicate<CheckIn> { checkIn in
-            checkIn.date >= sevenDaysAgo
-        }
-        let weekDescriptor = FetchDescriptor<CheckIn>(
-            predicate: weekPredicate,
-            sortBy: [SortDescriptor(\.date)]
-        )
-        let weekCheckIns = (try? context.fetch(weekDescriptor)) ?? []
-
-        let dayLetters = calendar.veryShortWeekdaySymbols
-        let weeklyStatuses: [DailyStatus] = (0..<7).map { offset in
-            let day = calendar.date(byAdding: .day, value: offset, to: sevenDaysAgo)!
-            let dayCheckIns = weekCheckIns.filter { calendar.isDate($0.date, inSameDayAs: day) }
-            let weekdayIndex = (calendar.component(.weekday, from: day) - 1) % 7
-            let avg: Int? = dayCheckIns.isEmpty ? nil :
-                dayCheckIns.reduce(0) { $0 + $1.status } / dayCheckIns.count
-            return DailyStatus(dayLetter: dayLetters[weekdayIndex], status: avg)
-        }
-
-        return RecoveryWidgetEntry(
-            date: .now,
-            currentStatus: todayCheckIn?.status,
-            currentNote: todayCheckIn?.note,
-            weeklyStatuses: weeklyStatuses
+    private func currentEntry() -> BetFreeEntry {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        return BetFreeEntry(
+            date: Date(),
+            currentStreak: defaults?.integer(forKey: "widget_currentStreak") ?? 0,
+            totalSaved: defaults?.double(forKey: "widget_totalSaved") ?? 0,
+            currencySymbol: defaults?.string(forKey: "widget_currencySymbol") ?? "$",
+            hasPledgedToday: defaults?.bool(forKey: "widget_hasPledgedToday") ?? false,
+            hasCheckedInToday: defaults?.bool(forKey: "widget_hasCheckedInToday") ?? false
         )
     }
 }
 ```
 
+Key details to notice:
+
+- **`getSnapshot` calls `currentEntry()`, not `.placeholder`.** BetAway's production code shows real user data in the widget gallery, not generic sample data. The `placeholder` is only used during the initial rendering before any data is available.
+- **30-minute refresh.** The timeline refreshes every 30 minutes via `.after(nextUpdate)`. The main app also triggers an immediate refresh via `WidgetCenter.shared.reloadAllTimelines()` when the user completes a pledge or check-in.
+- **No SwiftData.** The provider reads from `UserDefaults`, not from a database. This keeps the widget target lightweight — it does not need to import `SwiftData` or know about any model types.
+
 ### Widget Views
 
-```swift
-import SwiftUI
-import WidgetKit
+The widget renders a dark-themed view with a teal accent. Both sizes share the same entry type but have completely different layouts.
 
-struct RecoveryWidgetView: View {
+```swift
+// MARK: - Small Widget View
+
+struct BetFreeSmallWidgetView: View {
+    let entry: BetFreeEntry
+
+    private let teal = Color(red: 0, green: 0.82, blue: 0.82)
+    private let darkBg = Color(red: 13/255, green: 13/255, blue: 17/255)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.orange)
+
+                Spacer()
+
+                if entry.hasPledgedToday {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Spacer()
+
+            Text("\(entry.currentStreak)")
+                .font(.system(size: 40, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .contentTransition(.numericText())
+
+            Text("days bet-free")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+
+            Text("\(entry.currencySymbol)\(Int(entry.totalSaved)) saved")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(teal)
+        }
+        .padding(16)
+        .containerBackground(for: .widget) {
+            darkBg
+        }
+    }
+}
+
+// MARK: - Medium Widget View
+
+struct BetFreeMediumWidgetView: View {
+    let entry: BetFreeEntry
+
+    private let teal = Color(red: 0, green: 0.82, blue: 0.82)
+    private let darkBg = Color(red: 13/255, green: 13/255, blue: 17/255)
+
+    var body: some View {
+        HStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.orange)
+
+                    Text("BetAway")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                Spacer()
+
+                Text("\(entry.currentStreak)")
+                    .font(.system(size: 48, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text("days bet-free")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 12) {
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(entry.currencySymbol)\(Int(entry.totalSaved))")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundStyle(teal)
+
+                    Text("saved")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+
+                HStack(spacing: 8) {
+                    WidgetStatusDot(
+                        icon: "hand.raised.fill",
+                        isDone: entry.hasPledgedToday,
+                        label: "Pledge"
+                    )
+                    WidgetStatusDot(
+                        icon: "checkmark.circle.fill",
+                        isDone: entry.hasCheckedInToday,
+                        label: "Check-in"
+                    )
+                }
+            }
+        }
+        .padding(16)
+        .containerBackground(for: .widget) {
+            darkBg
+        }
+    }
+}
+
+// MARK: - Status Dot
+
+private struct WidgetStatusDot: View {
+    let icon: String
+    let isDone: Bool
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(isDone ? .green : .white.opacity(0.3))
+
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+    }
+}
+
+// MARK: - Entry View Router
+
+struct BetFreeWidgetEntryView: View {
     @Environment(\.widgetFamily) var family
-    let entry: RecoveryWidgetEntry
+    let entry: BetFreeEntry
 
     var body: some View {
         switch family {
         case .systemSmall:
-            SmallRecoveryWidget(entry: entry)
+            BetFreeSmallWidgetView(entry: entry)
         case .systemMedium:
-            MediumRecoveryWidget(entry: entry)
-        case .systemLarge:
-            LargeRecoveryWidget(entry: entry)
+            BetFreeMediumWidgetView(entry: entry)
         default:
-            SmallRecoveryWidget(entry: entry)
+            BetFreeSmallWidgetView(entry: entry)
         }
     }
-}
-
-// MARK: - Small Widget
-
-struct SmallRecoveryWidget: View {
-    let entry: RecoveryWidgetEntry
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Text(entry.statusIcon)
-                .font(.system(size: 48))
-
-            Text(entry.statusLabel)
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .containerBackground(for: .widget) {
-            statusGradient(for: entry.currentStatus)
-        }
-    }
-}
-
-// MARK: - Medium Widget
-
-struct MediumRecoveryWidget: View {
-    let entry: RecoveryWidgetEntry
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.statusIcon)
-                    .font(.system(size: 40))
-
-                Text(entry.statusLabel)
-                    .font(.headline)
-
-                Text("Today")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-                .padding(.horizontal, 8)
-
-            VStack(alignment: .leading) {
-                if let note = entry.currentNote, !note.isEmpty {
-                    Text(note)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
-                } else {
-                    Text("No check-in yet")
-                        .font(.subheadline)
-                        .foregroundStyle(.tertiary)
-                        .italic()
-                }
-
-                Spacer()
-            }
-
-            Spacer()
-        }
-        .padding(4)
-        .containerBackground(for: .widget) {
-            statusGradient(for: entry.currentStatus)
-        }
-    }
-}
-
-// MARK: - Large Widget
-
-struct LargeRecoveryWidget: View {
-    let entry: RecoveryWidgetEntry
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(entry.statusIcon)
-                        .font(.system(size: 40))
-
-                    Text(entry.statusLabel)
-                        .font(.headline)
-                }
-
-                Spacer()
-
-                if let note = entry.currentNote, !note.isEmpty {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 160)
-                }
-            }
-
-            Divider()
-
-            Text("Last 7 Days")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 0) {
-                ForEach(Array(entry.weeklyStatuses.enumerated()), id: \.offset) { _, dailyStatus in
-                    VStack(spacing: 6) {
-                        Circle()
-                            .fill(statusColor(for: dailyStatus.status))
-                            .frame(width: 28, height: 28)
-                            .overlay {
-                                if let status = dailyStatus.status {
-                                    Text("\(status)")
-                                        .font(.caption2)
-                                        .fontWeight(.bold)
-                                        .foregroundStyle(.white)
-                                }
-                            }
-
-                        Text(dailyStatus.dayLetter)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-
-            Spacer()
-        }
-        .padding(4)
-        .containerBackground(for: .widget) {
-            statusGradient(for: entry.currentStatus)
-        }
-    }
-}
-
-// MARK: - Shared Helpers
-
-func statusColor(for status: Int?) -> Color {
-    guard let status else { return .gray.opacity(0.3) }
-    switch status {
-    case 1: return .red
-    case 2: return .orange
-    case 3: return .yellow
-    case 4: return .mint
-    case 5: return .green
-    default: return .gray
-    }
-}
-
-func statusGradient(for status: Int?) -> some View {
-    let baseColor = statusColor(for: status)
-    return LinearGradient(
-        colors: [baseColor.opacity(0.15), baseColor.opacity(0.05)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
 }
 ```
 
-### Widget Bundle and Configuration
+Design choices to notice:
+
+- **`.containerBackground(for: .widget)`** is used for the dark background, not `.background()`. This is required for iOS 17 widgets — the old modifier does not reach the edges.
+- **`WidgetStatusDot`** shows the pledge and check-in completion status with color-coded SF Symbols: green when done, dim white when not. This gives users an at-a-glance view of their daily routine without opening the app.
+- **`.contentTransition(.numericText())`** on the streak count provides a smooth animated transition when the number changes between timeline entries.
+
+### Widget Configuration and Bundle
 
 ```swift
-import SwiftUI
 import WidgetKit
+import SwiftUI
 
-struct RecoveryWidget: Widget {
-    let kind = "RecoveryWidget"
+// MARK: - Widget Configuration
+
+struct BetFreeWidget: Widget {
+    let kind: String = "BetFreeWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: RecoveryWidgetProvider()) { entry in
-            RecoveryWidgetView(entry: entry)
+        StaticConfiguration(kind: kind, provider: BetFreeProvider()) { entry in
+            BetFreeWidgetEntryView(entry: entry)
         }
-        .configurationDisplayName("Recovery Streak")
-        .description("See your current recovery status at a glance.")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .configurationDisplayName("BetAway Streak")
+        .description("Track your bet-free streak and savings.")
+        .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
 
+// MARK: - Widget Bundle
+
 @main
-struct BetAwayWidgetBundle: WidgetBundle {
+struct BetFreeWidgetBundle: WidgetBundle {
     var body: some Widget {
-        RecoveryWidget()
+        BetFreeWidget()
     }
 }
 ```
+
+The `WidgetBundle` wrapper exists even though there is currently only one widget. It allows adding more widgets later (lock screen, live activity) without changing the `@main` entry point.
 
 ### Triggering Widget Refresh from the Main App
 
-Add this call wherever you save a new check-in in the main app:
+The key integration point is in `DashboardView.swift`. When the dashboard appears, it writes the current `UserProfile` data to the shared `UserDefaults` suite:
 
 ```swift
-import WidgetKit
+import SwiftUI
+import SwiftData
 
-// Call after saving a CheckIn in the main app
-func notifyWidgetOfUpdate() {
-    WidgetCenter.shared.reloadAllTimelines()
+struct DashboardView: View {
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            // ... dashboard content ...
+        }
+        .onAppear {
+            updateWidgetData()
+        }
+    }
+
+    private func updateWidgetData() {
+        guard let profile else { return }
+        SharedDataManager.updateWidgetData(
+            currentStreak: profile.currentStreak,
+            totalSaved: profile.totalSaved,
+            quitDate: profile.quitDate,
+            hasPledgedToday: profile.hasPledgedToday(),
+            hasCheckedInToday: profile.hasCheckedInToday()
+        )
+    }
 }
 ```
+
+This is the bridge. The `UserProfile` model computes `currentStreak` from the quit date and relapse history, `totalSaved` from weeks since quit times average weekly spend, and `hasPledgedToday()`/`hasCheckedInToday()` from the user's `DailyCheckin` records. `SharedDataManager.updateWidgetData()` flattens all of this into five `UserDefaults` entries that the widget can read without importing any SwiftData models.
+
+### Widget Extension Entitlements
+
+The widget extension needs its own entitlements file (`BetFreeWidgetExtension.entitlements`) with the same App Group:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.pekmario.betfreeapp</string>
+    </array>
+</dict>
+</plist>
+```
+
+Both the main app target and the widget extension target must have this same App Group identifier. Without it, `UserDefaults(suiteName: "group.com.pekmario.betfreeapp")` returns `nil` in the widget, and every value reads as zero.
 
 ## Checkpoint
 
 Verify each of these before moving on:
 
-- [ ] The App Group identifier (`group.com.betaway.shared`) is enabled in both the main app target's entitlements and the widget extension target's entitlements
-- [ ] `SharedModelContainer` uses the App Group container URL — not the default storage location
-- [ ] The `CheckIn.swift` model file has target membership in both the main app and the widget extension
-- [ ] `getSnapshot()` returns sample data when `context.isPreview` is true, so the widget gallery looks good
-- [ ] `getTimeline()` fetches real data and sets a `.after(nextUpdate)` policy for 2-hour refresh
-- [ ] The main app calls `WidgetCenter.shared.reloadAllTimelines()` after saving a new check-in
-- [ ] All three widget sizes render correctly — small shows status icon, medium shows status icon + note, large shows status icon + weekly dots
-- [ ] Widget views use `.containerBackground(for: .widget)` for backgrounds, not the `.background()` modifier
-- [ ] The widget handles the "no data" case gracefully — showing "No check-in" text, not a blank or crashed widget
+- [ ] The App Group identifier (`group.com.pekmario.betfreeapp`) is enabled in both the main app target's entitlements and the widget extension target's entitlements
+- [ ] `SharedDataManager` writes to `UserDefaults(suiteName: "group.com.pekmario.betfreeapp")`, not `UserDefaults.standard`
+- [ ] `DashboardView.updateWidgetData()` is called in `.onAppear`, pulling data from the `UserProfile` model
+- [ ] `BetFreeProvider.currentEntry()` reads from the same `UserDefaults` suite with matching keys
+- [ ] `getTimeline()` sets a `.after(nextUpdate)` policy for 30-minute refresh
+- [ ] Both widget sizes render correctly — small shows streak + savings + pledge status, medium adds the app name and status dots
+- [ ] Widget views use `.containerBackground(for: .widget)` for the dark background, not the `.background()` modifier
+- [ ] The widget handles the "no data" case gracefully — showing 0 days and $0 saved, not a blank or crashed widget
+- [ ] The `WidgetBundle` wraps the widget configuration for future extensibility
 
 ## Challenge
 
 **Add a lock screen widget.**
 
-iOS 17 supports lock screen widgets using the `.accessoryCircular`, `.accessoryRectangular`, and `.accessoryInline` widget families. Add support for `.accessoryCircular` that shows today's recovery status icon inside a `Gauge` ring (where the gauge value represents the status on a 1-5 scale), and `.accessoryInline` that shows the icon followed by the status label as text.
+iOS 17 supports lock screen widgets using the `.accessoryCircular`, `.accessoryRectangular`, and `.accessoryInline` widget families. Add support for `.accessoryCircular` that shows today's bet-free streak count inside a `Gauge` ring (where the gauge value represents progress toward the next milestone), and `.accessoryInline` that shows the flame icon followed by the streak count and "days bet-free" as text.
 
-**Hint:** Lock screen widgets use a restricted color space — they render in a tinted monochrome style. Your status colors will not be visible. Instead, focus on layout: use `Gauge(value: Double(status), in: 1...5) { } currentValueLabel: { Text(icon) }` with `.gaugeStyle(.accessoryCircularCapacity)` for the circular widget. Add the new families to `supportedFamilies` and handle them in your `@ViewBuilder` switch. Test in the simulator by adding the widget to the lock screen — long press the lock screen, tap "Customize," and look for your widget.
+**Hint:** Lock screen widgets use a restricted color space — they render in a tinted monochrome style. BetAway's teal and orange colors will not be visible. Instead, focus on layout: use `Gauge(value: progress, in: 0...1) { } currentValueLabel: { Text("\(entry.currentStreak)") }` with `.gaugeStyle(.accessoryCircularCapacity)` for the circular widget. Calculate `progress` as the ratio between the current streak and the next `Milestone.days` value. Add the new families to `supportedFamilies` and handle them in your `@ViewBuilder` switch. Test in the simulator by adding the widget to the lock screen — long press the lock screen, tap "Customize," and look for your widget.

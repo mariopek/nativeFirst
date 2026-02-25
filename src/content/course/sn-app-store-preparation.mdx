@@ -1,6 +1,6 @@
 ---
 title: "App Store Preparation"
-description: "Prepare BetAway for the App Store — set up App Store Connect, generate marketing screenshots with AI, write a compelling description, create a privacy policy, and pass the review guidelines checklist."
+description: "Prepare BetAway for the App Store — configure AppConfig with real bundle identifiers and tip product IDs, set up App Store Connect, generate marketing screenshots, write a compelling description, create a privacy policy, and pass the review guidelines checklist."
 courseSlug: "ship-native"
 module: 8
 moduleTitle: "Ship It"
@@ -15,13 +15,14 @@ pubDate: 2026-02-22
 
 You have built a working app. It compiles, it tests, it handles errors gracefully. Now comes the part that trips up more indie developers than any Swift compiler error: getting through App Review. This lesson is not about code — it is about everything around the code that determines whether your app actually reaches users.
 
-We will set up App Store Connect, write an app description that sells, generate screenshot assets, create the privacy policy that Apple requires when your app calls an external API, and walk through the Review Guidelines checklist so your first submission does not bounce.
+We will set up App Store Connect, write an app description that sells, generate screenshot assets, create the privacy policy that Apple requires, and walk through the Review Guidelines checklist so your first submission does not bounce. Along the way, we will look at how BetAway's `AppConfig` centralizes the identity, legal disclaimers, and tip product IDs that the App Store submission depends on.
 
 ## What You'll Learn
 
 - How to configure App Store Connect for a new app, including bundle ID registration, app icon requirements, and category selection
+- How BetAway's `AppConfig` centralizes app identity (`appName`, `appVersion`), legal text (`medicalDisclaimer`, `missionStatement`), and tip jar product IDs (`TipProducts.smallCoffee`, `TipProducts.largeCoffee`)
 - How to use AI to write a compelling App Store description, subtitle, and keyword set that maximizes discoverability
-- The privacy policy and data disclosure requirements for apps that send data to external APIs (OpenAI, in our case)
+- The privacy policy and data disclosure requirements for apps that store sensitive health-related data locally with SwiftData
 - A pre-submission checklist derived from the App Store Review Guidelines that catches the most common rejection reasons
 
 ## Why This Matters
@@ -35,18 +36,30 @@ Before touching App Store Connect, we need a plan for everything the submission 
 ```
 I am preparing to submit an iOS app called "BetAway" to the App Store.
 The app is a free gambling recovery app for iOS that:
-- Lets users log daily recovery check-ins with streak tracking
-- Provides CBT-based therapy exercises and crisis intervention
-- Includes guided breathing and financial recovery planning
-- Uses on-device ML for recovery insights (offline-first, private)
-- Stores data locally with SwiftData and optionally syncs via iCloud
+- Lets users log daily recovery check-ins (DailyCheckin model) with
+  morning pledges and evening check-ins, tracking MoodRating (1-5 scale:
+  veryBad, bad, neutral, good, veryGood) and gambling-free status
+- Tracks urges with an UrgeLog model that records intensity (1-10),
+  PredefinedTriggers (liveSports, bettingPromo, stressed, bored, payday,
+  etc.), and CopingStrategies (breathingExercise, groundingExercise,
+  calledSomeone, physicalActivity, journaled, distraction)
+- Includes a JournalEntry model for free-form recovery journaling
+  with mood tracking and prompt-based writing
+- Provides CBT-based therapy exercises and crisis intervention with
+  emergency contacts and gambling helplines (US: 1-800-522-4700,
+  UK: 0808-8020-133, plus localized helplines for 12 languages)
+- Includes guided breathing exercises and a 15-minute urge surfing timer
+- Stores all data locally with SwiftData (UserProfile with cascade
+  relationships to DailyCheckin, UrgeLog, JournalEntry)
+- Supports a free tip jar via StoreKit (com.pekmario.BetFree.tip.small,
+  com.pekmario.BetFree.tip.large) — no paywalls, no ads
 - Targets iOS 17+, Swift 6
 
 Help me plan the full App Store submission. Think through:
 1. What do I need to set up in App Store Connect?
 2. What metadata do I need (description, subtitle, keywords)?
 3. What screenshot sizes and devices are required?
-4. What privacy disclosures are needed given the OpenAI API usage?
+4. What privacy disclosures are needed?
 5. What App Review Guidelines sections should I review carefully?
 6. What do I need for a privacy policy URL?
 7. What are the app icon specifications?
@@ -58,15 +71,15 @@ Do not generate any content yet. Give me the plan with a checklist.
 
 A solid plan from this prompt will cover:
 
-1. **App Store Connect setup** — registering a Bundle ID in the Apple Developer portal, creating a new app record, selecting the correct primary and secondary categories (Health & Fitness or Lifestyle).
+1. **App Store Connect setup** — registering a Bundle ID (the real one is `com.pekmario.BetFree`) in the Apple Developer portal, creating a new app record, selecting the correct primary and secondary categories (Health & Fitness or Lifestyle).
 2. **Metadata requirements** — app name (30 chars max), subtitle (30 chars max), description (4000 chars max), keywords (100 chars max, comma-separated), What's New text, support URL, marketing URL.
 3. **Screenshot specifications** — required sizes for 6.7" (iPhone 15 Pro Max), 6.5" (iPhone 11 Pro Max), and optionally 5.5" (iPhone 8 Plus). iPad screenshots if you support iPad. At minimum 3 screenshots, maximum 10 per size class.
-4. **Privacy disclosures** — App Privacy section must declare: data collected (recovery check-ins as Health & Fitness data), data shared with third parties (text sent to OpenAI for processing), data used for tracking (none, in our case).
-5. **Review Guidelines flags** — Section 5.1 (Privacy), Section 1.1 (Objectionable Content — AI-generated responses need guardrails), Section 2.3 (Accurate Metadata), Section 5.1.2 (Data Use and Sharing), Section 1.4.1 (health/medical — BetAway discusses addiction recovery, which is a sensitive health topic).
-6. **Privacy policy** — a hosted URL (GitHub Pages is fine) that discloses what data you collect, how the OpenAI API processes it, and user deletion rights.
+4. **Privacy disclosures** — App Privacy section must declare: data collected (recovery check-ins, journal entries, and urge logs as Health & Fitness data), data storage (local only via SwiftData, no cloud sync in V1), data used for tracking (none). Since BetAway stores all data on-device and the tip jar uses StoreKit (Apple-managed transactions), the privacy story is clean.
+5. **Review Guidelines flags** — Section 5.1 (Privacy), Section 1.1 (Objectionable Content), Section 2.3 (Accurate Metadata), Section 5.1.2 (Data Use and Sharing), Section 1.4.1 (health/medical — BetAway discusses addiction recovery, which is a sensitive health topic). The `medicalDisclaimer` in `AppConfig` is critical here.
+6. **Privacy policy** — a hosted URL (GitHub Pages is fine) that discloses what data you collect, how it is stored on-device, and user deletion rights.
 7. **App icon** — single 1024x1024 PNG, no alpha channel, no rounded corners (the system applies them).
 
-If the plan is missing privacy disclosures for the OpenAI API, push back. That is the number one reason AI-powered apps get rejected.
+If the plan is missing the health/medical content flag for gambling addiction recovery, push back. That is one of the top reasons recovery-related apps get rejected.
 
 ### Anti-Pattern: Submitting Blind
 
@@ -76,7 +89,7 @@ Here is what NOT to do:
 Help me submit my app to the App Store
 ```
 
-This prompt produces generic advice that misses everything specific to your app. It will not flag the OpenAI data disclosure. It will not mention the health-related content considerations. It will not tell you that "recovery tracking" as a keyword is more competitive than "recovery app." Without specifics, the AI gives you a checklist that applies to any app — and catches none of the things that will get *your* app rejected.
+This prompt produces generic advice that misses everything specific to your app. It will not flag the medical disclaimer requirement. It will not mention the gambling addiction sensitivity under Section 1.4.1. It will not tell you that "recovery tracking" as a keyword is more competitive than "recovery app." Without specifics, the AI gives you a checklist that applies to any app — and catches none of the things that will get *your* app rejected.
 
 ## Execute Phase: Implementation
 
@@ -88,21 +101,97 @@ Before generating content, handle the portal configuration. Here is the executio
 Generate a step-by-step walkthrough for setting up BetAway in
 App Store Connect. Include:
 
-1. Bundle ID registration (com.yourname.betaway)
-2. Creating the app record
+1. Bundle ID registration (com.pekmario.BetFree)
+2. Creating the app record with display name "BetAway"
 3. Selecting categories (primary: Health & Fitness)
-4. Setting up pricing (free with no in-app purchases for v1.0)
+4. Setting up pricing (free with tip jar in-app purchases:
+   com.pekmario.BetFree.tip.small and
+   com.pekmario.BetFree.tip.large — consumable tips, not
+   subscriptions or paywalls)
 5. Age rating questionnaire answers for an app that:
    - Has no violence or mature content
    - Discusses gambling addiction (health/medical topic) but does NOT
      contain gambling content itself — it is a recovery tool
-   - Does include "unrestricted web access" (API calls to OpenAI)
-   - Includes user-generated content (recovery journal entries)
+   - Includes user-generated content (journal entries, check-in notes)
    - References health/medical topics (addiction recovery, CBT therapy)
+   - Does NOT include "unrestricted web access" (all data is local)
 
 Be specific about each field. I want to fill in the form without
 guessing.
 ```
+
+### BetAway's AppConfig — The Source of Truth
+
+Before writing marketing copy, let me show you how `AppConfig` centralizes the identity and legal text that feeds into the App Store submission. This is from the real production code in `BetFree/Core/Config/AppConfig.swift`:
+
+```swift
+import Foundation
+
+enum AppConfig {
+    // MARK: - App Identity
+    static let appName = "BetAway"
+    static var appTagline: String {
+        LanguageManager.shared.localized("Your path to freedom")
+    }
+    static let appVersion = Bundle.main.infoDictionary?[
+        "CFBundleShortVersionString"
+    ] as? String ?? "1.0"
+    static let buildNumber = Bundle.main.infoDictionary?[
+        "CFBundleVersion"
+    ] as? String ?? "1"
+
+    // MARK: - Feature Flags
+    static let enableBiometricLock = true
+    static let enableNotifications = true
+    static let enableTipJar = true
+    static let enableHapticFeedback = true
+
+    // MARK: - Support
+    static let feedbackEmail = "info@nativefirstapp.com"
+
+    // MARK: - Helplines
+    static let helplineUS = "1-800-522-4700"
+    static let helplineText = "800GAM"
+    static let helplineUK = "0808-8020-133"
+
+    // MARK: - Mission
+    static var missionStatement: String {
+        LanguageManager.shared.localized(
+            "%@ is built with one mission — to help anyone struggling "
+            + "with gambling take back control of their life. This app "
+            + "is completely free, with no hidden costs, no paywalls, "
+            + "and no ads. If even one person breaks free from gambling "
+            + "because of %@, we consider that mission accomplished.",
+            appName, appName
+        )
+    }
+
+    // MARK: - Legal
+    static var medicalDisclaimer: String {
+        LanguageManager.shared.localized(
+            "%@ is a self-help tool and is not a substitute for "
+            + "professional treatment. If you are experiencing a "
+            + "gambling crisis, please contact the National Problem "
+            + "Gambling Helpline at %@ or text %@.",
+            appName, helplineUS, helplineText
+        )
+    }
+
+    // MARK: - Tip Products
+    enum TipProducts {
+        static let smallCoffee = "com.pekmario.BetFree.tip.small"
+        static let largeCoffee = "com.pekmario.BetFree.tip.large"
+    }
+}
+```
+
+This matters for the App Store submission because:
+
+- **`appName`** ("BetAway") is the display name you enter in App Store Connect. The bundle ID (`com.pekmario.BetFree`) is different from the display name — this is normal and correct.
+- **`medicalDisclaimer`** must appear somewhere visible in the app (settings or first-launch). App Review checks that health-related apps do not make unsupported medical claims. This disclaimer explicitly states BetAway is a self-help tool, not a substitute for professional treatment.
+- **`missionStatement`** emphasizes "completely free, with no hidden costs, no paywalls, and no ads." This language should echo in your App Store description — it builds trust and differentiates you from predatory "free trial" apps.
+- **`TipProducts`** defines the two StoreKit product IDs. You must register these exact strings in App Store Connect under In-App Purchases before submitting.
+- **`feedbackEmail`** (`info@nativefirstapp.com`) is the support email you enter in App Store Connect.
 
 ### Step 2: AI-Generated App Description
 
@@ -110,16 +199,25 @@ Now ask the AI to write your marketing copy:
 
 ```
 Write the App Store metadata for BetAway, a free gambling recovery app
-for iOS.
+for iOS. Use the real app identity:
+- App name: "BetAway" (display name)
+- Bundle ID: com.pekmario.BetFree
+- Tagline: "Your path to freedom"
+- Mission: completely free, no paywalls, no ads
+- Support email: info@nativefirstapp.com
+- Medical disclaimer: self-help tool, not a substitute for professional
+  treatment, references National Problem Gambling Helpline 1-800-522-4700
 
 Generate:
 1. App name (max 30 characters): "BetAway"
-2. Subtitle (max 30 characters): something that communicates AI +
-   recovery tracking concisely
+2. Subtitle (max 30 characters): something that communicates
+   gambling recovery + daily tracking concisely
 3. Full description (max 4000 characters): use the problem-agitate-
    solve framework. Open with the user's pain point, explain why
    existing solutions fail, and position BetAway as the answer.
-   Include 3-4 feature bullets. End with a call to action.
+   Include features: morning pledges, evening check-ins, urge surfing
+   timer, journal, breathing exercises, emergency contacts, streak
+   tracking, savings calculator. End with the medical disclaimer.
 4. Keywords (max 100 characters, comma-separated): prioritize
    lower-competition long-tail keywords over generic terms
 5. What's New text for v1.0: keep it simple and welcoming
@@ -132,42 +230,154 @@ Do not use ALL CAPS, excessive exclamation marks, or buzzwords like
 
 **Subtitle:**
 
-- ✅ Under 30 characters, communicates core value (e.g., "Free Gambling Recovery")
-- ⚠️ If it repeats the app name — trim it. Apple penalizes keyword stuffing
-- ❌ If it uses "Best" or "No. 1" — reject. Apple rejects superlatives you cannot prove
+- Under 30 characters, communicates core value (e.g., "Your Path to Freedom" matches `AppConfig.appTagline`)
+- If it repeats the app name — trim it. Apple penalizes keyword stuffing
+- If it uses "Best" or "No. 1" — reject. Apple rejects superlatives you cannot prove
 
 **Description:**
 
-- ✅ Opens with a relatable pain point, not a feature list
-- ✅ Uses short paragraphs and line breaks (walls of text get skimmed)
-- ✅ Mentions privacy and data handling (builds trust)
-- ⚠️ If it exceeds 4000 characters — trim. App Store Connect will reject it silently
-- ❌ If it mentions competitor apps by name — reject. Violates guidelines
-- ❌ If it makes health claims ("cures addiction," "treats depression") — reject immediately. Section 1.4.1 of the Review Guidelines prohibits medical claims without regulatory clearance. BetAway is a recovery *tool*, not a treatment
+- Opens with a relatable pain point, not a feature list
+- Uses short paragraphs and line breaks (walls of text get skimmed)
+- Mentions that all data stays on-device (builds trust for a recovery app)
+- Includes the `medicalDisclaimer` text near the bottom — this is required for App Review
+- If it exceeds 4000 characters — trim. App Store Connect will reject it silently
+- If it mentions competitor apps by name — reject. Violates guidelines
+- If it makes health claims ("cures addiction," "treats gambling disorder") — reject immediately. Section 1.4.1 of the Review Guidelines prohibits medical claims without regulatory clearance. BetAway is a recovery *tool*, not a treatment
 
 **Keywords:**
 
-- ✅ Comma-separated, no spaces after commas (Apple counts spaces against the limit)
-- ✅ Includes long-tail terms like "gambling-recovery,ai-diary,daily-recovery" instead of just "recoveryStatus"
-- ❌ If it includes the app name or category name — remove. Apple already indexes those
+- Comma-separated, no spaces after commas (Apple counts spaces against the limit)
+- Includes long-tail terms like "gambling-recovery,urge-tracker,bet-free,daily-pledge" instead of just "recovery"
+- If it includes the app name or category name — remove. Apple already indexes those
 
-### Step 3: Privacy Policy
+### Step 3: Registering Tip Jar Products
+
+Before submitting, you need to register the two tip products in App Store Connect. These match the IDs in `AppConfig.TipProducts`:
+
+```
+In-App Purchase Type:  Consumable
+Reference Name:        Small Coffee Tip
+Product ID:            com.pekmario.BetFree.tip.small
+Price:                 $0.99 (Tier 1)
+Display Name:          Small Coffee
+Description:           Buy the developer a small coffee to support
+                       BetAway's mission of free gambling recovery tools.
+```
+
+```
+In-App Purchase Type:  Consumable
+Reference Name:        Large Coffee Tip
+Product ID:            com.pekmario.BetFree.tip.large
+Price:                 $4.99 (Tier 5)
+Display Name:          Large Coffee
+Description:           Buy the developer a large coffee to support
+                       BetAway's mission of free gambling recovery tools.
+```
+
+The `TipJarManager` in the production code loads these products using StoreKit:
+
+```swift
+import StoreKit
+
+@Observable
+final class TipJarManager {
+    var products: [Product] = []
+    var purchaseState: PurchaseState = .idle
+    var errorMessage: String?
+
+    enum PurchaseState {
+        case idle
+        case purchasing
+        case success
+        case failed
+    }
+
+    static let productIDs: Set<String> = [
+        AppConfig.TipProducts.smallCoffee,
+        AppConfig.TipProducts.largeCoffee,
+    ]
+
+    func loadProducts() async {
+        do {
+            products = try await Product.products(for: Self.productIDs)
+                .sorted { $0.price < $1.price }
+        } catch {
+            await MainActor.run {
+                errorMessage = "Could not load products."
+            }
+        }
+    }
+
+    func purchase(_ product: Product) async {
+        await MainActor.run { purchaseState = .purchasing }
+
+        do {
+            let result = try await product.purchase()
+            switch result {
+            case .success(let verification):
+                let transaction = try checkVerified(verification)
+                await transaction.finish()
+                await MainActor.run { purchaseState = .success }
+            case .userCancelled:
+                await MainActor.run { purchaseState = .idle }
+            case .pending:
+                await MainActor.run { purchaseState = .idle }
+            @unknown default:
+                await MainActor.run { purchaseState = .idle }
+            }
+        } catch {
+            await MainActor.run {
+                purchaseState = .failed
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func checkVerified<T>(
+        _ result: VerificationResult<T>
+    ) throws -> T {
+        switch result {
+        case .unverified:
+            throw StoreError.failedVerification
+        case .verified(let safe):
+            return safe
+        }
+    }
+
+    enum StoreError: Error {
+        case failedVerification
+    }
+}
+```
+
+Key points for App Review:
+
+- These are **consumable** tips, not subscriptions. No auto-renewal disclosures needed.
+- The app is fully functional without any purchase. App Review will verify this.
+- The tip jar must be clearly labeled as optional support, not a gate for features.
+
+### Step 4: Privacy Policy
 
 ```
 Generate a privacy policy for BetAway that covers:
 
-1. What data is collected: recovery check-ins (text, recovery status rating, date)
-2. How data is stored: locally on device via SwiftData, optionally
-   synced via iCloud (user-controlled)
-3. Third-party data processing: check-in text is sent to OpenAI's
-   API for insight generation. Include OpenAI's data usage policy
-   reference.
-4. Data retention: entries stay on device until user deletes them.
-   OpenAI API data is not stored by us (reference OpenAI's zero
-   data retention API policy)
-5. User rights: users can delete all data from within the app
-6. Contact information: placeholder email
-7. Effective date: today's date
+1. What data is collected: daily check-ins (DailyCheckin with mood
+   rating 1-5, gambling-free status, triggers, risk level), urge logs
+   (UrgeLog with intensity, trigger, coping strategy, resistance
+   outcome), journal entries (JournalEntry with title, content, mood),
+   and a user profile (UserProfile with quit date, gambling types,
+   weekly spend)
+2. How data is stored: locally on device via SwiftData with cascade
+   delete relationships. No cloud sync, no external servers.
+3. Third-party data processing: NONE. All data stays on-device. No
+   analytics, no crash reporting, no external APIs.
+4. In-app purchases: tip jar only, processed entirely through Apple's
+   StoreKit. We never see payment details.
+5. Data retention: entries stay on device until user deletes them.
+   Deleting the app removes all data.
+6. User rights: users can delete all data from within the app
+7. Contact: info@nativefirstapp.com
+8. Effective date: today's date
 
 Format as a clean HTML page I can host on GitHub Pages.
 ```
@@ -185,10 +395,16 @@ Review the App Store materials and tighten them up:
    in under 10 words (that's all users see before "more")
 3. Verify keywords total under 100 characters including commas
 4. Add a "Data Linked to You" and "Data Not Linked to You" breakdown
-   matching App Store Connect's privacy labels format
+   matching App Store Connect's privacy labels format:
+   - Data Not Collected: we collect no analytics, no identifiers
+   - Data Linked to You: Health & Fitness (check-ins, urge logs,
+     journal entries) — stored on-device only
+   - Data Not Linked to You: Purchases (tip jar via StoreKit)
 5. Confirm the privacy policy covers GDPR basics (right to deletion,
    data portability) even if we primarily target the US — Apple
    reviewers check this globally
+6. Verify the medical disclaimer appears in both the app (AppConfig
+   .medicalDisclaimer) and the App Store description
 ```
 
 ## Verify Phase
@@ -200,25 +416,68 @@ Before you hit "Submit for Review," walk through every item:
 2. Screenshots uploaded for all required device sizes (minimum: 6.7" and 6.5")
 3. Description, subtitle, and keywords are filled and within character limits
 4. Privacy policy URL is live and accessible (test it in an incognito browser)
-5. App Privacy section completed — "Data Used to Track You: None," "Data Linked to You: Health & Fitness (Recovery check-ins)," "Data Shared with Third Parties: OpenAI for processing"
-6. Age rating completed — marked "Unrestricted Web Access: Yes" and "Medical/Treatment Information: Yes" (the app discusses gambling addiction recovery as a health topic, though it does not contain gambling content itself)
-7. Contact information and support URL are valid
+5. App Privacy section completed — "Data Used to Track You: None," "Data Linked to You: Health & Fitness (recovery check-ins, urge logs, journal entries)," "Data Not Collected" for analytics and identifiers
+6. Age rating completed — marked "Medical/Treatment Information: Yes" (the app discusses gambling addiction recovery as a health topic, though it does not contain gambling content itself)
+7. Contact information (`info@nativefirstapp.com`) and support URL are valid
 8. Build uploaded via Xcode or Transporter
+9. In-App Purchases registered: `com.pekmario.BetFree.tip.small` and `com.pekmario.BetFree.tip.large` are approved and "Ready for Sale"
 
 **On device:**
 1. App tested on at least one physical device, not just the Simulator
 2. Every feature shown in screenshots actually works in the build you uploaded
 3. No placeholder text ("Lorem ipsum," "TODO," "Test") visible anywhere in the app
 4. App does not crash on first launch, low memory, or interrupted network
+5. The medical disclaimer from `AppConfig.medicalDisclaimer` is visible in settings or on first launch
 
 **Privacy compliance:**
-1. The app discloses the OpenAI API connection at first launch or in settings
-2. Users can delete all their data from within the app
+1. No data leaves the device — verify with Charles Proxy or Network Link Conditioner
+2. Users can delete all their data from within the app (the `DataExportManager` handles this)
 3. No data is collected before the user takes an action (no background tracking on launch)
+4. StoreKit tip jar works correctly in sandbox testing
 
 ## Final Code
 
-This lesson's deliverables are configuration and content, not Swift code. Here are the key files you should have ready.
+This lesson's deliverables are configuration and content, not new Swift code. Here are the key files and artifacts you should have ready.
+
+### AppConfig — Verify Against Production
+
+Make sure your `AppConfig.swift` matches these critical values. The real file lives at `BetFree/Core/Config/AppConfig.swift`:
+
+```swift
+enum AppConfig {
+    // App Store uses this as the display name
+    static let appName = "BetAway"
+
+    // Bundle ID registered in Apple Developer portal
+    // (set in Xcode target, not in this file)
+    // com.pekmario.BetFree
+
+    // Version shown in App Store Connect
+    static let appVersion = Bundle.main.infoDictionary?[
+        "CFBundleShortVersionString"
+    ] as? String ?? "1.0"
+
+    // Support email for App Store Connect
+    static let feedbackEmail = "info@nativefirstapp.com"
+
+    // Must appear in-app for App Review compliance
+    static var medicalDisclaimer: String {
+        LanguageManager.shared.localized(
+            "%@ is a self-help tool and is not a substitute for "
+            + "professional treatment. If you are experiencing a "
+            + "gambling crisis, please contact the National Problem "
+            + "Gambling Helpline at %@ or text %@.",
+            appName, helplineUS, helplineText
+        )
+    }
+
+    // Register these in App Store Connect > In-App Purchases
+    enum TipProducts {
+        static let smallCoffee = "com.pekmario.BetFree.tip.small"
+        static let largeCoffee = "com.pekmario.BetFree.tip.large"
+    }
+}
+```
 
 ### Privacy Policy (HTML for GitHub Pages)
 
@@ -248,29 +507,37 @@ This lesson's deliverables are configuration and content, not Swift code. Here a
 
     <h2>What Data We Collect</h2>
     <p>
-        BetAway collects only the data you create: recovery check-ins consisting of
-        a recovery status rating (1–5), optional text notes, and the date and time of
-        the entry. We do not collect analytics, device identifiers, or
-        location data.
+        BetAway collects only the data you create within the app:
+    </p>
+    <ul>
+        <li><strong>Daily check-ins</strong> — mood rating (1–5 scale),
+        gambling-free status, optional notes, triggers, and risk level</li>
+        <li><strong>Urge logs</strong> — intensity (1–10), trigger category,
+        coping strategy used, resistance outcome, and duration</li>
+        <li><strong>Journal entries</strong> — title, content, mood rating,
+        and optional writing prompt</li>
+        <li><strong>User profile</strong> — display name, quit date, gambling
+        types, and average weekly spend (for savings calculation)</li>
+    </ul>
+    <p>
+        We do not collect analytics, device identifiers, location data,
+        or any information beyond what you explicitly enter.
     </p>
 
     <h2>How Data Is Stored</h2>
     <p>
-        All recovery check-ins are stored locally on your device using Apple's
-        SwiftData framework. If you enable iCloud sync, entries are also
-        stored in your private iCloud container, which only you can access.
-        We do not operate any servers that store your data.
+        All data is stored locally on your device using Apple's SwiftData
+        framework. BetAway does not operate any servers. Your data never
+        leaves your device. There is no cloud sync, no external database,
+        and no third-party analytics.
     </p>
 
     <h2>Third-Party Data Processing</h2>
     <p>
-        When you use the "AI Insights" feature, the text of your check-in
-        is sent to OpenAI's API for processing. OpenAI processes this data
-        to generate personalized insights. We use OpenAI's zero data
-        retention API endpoint, meaning your data is not stored by OpenAI
-        after processing. For details, see
-        <a href="https://openai.com/policies/api-data-usage-policies">
-        OpenAI's API Data Usage Policies</a>.
+        BetAway does not send any data to third parties. All features
+        operate entirely on-device. The optional tip jar is processed
+        through Apple's StoreKit framework — we never see your payment
+        information.
     </p>
 
     <h2>Data We Do Not Collect</h2>
@@ -279,15 +546,25 @@ This lesson's deliverables are configuration and content, not Swift code. Here a
         <li>Location data</li>
         <li>Usage analytics or behavioral tracking</li>
         <li>Contacts, photos, or other personal files</li>
+        <li>Crash reports or diagnostics</li>
     </ul>
+
+    <h2>In-App Purchases</h2>
+    <p>
+        BetAway offers an optional tip jar with two products
+        (com.pekmario.BetFree.tip.small and com.pekmario.BetFree.tip.large).
+        These are consumable purchases processed entirely through Apple.
+        All app features are available without any purchase.
+    </p>
 
     <h2>Your Rights</h2>
     <p>
-        You can delete any or all recovery check-ins from within the app at any
-        time. Deleting an entry removes it from your device and, if iCloud
-        sync is enabled, from your iCloud container. You may also delete
-        the app entirely, which removes all local data. To request a copy
-        of your data or ask questions, contact us at the email below.
+        You can delete any or all data from within the app at any time.
+        Deleting the app removes all local data permanently. You have
+        the right to request information about your data or request
+        deletion by contacting us at the email below. Under GDPR and
+        similar regulations, you have the right to data portability
+        and the right to be forgotten.
     </p>
 
     <h2>Children's Privacy</h2>
@@ -305,7 +582,7 @@ This lesson's deliverables are configuration and content, not Swift code. Here a
     <h2>Contact</h2>
     <p>
         For questions about this privacy policy, email
-        <a href="mailto:privacy@yourdomain.com">privacy@yourdomain.com</a>.
+        <a href="mailto:info@nativefirstapp.com">info@nativefirstapp.com</a>.
     </p>
 </body>
 </html>
@@ -317,11 +594,11 @@ Before uploading your build, confirm these settings in Xcode under your target's
 
 ```
 Display Name:            BetAway
-Bundle Identifier:       com.yourname.betaway
-Version:                 1.0.0
+Bundle Identifier:       com.pekmario.BetFree
+Version:                 1.0
 Build:                   1
 Deployment Target:       iOS 17.0
-Supported Destinations:  iPhone (add iPad if applicable)
+Supported Destinations:  iPhone
 App Category:            Health & Fitness
 App Icon:                AppIcon (1024x1024, no alpha)
 ```
@@ -330,12 +607,12 @@ App Icon:                AppIcon (1024x1024, no alpha)
 
 ```
 Format:           PNG
-Size:             1024 × 1024 pixels
+Size:             1024 x 1024 pixels
 Alpha channel:    No (must be opaque)
 Rounded corners:  No (system applies the mask)
 Layers/effects:   No transparency, no overlays by system
 Color space:      sRGB or Display P3
-File location:    Assets.xcassets → AppIcon
+File location:    Assets.xcassets > AppIcon
 ```
 
 ### Screenshot Generation Script (Optional)
@@ -354,36 +631,70 @@ final class ScreenshotTests: XCTestCase {
     }
 
     /// Captures screenshots for App Store submission.
+    /// Covers: dashboard with streak, morning pledge, urge timer,
+    /// journal, and settings with tip jar.
     @MainActor
     func testCaptureAppStoreScreenshots() throws {
-        // Screenshot 1: Home screen with recovery check-ins
-        let homeAttachment = XCTAttachment(screenshot: app.screenshot())
-        homeAttachment.name = "01-HomeScreen"
-        homeAttachment.lifetime = .keepAlways
-        add(homeAttachment)
+        // Screenshot 1: Dashboard with streak and savings cards
+        let dashboardAttachment = XCTAttachment(
+            screenshot: app.screenshot()
+        )
+        dashboardAttachment.name = "01-Dashboard"
+        dashboardAttachment.lifetime = .keepAlways
+        add(dashboardAttachment)
 
-        // Screenshot 2: New check-in
-        let newEntryButton = app.buttons["New Entry"]
-        if newEntryButton.waitForExistence(timeout: 3) {
-            newEntryButton.tap()
+        // Screenshot 2: Morning Pledge flow
+        let pledgeButton = app.buttons["Morning Pledge"]
+        if pledgeButton.waitForExistence(timeout: 3) {
+            pledgeButton.tap()
             sleep(1)
-            let entryAttachment = XCTAttachment(screenshot: app.screenshot())
-            entryAttachment.name = "02-NewEntry"
-            entryAttachment.lifetime = .keepAlways
-            add(entryAttachment)
+            let pledgeAttachment = XCTAttachment(
+                screenshot: app.screenshot()
+            )
+            pledgeAttachment.name = "02-MorningPledge"
+            pledgeAttachment.lifetime = .keepAlways
+            add(pledgeAttachment)
         }
 
-        // Screenshot 3: AI Insights
+        // Screenshot 3: Urge surfing timer
         app.navigationBars.buttons.element(boundBy: 0).tap()
         sleep(1)
-        let insightsTab = app.buttons["Insights"]
-        if insightsTab.waitForExistence(timeout: 3) {
-            insightsTab.tap()
+        let urgeTab = app.tabBars.buttons["Urge"]
+        if urgeTab.waitForExistence(timeout: 3) {
+            urgeTab.tap()
             sleep(1)
-            let insightsAttachment = XCTAttachment(screenshot: app.screenshot())
-            insightsAttachment.name = "03-AIInsights"
-            insightsAttachment.lifetime = .keepAlways
-            add(insightsAttachment)
+            let urgeAttachment = XCTAttachment(
+                screenshot: app.screenshot()
+            )
+            urgeAttachment.name = "03-UrgeSurfing"
+            urgeAttachment.lifetime = .keepAlways
+            add(urgeAttachment)
+        }
+
+        // Screenshot 4: Journal
+        let journalTab = app.tabBars.buttons["Journal"]
+        if journalTab.waitForExistence(timeout: 3) {
+            journalTab.tap()
+            sleep(1)
+            let journalAttachment = XCTAttachment(
+                screenshot: app.screenshot()
+            )
+            journalAttachment.name = "04-Journal"
+            journalAttachment.lifetime = .keepAlways
+            add(journalAttachment)
+        }
+
+        // Screenshot 5: Progress with mood chart
+        let progressTab = app.tabBars.buttons["Progress"]
+        if progressTab.waitForExistence(timeout: 3) {
+            progressTab.tap()
+            sleep(1)
+            let progressAttachment = XCTAttachment(
+                screenshot: app.screenshot()
+            )
+            progressAttachment.name = "05-Progress"
+            progressAttachment.lifetime = .keepAlways
+            add(progressAttachment)
         }
     }
 }
@@ -396,16 +707,18 @@ Run this test with `xcodebuild test` for each simulator device to collect all re
 Before moving to Lesson 8.2, confirm every item:
 
 - [ ] Apple Developer account is active and enrolled in the Apple Developer Program
-- [ ] Bundle ID registered in the Apple Developer portal
-- [ ] App record created in App Store Connect with correct bundle ID
+- [ ] Bundle ID `com.pekmario.BetFree` registered in the Apple Developer portal
+- [ ] App record created in App Store Connect with display name "BetAway"
 - [ ] App icon (1024x1024, no alpha) added to Assets.xcassets
-- [ ] App Store description written, under 4000 characters, no health claims
+- [ ] App Store description written, under 4000 characters, includes medical disclaimer, no health claims
 - [ ] Subtitle written, under 30 characters, no keyword stuffing
 - [ ] Keywords set, under 100 characters, comma-separated without spaces after commas
 - [ ] Screenshots captured for at least 6.7" and 6.5" device sizes
 - [ ] Privacy policy hosted at a publicly accessible URL
-- [ ] App Privacy section completed in App Store Connect with OpenAI data disclosure
-- [ ] Age rating questionnaire completed with "Unrestricted Web Access: Yes" and health/medical content flagged (gambling addiction recovery)
+- [ ] App Privacy section completed in App Store Connect — "Data Not Collected" for analytics/identifiers, "Data Linked to You: Health & Fitness" for check-ins/journals/urge logs
+- [ ] In-App Purchases registered: `com.pekmario.BetFree.tip.small` ($0.99) and `com.pekmario.BetFree.tip.large` ($4.99)
+- [ ] Age rating questionnaire completed with health/medical content flagged (gambling addiction recovery)
+- [ ] `AppConfig.medicalDisclaimer` is visible somewhere in the app (settings screen)
 - [ ] App tested on at least one physical device
 - [ ] No placeholder text, debug code, or `TODO` comments visible in the shipped build
 
@@ -413,24 +726,26 @@ Before moving to Lesson 8.2, confirm every item:
 
 **Write an alternative App Store description targeting a different audience.**
 
-Your current description targets general users. Rewrite it for a specific niche: college students dealing with academic stress.
+Your current description targets general users. Rewrite it for a specific niche: people in early recovery (first 30 days) who need the most support.
 
 1. Use the same problem-agitate-solve structure
-2. Open with a pain point specific to students (exam stress, burnout, irregular schedules)
-3. Keep it under 3500 characters
-4. Adjust the keywords to target this audience (add "student-recovery,exam-stress,college-wellbeing")
-5. Verify the new keywords still total under 100 characters
+2. Open with a pain point specific to early recovery (the first week is hardest, constant urges, shame spiral, no one to talk to at 2 AM)
+3. Highlight features that matter most in early recovery: the 15-minute urge surfing timer, emergency helplines (`AppConfig.helplineUS`: 1-800-522-4700), morning pledges, and the breathing exercise
+4. Include the `medicalDisclaimer` text verbatim from `AppConfig`
+5. Keep it under 3500 characters
+6. Adjust the keywords to target this audience (add "first-week-recovery,urge-surfing,gambling-helpline")
+7. Verify the new keywords still total under 100 characters
 
 <details>
 <summary>Hint</summary>
 
-The best App Store descriptions speak directly to one person, not everyone. Starting with "Between midterms and finals..." immediately signals to students that this app was built for them. Generic descriptions try to appeal to everyone and end up resonating with no one.
+The best App Store descriptions speak directly to one person, not everyone. Starting with "Day one is the hardest..." immediately signals to someone in early recovery that this app was built for them. Generic descriptions try to appeal to everyone and end up resonating with no one.
 
 Here is a strong opening line to build from:
 
-"Between lectures, deadlines, and late nights, your mental health is the first thing that slips. BetAway catches it before you do."
+"Day one is the hardest. The urge hits, and every app on your phone feels like it leads back to a betting site. BetAway is the one that leads you out."
 
-Notice: no health claims ("reduces stress"), no superlatives ("best app"), no competitor mentions. Just a relatable scenario and a clear value proposition.
+Notice: no health claims ("cures addiction"), no superlatives ("best app"), no competitor mentions. Just a relatable scenario and a clear value proposition. End with the medical disclaimer from `AppConfig.medicalDisclaimer` — App Review requires it for health-related apps.
 </details>
 
 ---
