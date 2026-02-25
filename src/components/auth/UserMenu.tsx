@@ -61,13 +61,13 @@ export default function UserMenu() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowModal('login')}
-            className="hidden sm:inline-flex px-3 py-1.5 text-sm font-medium text-text-muted hover:text-accent transition-colors rounded-lg"
+            className="hidden sm:inline-flex px-3 py-1.5 text-sm font-medium font-nav text-text-muted hover:text-accent transition-colors rounded-lg"
           >
             Log In
           </button>
           <button
             onClick={() => setShowModal('signup')}
-            className="px-3 py-1.5 text-sm font-medium text-white gradient-brand rounded-lg transition-all"
+            className="px-3 py-1.5 text-sm font-medium font-nav text-white gradient-brand rounded-lg transition-all"
           >
             Sign Up
           </button>
