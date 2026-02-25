@@ -1,0 +1,990 @@
+---
+title: "On-Device ML Alternative"
+description: "Explore Apple's NaturalLanguage framework for on-device sentiment analysis, understand how it compares to BetAway's actual approach of manual mood tracking with MoodRating, and learn when each pattern is the right choice."
+courseSlug: "ship-native"
+module: 4
+moduleTitle: "AI Integration"
+lesson: 2
+duration: "18 min read"
+difficulty: "intermediate"
+topics: ["NaturalLanguage", "NLTagger", "Sentiment Analysis", "On-Device ML", "Offline", "Privacy", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+In the previous lesson we walked through a production-quality OpenAI API integration — the cloud approach to sentiment analysis. BetAway deliberately rejects that path. Recovery journal entries are too sensitive to send to any cloud service. Users are writing about gambling debts, family damage, moments of crisis. That data stays on the device. Period.
+
+But BetAway goes further than just avoiding cloud APIs. The real app does not use on-device ML either. There is no `NLTagger`, no `NaturalLanguage` import, no automated sentiment analysis at all. Instead, BetAway trusts the user to report their own emotional state through a `MoodRating` picker (1-5 scale) on every journal entry and check-in. The user selects an emoji, and that integer gets stored in SwiftData. Mood trends are computed by averaging those self-reported integers over time.
+
+This lesson teaches a middle path that BetAway considered but chose not to ship: Apple's **NaturalLanguage** framework and **NLTagger** for on-device sentiment analysis. It is a powerful tool — no API key, no network, no cost, no data leaving the phone. If you were building an app where automated text analysis was appropriate, this would be the privacy-preserving way to do it. We will build it as a reference, compare it to BetAway's actual manual approach, and help you decide which pattern fits your own projects.
+
+## What You'll Learn
+
+- How Apple's **NaturalLanguage** framework and **NLTagger** work for sentiment analysis
+- Building a `SentimentAnalyzer` that maps NL scores to recovery score levels
+- How BetAway's real `MoodRating`, `JournalEntry`, and `ProgressViewModel` handle mood tracking without any ML
+- The privacy, cost, and design tradeoffs between manual tracking, on-device ML, and cloud AI
+- When on-device ML is the right primary choice, and when manual tracking is better
+
+## Why This Matters
+
+Most apps built with AI assistants hard-wire themselves to a single cloud provider. The developer prompts for "OpenAI integration," gets working code, and ships it. Then users on the subway, users on airplane mode, users who never set up an API key — they all get an error screen.
+
+Apple ships a framework called **NaturalLanguage** on every iPhone, iPad, and Mac. It includes a pre-trained sentiment analysis model that runs entirely on device. No API key. No network. No cost. No data leaving the phone. It is less nuanced than GPT, but it is always available.
+
+BetAway chose an even simpler path: let the user tell you how they feel. No model inference at all. But if your app needs automated text analysis — a content moderation system, a customer feedback classifier, a writing assistant — NLTagger is the privacy-preserving foundation to build on.
+
+## What BetAway Actually Ships
+
+Before we build the NLTagger reference, let us examine the real app's approach in detail. BetAway's mood tracking is built on three pieces: a `MoodRating` enum, a `JournalEntry` model, and a `DailyCheckin` model.
+
+The `MoodRating` enum is the core abstraction. From the real `Enums.swift`:
+
+```swift
+// BetFree/Models/Enums.swift — what BetAway actually ships
+
+enum MoodRating: Int, Codable, CaseIterable, Identifiable {
+    case veryBad = 1
+    case bad = 2
+    case neutral = 3
+    case good = 4
+    case veryGood = 5
+
+    var id: Int { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .veryBad: return "😣"
+        case .bad: return "😔"
+        case .neutral: return "😐"
+        case .good: return "🙂"
+        case .veryGood: return "😊"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .veryBad: return LanguageManager.shared.localized("Very Bad")
+        case .bad: return LanguageManager.shared.localized("Bad")
+        case .neutral: return LanguageManager.shared.localized("Okay")
+        case .good: return LanguageManager.shared.localized("Good")
+        case .veryGood: return LanguageManager.shared.localized("Great")
+        }
+    }
+}
+```
+
+This maps directly to the 1-5 integer stored in both `JournalEntry.mood` and `DailyCheckin.mood`. When the user writes a journal entry, they select their mood through a picker. Here is how the real `JournalEntryView` presents it:
+
+```swift
+// BetFree/Views/Journal/JournalEntryView.swift — what BetAway actually ships
+
+struct JournalEntryView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    let profile: UserProfile?
+    var editingEntry: JournalEntry?
+
+    @State private var title = ""
+    @State private var content = ""
+    @State private var selectedMood: MoodRating = .neutral
+    @State private var selectedPrompt: JournalPrompt?
+    @State private var isVisible = false
+
+    private var isEditing: Bool { editingEntry != nil }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xl) {
+                // Mood selector
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("How are you feeling?")
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    HStack(spacing: Spacing.md) {
+                        ForEach(MoodRating.allCases) { mood in
+                            Button {
+                                withAnimation(AnimationPresets.snappy) {
+                                    selectedMood = mood
+                                }
+                            } label: {
+                                VStack(spacing: Spacing.xxs) {
+                                    Text(mood.emoji)
+                                        .font(.system(size: selectedMood == mood ? 36 : 28))
+
+                                    Text(mood.label)
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(
+                                            selectedMood == mood
+                                                ? ColorPalette.accent
+                                                : ColorPalette.textTertiary
+                                        )
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, Spacing.xs)
+                                .background(
+                                    selectedMood == mood
+                                        ? ColorPalette.accent.opacity(0.1)
+                                        : Color.clear
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.small, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+                // Prompts (hide when editing)
+                if !isEditing {
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Need a prompt?")
+                            .font(Typography.headline())
+                            .foregroundStyle(ColorPalette.textPrimary)
+
+                        FlowLayout(spacing: Spacing.xs) {
+                            ForEach(JournalPrompt.allCases) { prompt in
+                                Button {
+                                    withAnimation(AnimationPresets.snappy) {
+                                        if selectedPrompt == prompt {
+                                            selectedPrompt = nil
+                                        } else {
+                                            selectedPrompt = prompt
+                                            if title.isEmpty {
+                                                title = prompt.localizedName
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Text(prompt.localizedName)
+                                        .font(Typography.caption(weight: .medium))
+                                        .padding(.horizontal, Spacing.sm)
+                                        .padding(.vertical, Spacing.xs)
+                                        .foregroundStyle(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.textOnPrimary
+                                                : ColorPalette.textPrimary
+                                        )
+                                        .background(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.accent
+                                                : ColorPalette.surfaceSecondary
+                                        )
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(BFButtonPressStyle())
+                            }
+                        }
+                    }
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+                }
+
+                // Title and content fields ...
+
+                // Save button
+                BFButton(title: isEditing ? LocalizedStringKey("Save Changes") : LocalizedStringKey("Save Entry"), icon: AppConfig.Icons.checkmark) {
+                    saveEntry()
+                }
+                .disabled(content.isEmpty)
+                .opacity(content.isEmpty ? 0.5 : 1.0)
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+    }
+
+    private func saveEntry() {
+        if let entry = editingEntry {
+            entry.title = title
+            entry.content = content
+            entry.moodRating = selectedMood
+            entry.promptUsed = selectedPrompt?.rawValue ?? entry.promptUsed
+        } else {
+            let entry = JournalEntry(
+                title: title,
+                content: content,
+                mood: selectedMood,
+                promptUsed: selectedPrompt?.rawValue ?? ""
+            )
+            entry.userProfile = profile
+            modelContext.insert(entry)
+        }
+        dismiss()
+    }
+}
+```
+
+Notice the `JournalPrompt` enum that provides optional writing prompts — these are for the human, not for an AI:
+
+```swift
+// BetFree/Views/Journal/JournalEntryView.swift — what BetAway actually ships
+
+enum JournalPrompt: String, CaseIterable, Identifiable {
+    case gratitude = "What am I grateful for?"
+    case trigger = "What triggered me today?"
+    case wins = "What went well today?"
+    case feelings = "How am I feeling right now?"
+    case future = "What do I look forward to?"
+    case challenge = "What challenged me?"
+    case growth = "How have I grown?"
+    case support = "Who supports me?"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+}
+```
+
+The evening check-in follows the same pattern — manual mood selection, no text analysis. From the real `PledgeViewModel`:
+
+```swift
+// BetFree/ViewModels/PledgeViewModel.swift — what BetAway actually ships
+
+@Observable
+final class PledgeViewModel {
+    var selectedMood: MoodRating = .neutral
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var gamblingFree: Bool = true
+    var amountGambled: String = ""
+    var selectedTriggers: Set<PredefinedTrigger> = []
+
+    var isPledgeTaken: Bool = false
+    var isCheckinDone: Bool = false
+    var showCelebration: Bool = false
+    var isSubmitting: Bool = false
+
+    // MARK: - Evening Check-in
+
+    func submitCheckin(profile: UserProfile, context: ModelContext) {
+        isSubmitting = true
+
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: selectedMood,
+            gamblingFree: gamblingFree,
+            notes: notes
+        )
+
+        if !gamblingFree, let amount = Double(amountGambled) {
+            checkin.amountGambled = amount
+        }
+
+        checkin.triggers = Array(selectedTriggers)
+        checkin.userProfile = profile
+        context.insert(checkin)
+
+        withAnimation(AnimationPresets.bouncy) {
+            isCheckinDone = true
+            if gamblingFree {
+                showCelebration = true
+                HapticManager.success()
+            }
+        }
+
+        isSubmitting = false
+    }
+}
+```
+
+The check-in is saved directly to SwiftData. No intermediate processing, no analysis step. The `notes` field is stored but never analyzed. The `mood` is whatever the user selected.
+
+And here is how mood data flows into the progress charts. The `ProgressViewModel` computes averages by simply doing math on the stored integers:
+
+```swift
+// BetFree/ViewModels/ProgressViewModel.swift — what BetAway actually ships
+
+func moodData(from checkins: [DailyCheckin], days: Int) -> [MoodDataPoint] {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date())
+
+    return (0..<days).compactMap { offset in
+        guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+
+        let dayCheckins = checkins.filter { calendar.isDate($0.date, inSameDayAs: date) }
+        guard !dayCheckins.isEmpty else { return nil }
+
+        let avgMood = Double(dayCheckins.map(\.mood).reduce(0, +)) / Double(dayCheckins.count)
+        let label = MoodRating(rawValue: Int(avgMood.rounded())) ?? .neutral
+
+        return MoodDataPoint(date: date, value: avgMood, label: label.emoji)
+    }
+    .reversed()
+}
+```
+
+The weekly summary card on the dashboard uses the same approach — average the mood integers, display an emoji:
+
+```swift
+// BetFree/Views/Dashboard/WeeklySummaryCard.swift — what BetAway actually ships
+
+private var avgMoodEmoji: String {
+    let moodCheckins = weekCheckins.filter { $0.mood > 0 }
+    guard !moodCheckins.isEmpty else { return "😐" }
+    let avg = Double(moodCheckins.map(\.mood).reduce(0, +)) / Double(moodCheckins.count)
+    return MoodRating(rawValue: Int(avg.rounded()))?.emoji ?? "😐"
+}
+```
+
+This is the entire mood tracking pipeline in BetAway: user taps emoji, integer stored, averages computed, chart rendered. Zero ML. Zero NLP. It works because the user is the best judge of their own emotional state.
+
+## The On-Device ML Alternative (Reference Implementation)
+
+Now let us build what BetAway could have used instead: Apple's NaturalLanguage framework for automated sentiment analysis of journal text. This is a reference implementation — the real app does not ship it.
+
+### Why You Might Want This
+
+On-device ML makes sense when:
+- Your app processes text that users did not manually classify (e.g., imported messages, scraped content)
+- You want to augment user input with automated signals (e.g., "your writing has been trending more positive this week")
+- You are building a content moderation or classification system
+- The domain is less sensitive than gambling recovery
+
+### Plan Phase
+
+Here is the prompt to start the planning conversation:
+
+```
+I'm building BetAway, a gambling recovery app (Swift 6, SwiftUI,
+iOS 17+). BetAway uses MVVM + Service Layer architecture with
+SwiftData. I need to build a reference sentiment analysis engine
+using Apple's NaturalLanguage framework — all analysis runs
+on-device for privacy.
+
+Plan the implementation. I need:
+
+1. A SentimentAnalyzer struct that takes a String and returns a
+   recovery score (1-5) and a confidence score, using NLTagger
+   with .sentimentScore
+2. A RecoveryService that provides journal analysis as part of
+   BetAway's Service Layer, conforming to a JournalAnalysisService
+   protocol
+3. Keep it testable — the service behind a protocol
+4. This is a reference implementation — BetAway actually uses
+   manual MoodRating (1-5) for mood tracking
+
+Do NOT write code yet. Just outline the types, the flow, and flag
+any edge cases.
+```
+
+A good AI response will outline something like this:
+
+- `JournalAnalysisService` protocol with `func analyzeEntry(from text: String) async throws -> JournalAnalysisResult`
+- `JournalAnalysisResult` struct holding `recoveryScore: Int` (1-5), `insight: String`, `source: AnalysisSource` (.onDevice)
+- `SentimentAnalyzer` — pure logic, no protocol, takes text and returns a score
+- `RecoveryService` conforms to `JournalAnalysisService`, uses `SentimentAnalyzer` internally
+
+The edge cases to watch for:
+
+- **Empty text** — NLTagger returns 0.0 for empty strings. That maps to neutral (level 3), which is a reasonable default.
+- **Mixed sentiment** — A long entry with both hopeful and distressed passages. NLTagger returns a single aggregate score. It will not be as nuanced as GPT, and that is fine.
+- **Language support** — NLTagger's sentiment model works best with English. For other languages, accuracy drops. BetAway's real `LanguageManager` supports 12 languages — NLTagger would not serve all of those users equally.
+
+### The anti-pattern to avoid
+
+```swift
+// Bad: Requiring network for basic features in a recovery app.
+func analyzeEntry(from text: String) async throws -> AnalysisResult {
+    return try await openAIService.analyze(text)
+    // If this throws, the user sees an error during a crisis moment.
+}
+```
+
+This is the "always require network for basic features" anti-pattern. BetAway avoids it entirely — not by using on-device ML, but by skipping automated analysis altogether. The user's manual mood selection never fails, never throws, never needs a network connection.
+
+## Execute Phase
+
+Now we build the reference implementation. Start with the foundation.
+
+### Prompt 1 — SentimentAnalyzer
+
+```
+Create a SentimentAnalyzer struct in Services/ML/SentimentAnalyzer.swift.
+
+Requirements:
+- Import NaturalLanguage
+- Method: func analyze(_ text: String) -> SentimentResult
+- Use NLTagger with .sentimentScore tag scheme
+- NLTagger returns a Double from -1.0 (negative) to 1.0 (positive)
+- Map that score to a recovery score 1-5:
+  - -1.0 to -0.6 → level 1 (very negative)
+  - -0.6 to -0.2 → level 2 (somewhat negative)
+  - -0.2 to  0.2 → level 3 (neutral)
+  -  0.2 to  0.6 → level 4 (somewhat positive)
+  -  0.6 to  1.0 → level 5 (very positive)
+- SentimentResult struct: recoveryScore (Int), confidence (Double 0-1),
+  rawScore (Double)
+- The confidence is the absolute value of the raw score (stronger
+  sentiment = higher confidence)
+- Handle the empty string case (return level 3, confidence 0)
+- No async needed — NLTagger is synchronous
+- Add os.Logger
+- Target Swift 6, iOS 17+
+```
+
+Here is the code you should get, reviewed and annotated:
+
+```swift
+// Reference implementation — not shipped in BetAway
+// BetAway uses manual MoodRating (1-5) instead of NLTagger
+
+import NaturalLanguage
+import os
+
+struct SentimentResult: Sendable {
+    let recoveryScore: Int   // 1-5
+    let confidence: Double   // 0.0-1.0
+    let rawScore: Double     // -1.0-1.0
+}
+
+struct SentimentAnalyzer: Sendable {
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "SentimentAnalyzer")
+
+    func analyze(_ text: String) -> SentimentResult {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.debug("Empty text — returning neutral")
+            return SentimentResult(recoveryScore: 3, confidence: 0, rawScore: 0)
+        }
+
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (sentimentTag, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        let rawScore = Double(sentimentTag?.rawValue ?? "0") ?? 0.0
+        let recoveryScore = mapScoreToRecoveryLevel(rawScore)
+        let confidence = min(abs(rawScore), 1.0)
+
+        logger.debug("Sentiment: \(rawScore, format: .fixed(precision: 3)) → recovery score \(recoveryScore) (confidence \(confidence, format: .fixed(precision: 2)))")
+
+        return SentimentResult(
+            recoveryScore: recoveryScore,
+            confidence: confidence,
+            rawScore: rawScore
+        )
+    }
+
+    private func mapScoreToRecoveryLevel(_ score: Double) -> Int {
+        switch score {
+        case ...(-0.6):       return 1
+        case -0.6..<(-0.2):   return 2
+        case -0.2..<0.2:      return 3
+        case 0.2..<0.6:       return 4
+        default:              return 5
+        }
+    }
+}
+```
+
+Let us review this:
+
+- **NLTagger setup** — You create a tagger with the `.sentimentScore` scheme, assign the text, then call `tag(at:unit:scheme:)`. The `unit: .paragraph` tells NLTagger to score the entire text as one block rather than word by word. This is what you want for a journal entry.
+- **The raw value trick** — `NLTagger` returns its sentiment score as an `NLTag`, which is a wrapper around a `String`. You have to parse it to a `Double`. This is an API quirk that AI sometimes misses — it tries to cast the tag directly to a number.
+- **Score mapping** — The ranges map to the same 1-5 scale as BetAway's real `MoodRating` enum. The thresholds are evenly distributed across the -1 to 1 spectrum. You could adjust these later based on real-world usage.
+- **Confidence** — We use the absolute value of the raw score. A score of 0.9 (very positive) or -0.9 (very negative) both have high confidence. A score near 0 means the model is unsure — which is neutral, level 3.
+
+Compare this to BetAway's actual approach: the `MoodRating` enum has the same 1-5 scale, but the value comes from the user, not from NLTagger. The user's confidence in their own emotional state is always 100%.
+
+### Prompt 2 — RecoveryService
+
+```
+Create a RecoveryService in Services/ML/RecoveryService.swift.
+
+Requirements:
+- Conforms to JournalAnalysisService protocol:
+  protocol JournalAnalysisService {
+      func analyzeEntry(from text: String) async throws -> JournalAnalysisResult
+  }
+- JournalAnalysisResult has: recoveryScore (Int), insight (String),
+  source (AnalysisSource enum: .onDevice)
+- Uses SentimentAnalyzer internally
+- Generates a recovery-focused insight string based on the
+  recovery score (e.g., "Your entry shows signs of progress
+  in your recovery journey." for level 4-5)
+- The method is async to match the protocol, but the actual work
+  is synchronous (NLTagger is sync)
+- Never throws — on-device analysis always succeeds
+- Add os.Logger
+- Swift 6, Sendable where needed
+```
+
+```swift
+// Reference implementation — not shipped in BetAway
+
+import Foundation
+import os
+
+enum AnalysisSource: String, Sendable {
+    case onDevice
+}
+
+struct JournalAnalysisResult: Sendable {
+    let recoveryScore: Int
+    let insight: String
+    let source: AnalysisSource
+}
+
+protocol JournalAnalysisService: Sendable {
+    func analyzeEntry(from text: String) async throws -> JournalAnalysisResult
+}
+
+struct RecoveryService: JournalAnalysisService {
+    private let analyzer = SentimentAnalyzer()
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
+
+    func analyzeEntry(from text: String) async throws -> JournalAnalysisResult {
+        let sentiment = analyzer.analyze(text)
+
+        let insight = generateInsight(for: sentiment)
+
+        logger.info("On-device analysis complete: recovery score \(sentiment.recoveryScore), confidence \(sentiment.confidence, format: .fixed(precision: 2))")
+
+        return JournalAnalysisResult(
+            recoveryScore: sentiment.recoveryScore,
+            insight: insight,
+            source: .onDevice
+        )
+    }
+
+    private func generateInsight(for sentiment: SentimentResult) -> String {
+        switch sentiment.recoveryScore {
+        case 1:
+            return "Your entry suggests you're going through a difficult moment. Remember — reaching for this app instead of gambling is already a win."
+        case 2:
+            return "Your writing carries some heaviness. Consider using the breathing exercise or reaching out to your support network."
+        case 3:
+            if sentiment.confidence < 0.1 {
+                return "Your entry is fairly neutral. Steady days are part of recovery — they matter more than you think."
+            }
+            return "Your recovery seems balanced today. A mix of thoughts and feelings is perfectly normal in this journey."
+        case 4:
+            return "Your entry shows signs of progress in your recovery journey. Hold onto what is working."
+        case 5:
+            return "Your writing reflects real strength and resilience. This is recovery in action — keep building on it."
+        default:
+            return "Check-in analyzed."
+        }
+    }
+}
+```
+
+Let us review this:
+
+- **Protocol conformance** — `RecoveryService` conforms to `JournalAnalysisService`. This means the ViewModel does not care which implementation it is talking to. If you ever needed to swap in a different analysis backend, the protocol boundary makes that trivial.
+- **Never throws** — Notice that even though the protocol method is `throws`, `RecoveryService` never actually throws. On-device analysis cannot fail in any meaningful way. If the text is empty, you get neutral. If the text is gibberish, you get neutral. The model always returns something.
+- **Recovery-focused insights** — These are static strings tailored to gambling recovery. BetAway's real app uses a similar approach for motivational messages — the `WeeklySummaryCard` generates encouragement based on pledge counts and urge resist rates, not based on NLP.
+
+Compare the `generateInsight` method above with BetAway's real motivational logic from `WeeklySummaryCard`:
+
+```swift
+// BetFree/Views/Dashboard/WeeklySummaryCard.swift — what BetAway actually ships
+
+private var motivationalMessage: String {
+    if pledgeCount >= 6 {
+        return LanguageManager.shared.localized("Amazing commitment this week! You pledged almost every day.")
+    } else if resistedCount == urgeCount && urgeCount > 0 {
+        return LanguageManager.shared.localized("You resisted every urge this week. Incredible willpower!")
+    } else if weekJournals.count >= 3 {
+        return LanguageManager.shared.localized("Great journaling habit! Writing helps process your emotions.")
+    } else if urgeCount == 0 {
+        return LanguageManager.shared.localized("No urges logged this week. Keep up the great work!")
+    } else {
+        return LanguageManager.shared.localized("Every day you stay bet-free is a victory. Keep going!")
+    }
+}
+```
+
+Same pattern — template-based messages selected by condition — but BetAway's conditions are behavioral (pledges made, urges resisted, journals written) rather than NLP-derived. The insight comes from what the user **did**, not what an algorithm inferred from their text.
+
+## Iteration
+
+Now we connect the reference service to a ViewModel. Here is how it would look if BetAway used NLTagger:
+
+```
+Update our CheckInViewModel to use the RecoveryService for
+journal analysis.
+
+Requirements:
+- Use RecoveryService for all sentiment analysis
+- No cloud fallback needed — on-device is the primary path
+- The JournalAnalysisResult includes .source so the UI can show
+  "Analyzed on-device" if desired
+- Log the analysis path
+- Use the JournalAnalysisService protocol — the ViewModel should
+  not import NaturalLanguage or know about the ML implementation
+  directly
+```
+
+The key piece of logic the AI should produce looks like this:
+
+```swift
+// Reference implementation — not shipped in BetAway
+// BetAway's real PledgeViewModel and JournalEntryView
+// use manual MoodRating selection instead
+
+@Observable
+final class CheckInViewModel {
+    var analysisResult: JournalAnalysisResult?
+    var isAnalyzing = false
+
+    private let analysisService: any JournalAnalysisService
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckInViewModel")
+
+    init(
+        analysisService: any JournalAnalysisService = RecoveryService()
+    ) {
+        self.analysisService = analysisService
+    }
+
+    func analyzeEntry(from text: String) async {
+        isAnalyzing = true
+        defer { isAnalyzing = false }
+
+        do {
+            analysisResult = try await analysisService.analyzeEntry(from: text)
+            logger.info("Analysis succeeded via \(self.analysisResult?.source.rawValue ?? "unknown")")
+        } catch {
+            // This should never happen with RecoveryService, but handle it defensively
+            logger.error("Analysis failed unexpectedly: \(error.localizedDescription)")
+            analysisResult = JournalAnalysisResult(
+                recoveryScore: 3,
+                insight: "Unable to analyze your entry at this time.",
+                source: .onDevice
+            )
+        }
+    }
+}
+```
+
+Compare this to BetAway's real ViewModel. The actual `PledgeViewModel` has no analysis step — the user selects their mood directly:
+
+```swift
+// BetFree/ViewModels/PledgeViewModel.swift — what BetAway actually ships
+
+@Observable
+final class PledgeViewModel {
+    var selectedMood: MoodRating = .neutral
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var gamblingFree: Bool = true
+    var amountGambled: String = ""
+    var selectedTriggers: Set<PredefinedTrigger> = []
+
+    var isPledgeTaken: Bool = false
+    var isCheckinDone: Bool = false
+    var showCelebration: Bool = false
+    var isSubmitting: Bool = false
+
+    // MARK: - Morning Pledge
+
+    func submitPledge(profile: UserProfile, context: ModelContext) {
+        isSubmitting = true
+
+        let checkin = DailyCheckin(
+            checkinType: .morningPledge,
+            mood: selectedMood,
+            pledgeReason: pledgeReason,
+            notes: notes
+        )
+        checkin.userProfile = profile
+        context.insert(checkin)
+
+        withAnimation(AnimationPresets.bouncy) {
+            isPledgeTaken = true
+            showCelebration = true
+        }
+
+        HapticManager.success()
+        isSubmitting = false
+    }
+}
+```
+
+No `isAnalyzing` state. No async analysis call. No error handling for analysis failures. The user selects a mood, the ViewModel creates a `DailyCheckin`, and SwiftData persists it. Done.
+
+### On-Device vs Manual: The Honest Comparison
+
+| Factor | On-Device (NLTagger) | Manual (BetAway's MoodRating) |
+|---|---|---|
+| **Accuracy** | Moderate — aggregate sentiment only | Perfect — user knows their own state |
+| **Insight quality** | Template-based, derived from score | Template-based, derived from behavior |
+| **Latency** | Under 10ms | Instant — no computation |
+| **Cost** | Free, forever | Free, forever |
+| **Privacy** | Text never leaves device | Text stored locally, never analyzed |
+| **Offline** | Always works | Always works |
+| **Languages** | Best for English, limited otherwise | Works in all 12 supported languages |
+| **User agency** | Algorithm decides mood | User decides mood |
+| **Code complexity** | NLTagger + mapping + service layer | One enum + integer storage |
+| **Failure modes** | None meaningful | None |
+
+For BetAway, the manual approach wins on almost every dimension. The user selecting their own mood is more accurate than NLTagger guessing, works identically in all 12 languages BetAway supports (English, German, French, Spanish, Italian, Portuguese, Russian, Japanese, Korean, Arabic, and Balkan languages), and requires dramatically less code.
+
+The NLTagger approach wins when you cannot ask the user — when you need to classify text automatically, in bulk, without human input.
+
+## Verify Phase
+
+Let us verify the reference NLTagger implementation with tests. These use the Swift Testing framework:
+
+```swift
+// Reference tests — for the NLTagger implementation that BetAway does not ship
+
+import Testing
+@testable import BetAway
+
+struct SentimentAnalyzerTests {
+    let analyzer = SentimentAnalyzer()
+
+    @Test func positiveTextReturnsHighRecoveryScore() {
+        let result = analyzer.analyze(
+            "I had an amazing day! I resisted every urge and feel proud of my progress."
+        )
+        #expect(result.recoveryScore >= 4)
+        #expect(result.rawScore > 0)
+    }
+
+    @Test func negativeTextReturnsLowRecoveryScore() {
+        let result = analyzer.analyze(
+            "Everything went wrong today. I feel terrible and the urges are overwhelming."
+        )
+        #expect(result.recoveryScore <= 2)
+        #expect(result.rawScore < 0)
+    }
+
+    @Test func neutralTextReturnsMidRecoveryScore() {
+        let result = analyzer.analyze(
+            "I went to the store and bought some groceries. Then I came home."
+        )
+        #expect(result.recoveryScore == 3)
+    }
+
+    @Test func emptyTextReturnsNeutralWithZeroConfidence() {
+        let result = analyzer.analyze("")
+        #expect(result.recoveryScore == 3)
+        #expect(result.confidence == 0)
+        #expect(result.rawScore == 0)
+    }
+
+    @Test func rawScoreIsInValidRange() {
+        let texts = [
+            "I love this progress!",
+            "I hate how I feel.",
+            "It is fine.",
+            "The weather is partly cloudy with a chance of rain."
+        ]
+
+        for text in texts {
+            let result = analyzer.analyze(text)
+            #expect(result.rawScore >= -1.0)
+            #expect(result.rawScore <= 1.0)
+        }
+    }
+
+    @Test func confidenceIsInValidRange() {
+        let texts = [
+            "Best day of my recovery!",
+            "Worst experience of my life.",
+            "I ate lunch.",
+            ""
+        ]
+
+        for text in texts {
+            let result = analyzer.analyze(text)
+            #expect(result.confidence >= 0.0)
+            #expect(result.confidence <= 1.0)
+        }
+    }
+}
+```
+
+Notice the testing strategy. We do **not** test for exact recovery scores on real text. NLTagger is a machine learning model — its output can vary slightly across iOS versions as Apple updates the model. What we test is that positive text trends positive, negative text trends negative, and edge cases are handled correctly. Deterministic assertions on ML output lead to flaky tests.
+
+For the service layer, you can test the ViewModel with a mock service:
+
+```swift
+// Reference tests — for the NLTagger implementation that BetAway does not ship
+
+struct MockAnalysisService: JournalAnalysisService {
+    let result: JournalAnalysisResult
+
+    func analyzeEntry(from text: String) async throws -> JournalAnalysisResult {
+        result
+    }
+}
+
+@Test func viewModelUsesInjectedService() async {
+    let expected = JournalAnalysisResult(
+        recoveryScore: 4,
+        insight: "Test insight",
+        source: .onDevice
+    )
+
+    let viewModel = CheckInViewModel(
+        analysisService: MockAnalysisService(result: expected)
+    )
+
+    await viewModel.analyzeEntry(from: "I feel great about my recovery today!")
+
+    #expect(viewModel.analysisResult != nil)
+    #expect(viewModel.analysisResult?.recoveryScore == 4)
+    #expect(viewModel.analysisResult?.source == .onDevice)
+}
+```
+
+Because the service is behind a protocol, testing is trivial. You inject a mock and verify the result. No mocking frameworks, no network stubs. Protocol-based design pays for itself in the test suite.
+
+## Final Code
+
+Here is the complete reference code for the two primary NLTagger files, alongside the real BetAway code they would replace.
+
+### SentimentAnalyzer.swift (Reference)
+
+```swift
+// Reference implementation — not shipped in BetAway
+// Services/ML/SentimentAnalyzer.swift
+
+import NaturalLanguage
+import os
+
+struct SentimentResult: Sendable {
+    let recoveryScore: Int
+    let confidence: Double
+    let rawScore: Double
+}
+
+struct SentimentAnalyzer: Sendable {
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "SentimentAnalyzer")
+
+    func analyze(_ text: String) -> SentimentResult {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.debug("Empty text — returning neutral")
+            return SentimentResult(recoveryScore: 3, confidence: 0, rawScore: 0)
+        }
+
+        let tagger = NLTagger(tagSchemes: [.sentimentScore])
+        tagger.string = text
+
+        let (sentimentTag, _) = tagger.tag(
+            at: text.startIndex,
+            unit: .paragraph,
+            scheme: .sentimentScore
+        )
+
+        let rawScore = Double(sentimentTag?.rawValue ?? "0") ?? 0.0
+        let recoveryScore = mapScoreToRecoveryLevel(rawScore)
+        let confidence = min(abs(rawScore), 1.0)
+
+        logger.debug("Sentiment: \(rawScore, format: .fixed(precision: 3)) → recovery score \(recoveryScore) (confidence \(confidence, format: .fixed(precision: 2)))")
+
+        return SentimentResult(
+            recoveryScore: recoveryScore,
+            confidence: confidence,
+            rawScore: rawScore
+        )
+    }
+
+    private func mapScoreToRecoveryLevel(_ score: Double) -> Int {
+        switch score {
+        case ...(-0.6):       return 1
+        case -0.6..<(-0.2):   return 2
+        case -0.2..<0.2:      return 3
+        case 0.2..<0.6:       return 4
+        default:              return 5
+        }
+    }
+}
+```
+
+### RecoveryService.swift (Reference)
+
+```swift
+// Reference implementation — not shipped in BetAway
+// Services/ML/RecoveryService.swift
+
+import Foundation
+import os
+
+enum AnalysisSource: String, Sendable {
+    case onDevice
+}
+
+struct JournalAnalysisResult: Sendable {
+    let recoveryScore: Int
+    let insight: String
+    let source: AnalysisSource
+}
+
+protocol JournalAnalysisService: Sendable {
+    func analyzeEntry(from text: String) async throws -> JournalAnalysisResult
+}
+
+struct RecoveryService: JournalAnalysisService {
+    private let analyzer = SentimentAnalyzer()
+    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
+
+    func analyzeEntry(from text: String) async throws -> JournalAnalysisResult {
+        let sentiment = analyzer.analyze(text)
+
+        let insight = generateInsight(for: sentiment)
+
+        logger.info("On-device analysis complete: recovery score \(sentiment.recoveryScore), confidence \(sentiment.confidence, format: .fixed(precision: 2))")
+
+        return JournalAnalysisResult(
+            recoveryScore: sentiment.recoveryScore,
+            insight: insight,
+            source: .onDevice
+        )
+    }
+
+    private func generateInsight(for sentiment: SentimentResult) -> String {
+        switch sentiment.recoveryScore {
+        case 1:
+            return "Your entry suggests you're going through a difficult moment. Remember — reaching for this app instead of gambling is already a win."
+        case 2:
+            return "Your writing carries some heaviness. Consider using the breathing exercise or reaching out to your support network."
+        case 3:
+            if sentiment.confidence < 0.1 {
+                return "Your entry is fairly neutral. Steady days are part of recovery — they matter more than you think."
+            }
+            return "Your recovery seems balanced today. A mix of thoughts and feelings is perfectly normal in this journey."
+        case 4:
+            return "Your entry shows signs of progress in your recovery journey. Hold onto what is working."
+        case 5:
+            return "Your writing reflects real strength and resilience. This is recovery in action — keep building on it."
+        default:
+            return "Check-in analyzed."
+        }
+    }
+}
+```
+
+## Checkpoint
+
+At this point you should understand:
+
+- How `NLTagger` with `.sentimentScore` works — assign text, call `tag(at:unit:scheme:)`, parse the raw value to a `Double`
+- How to map NLTagger's -1.0 to 1.0 range onto a 1-5 recovery score that matches BetAway's `MoodRating` scale
+- Why BetAway chose manual mood tracking over NLTagger — user agency, multilingual support, code simplicity
+- The real BetAway code path: `MoodRating` enum, `JournalEntry.mood` integer, `ProgressViewModel.moodData()` averages
+- How to test ML output (test ranges, not exact values) and how protocol-based design enables mock injection
+- Zero new dependencies, zero API costs, zero privacy concerns — both the NLTagger reference and BetAway's actual approach share these properties
+
+The key takeaway: BetAway demonstrates that you do not always need ML to solve a problem. The simplest solution — asking the user — is often the most accurate, most reliable, and easiest to maintain. On-device ML is a powerful tool for situations where automated text classification is genuinely needed. Know both patterns so you can choose the right one.
+
+## Challenge
+
+**Add sentence-level analysis for richer recovery insights (30 minutes):**
+
+1. Extend `SentimentAnalyzer` to analyze text **sentence by sentence** instead of as one paragraph. Return the per-sentence scores alongside the aggregate. Display the most positive and most negative sentences in the insight card. Hint: use `NLTagger` with `unit: .sentence` and `enumerateTags(in:unit:scheme:)`.
+
+2. Compare the NLTagger result against BetAway's actual `MoodRating` for the same entry. If the user selected `MoodRating.veryGood` but NLTagger scored the text as negative, what does that tell you? Build a small test that highlights these disagreements. This is a concrete demonstration of why BetAway trusts the user over the algorithm.
+
+3. Use the per-sentence analysis to detect mixed signals — a journal entry that contains both hopeful and distressed passages. Flag these to the user: "Your entry shows mixed emotions — that is a natural part of recovery." This is where NLTagger adds genuine value over a single aggregate score, and where it could complement (not replace) manual mood tracking.

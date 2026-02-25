@@ -26,8 +26,8 @@ export default function Comments({ slug }: Props) {
   }, []);
 
   return (
-    <div className="border-t border-slate-200 dark:border-slate-800 pt-10 mt-10">
-      <h2 className="font-display font-bold text-2xl text-slate-900 dark:text-white mb-8">
+    <div className="border-t border-border pt-10 mt-10">
+      <h2 className="font-display font-bold text-2xl text-white mb-8">
         Comments
       </h2>
 

@@ -1,0 +1,771 @@
+---
+title: "CloudKit Sync"
+description: "Add multi-device sync to BetAway using SwiftData's CloudKit integration — update UserProfile, DailyCheckin, UrgeLog, and JournalEntry for CloudKit compatibility, configure the container, handle merge conflicts, and test sync between simulator and device."
+courseSlug: "ship-native"
+module: 9
+moduleTitle: "Bonus: Advanced Topics"
+lesson: 1
+duration: "24 min read"
+difficulty: "advanced"
+topics: ["CloudKit", "SwiftData Sync", "iCloud", "Conflict Resolution", "Multi-Device", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your users have an iPhone and an iPad. They complete their morning pledge on the train with their phone, then open the iPad at home and expect to see it there. If it is not there, they do not file a bug report — they just stop using your app. Multi-device sync is not a feature. It is table stakes.
+
+The good news: SwiftData and CloudKit were designed to work together. The bad news: "designed to work together" does not mean "works without thinking." Merge conflicts, network failures, and sync delays are real, and ignoring them produces an app that silently loses data. This lesson gets you through the full setup, the conflict resolution strategy, and the testing workflow you need to ship sync with confidence.
+
+BetAway does not ship CloudKit sync in its MVP — the app currently uses a local-only `ModelContainer`. This lesson walks through exactly what it would take to add multi-device sync to the existing codebase, using BetAway's real SwiftData models (`UserProfile`, `DailyCheckin`, `UrgeLog`, `JournalEntry`) as the foundation.
+
+## What You'll Learn
+
+- How to enable CloudKit sync in a SwiftData `ModelConfiguration` with a single property change and configure the iCloud container in Xcode
+- What CloudKit-compatibility constraints apply to BetAway's SwiftData models — and why `@Attribute(.unique)` breaks everything
+- How to adapt `UserProfile`'s `@Relationship` properties and `DailyCheckin`'s enum-backed fields for CloudKit
+- Merge conflict strategies (last-write-wins vs. custom resolution) and how SwiftData handles them by default
+- A testing workflow for verifying sync between simulator instances and physical devices, including offline-to-online transitions
+
+## Why This Matters
+
+Users expect their data to follow them across devices. Apple makes this possible through iCloud and CloudKit, and SwiftData's integration means you do not need to build a backend, manage authentication, or run a server. But the abstraction is leaky — sync is eventually consistent, not instant, and merge conflicts are silent unless you handle them. Understanding what happens under the hood is the difference between "sync works" and "sync works until two devices edit the same check-in, then one user's data disappears."
+
+## Plan Phase: Designing the CloudKit Integration
+
+Open plan mode and think through the full integration before writing code:
+
+```
+I want to add iCloud sync to BetAway using SwiftData's CloudKit
+integration.
+
+Current setup:
+- SwiftData ModelContainer with these models:
+  - UserProfile (quitDate, displayName, averageWeeklySpend,
+    gamblingTypesRaw, frequencyRaw, biometricLockEnabled,
+    notificationsEnabled, emergencyContactsData,
+    @Relationship checkins, urgeLogs, journalEntries)
+  - DailyCheckin (checkinTypeRaw, mood, gamblingFree,
+    pledgeReason, notes, triggersRaw, riskLevelRaw,
+    @Relationship userProfile)
+  - UrgeLog (intensity, triggerRaw, copingStrategyRaw,
+    didResist, notes, durationSeconds,
+    @Relationship userProfile)
+  - JournalEntry (title, content, mood, promptUsed,
+    @Relationship userProfile)
+- Local-only ModelConfiguration (isStoredInMemoryOnly: false)
+- Swift 6 strict concurrency, iOS 17+
+
+Plan the CloudKit integration:
+1. What changes to ModelConfiguration are needed?
+2. What Xcode capabilities and entitlements must I add?
+3. What iCloud container do I need and how do I create it?
+4. What model constraints affect CloudKit compatibility?
+   (unique constraints, optional vs required fields,
+   relationships, Codable stored as Data)
+5. What happens when two devices edit the same DailyCheckin?
+   What is SwiftData's default conflict resolution?
+6. What does NOT sync? (e.g., @Transient properties,
+   biometricLockEnabled which is device-specific)
+7. How do I handle the emergencyContactsData property
+   (stored as Data via JSONEncoder)?
+8. How do I test sync without two physical devices?
+9. How do I handle the app being offline?
+
+Do not generate code yet. Plan first.
+```
+
+### AI Plan Review
+
+The AI plan should contain these specific items. If any are missing, push back before moving to code:
+
+- **ModelConfiguration change** — set `cloudKitDatabase: .automatic` (or `.private`) on the `ModelConfiguration`. That is the entire SwiftData change to enable sync. If the plan says to import CloudKit and manually create `CKContainer` instances, it is overcomplicating things.
+- **Xcode capabilities** — iCloud capability with CloudKit checked, plus Background Modes with "Remote notifications" enabled. CloudKit uses silent push notifications to trigger sync between devices.
+- **Container identifier** — an iCloud container identifier like `iCloud.com.pekmario.betfreeapp`, created in the Apple Developer portal or automatically by Xcode when you check the CloudKit capability.
+- **Entitlements** — `com.apple.developer.icloud-container-identifiers` and `com.apple.developer.icloud-services` with `CloudKit` value in the entitlements file.
+- **Conflict resolution** — SwiftData with CloudKit uses last-write-wins by default. The most recent change (by device timestamp) overwrites the older one. No merge, no prompt. If the plan describes field-level merging as a built-in feature, it is wrong.
+- **CloudKit limitations** — `@Attribute(.unique)` constraints are **not supported** with CloudKit. All properties should be optional or have default values. `@Transient` properties do not sync. Relationships must be optional. If the plan does not mention the `@Attribute(.unique)` restriction, flag it. This is the single most common cause of "sync just does not work" bugs.
+- **The `emergencyContactsData` property** — stored as `Data` via `JSONEncoder`. This syncs fine because CloudKit supports `Data` fields. But the `EmergencyContact` struct must remain `Codable` and the serialization format must not change between app versions, or devices running different versions will corrupt each other's data.
+- **Device-specific settings** — `biometricLockEnabled` should probably be `@Transient` because Face ID / Touch ID enrollment is device-specific. If Device A has Face ID enabled but Device B does not, syncing this flag would lock the user out of Device B.
+- **Testing strategy** — use two simulator instances signed into the same iCloud account, or one simulator plus one physical device. The CloudKit Dashboard at `console.developer.apple.com` shows records in real time.
+- If the plan says to use `NSPersistentCloudKitContainer` directly — reject. SwiftData wraps this internally. You should not be creating Core Data containers alongside SwiftData.
+- If the plan ignores offline handling — push back. SwiftData queues changes locally and syncs when connectivity returns. No extra code is needed for basic offline support, but you should know this behavior exists.
+
+### Anti-Pattern: Assuming Instant Sync
+
+```
+Just enable CloudKit and it will sync automatically
+```
+
+Technically true. Practically misleading. CloudKit sync is eventually consistent, meaning changes can take seconds to minutes to propagate depending on network conditions, iCloud account status, and Apple's server load. If your tests assume instant sync, they will be flaky. If your UI assumes instant sync, users will think the app is broken. Plan for latency from the start.
+
+## Execute Phase: Building the Sync Layer
+
+We need two things: updated models that are CloudKit-compatible and a container configuration that enables sync.
+
+### Step 1: Model Compatibility
+
+First, make sure BetAway's data models work with CloudKit. Here is the current `UserProfile` model from `BetFree/Models/UserProfile.swift`:
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class UserProfile {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var quitDate: Date = Date()
+    var displayName: String = ""
+
+    // Gambling profile
+    var gamblingTypesRaw: [String] = []
+    var frequencyRaw: String = GamblingFrequency.weekly.rawValue
+    var averageWeeklySpend: Double = 0
+    var estimatedTotalLosses: Double?
+    var estimatedDebt: Double?
+
+    // Settings
+    var biometricLockEnabled: Bool = false
+    var notificationsEnabled: Bool = true
+    var morningReminderHour: Int = AppConfig.defaultMorningHour
+    var morningReminderMinute: Int = AppConfig.defaultMorningMinute
+    var eveningReminderHour: Int = AppConfig.defaultEveningHour
+    var eveningReminderMinute: Int = AppConfig.defaultEveningMinute
+    var hapticFeedbackEnabled: Bool = true
+    var emergencyContactsData: Data?
+
+    // Relationships
+    @Relationship(deleteRule: .cascade) var checkins: [DailyCheckin] = []
+    @Relationship(deleteRule: .cascade) var urgeLogs: [UrgeLog] = []
+    @Relationship(deleteRule: .cascade) var journalEntries: [JournalEntry] = []
+
+    // ... computed properties and init ...
+}
+```
+
+And the `DailyCheckin` model from `BetFree/Models/DailyCheckin.swift`:
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class DailyCheckin {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var checkinTypeRaw: String = CheckinType.morningPledge.rawValue
+    var mood: Int = MoodRating.neutral.rawValue
+    var gamblingFree: Bool = true
+    var amountGambled: Double?
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var triggersRaw: [String] = []
+    var riskLevelRaw: String = RiskLevel.low.rawValue
+    var createdAt: Date = Date()
+
+    @Relationship(inverse: \UserProfile.checkins) var userProfile: UserProfile?
+
+    // ... computed properties and init ...
+}
+```
+
+The `UrgeLog` model from `BetFree/Models/UrgeLog.swift`:
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class UrgeLog {
+    var id: UUID = UUID()
+    var timestamp: Date = Date()
+    var intensity: Int = 5
+    var durationSeconds: TimeInterval = 0
+    var triggerRaw: String = ""
+    var copingStrategyRaw: String = ""
+    var didResist: Bool = true
+    var notes: String = ""
+
+    @Relationship(inverse: \UserProfile.urgeLogs) var userProfile: UserProfile?
+
+    // ... computed properties and init ...
+}
+```
+
+And the `JournalEntry` model from `BetFree/Models/JournalEntry.swift`:
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
+
+    @Relationship(inverse: \UserProfile.journalEntries) var userProfile: UserProfile?
+
+    // ... init ...
+}
+```
+
+Now send this prompt to prepare the models for CloudKit:
+
+```
+Review and update BetAway's SwiftData models for CloudKit
+compatibility.
+
+Current models: UserProfile, DailyCheckin, UrgeLog, JournalEntry
+(code shown above).
+
+Requirements for CloudKit sync:
+1. Remove any @Attribute(.unique) constraints (not supported)
+2. Ensure all non-optional properties have default values
+   (all four models already do this — verify)
+3. Mark device-specific properties as @Transient:
+   - biometricLockEnabled (Face ID enrollment is per-device)
+   - hapticFeedbackEnabled (preference is per-device)
+   - notificationsEnabled (notification permissions are per-device)
+   - morningReminderHour/Minute, eveningReminderHour/Minute
+     (reminder schedules are per-device)
+4. Add a lastModified timestamp to UserProfile, DailyCheckin,
+   UrgeLog, and JournalEntry for conflict debugging
+5. Verify relationships are optional (inverse relationships
+   already are)
+6. Verify emergencyContactsData (stored as Data?) syncs correctly
+7. Keep Swift 6 strict concurrency compliance
+
+Generate the updated UserProfile model only — the other models
+need the same lastModified addition but are otherwise already
+CloudKit-compatible.
+```
+
+### Code Review
+
+Review the AI output against these criteria:
+
+- No `@Attribute(.unique)` on any property — CloudKit manages its own record identifiers via `CKRecord.ID`
+- All properties have default values — CloudKit requires this for new fields added in future schema versions. BetAway's models already satisfy this requirement.
+- Device-specific settings marked `@Transient` — `biometricLockEnabled`, `hapticFeedbackEnabled`, `notificationsEnabled`, and reminder time properties should not sync because they depend on per-device configuration (Face ID enrollment, notification permissions, personal schedule)
+- `lastModified` property added with a default of `Date.now` for conflict debugging
+- `emergencyContactsData` remains as `Data?` — CloudKit handles `Data` fields natively. The `EmergencyContact` struct is encoded/decoded via `JSONEncoder`/`JSONDecoder`, and this will sync correctly as long as the Codable format stays stable across app versions
+- `@Relationship` declarations remain as-is — the inverse relationships (`userProfile: UserProfile?`) are already optional, which is required for CloudKit
+- If the AI kept `@Attribute(.unique)` on `id` — reject. A unique constraint on UUID will cause sync failures with cryptic Core Data errors in the console
+- If the AI added explicit `CKRecord` handling — reject. SwiftData abstracts this entirely
+
+Here is what the updated `UserProfile` looks like with CloudKit compatibility:
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class UserProfile {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var quitDate: Date = Date()
+    var displayName: String = ""
+
+    // Gambling profile
+    var gamblingTypesRaw: [String] = []
+    var frequencyRaw: String = GamblingFrequency.weekly.rawValue
+    var averageWeeklySpend: Double = 0
+    var estimatedTotalLosses: Double?
+    var estimatedDebt: Double?
+
+    // Device-specific settings — NOT synced across devices.
+    // Face ID enrollment, notification permissions, and reminder
+    // schedules are per-device concerns.
+    @Transient var biometricLockEnabled: Bool = false
+    @Transient var notificationsEnabled: Bool = true
+    @Transient var morningReminderHour: Int = AppConfig.defaultMorningHour
+    @Transient var morningReminderMinute: Int = AppConfig.defaultMorningMinute
+    @Transient var eveningReminderHour: Int = AppConfig.defaultEveningHour
+    @Transient var eveningReminderMinute: Int = AppConfig.defaultEveningMinute
+    @Transient var hapticFeedbackEnabled: Bool = true
+
+    // Emergency contacts — syncs as raw Data via JSONEncoder.
+    // The EmergencyContact struct must remain Codable-stable
+    // across app versions to avoid cross-device corruption.
+    var emergencyContactsData: Data?
+
+    // Conflict debugging — updated on every save.
+    var lastModified: Date = Date.now
+
+    // Relationships
+    @Relationship(deleteRule: .cascade) var checkins: [DailyCheckin] = []
+    @Relationship(deleteRule: .cascade) var urgeLogs: [UrgeLog] = []
+    @Relationship(deleteRule: .cascade) var journalEntries: [JournalEntry] = []
+
+    // ... computed properties and init ...
+}
+```
+
+The key change is `@Transient` on device-specific settings. Without this, enabling Face ID on your iPhone would enable it on your iPad — where the user may not have Face ID enrolled, effectively locking them out.
+
+### Step 2: Container Configuration
+
+Here is BetAway's current `ModelContainer` setup from `BetFree/App/BetFreeApp.swift`:
+
+```swift
+import SwiftUI
+import SwiftData
+import CoreText
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            // If the database is corrupted, try deleting and recreating
+            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent("default.store\(suffix)")
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+To add CloudKit sync, the `ModelConfiguration` needs one change — `cloudKitDatabase: .automatic`:
+
+```swift
+import SwiftUI
+import SwiftData
+import CoreText
+import os
+
+@main
+struct BetFreeApp: App {
+    private static let logger = Logger(
+        subsystem: "com.pekmario.betfreeapp",
+        category: "App"
+    )
+
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+    @State private var syncMonitor = SyncMonitor()
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false,
+            cloudKitDatabase: .automatic
+        )
+
+        do {
+            let container = try ModelContainer(
+                for: schema,
+                configurations: [modelConfiguration]
+            )
+            logger.info("ModelContainer created with CloudKit sync enabled.")
+            return container
+        } catch {
+            logger.fault(
+                "Failed to create ModelContainer: \(error.localizedDescription)"
+            )
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(syncMonitor)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+The critical line is `cloudKitDatabase: .automatic`. That single parameter change is the entire SwiftData integration. SwiftData creates an `NSPersistentCloudKitContainer` internally, configures the CloudKit schema, and handles push-notification-based sync triggers.
+
+Note that the database corruption recovery logic from the original code has been removed. With CloudKit sync enabled, deleting the local store is dangerous — it could trigger a full re-download of all CloudKit records, which is slow and can cause duplicate entries if the schema has changed. In production, handle container creation errors by logging them and falling back gracefully, not by nuking the database.
+
+### Code Review
+
+- `ModelConfiguration` uses `cloudKitDatabase: .automatic`
+- The schema includes all four model types: `UserProfile`, `DailyCheckin`, `UrgeLog`, `JournalEntry`
+- No force unwrapping on container creation
+- `SyncMonitor` is injected into the environment for UI sync status
+- If it uses a hardcoded `cloudKitContainerIdentifier` that does not match the entitlements — sync will silently fail with no user-visible error
+
+## Iteration: Adding Sync Visibility
+
+After reviewing the generated model and container code, we need a way to see what is happening. Silent sync is fine for users, but during development you need visibility:
+
+```
+Good. Now add these improvements:
+
+1. Create a SyncMonitor class that listens to
+   NSPersistentCloudKitContainer.eventChangedNotification to track
+   sync status (importing, exporting, idle, error)
+2. Expose the sync status as an @Observable property so the UI can
+   show a subtle sync indicator
+3. Add a method to check if iCloud is available using
+   FileManager.default.ubiquityIdentityToken
+4. Log all sync events with os.Logger including the event type and
+   any errors
+5. Make SyncMonitor @MainActor for safe UI binding
+
+Keep it minimal. We are not building a full sync engine — just enough
+visibility to debug issues and inform the user.
+```
+
+Then add the UI component:
+
+```
+Create a small SyncStatusView that reads from SyncMonitor and shows:
+- A green checkmark.icloud icon when idle
+- A rotating arrow.triangle.2.circlepath.icloud when syncing
+- A red exclamationmark.icloud when there is an error
+- An icloud.slash icon when no iCloud account is available
+
+Use SF Symbols and keep it small enough to put in a toolbar or
+settings screen. Use .symbolEffect for the rotation animation.
+```
+
+## Verify Phase: Testing Sync End-to-End
+
+CloudKit sync requires careful testing because failures are often silent. Work through this verification plan:
+
+**Xcode configuration:**
+1. Target > Signing & Capabilities > iCloud: CloudKit is checked
+2. Container identifier matches your `ModelConfiguration`
+3. Background Modes capability added with "Remote notifications" enabled
+4. Entitlements file contains `com.apple.developer.icloud-container-identifiers` with the correct container
+5. Build and run — zero errors, zero warnings
+
+**CloudKit Dashboard:**
+1. Open [CloudKit Console](https://icloud.developer.apple.com/)
+2. Select your container
+3. Navigate to the "Development" environment
+4. Check that SwiftData has created the record types matching your models (this happens on first launch)
+5. You should see record types for `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` with fields matching your properties
+
+**Sync testing — two simulators:**
+1. Open two iOS Simulator instances (Xcode > Open Developer Tool > Simulator, then File > New Simulator)
+2. Sign both into the same iCloud account (Settings > Apple ID)
+3. Run the app on Simulator A, complete a morning pledge
+4. Wait 10-30 seconds
+5. Run the app on Simulator B — the pledge should appear in the checkins
+6. Log an urge on Simulator B, wait, confirm the `UrgeLog` appears on Simulator A
+
+**Offline-to-online transition:**
+1. Enable Airplane Mode on the simulator (or use Network Link Conditioner)
+2. Log a morning pledge, an evening check-in, and a journal entry while offline
+3. Disable Airplane Mode
+4. Confirm all three entries sync to the other device within 60 seconds
+
+**Conflict test:**
+1. On Device A, start editing a journal entry but do not save yet
+2. On Device B, edit the same journal entry and save
+3. On Device A, save your edit
+4. Observe which version wins (should be the last save — Device A)
+5. Confirm no data loss and no crash
+
+## Final Code
+
+### SyncMonitor.swift
+
+```swift
+import Foundation
+import CoreData
+import os
+
+/// Observes CloudKit sync events and exposes status for the UI.
+///
+/// SyncMonitor listens to NSPersistentCloudKitContainer notifications
+/// (which SwiftData fires internally) and translates them into a
+/// simple status enum that views can observe.
+@MainActor
+@Observable
+final class SyncMonitor {
+    private let logger = Logger(
+        subsystem: "com.pekmario.betfreeapp",
+        category: "Sync"
+    )
+
+    /// Current sync status.
+    enum Status: String, Sendable {
+        case idle = "Up to date"
+        case importing = "Downloading..."
+        case exporting = "Uploading..."
+        case error = "Sync error"
+        case noAccount = "No iCloud account"
+    }
+
+    /// The current sync status, observable by SwiftUI views.
+    private(set) var status: Status = .idle
+
+    /// Whether iCloud is available on this device.
+    private(set) var isCloudAvailable: Bool = false
+
+    /// The last time a sync export completed successfully.
+    /// Useful for displaying "Last synced: 2 minutes ago" in settings.
+    private(set) var lastSyncDate: Date?
+
+    init() {
+        checkCloudAvailability()
+        startObserving()
+    }
+
+    /// Checks whether the user is signed into iCloud.
+    private func checkCloudAvailability() {
+        let token = FileManager.default.ubiquityIdentityToken
+        isCloudAvailable = token != nil
+        if !isCloudAvailable {
+            status = .noAccount
+            logger.warning("No iCloud account detected. Data is local only.")
+        }
+    }
+
+    /// Subscribes to CloudKit sync event notifications.
+    ///
+    /// SwiftData uses NSPersistentCloudKitContainer internally, so these
+    /// notifications fire even though we never create the container ourselves.
+    private func startObserving() {
+        NotificationCenter.default.addObserver(
+            forName: NSPersistentCloudKitContainer.eventChangedNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            guard let event = notification.userInfo?[
+                NSPersistentCloudKitContainer.eventNotificationUserInfoKey
+            ] as? NSPersistentCloudKitContainer.Event else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.handleSyncEvent(event)
+            }
+        }
+    }
+
+    /// Maps a CloudKit sync event to a user-visible status.
+    private func handleSyncEvent(
+        _ event: NSPersistentCloudKitContainer.Event
+    ) {
+        if let error = event.error {
+            status = .error
+            logger.error(
+                "Sync error (\(event.type.label)): \(error.localizedDescription)"
+            )
+            return
+        }
+
+        if event.endDate == nil {
+            // Event is in progress.
+            switch event.type {
+            case .import:
+                status = .importing
+                logger.debug("Sync: importing from CloudKit.")
+            case .export:
+                status = .exporting
+                logger.debug("Sync: exporting to CloudKit.")
+            case .setup:
+                logger.debug("Sync: setup in progress.")
+            @unknown default:
+                logger.debug("Sync: unknown event type.")
+            }
+        } else {
+            // Event finished successfully.
+            if event.type == .export {
+                lastSyncDate = Date.now
+            }
+            status = .idle
+            logger.debug("Sync: \(event.type.label) completed.")
+        }
+    }
+}
+
+// MARK: - Event Type Label
+
+extension NSPersistentCloudKitContainer.EventType {
+    var label: String {
+        switch self {
+        case .setup:  return "setup"
+        case .import: return "import"
+        case .export: return "export"
+        @unknown default: return "unknown"
+        }
+    }
+}
+```
+
+### SyncStatusView.swift
+
+```swift
+import SwiftUI
+
+/// A small indicator showing the current CloudKit sync status.
+///
+/// Place this in a toolbar, settings screen, or anywhere you want
+/// a subtle indicator of sync health. It stays small and unobtrusive.
+struct SyncStatusView: View {
+    @Environment(SyncMonitor.self) private var syncMonitor
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusIcon
+                .font(.caption)
+            Text(syncMonitor.status.rawValue)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .animation(.easeInOut(duration: 0.3), value: syncMonitor.status)
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch syncMonitor.status {
+        case .idle:
+            Image(systemName: "checkmark.icloud")
+                .foregroundStyle(.green)
+        case .importing, .exporting:
+            Image(systemName: "arrow.triangle.2.circlepath.icloud")
+                .foregroundStyle(.blue)
+                .symbolEffect(.rotate, isActive: true)
+        case .error:
+            Image(systemName: "exclamationmark.icloud")
+                .foregroundStyle(.red)
+        case .noAccount:
+            Image(systemName: "icloud.slash")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+#Preview {
+    SyncStatusView()
+        .environment(SyncMonitor())
+}
+```
+
+### Key Design Decisions
+
+**Why `cloudKitDatabase: .automatic` instead of `.private`?** The `.automatic` option uses the private database by default but allows Apple to determine the best configuration. For most apps, this is the right choice. Use `.private` explicitly only if you need to guarantee no data touches a public or shared database.
+
+**Why no `@Attribute(.unique)` on `id`?** CloudKit manages record identity internally using `CKRecord.ID`. Adding a unique constraint on your own `id` field causes the persistent store coordinator to throw merge errors during sync, because CloudKit's conflict resolution operates at the record level, not the field level. BetAway's models use `var id: UUID = UUID()` without uniqueness constraints — this is correct for CloudKit.
+
+**Why last-write-wins?** SwiftData with CloudKit does not offer built-in field-level merge. The entire record is replaced by whichever device wrote last (by timestamp). For a recovery app, this is acceptable — users rarely edit the same `DailyCheckin` on two devices simultaneously. The morning pledge happens once, the evening check-in happens once, and journal entries are typically written on one device. For collaborative apps (shared documents, team task lists), you would need a custom merge strategy or a different sync backend entirely.
+
+**Why `@Transient` on device-specific settings?** `biometricLockEnabled`, `notificationsEnabled`, `hapticFeedbackEnabled`, and reminder time settings are all device-specific concerns. If Device A has Face ID enabled but Device B does not have Face ID hardware, syncing this flag would present a biometric prompt that can never succeed. Notification permissions and reminder schedules similarly depend on per-device OS settings. Keeping these `@Transient` means each device maintains its own preferences independently.
+
+**Why keep `emergencyContactsData` synced?** Emergency contacts are user data, not device configuration. If someone adds their therapist's phone number as an emergency contact on their iPhone, they expect to see it on their iPad too. The `Data` field (encoded via `JSONEncoder`) syncs natively through CloudKit. The only risk is Codable format changes between app versions — if you add a new property to `EmergencyContact`, make it optional with a default value so older versions can still decode the data.
+
+## Checkpoint
+
+Before considering CloudKit sync complete, verify every item:
+
+1. iCloud capability added in Xcode with CloudKit checked
+2. Background Modes capability added with "Remote notifications" enabled
+3. Container identifier matches between Xcode entitlements and `ModelConfiguration`
+4. `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` have no `@Attribute(.unique)` constraints on any property
+5. All non-optional properties in every model have default values
+6. Device-specific settings (`biometricLockEnabled`, `notificationsEnabled`, `hapticFeedbackEnabled`, reminder times) are marked `@Transient`
+7. App builds and runs with zero warnings under Swift 6 strict concurrency
+8. CloudKit Dashboard shows record types for all four models after first launch
+9. Creating a `DailyCheckin` on Device A appears on Device B within 60 seconds
+10. Editing a `JournalEntry` on one device reflects on the other
+11. Deleting an `UrgeLog` on one device removes it from the other
+12. App works normally when iCloud is unavailable (local-only fallback)
+13. `SyncMonitor` logs sync events in the Xcode console
+14. Creating entries offline and then going online results in successful sync
+
+## Challenge
+
+**Implement a manual sync status indicator in the Settings screen.**
+
+Add `SyncStatusView` to BetAway's `SettingsView`. Below the status indicator, show the last successful sync time. Add a "Sync Now" button that triggers a save on the `ModelContext` to nudge the persistent store into attempting an export. If `isCloudAvailable` is false, show a message directing the user to sign into iCloud in Settings.
+
+<details>
+<summary>Hint</summary>
+
+The last sync time is already tracked in `SyncMonitor.lastSyncDate`. Display it with a relative format:
+
+```swift
+if let lastSync = syncMonitor.lastSyncDate {
+    Text("Last synced: \(lastSync, format: .relative(presentation: .named))")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+}
+```
+
+The "Sync Now" button triggers a context save, which prompts the CloudKit integration to check for pending changes:
+
+```swift
+@Environment(\.modelContext) private var modelContext
+
+Button("Sync Now") {
+    try? modelContext.save()
+}
+.disabled(!syncMonitor.isCloudAvailable)
+```
+
+This does not force an immediate sync — CloudKit decides the actual timing — but it ensures any unsaved local changes are flushed to the persistent store where the sync engine can pick them up. For the "no account" state:
+
+```swift
+if !syncMonitor.isCloudAvailable {
+    ContentUnavailableView(
+        "iCloud Not Available",
+        systemImage: "icloud.slash",
+        description: Text("Sign into iCloud in Settings to sync your recovery data across devices.")
+    )
+}
+```
+</details>
+
+---
+
+Next up: **Bonus Lesson 9.2 — Share Extension & Beyond**, where we build a Share Extension for quick check-in logging from any app and chart your path forward as an AI-augmented iOS developer.

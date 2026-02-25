@@ -21,6 +21,7 @@ const course = defineCollection({
   schema: z.object({
     title: z.string(),
     description: z.string(),
+    courseSlug: z.string().default('vibe-code-native'),
     module: z.number(),
     moduleTitle: z.string(),
     lesson: z.number(),

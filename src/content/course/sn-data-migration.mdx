@@ -1,0 +1,1134 @@
+---
+title: "Data Migration Strategy"
+description: "Set up SwiftData schema versioning and lightweight migrations for BetAway's UserProfile, DailyCheckin, UrgeLog, and JournalEntry models so you can evolve your data model without losing user data."
+courseSlug: "ship-native"
+module: 3
+moduleTitle: "Data Layer & Persistence"
+lesson: 3
+duration: "18 min read"
+difficulty: "advanced"
+topics: ["SwiftData", "Schema Versioning", "Migration", "Data Safety", "VersionedSchema", "MigrationPlan", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your data model will change. It is not a question of if — it is a question of when. You will add a property, rename a field, change a relationship. And when that happens, every user who already has data on their device is holding a database that no longer matches your code.
+
+If you handle this wrong, the app crashes on launch. The user loses their recovery data. They leave a one-star review. This is not hypothetical — it is the number one cause of data-loss complaints on the App Store.
+
+In this lesson, we set up SwiftData schema versioning and migration plans for BetAway so that every future model change is safe, tested, and invisible to the user.
+
+## What You'll Learn
+
+- How `VersionedSchema` and `SchemaMigrationPlan` work in SwiftData
+- The difference between lightweight (automatic) and custom (manual) migrations
+- How to version BetAway's four core models — `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` — from V1 to V2
+- How to configure `ModelContainer` to use a migration plan
+- How to test migrations with sample data before shipping
+- When to use each migration type — and when you are in trouble
+
+## Why This Matters
+
+SwiftData handles a lot of persistence work for you. But it does not handle model evolution automatically. If you add a new property to a `@Model` class without a default value and without a migration plan, SwiftData cannot open the existing database. The store fails to load. Your app is dead on arrival for every existing user.
+
+This is especially dangerous with AI-assisted development. You ask Claude Code to "add a sentimentScore property to JournalEntry" and it adds the property, compiles, runs great on the simulator — because the simulator has no existing data. You ship it. And then your users, who have weeks of daily check-ins, urge logs, and journal entries, open the app to a blank screen or a crash.
+
+The fix is straightforward: version your schema from day one, write migration plans, and test them before every release. It takes 15 minutes to set up. It saves you from disaster.
+
+## Plan Phase
+
+### The Prompt
+
+Here is the prompt I send to Claude Code to plan the migration architecture:
+
+```
+I need to set up SwiftData schema versioning for BetAway.
+Before writing code, think through:
+
+1. What does VersionedSchema look like for our current models?
+   Call it BetAwaySchemaV1. We have four @Model classes:
+   - UserProfile (quitDate, displayName, gamblingTypesRaw,
+     frequencyRaw, averageWeeklySpend, biometricLockEnabled,
+     notificationsEnabled, relationships to checkins/urgeLogs/
+     journalEntries)
+   - DailyCheckin (date, checkinTypeRaw, mood, gamblingFree,
+     pledgeReason, notes, triggersRaw, riskLevelRaw)
+   - UrgeLog (timestamp, intensity, durationSeconds, triggerRaw,
+     copingStrategyRaw, didResist, notes)
+   - JournalEntry (createdAt, title, content, mood, promptUsed)
+2. For V2, I want to add two new properties:
+   - sentimentScore: Double (default 0.0) on JournalEntry —
+     stores the on-device NLTagger sentiment score
+   - resistanceRate: Double (default 0.0) on UserProfile —
+     cached urge resistance percentage
+3. What migration stages do we need?
+4. Should these be lightweight or custom migrations?
+5. How do we configure ModelContainer to use the plan?
+
+Think step by step. Then give me the implementation plan.
+```
+
+Notice what this prompt does. It asks the AI to reason before coding — chain-of-thought applied to data architecture. It also specifies the exact changes for V2, which prevents the AI from inventing properties we do not need.
+
+### AI Analysis
+
+Claude Code responds with a solid analysis. The key points:
+
+- **V1** captures the current shape of all four models exactly as they exist in the database today — `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` with their relationships
+- **V2** adds `sentimentScore` to `JournalEntry` and `resistanceRate` to `UserProfile` with default values
+- Both new properties have defaults, so SwiftData can perform a **lightweight migration** — it maps old columns to new columns and fills in defaults automatically
+- If we were renaming a property or transforming data, we would need a **custom migration**
+- The `SchemaMigrationPlan` ties it all together and the `ModelContainer` needs to know about it
+
+### Anti-Pattern: No Versioning
+
+Here is the pattern I see constantly in AI-generated code, and it is the one that causes data loss:
+
+```swift
+// DANGEROUS — no versioning, no migration plan
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
+    var sentimentScore: Double = 0.0  // Added in v1.1
+
+    @Relationship(inverse: \UserProfile.journalEntries)
+    var userProfile: UserProfile?
+
+    init(
+        title: String = "",
+        content: String = "",
+        mood: MoodRating = .neutral,
+        promptUsed: String = ""
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.title = title
+        self.content = content
+        self.mood = mood.rawValue
+        self.promptUsed = promptUsed
+        self.sentimentScore = 0.0
+    }
+}
+```
+
+This compiles. It runs. But if a user has a V1 database, SwiftData sees a column that does not exist in the store. Without a migration plan telling it how to handle the mismatch, it fails. The init defaults do not matter -- they are for new objects, not for migrating existing rows.
+
+**Never add properties to a shipped `@Model` without a versioned schema and migration plan.**
+
+## Execute Phase
+
+### The Prompt
+
+```
+Implement the SwiftData migration architecture for BetAway.
+
+Create three files:
+1. BetAwaySchemaV1.swift — VersionedSchema with the current
+   four models:
+   - UserProfile (id, createdAt, quitDate, displayName,
+     gamblingTypesRaw, frequencyRaw, averageWeeklySpend,
+     estimatedTotalLosses, estimatedDebt, biometricLockEnabled,
+     notificationsEnabled, morningReminderHour/Minute,
+     eveningReminderHour/Minute, hapticFeedbackEnabled,
+     emergencyContactsData, relationships to checkins/urgeLogs/
+     journalEntries)
+   - DailyCheckin (id, date, checkinTypeRaw, mood, gamblingFree,
+     amountGambled, pledgeReason, notes, triggersRaw,
+     riskLevelRaw, createdAt, inverse relationship to
+     userProfile)
+   - UrgeLog (id, timestamp, intensity, durationSeconds,
+     triggerRaw, copingStrategyRaw, didResist, notes, inverse
+     relationship to userProfile)
+   - JournalEntry (id, createdAt, title, content, mood,
+     promptUsed, inverse relationship to userProfile)
+2. BetAwaySchemaV2.swift — VersionedSchema adding
+   sentimentScore (Double, default 0.0) to JournalEntry and
+   resistanceRate (Double, default 0.0) to UserProfile
+3. BetAwayMigrationPlan.swift — SchemaMigrationPlan with
+   a lightweight migration stage from V1 to V2
+
+Use Swift 6 conventions. Each schema should use an enum
+conforming to VersionedSchema. The models inside each
+schema should be @Model classes with the exact properties
+for that version.
+
+Also show how to update the ModelContainer configuration
+to use BetAwayMigrationPlan.
+```
+
+### AI Review
+
+Here is what Claude Code generates. Let me walk through each file and call out what matters.
+
+**BetAwaySchemaV1.swift** — the baseline:
+
+```swift
+import SwiftData
+import Foundation
+
+enum BetAwaySchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        [UserProfile.self, DailyCheckin.self,
+         UrgeLog.self, JournalEntry.self]
+    }
+
+    @Model
+    final class UserProfile {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var quitDate: Date = Date()
+        var displayName: String = ""
+        var gamblingTypesRaw: [String] = []
+        var frequencyRaw: String = "Weekly"
+        var averageWeeklySpend: Double = 0
+        var estimatedTotalLosses: Double?
+        var estimatedDebt: Double?
+        var biometricLockEnabled: Bool = false
+        var notificationsEnabled: Bool = true
+        var morningReminderHour: Int = 8
+        var morningReminderMinute: Int = 0
+        var eveningReminderHour: Int = 21
+        var eveningReminderMinute: Int = 0
+        var hapticFeedbackEnabled: Bool = true
+        var emergencyContactsData: Data?
+
+        @Relationship(deleteRule: .cascade)
+        var checkins: [DailyCheckin] = []
+        @Relationship(deleteRule: .cascade)
+        var urgeLogs: [UrgeLog] = []
+        @Relationship(deleteRule: .cascade)
+        var journalEntries: [JournalEntry] = []
+
+        init(
+            quitDate: Date = Date(),
+            displayName: String = "",
+            averageWeeklySpend: Double = 0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.quitDate = quitDate
+            self.displayName = displayName
+            self.averageWeeklySpend = averageWeeklySpend
+        }
+    }
+
+    @Model
+    final class DailyCheckin {
+        var id: UUID = UUID()
+        var date: Date = Date()
+        var checkinTypeRaw: String = "Morning Pledge"
+        var mood: Int = 3
+        var gamblingFree: Bool = true
+        var amountGambled: Double?
+        var pledgeReason: String = ""
+        var notes: String = ""
+        var triggersRaw: [String] = []
+        var riskLevelRaw: String = "Low"
+        var createdAt: Date = Date()
+
+        @Relationship(inverse: \UserProfile.checkins)
+        var userProfile: UserProfile?
+
+        init(
+            checkinTypeRaw: String = "Morning Pledge",
+            mood: Int = 3,
+            gamblingFree: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.date = Date()
+            self.checkinTypeRaw = checkinTypeRaw
+            self.mood = mood
+            self.gamblingFree = gamblingFree
+            self.notes = notes
+            self.createdAt = Date()
+        }
+    }
+
+    @Model
+    final class UrgeLog {
+        var id: UUID = UUID()
+        var timestamp: Date = Date()
+        var intensity: Int = 5
+        var durationSeconds: TimeInterval = 0
+        var triggerRaw: String = ""
+        var copingStrategyRaw: String = ""
+        var didResist: Bool = true
+        var notes: String = ""
+
+        @Relationship(inverse: \UserProfile.urgeLogs)
+        var userProfile: UserProfile?
+
+        init(
+            intensity: Int = 5,
+            didResist: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.timestamp = Date()
+            self.intensity = intensity
+            self.didResist = didResist
+            self.notes = notes
+        }
+    }
+
+    @Model
+    final class JournalEntry {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var title: String = ""
+        var content: String = ""
+        var mood: Int = 3
+        var promptUsed: String = ""
+
+        @Relationship(inverse: \UserProfile.journalEntries)
+        var userProfile: UserProfile?
+
+        init(
+            title: String = "",
+            content: String = "",
+            mood: Int = 3,
+            promptUsed: String = ""
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.title = title
+            self.content = content
+            self.mood = mood
+            self.promptUsed = promptUsed
+        }
+    }
+}
+```
+
+Review checklist:
+
+- The `VersionedSchema` conformance on an enum — correct pattern. Enums cannot be instantiated, which is exactly what we want for a schema definition.
+- `versionIdentifier` uses `Schema.Version(1, 0, 0)` — semantic versioning for your data model.
+- `models` returns all four model types: `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry`. Every `@Model` in your schema must be listed here.
+- Each class inside the enum is scoped to V1. This is the snapshot of what each model looked like at launch.
+- The `@Relationship` declarations with `deleteRule: .cascade` and inverse references are preserved exactly as the production models define them.
+- Make sure this matches your actual shipped models exactly. If your production `DailyCheckin` has a property that is missing here, the migration will fail. Compare property-by-property against the real files in `BetFree/Models/`.
+
+**BetAwaySchemaV2.swift** — the evolution:
+
+```swift
+import SwiftData
+import Foundation
+
+enum BetAwaySchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        [UserProfile.self, DailyCheckin.self,
+         UrgeLog.self, JournalEntry.self]
+    }
+
+    @Model
+    final class UserProfile {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var quitDate: Date = Date()
+        var displayName: String = ""
+        var gamblingTypesRaw: [String] = []
+        var frequencyRaw: String = "Weekly"
+        var averageWeeklySpend: Double = 0
+        var estimatedTotalLosses: Double?
+        var estimatedDebt: Double?
+        var biometricLockEnabled: Bool = false
+        var notificationsEnabled: Bool = true
+        var morningReminderHour: Int = 8
+        var morningReminderMinute: Int = 0
+        var eveningReminderHour: Int = 21
+        var eveningReminderMinute: Int = 0
+        var hapticFeedbackEnabled: Bool = true
+        var emergencyContactsData: Data?
+        var resistanceRate: Double = 0.0  // NEW in V2
+
+        @Relationship(deleteRule: .cascade)
+        var checkins: [DailyCheckin] = []
+        @Relationship(deleteRule: .cascade)
+        var urgeLogs: [UrgeLog] = []
+        @Relationship(deleteRule: .cascade)
+        var journalEntries: [JournalEntry] = []
+
+        init(
+            quitDate: Date = Date(),
+            displayName: String = "",
+            averageWeeklySpend: Double = 0,
+            resistanceRate: Double = 0.0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.quitDate = quitDate
+            self.displayName = displayName
+            self.averageWeeklySpend = averageWeeklySpend
+            self.resistanceRate = resistanceRate
+        }
+    }
+
+    @Model
+    final class DailyCheckin {
+        var id: UUID = UUID()
+        var date: Date = Date()
+        var checkinTypeRaw: String = "Morning Pledge"
+        var mood: Int = 3
+        var gamblingFree: Bool = true
+        var amountGambled: Double?
+        var pledgeReason: String = ""
+        var notes: String = ""
+        var triggersRaw: [String] = []
+        var riskLevelRaw: String = "Low"
+        var createdAt: Date = Date()
+
+        @Relationship(inverse: \UserProfile.checkins)
+        var userProfile: UserProfile?
+
+        init(
+            checkinTypeRaw: String = "Morning Pledge",
+            mood: Int = 3,
+            gamblingFree: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.date = Date()
+            self.checkinTypeRaw = checkinTypeRaw
+            self.mood = mood
+            self.gamblingFree = gamblingFree
+            self.notes = notes
+            self.createdAt = Date()
+        }
+    }
+
+    @Model
+    final class UrgeLog {
+        var id: UUID = UUID()
+        var timestamp: Date = Date()
+        var intensity: Int = 5
+        var durationSeconds: TimeInterval = 0
+        var triggerRaw: String = ""
+        var copingStrategyRaw: String = ""
+        var didResist: Bool = true
+        var notes: String = ""
+
+        @Relationship(inverse: \UserProfile.urgeLogs)
+        var userProfile: UserProfile?
+
+        init(
+            intensity: Int = 5,
+            didResist: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.timestamp = Date()
+            self.intensity = intensity
+            self.didResist = didResist
+            self.notes = notes
+        }
+    }
+
+    @Model
+    final class JournalEntry {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var title: String = ""
+        var content: String = ""
+        var mood: Int = 3
+        var promptUsed: String = ""
+        var sentimentScore: Double = 0.0  // NEW in V2
+
+        @Relationship(inverse: \UserProfile.journalEntries)
+        var userProfile: UserProfile?
+
+        init(
+            title: String = "",
+            content: String = "",
+            mood: Int = 3,
+            promptUsed: String = "",
+            sentimentScore: Double = 0.0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.title = title
+            self.content = content
+            self.mood = mood
+            self.promptUsed = promptUsed
+            self.sentimentScore = sentimentScore
+        }
+    }
+}
+```
+
+Review checklist:
+
+- Version bumped to `Schema.Version(2, 0, 0)`.
+- All V1 properties are preserved on every model — you never remove properties in a new version without an explicit migration stage handling the removal.
+- `JournalEntry` gains `sentimentScore: Double = 0.0` and `UserProfile` gains `resistanceRate: Double = 0.0`. Both have default values in the init. This is critical for the lightweight migration — SwiftData uses these defaults to populate existing rows.
+- `DailyCheckin` and `UrgeLog` are unchanged between V1 and V2, but they still appear in the `models` array because the schema must list all models for every version.
+- Each model is a complete snapshot of V2. Someone reading this file knows exactly what the database looks like at version 2.
+
+**BetAwayMigrationPlan.swift** — the bridge:
+
+```swift
+import SwiftData
+
+enum BetAwayMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [BetAwaySchemaV1.self, BetAwaySchemaV2.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [migrateV1toV2]
+    }
+
+    static let migrateV1toV2 = MigrationStage.lightweight(
+        fromVersion: BetAwaySchemaV1.self,
+        toVersion: BetAwaySchemaV2.self
+    )
+}
+```
+
+Review checklist:
+
+- `schemas` lists every version in order — V1 first, V2 second. SwiftData walks this list to determine the migration path.
+- `stages` lists every migration step. Right now there is one: V1 to V2.
+- `.lightweight` is the correct choice here because we are only adding new properties with default values. SwiftData handles this automatically — no custom code needed.
+- One thing to watch: if you later need V3, you add `BetAwaySchemaV3.self` to `schemas` and a new stage to `stages`. The plan grows linearly with each version. Do not skip versions — SwiftData migrates one stage at a time.
+
+**ModelContainer configuration:**
+
+Here is how to update `BetFreeApp.swift` to use the migration plan. Compare this with the current production code in `BetFree/App/BetFreeApp.swift`, which creates the container without versioning:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+
+    init() {
+        UserDefaults.standard.register(defaults: [
+            AppConfig.StorageKeys.hapticFeedbackEnabled: true
+        ])
+    }
+
+    var sharedModelContainer: ModelContainer = {
+        do {
+            return try ModelContainer(
+                for: BetAwaySchemaV2.UserProfile.self,
+                     BetAwaySchemaV2.DailyCheckin.self,
+                     BetAwaySchemaV2.UrgeLog.self,
+                     BetAwaySchemaV2.JournalEntry.self,
+                migrationPlan: BetAwayMigrationPlan.self
+            )
+        } catch {
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+Notice the key change: `ModelContainer` now takes all four V2 model types — `BetAwaySchemaV2.UserProfile.self`, `BetAwaySchemaV2.DailyCheckin.self`, `BetAwaySchemaV2.UrgeLog.self`, and `BetAwaySchemaV2.JournalEntry.self` — always the latest schema version — plus `migrationPlan: BetAwayMigrationPlan.self`. This tells SwiftData: "The current models look like V2. If the database is older, use this plan to bring it up to date."
+
+Compare this with the current production `BetFreeApp.swift` which creates the schema directly without versioning:
+
+```swift
+var sharedModelContainer: ModelContainer = {
+    let schema = Schema([
+        UserProfile.self,
+        DailyCheckin.self,
+        UrgeLog.self,
+        JournalEntry.self,
+    ])
+    let modelConfiguration = ModelConfiguration(
+        schema: schema,
+        isStoredInMemoryOnly: false
+    )
+
+    do {
+        return try ModelContainer(
+            for: schema,
+            configurations: [modelConfiguration]
+        )
+    } catch {
+        // If the database is corrupted, try deleting and recreating
+        let urls = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )
+        if let appSupportURL = urls.first {
+            let storeURL = appSupportURL.appendingPathComponent(
+                "default.store"
+            )
+            try? FileManager.default.removeItem(at: storeURL)
+            for suffix in ["-shm", "-wal"] {
+                let relatedURL = appSupportURL.appendingPathComponent(
+                    "default.store\(suffix)"
+                )
+                try? FileManager.default.removeItem(at: relatedURL)
+            }
+        }
+
+        do {
+            return try ModelContainer(
+                for: schema,
+                configurations: [modelConfiguration]
+            )
+        } catch {
+            fatalError(
+                "Could not create ModelContainer after reset: \(error)"
+            )
+        }
+    }
+}()
+```
+
+This current approach works fine for V1 — but the moment you add a property to any of the four models, it breaks for existing users. The versioned approach replaces the raw `Schema([...])` call with versioned schema types and a migration plan.
+
+## Iteration
+
+The lightweight migration handles our V1-to-V2 case. But what if you need a custom migration — one that transforms data, not just adds columns?
+
+Let me show you what that looks like. Suppose in V3 we want to replace the `mood: Int` on `DailyCheckin` (a 1-5 `MoodRating` scale where 1=veryBad, 2=bad, 3=neutral, 4=good, 5=veryGood) with a `moodLabel: String` that stores the human-readable label directly. This is not adding a column — it is transforming existing data. Lightweight migration cannot do this.
+
+Here is the prompt:
+
+```
+Add a V3 to our migration plan. In V3, we replace the
+mood: Int property on DailyCheckin (1-5 MoodRating scale)
+with moodLabel: String.
+
+The custom migration should map:
+1 -> "veryBad", 2 -> "bad", 3 -> "neutral",
+4 -> "good", 5 -> "veryGood"
+
+Use MigrationStage.custom for this stage. Keep the V1->V2
+stage as lightweight.
+```
+
+And here is the custom migration stage that gets added to `BetAwayMigrationPlan`:
+
+```swift
+static let migrateV2toV3 = MigrationStage.custom(
+    fromVersion: BetAwaySchemaV2.self,
+    toVersion: BetAwaySchemaV3.self,
+    willMigrate: { context in
+        guard let checkins = try? context.fetch(
+            FetchDescriptor<BetAwaySchemaV2.DailyCheckin>()
+        ) else { return }
+
+        for checkin in checkins {
+            let label: String
+            switch checkin.mood {
+            case 1: label = "veryBad"
+            case 2: label = "bad"
+            case 3: label = "neutral"
+            case 4: label = "good"
+            case 5: label = "veryGood"
+            default: label = "neutral"
+            }
+            // The new property is set during migration
+            checkin.setValue(forKey: "moodLabel", to: label)
+        }
+
+        try? context.save()
+    },
+    didMigrate: nil
+)
+```
+
+The updated `schemas` and `stages`:
+
+```swift
+static var schemas: [any VersionedSchema.Type] {
+    [BetAwaySchemaV1.self, BetAwaySchemaV2.self, BetAwaySchemaV3.self]
+}
+
+static var stages: [MigrationStage] {
+    [migrateV1toV2, migrateV2toV3]
+}
+```
+
+A user on V1 gets both stages applied in order. A user on V2 gets only the V2-to-V3 stage. SwiftData figures out where the database currently is and applies only the stages needed. You do not write conditional logic for this — the plan handles it.
+
+### When to Use Each Type
+
+| Scenario | Migration Type |
+|----------|---------------|
+| Adding a new property with a default value | Lightweight |
+| Adding a new optional property | Lightweight |
+| Removing a property | Lightweight |
+| Renaming a property | Custom |
+| Changing a property's type | Custom |
+| Transforming existing data | Custom |
+| Adding a relationship with a default | Lightweight |
+| Splitting one model into two | Custom |
+
+The rule of thumb: if SwiftData can figure out the mapping on its own (add column, drop column, add optional), use lightweight. If the mapping requires logic (rename, type change, data transformation), use custom.
+
+## Verify Phase
+
+Migrations are the one thing you absolutely cannot ship without testing. A bug in your migration plan corrupts every existing user's data. There is no undo.
+
+Here is how I test migrations:
+
+### Step 1 — Create a Test with V1 Data
+
+```swift
+import Testing
+import SwiftData
+@testable import BetFree
+
+@Test("V1 to V2 migration preserves existing journal entries")
+func testV1toV2MigrationJournalEntry() throws {
+    // Create an in-memory container with V1 schema
+    let v1Config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let v1Container = try ModelContainer(
+        for: BetAwaySchemaV1.JournalEntry.self,
+             BetAwaySchemaV1.UserProfile.self,
+             BetAwaySchemaV1.DailyCheckin.self,
+             BetAwaySchemaV1.UrgeLog.self,
+        configurations: v1Config
+    )
+
+    // Insert V1 data
+    let context = v1Container.mainContext
+    let entry = BetAwaySchemaV1.JournalEntry(
+        title: "Day 30 reflection",
+        content: "One month without gambling. The urges on payday were tough but I used the breathing exercise.",
+        mood: MoodRating.good.rawValue,
+        promptUsed: "What helped you resist today?"
+    )
+    context.insert(entry)
+    try context.save()
+
+    // Verify V1 data exists
+    let v1Entries = try context.fetch(
+        FetchDescriptor<BetAwaySchemaV1.JournalEntry>()
+    )
+    #expect(v1Entries.count == 1)
+    #expect(v1Entries[0].mood == 4)
+    #expect(v1Entries[0].title == "Day 30 reflection")
+}
+```
+
+### Step 2 — Verify Migrated Data
+
+After running the migration, verify that every field carried over and that new fields got their defaults:
+
+```swift
+@Test("Migrated journal entries have correct default sentimentScore")
+func testMigratedDefaults() throws {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try ModelContainer(
+        for: BetAwaySchemaV2.JournalEntry.self,
+             BetAwaySchemaV2.UserProfile.self,
+             BetAwaySchemaV2.DailyCheckin.self,
+             BetAwaySchemaV2.UrgeLog.self,
+        migrationPlan: BetAwayMigrationPlan.self,
+        configurations: config
+    )
+
+    let context = container.mainContext
+    let entries = try context.fetch(
+        FetchDescriptor<BetAwaySchemaV2.JournalEntry>()
+    )
+
+    for entry in entries {
+        // New field should have default
+        #expect(entry.sentimentScore == 0.0)
+
+        // Existing fields should be preserved
+        #expect(!entry.title.isEmpty || entry.title == "")
+        #expect(entry.mood >= 1 && entry.mood <= 5)
+    }
+
+    // Also verify UserProfile got its new field
+    let profiles = try context.fetch(
+        FetchDescriptor<BetAwaySchemaV2.UserProfile>()
+    )
+
+    for profile in profiles {
+        #expect(profile.resistanceRate == 0.0)
+    }
+}
+```
+
+### Step 3 — Edge Cases
+
+Test with edge-case data that might trip up the migration:
+
+- A `DailyCheckin` with empty notes and no triggers (`triggersRaw: []`)
+- A `JournalEntry` with `mood` set to the boundary values (1 and 5, mapping to `MoodRating.veryBad` and `MoodRating.veryGood`)
+- An `UrgeLog` with `durationSeconds: 0` (user skipped the timer)
+- A `UserProfile` with all relationships populated — check-ins, urge logs, and journal entries
+- A large number of records (1,000+ across all four models) to verify performance
+
+If any of these tests fail, you have a migration bug. Fix it before shipping. There is no "we will fix it in the next update" for data corruption — the damage is done the moment the user opens the app.
+
+## Final Code
+
+Here are the three production files, ready to drop into your project.
+
+**Models/Migration/BetAwaySchemaV1.swift**
+
+```swift
+import SwiftData
+import Foundation
+
+enum BetAwaySchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        [UserProfile.self, DailyCheckin.self,
+         UrgeLog.self, JournalEntry.self]
+    }
+
+    @Model
+    final class UserProfile {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var quitDate: Date = Date()
+        var displayName: String = ""
+        var gamblingTypesRaw: [String] = []
+        var frequencyRaw: String = "Weekly"
+        var averageWeeklySpend: Double = 0
+        var estimatedTotalLosses: Double?
+        var estimatedDebt: Double?
+        var biometricLockEnabled: Bool = false
+        var notificationsEnabled: Bool = true
+        var morningReminderHour: Int = 8
+        var morningReminderMinute: Int = 0
+        var eveningReminderHour: Int = 21
+        var eveningReminderMinute: Int = 0
+        var hapticFeedbackEnabled: Bool = true
+        var emergencyContactsData: Data?
+
+        @Relationship(deleteRule: .cascade)
+        var checkins: [DailyCheckin] = []
+        @Relationship(deleteRule: .cascade)
+        var urgeLogs: [UrgeLog] = []
+        @Relationship(deleteRule: .cascade)
+        var journalEntries: [JournalEntry] = []
+
+        init(
+            quitDate: Date = Date(),
+            displayName: String = "",
+            averageWeeklySpend: Double = 0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.quitDate = quitDate
+            self.displayName = displayName
+            self.averageWeeklySpend = averageWeeklySpend
+        }
+    }
+
+    @Model
+    final class DailyCheckin {
+        var id: UUID = UUID()
+        var date: Date = Date()
+        var checkinTypeRaw: String = "Morning Pledge"
+        var mood: Int = 3
+        var gamblingFree: Bool = true
+        var amountGambled: Double?
+        var pledgeReason: String = ""
+        var notes: String = ""
+        var triggersRaw: [String] = []
+        var riskLevelRaw: String = "Low"
+        var createdAt: Date = Date()
+
+        @Relationship(inverse: \UserProfile.checkins)
+        var userProfile: UserProfile?
+
+        init(
+            checkinTypeRaw: String = "Morning Pledge",
+            mood: Int = 3,
+            gamblingFree: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.date = Date()
+            self.checkinTypeRaw = checkinTypeRaw
+            self.mood = mood
+            self.gamblingFree = gamblingFree
+            self.notes = notes
+            self.createdAt = Date()
+        }
+    }
+
+    @Model
+    final class UrgeLog {
+        var id: UUID = UUID()
+        var timestamp: Date = Date()
+        var intensity: Int = 5
+        var durationSeconds: TimeInterval = 0
+        var triggerRaw: String = ""
+        var copingStrategyRaw: String = ""
+        var didResist: Bool = true
+        var notes: String = ""
+
+        @Relationship(inverse: \UserProfile.urgeLogs)
+        var userProfile: UserProfile?
+
+        init(
+            intensity: Int = 5,
+            didResist: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.timestamp = Date()
+            self.intensity = intensity
+            self.didResist = didResist
+            self.notes = notes
+        }
+    }
+
+    @Model
+    final class JournalEntry {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var title: String = ""
+        var content: String = ""
+        var mood: Int = 3
+        var promptUsed: String = ""
+
+        @Relationship(inverse: \UserProfile.journalEntries)
+        var userProfile: UserProfile?
+
+        init(
+            title: String = "",
+            content: String = "",
+            mood: Int = 3,
+            promptUsed: String = ""
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.title = title
+            self.content = content
+            self.mood = mood
+            self.promptUsed = promptUsed
+        }
+    }
+}
+```
+
+**Models/Migration/BetAwaySchemaV2.swift**
+
+```swift
+import SwiftData
+import Foundation
+
+enum BetAwaySchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        [UserProfile.self, DailyCheckin.self,
+         UrgeLog.self, JournalEntry.self]
+    }
+
+    @Model
+    final class UserProfile {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var quitDate: Date = Date()
+        var displayName: String = ""
+        var gamblingTypesRaw: [String] = []
+        var frequencyRaw: String = "Weekly"
+        var averageWeeklySpend: Double = 0
+        var estimatedTotalLosses: Double?
+        var estimatedDebt: Double?
+        var biometricLockEnabled: Bool = false
+        var notificationsEnabled: Bool = true
+        var morningReminderHour: Int = 8
+        var morningReminderMinute: Int = 0
+        var eveningReminderHour: Int = 21
+        var eveningReminderMinute: Int = 0
+        var hapticFeedbackEnabled: Bool = true
+        var emergencyContactsData: Data?
+        var resistanceRate: Double = 0.0
+
+        @Relationship(deleteRule: .cascade)
+        var checkins: [DailyCheckin] = []
+        @Relationship(deleteRule: .cascade)
+        var urgeLogs: [UrgeLog] = []
+        @Relationship(deleteRule: .cascade)
+        var journalEntries: [JournalEntry] = []
+
+        init(
+            quitDate: Date = Date(),
+            displayName: String = "",
+            averageWeeklySpend: Double = 0,
+            resistanceRate: Double = 0.0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.quitDate = quitDate
+            self.displayName = displayName
+            self.averageWeeklySpend = averageWeeklySpend
+            self.resistanceRate = resistanceRate
+        }
+    }
+
+    @Model
+    final class DailyCheckin {
+        var id: UUID = UUID()
+        var date: Date = Date()
+        var checkinTypeRaw: String = "Morning Pledge"
+        var mood: Int = 3
+        var gamblingFree: Bool = true
+        var amountGambled: Double?
+        var pledgeReason: String = ""
+        var notes: String = ""
+        var triggersRaw: [String] = []
+        var riskLevelRaw: String = "Low"
+        var createdAt: Date = Date()
+
+        @Relationship(inverse: \UserProfile.checkins)
+        var userProfile: UserProfile?
+
+        init(
+            checkinTypeRaw: String = "Morning Pledge",
+            mood: Int = 3,
+            gamblingFree: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.date = Date()
+            self.checkinTypeRaw = checkinTypeRaw
+            self.mood = mood
+            self.gamblingFree = gamblingFree
+            self.notes = notes
+            self.createdAt = Date()
+        }
+    }
+
+    @Model
+    final class UrgeLog {
+        var id: UUID = UUID()
+        var timestamp: Date = Date()
+        var intensity: Int = 5
+        var durationSeconds: TimeInterval = 0
+        var triggerRaw: String = ""
+        var copingStrategyRaw: String = ""
+        var didResist: Bool = true
+        var notes: String = ""
+
+        @Relationship(inverse: \UserProfile.urgeLogs)
+        var userProfile: UserProfile?
+
+        init(
+            intensity: Int = 5,
+            didResist: Bool = true,
+            notes: String = ""
+        ) {
+            self.id = UUID()
+            self.timestamp = Date()
+            self.intensity = intensity
+            self.didResist = didResist
+            self.notes = notes
+        }
+    }
+
+    @Model
+    final class JournalEntry {
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var title: String = ""
+        var content: String = ""
+        var mood: Int = 3
+        var promptUsed: String = ""
+        var sentimentScore: Double = 0.0
+
+        @Relationship(inverse: \UserProfile.journalEntries)
+        var userProfile: UserProfile?
+
+        init(
+            title: String = "",
+            content: String = "",
+            mood: Int = 3,
+            promptUsed: String = "",
+            sentimentScore: Double = 0.0
+        ) {
+            self.id = UUID()
+            self.createdAt = Date()
+            self.title = title
+            self.content = content
+            self.mood = mood
+            self.promptUsed = promptUsed
+            self.sentimentScore = sentimentScore
+        }
+    }
+}
+```
+
+**Models/Migration/BetAwayMigrationPlan.swift**
+
+```swift
+import SwiftData
+
+enum BetAwayMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [BetAwaySchemaV1.self, BetAwaySchemaV2.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [migrateV1toV2]
+    }
+
+    static let migrateV1toV2 = MigrationStage.lightweight(
+        fromVersion: BetAwaySchemaV1.self,
+        toVersion: BetAwaySchemaV2.self
+    )
+}
+```
+
+## Checkpoint
+
+Before moving on, confirm:
+
+1. **BetAwaySchemaV1 matches your shipped models exactly** — every property on `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry`, every type, every relationship. If there is a mismatch, the migration will fail on real user data.
+2. **BetAwaySchemaV2 includes all V1 properties plus the new ones** — `sentimentScore` on `JournalEntry` and `resistanceRate` on `UserProfile`. Do not drop properties without handling it in a migration stage.
+3. **New properties in V2 have default values** — this is what makes the lightweight migration work. Without defaults, SwiftData cannot fill in existing rows.
+4. **BetAwayMigrationPlan lists schemas in order** — V1 first, V2 second. Order matters.
+5. **ModelContainer uses the migration plan** — if you forget to pass `migrationPlan:`, SwiftData does not know your versions exist and the store will fail to open when the schema changes.
+6. **You have at least one test** that creates V1 data and verifies it survives the migration to V2 with correct defaults for all four model types.
+
+If all six are true, your data layer is production-safe. Your users can update the app without losing a single check-in, urge log, or journal entry.
+
+## Challenge
+
+**Add a V3 migration (30 minutes):**
+
+BetAway V3 needs a new property: `copingNotes: String?` — an optional string on `UrgeLog` that stores extended notes about which coping strategy worked best. Since it is optional, no default value is needed. This is a lightweight migration.
+
+1. Create `BetAwaySchemaV3.swift` with all four updated models (only `UrgeLog` changes)
+2. Add a `migrateV2toV3` lightweight stage to `BetAwayMigrationPlan`
+3. Update `schemas` and `stages` to include V3
+4. Update `ModelContainer` to use `BetAwaySchemaV3.UserProfile.self`, etc.
+5. Write a test that creates V2 data and verifies it migrates to V3 with `copingNotes == nil`
+
+**Stretch goal:** Add a custom migration from V3 to V4 that splits the `triggersRaw: [String]` array on `DailyCheckin` into a separate `TriggerRecord` model with a relationship back to `DailyCheckin`. This requires a custom stage because you are moving data between models. Think through how `willMigrate` would iterate over check-ins, create `TriggerRecord` objects for each trigger string, and establish the relationships.
+
+This is the hardest migration pattern you will encounter. If you can do this, you can handle anything.

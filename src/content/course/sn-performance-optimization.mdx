@@ -1,0 +1,657 @@
+---
+title: "Performance Optimization"
+description: "Optimize BetAway for production — staggered card animations with AnimationPresets, DashboardView's ScrollView layout, BFProgressRing animation performance, and UserProfile computed property costs."
+courseSlug: "ship-native"
+module: 7
+moduleTitle: "Production Polish"
+lesson: 3
+duration: "20 min read"
+difficulty: "advanced"
+topics: ["Performance", "Staggered Animations", "AnimationPresets", "BFProgressRing", "UserProfile Computed Properties", "DashboardView", "ScrollView", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+BetAway works. The error handling is solid. The accessibility is polished. A user with a 7-day streak opens the app and everything feels instant. That same user hits their 365-day milestone, accumulates hundreds of check-ins and urge logs, opens the app on a cold morning, and the dashboard takes a visible moment to render. They scroll through their weekly summary and every card hitch-loads. They check their streak and the number flickers because the computed property recalculates.
+
+They do not file a bug. They do not leave a review. They delete your app and try another one.
+
+Performance is the feature nobody sees until it is missing. In this lesson, we examine BetFree's real performance patterns — staggered card animations, animation presets, progress ring rendering, and computed property costs. No guessing. No premature optimization. Real code first, analysis second.
+
+## What You'll Learn
+
+- Study `AnimationPresets` — how BetFree defines spring animations, eased animations, and stagger intervals in a single centralized enum
+- Examine `DashboardView`'s staggered animation pattern — how eight cards animate in sequence using `staggeredAppear(index:isVisible:)` without blocking the main thread
+- Understand `BFProgressRing`'s animation approach — how it uses `@State` to defer animation until `onAppear` and responds to `onChange` for updates
+- Analyze `UserProfile`'s computed properties — `currentStreak`, `totalSaved`, `daysSinceQuit` — and their cost when called from multiple views on every body evaluation
+
+## Why This Matters
+
+Apple measures your app's launch time. If a cold start exceeds 4 seconds, the watchdog kills the process — the user sees a crash. The App Store review team tests on older hardware. A sluggish iPhone SE experience is a rejection risk.
+
+Beyond Apple's threshold: every 100ms of delay reduces user engagement measurably. BetAway's dashboard renders eight cards with staggered animations, a progress ring, and computed streak data on every appearance. Each of those is a potential bottleneck on older devices. Let us understand how the real code handles these concerns.
+
+## Plan Phase: Understanding the Real Performance Patterns
+
+Before optimizing anything, we need to understand what BetFree already does well and where the costs are. Send this prompt:
+
+```
+I need to analyze BetAway's performance before shipping.
+Do NOT write code yet — create a performance analysis plan.
+
+Current architecture:
+- DashboardView with 8 staggered card animations
+- AnimationPresets enum defining spring/eased animations
+- BFProgressRing with animated Circle trim
+- UserProfile with computed properties (currentStreak, totalSaved,
+  daysSinceQuit) that query relationships on every access
+- MainTabView with custom animated tab bar
+- ScrollView (not LazyVStack) on DashboardView
+
+What I want to understand:
+1. Are the staggered animations efficient? Do 8 concurrent
+   spring animations cause frame drops?
+2. Does BFProgressRing animate efficiently, or does it
+   re-trigger on every body evaluation?
+3. How expensive are UserProfile's computed properties when
+   called from multiple cards in the same dashboard?
+4. Is ScrollView + VStack appropriate here, or should this
+   be a LazyVStack?
+
+Plan what to measure and how.
+```
+
+### AI Plan Review
+
+The AI should return an analysis focused on the specific patterns in the codebase.
+
+**Keep** — "Measure the stagger animation frame rate with Instruments." The stagger pattern uses `AnimationPresets.cardEntry.delay(AnimationPresets.staggerDelay(for: index))`. Eight cards means 8 concurrent spring animations. This is worth measuring.
+
+**Keep** — "Profile UserProfile.currentStreak cost." This computed property iterates all check-ins, filters for relapses, and sorts — on every access. If the dashboard calls it from multiple card views, it runs multiple times per body evaluation.
+
+**Question** — If the AI suggests replacing `ScrollView` with `LazyVStack` on the dashboard, push back. The dashboard has only 8 cards. `LazyVStack` adds complexity (deferred creation, potential layout measurement issues) that is not justified for 8 items. `LazyVStack` is for hundreds of items, not a fixed dashboard layout.
+
+**Question** — If the AI suggests caching `currentStreak` in a stored property, consider the trade-off. Caching eliminates redundant computation but introduces cache invalidation complexity. For 8 cards on a dashboard, the recalculation cost is likely negligible.
+
+### Anti-Pattern: Optimizing Without Measuring
+
+```swift
+// The developer "optimizes" by caching every computed property
+// without knowing if computation is even the problem.
+
+// They cache the streak:
+private var cachedStreak: Int?
+
+// They cache the savings:
+private var cachedSavings: Double?
+
+// They cache the formatted dates:
+private var dateCache: [Date: String] = [:]
+
+// Result: more memory usage, stale data bugs, cache invalidation
+// headaches, and the actual performance concern (if any) is
+// completely untouched.
+```
+
+The worst performance bugs come from fixing the wrong problem. Measure. Identify. Then fix.
+
+## Execute Phase: Analyzing the Real Code
+
+### Pattern 1 — AnimationPresets: Centralized Animation Configuration
+
+BetFree defines all animations in a single enum. This is a performance-conscious pattern — instead of creating new `Animation` values inline on every body evaluation, the app uses static constants:
+
+```swift
+import SwiftUI
+
+enum AnimationPresets {
+    // MARK: - Spring Animations
+
+    /// Snappy interaction feedback — buttons, toggles, chip selection
+    static let snappy = Animation.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)
+
+    /// Standard transitions — cards appearing, navigation
+    static let smooth = Animation.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)
+
+    /// Gentle, slow animations — onboarding transitions, celebrations
+    static let gentle = Animation.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0)
+
+    /// Bouncy feedback — streak counter update, milestone reached
+    static let bouncy = Animation.spring(response: 0.4, dampingFraction: 0.5, blendDuration: 0)
+
+    /// Entry animation for cards/elements appearing on screen
+    static let cardEntry = Animation.spring(response: 0.6, dampingFraction: 0.75, blendDuration: 0)
+
+    // MARK: - Eased Animations
+
+    /// Fade in/out for overlays, modals
+    static let fade = Animation.easeInOut(duration: 0.25)
+
+    /// Slow fade for background transitions
+    static let slowFade = Animation.easeInOut(duration: 0.5)
+
+    // MARK: - Durations
+    static let shortDuration: Double = 0.2
+    static let standardDuration: Double = 0.35
+    static let longDuration: Double = 0.5
+    static let celebrationDuration: Double = 1.5
+
+    // MARK: - Stagger
+    static let staggerInterval: Double = 0.08
+
+    static func staggerDelay(for index: Int) -> Double {
+        Double(index) * staggerInterval
+    }
+}
+```
+
+Key performance observations:
+
+- **Static constants.** `Animation.spring(response:dampingFraction:blendDuration:)` creates a value type. Storing it as a `static let` means it is created once and reused. No allocation on each use.
+- **Stagger interval of 0.08 seconds.** The `staggerDelay(for:)` function returns `0.0`, `0.08`, `0.16`, `0.24`... up to `0.56` for index 7. The total animation cascade is just over half a second. This is fast enough to feel responsive but slow enough that each card's entrance is visually distinct.
+- **Named presets prevent drift.** Without this enum, developers would write `Animation.spring(response: 0.5, dampingFraction: 0.8)` in one place and `Animation.spring(response: 0.45, dampingFraction: 0.75)` in another. The app would feel inconsistent. Centralizing prevents this and makes it easy to tune animations globally.
+- **`blendDuration: 0` on every spring.** This means animations do not blend with each other when interrupted. If the user navigates away and back during the stagger sequence, each animation restarts cleanly rather than blending into a mushy transition.
+
+### Pattern 2 — DashboardView: Staggered Card Layout
+
+The `DashboardView` uses the `staggeredAppear` view modifier to animate eight cards in sequence:
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct DashboardView: View {
+    @Environment(AppRouter.self) private var router
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+    @State private var isVisible = false
+    @State private var showUrgeFlow = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                // Greeting
+                if let profile {
+                    HStack {
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            HStack(spacing: Spacing.xs) {
+                                Image(systemName: viewModel.greetingIcon)
+                                    .foregroundStyle(ColorPalette.warning)
+                                Text(viewModel.greeting)
+                                    .font(Typography.title3())
+                                    .foregroundStyle(ColorPalette.textPrimary)
+                            }
+
+                            Text("Day \(profile.currentStreak) of your journey")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+
+                    // Streak Card
+                    StreakCardView(profile: profile, viewModel: viewModel)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 1, isVisible: isVisible)
+
+                    // Daily Quote
+                    QuoteCardView(quote: MotivationalQuotes.quoteForToday())
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 2, isVisible: isVisible)
+
+                    // Savings & Stats Row
+                    HStack(spacing: Spacing.sm) {
+                        SavingsCardView(profile: profile)
+                        StatsCardView(profile: profile)
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+
+                    // Daily Check-in (Pledge + Evening Check-in)
+                    DashboardPledgeCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 4, isVisible: isVisible)
+
+                    // Weekly Summary
+                    WeeklySummaryCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 5, isVisible: isVisible)
+
+                    // Milestones
+                    MilestoneCardView(currentStreak: profile.currentStreak)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 6, isVisible: isVisible)
+
+                    // Emergency Urge Button
+                    EmergencyUrgeButton { showUrgeFlow = true }
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 7, isVisible: isVisible)
+                } else {
+                    // No profile — shouldn't happen after onboarding
+                    Text("Setting up your profile...")
+                        .font(Typography.body())
+                        .foregroundStyle(ColorPalette.textSecondary)
+                }
+            }
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Image(AppConfig.Images.appLogoShield)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 44)
+                    .shadow(color: ColorPalette.accent.opacity(0.3), radius: 4, y: 2)
+            }
+        }
+        .onAppear {
+            isVisible = true
+            updateWidgetData()
+        }
+        .fullScreenCover(isPresented: $showUrgeFlow) {
+            UrgeContainerView()
+        }
+    }
+
+    private func updateWidgetData() {
+        guard let profile else { return }
+        SharedDataManager.updateWidgetData(
+            currentStreak: profile.currentStreak,
+            totalSaved: profile.totalSaved,
+            quitDate: profile.quitDate,
+            hasPledgedToday: profile.hasPledgedToday(),
+            hasCheckedInToday: profile.hasCheckedInToday()
+        )
+    }
+}
+```
+
+And the `staggeredAppear` modifier from `View+Extensions.swift`:
+
+```swift
+extension View {
+    func staggeredAppear(index: Int, isVisible: Bool) -> some View {
+        self
+            .opacity(isVisible ? 1 : 0)
+            .offset(y: isVisible ? 0 : 20)
+            .animation(
+                AnimationPresets.cardEntry.delay(AnimationPresets.staggerDelay(for: index)),
+                value: isVisible
+            )
+    }
+}
+```
+
+Performance analysis:
+
+- **Why `ScrollView` + `VStack` instead of `LazyVStack`?** The dashboard has exactly 8 cards. All 8 are visible or nearly visible on most screen sizes. `LazyVStack` defers view creation for off-screen items — but when all items are on-screen, laziness adds measurement overhead without benefit. `VStack` is correct here.
+- **The stagger animation triggers once.** `isVisible` is set to `true` in `onAppear` and never set back to `false`. The animation runs exactly once per dashboard appearance. There is no repeated triggering.
+- **Each card animates opacity and offset.** The `.opacity` and `.offset` modifiers are cheap — they do not cause layout recalculation, only render tree changes. SwiftUI's Metal-backed renderer handles 8 concurrent opacity+offset animations without frame drops on any modern device.
+- **The `value: isVisible` parameter is critical.** Without it, the animation would trigger on every body evaluation, not just when `isVisible` changes. This is the difference between animating once and animating on every redraw.
+- **Widget data update runs on appear.** `updateWidgetData()` calls `profile.currentStreak`, `profile.totalSaved`, and two helper methods. This means those computed properties run once on dashboard appearance plus once per card that uses them. For 8 cards, this is at most ~8 evaluations of `currentStreak` — fast enough for a dashboard but worth watching if the check-in count grows to thousands.
+
+### Pattern 3 — BFProgressRing: Deferred Animation
+
+The progress ring uses a `@State` variable to defer the animation until the view appears:
+
+```swift
+import SwiftUI
+
+struct BFProgressRing: View {
+    let progress: Double // 0.0 to 1.0
+    var lineWidth: CGFloat = 12
+    var size: CGFloat = 120
+    var gradient: LinearGradient = ColorPalette.primaryGradient
+    var trackColor: Color = ColorPalette.surfacePrimary
+
+    @State private var animatedProgress: Double = 0
+
+    var body: some View {
+        ZStack {
+            // Background track
+            Circle()
+                .stroke(trackColor, lineWidth: lineWidth)
+
+            // Progress ring
+            Circle()
+                .trim(from: 0, to: animatedProgress)
+                .stroke(
+                    gradient,
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            withAnimation(AnimationPresets.gentle) {
+                animatedProgress = min(progress, 1.0)
+            }
+        }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(AnimationPresets.smooth) {
+                animatedProgress = min(newValue, 1.0)
+            }
+        }
+    }
+}
+```
+
+Performance analysis:
+
+- **`@State private var animatedProgress: Double = 0` starts at zero.** When the view appears, the ring animates from 0 to the target progress. This creates a smooth "fill" animation. Without this pattern, the ring would snap to its target value instantly.
+- **`onAppear` uses `AnimationPresets.gentle`** (response: 0.7, damping: 0.85). This is the slowest spring in the preset system — appropriate for a progress ring that should feel deliberate, not snappy.
+- **`onChange(of: progress)` uses `AnimationPresets.smooth`** (response: 0.5, damping: 0.8). When the progress updates (e.g., the streak advances), the ring transitions faster because the user already saw the initial fill and expects responsive updates.
+- **`Circle().trim(from:to:)` is GPU-accelerated.** SwiftUI renders trimmed circles on the GPU. The animation interpolates the `to:` parameter — the GPU draws a partial circle each frame. No CPU path recalculation needed.
+- **Potential concern: body re-evaluation.** If the parent view's body is re-evaluated (e.g., because an `@Observable` property changed), `BFProgressRing`'s body runs again. But `animatedProgress` is `@State` — it persists across re-evaluations. The ring does not re-animate from 0 unless the view is fully removed and re-inserted into the hierarchy.
+- **The `min(progress, 1.0)` guard** prevents trim values greater than 1.0, which would cause `Circle().trim` to draw a full circle plus extra (visual glitch on some iOS versions).
+
+### Pattern 4 — UserProfile Computed Properties: Cost on Every Access
+
+These are the most performance-sensitive parts of the BetFree codebase. Every time the dashboard renders, multiple views access these properties:
+
+```swift
+var daysSinceQuit: Int {
+    max(0, Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: quitDate), to: Calendar.current.startOfDay(for: Date())).day ?? 0)
+}
+
+var totalSaved: Double {
+    let weeks = Double(daysSinceQuit) / 7.0
+    return weeks * averageWeeklySpend
+}
+
+var annualizedSavings: Double {
+    (averageWeeklySpend * 52)
+}
+
+var hoursSaved: Double {
+    // Estimate 2 hours per day spent on gambling
+    Double(daysSinceQuit) * 2.0
+}
+
+var currentStreak: Int {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date())
+    let quitStart = calendar.startOfDay(for: quitDate)
+
+    // If quit date is in the future, no streak yet
+    if quitStart > today { return 0 }
+
+    // Check for any relapse (evening checkin where gamblingFree == false)
+    let relapses = checkins
+        .filter { !$0.gamblingFree && $0.checkinTypeRaw == CheckinType.eveningCheckin.rawValue }
+        .sorted { $0.date > $1.date }
+
+    if let lastRelapse = relapses.first {
+        let relapsDay = calendar.startOfDay(for: lastRelapse.date)
+        let daysSinceRelapse = calendar.dateComponents([.day], from: relapsDay, to: today).day ?? 0
+        return max(0, daysSinceRelapse)
+    }
+
+    return daysSinceQuit
+}
+```
+
+Cost analysis:
+
+- **`daysSinceQuit`** — Two `Calendar.current.startOfDay` calls and one `dateComponents`. `Calendar.current` is cached by the system, but `startOfDay` allocates a new `Date` each time. Cost: negligible. This is a constant-time operation regardless of data size.
+- **`totalSaved`** — Calls `daysSinceQuit` (cheap) and does a multiplication. Cost: negligible.
+- **`annualizedSavings`** — One multiplication. Cost: zero concern.
+- **`hoursSaved`** — Calls `daysSinceQuit` and multiplies. Cost: negligible.
+- **`currentStreak`** — This is the expensive one. It iterates **all** check-ins through the `checkins` relationship, filters for relapses, and sorts by date. On a user with 365 days of check-ins (730+ entries for morning pledge + evening check-in), this is:
+  - One SwiftData relationship traversal (potential fault)
+  - One `filter` pass over all check-ins: O(n)
+  - One `sort` on the filtered results: O(k log k) where k is relapse count
+  - Called from: greeting text, streak card, milestone card, savings card, widget update
+
+That means `currentStreak` runs roughly 5 times per dashboard `body` evaluation. For 730 check-ins, each call iterates the full array. This is 5 * 730 = 3,650 iterations per dashboard render.
+
+**Is this actually a problem?** At 730 entries, probably not — modern hardware iterates arrays this size in microseconds. At 2,000+ entries on an iPhone SE, it could become measurable. The right approach: measure with Instruments at scale, and cache only if the data proves it is needed.
+
+### Pattern 5 — MainTabView: Animation in Tab Switching
+
+The tab bar uses `HapticManager` on every tab switch, which means the `isEnabled` guard runs on every tap:
+
+```swift
+ForEach(AppRouter.Tab.allCases) { tab in
+    TabBarButton(
+        tab: tab,
+        isSelected: selectedTab == tab,
+        namespace: tabNamespace
+    ) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            selectedTab = tab
+        }
+        HapticManager.lightImpact()
+    }
+}
+```
+
+Note that the tab bar creates its own inline spring animation rather than using `AnimationPresets`. This is a minor inconsistency — the `response: 0.35` and `dampingFraction: 0.7` do not exactly match any preset. For tab switching, this is harmless (the user will not notice a 0.05s response difference), but it means tuning the tab animation requires finding this inline value rather than adjusting the centralized preset.
+
+The `HapticManager.lightImpact()` call on every tab switch:
+
+```swift
+static func lightImpact() {
+    guard isEnabled else { return }
+    let generator = UIImpactFeedbackGenerator(style: .light)
+    generator.prepare()
+    generator.impactOccurred()
+}
+```
+
+This creates a new `UIImpactFeedbackGenerator` on every call. Apple recommends creating the generator ahead of time and calling `prepare()` before the event, then `impactOccurred()` when it happens. For tab switching (which happens relatively infrequently), creating a new generator each time is acceptable. For a timer that fires 900 times (the urge timer at 1/second for 15 minutes), you would want to reuse the generator.
+
+## Iteration: What to Measure and How
+
+After analyzing the code, here is what to measure with Instruments:
+
+```
+PERFORMANCE PROFILING PLAN FOR BETFREE
+=======================================
+
+1. DASHBOARD RENDER TIME:
+   [ ] Use Self._printChanges() in DashboardView body
+   [ ] Measure body evaluation count per appearance
+   [ ] Profile with Time Profiler during dashboard load
+   [ ] Expected: single body evaluation, < 16ms total
+
+2. STAGGER ANIMATION FRAME RATE:
+   [ ] Open Instruments > Core Animation / SwiftUI
+   [ ] Navigate to dashboard and watch the 8-card stagger
+   [ ] Look for frame drops during the 0.56s cascade
+   [ ] Expected: 60fps throughout (opacity + offset are GPU)
+
+3. BFPROGRESSRING ANIMATION:
+   [ ] Verify onAppear animation triggers exactly once
+   [ ] Verify onChange triggers on streak update
+   [ ] Check that body re-evaluation does NOT restart animation
+   [ ] Use Self._printChanges() to count evaluations
+
+4. USERPROFILE.CURRENTSTREAK COST:
+   [ ] Generate 730+ check-in entries for testing
+   [ ] Set breakpoint on currentStreak getter
+   [ ] Count how many times it is called per dashboard render
+   [ ] Measure time per call with Instruments Time Profiler
+   [ ] Expected: < 1ms per call at 730 entries
+
+5. TAB SWITCH PERFORMANCE:
+   [ ] Profile tab switching with Time Profiler
+   [ ] Verify HapticManager.lightImpact() cost is negligible
+   [ ] Check matchedGeometryEffect performance on tab indicator
+   [ ] Expected: < 16ms total per tab switch
+```
+
+### Improvement: Caching currentStreak in DashboardViewModel
+
+If profiling reveals that `currentStreak` is a bottleneck at scale, here is how to cache it without over-engineering:
+
+```swift
+@Observable
+final class DashboardViewModel {
+    var showCelebration = false
+    private(set) var cachedStreak: Int?
+
+    var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return LanguageManager.shared.localized("Good morning")
+        case 12..<17: return LanguageManager.shared.localized("Good afternoon")
+        case 17..<22: return LanguageManager.shared.localized("Good evening")
+        default: return LanguageManager.shared.localized("Good night")
+        }
+    }
+
+    var greetingIcon: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return AppConfig.Icons.sun
+        case 12..<17: return AppConfig.Icons.sun
+        case 17..<22: return AppConfig.Icons.moon
+        default: return AppConfig.Icons.moon
+        }
+    }
+
+    func refreshStreak(from profile: UserProfile) {
+        cachedStreak = profile.currentStreak
+    }
+
+    func milestoneProgress(for profile: UserProfile) -> Double {
+        let streak = cachedStreak ?? profile.currentStreak
+        guard let nextMilestone = Milestone.next(for: streak) else {
+            return 1.0
+        }
+        let currentMilestone = Milestone.current(for: streak)
+        let start = Double(currentMilestone?.days ?? 0)
+        let end = Double(nextMilestone.days)
+        let current = Double(streak)
+
+        guard end > start else { return 1.0 }
+        return (current - start) / (end - start)
+    }
+
+    func nextMilestoneText(for profile: UserProfile) -> String? {
+        let streak = cachedStreak ?? profile.currentStreak
+        guard let next = Milestone.next(for: streak) else { return nil }
+        let remaining = next.days - streak
+        return LanguageManager.shared.localized("%lld day(s) to %@", remaining, next.title)
+    }
+}
+```
+
+Call `refreshStreak(from: profile)` once in `onAppear`, then use `cachedStreak` from all card views. This reduces 5+ evaluations per render to exactly 1.
+
+**Do not add this unless Instruments shows it is needed.** The current code works fine at typical data sizes. Adding caching prematurely creates a new bug class (stale cache values) without solving a real performance problem.
+
+## Verify Phase: Instruments Profiling
+
+Open Instruments (Product > Profile in Xcode) and run these tests on a real device:
+
+1. **Dashboard render time** — Use the Time Profiler instrument. The dashboard should render all 8 cards in under 16ms (one frame at 60fps). The stagger animation should cascade smoothly over 0.56 seconds with no frame drops. If you see frame drops, check if `UserProfile.currentStreak` is being called more times than expected.
+
+2. **Progress ring animation** — Navigate to the dashboard and watch the streak card. The `BFProgressRing` should animate from 0 to the target value exactly once. Navigate away and back — it should animate again (because `onAppear` fires). It should NOT restart mid-animation if the parent body re-evaluates.
+
+3. **Tab switching** — Switch tabs rapidly 10 times. Each switch should feel instant. `HapticManager.lightImpact()` should not cause any delay. The `matchedGeometryEffect` on the tab indicator should animate smoothly.
+
+4. **Memory** — Open the Allocations instrument. Navigate through all four tabs, then back to the dashboard. Memory should return close to baseline. If it grows, check for retain cycles in closures — particularly the `showUrgeFlow` fullScreenCover closure.
+
+5. **Stagger animation GPU overhead** — In the Core Animation instrument, watch the dashboard stagger. All 8 animations should be GPU-composed (opacity and offset are layer properties). If you see CPU-side rendering, check for views that clip or mask (`.clipShape` forces rasterization).
+
+## Final Code
+
+Here is a summary of BetFree's performance-relevant patterns and their measurable impact:
+
+| Pattern | Implementation | Why It Works |
+|---|---|---|
+| AnimationPresets | Static constants for all spring/eased animations | Created once, reused everywhere. No per-frame allocation |
+| Stagger delay | `0.08s * index` for 8 cards = 0.56s total cascade | Short enough to feel responsive, long enough for visual distinction |
+| staggeredAppear | `opacity` + `offset` with `value: isVisible` | GPU-accelerated properties. Animates once per appear, not per body eval |
+| BFProgressRing | `@State animatedProgress` deferred until `onAppear` | Persists across body re-evaluations. Does not restart animation |
+| UserProfile computed props | `currentStreak` filters + sorts all check-ins | O(n) per call. Acceptable at ~730 entries. Monitor at scale |
+| HapticManager | `guard isEnabled` reads UserDefaults per call | Negligible cost. Creates new generator per call (acceptable for infrequent events) |
+| ScrollView + VStack | Fixed 8-card dashboard layout | Correct choice for small, fixed item count. LazyVStack adds overhead without benefit |
+
+## Checkpoint
+
+Verify these before shipping:
+
+1. The dashboard's 8-card stagger animation runs at 60fps with no visible frame drops
+2. `AnimationPresets.staggerDelay(for: 7)` returns `0.56` — the total cascade duration for 8 cards
+3. `BFProgressRing` animates from 0 to target on appear, and responds to progress changes via `onChange`
+4. `UserProfile.currentStreak` is called a reasonable number of times per dashboard render (ideally 5 or fewer)
+5. Tab switching with `HapticManager.lightImpact()` completes in under 16ms total
+6. The dashboard uses `ScrollView` + `VStack` (not `LazyVStack`) — confirmed as the correct choice for 8 fixed cards
+7. No `Animation` values are created inline in frequently-called body properties — all use `AnimationPresets`
+8. `BFProgressRing`'s `@State animatedProgress` persists across parent body re-evaluations
+
+## Challenge
+
+**Profile `UserProfile.currentStreak` at scale and decide whether to cache it.**
+
+Generate 1,000+ check-in entries using a test data generator (wrap it in `#if DEBUG`). Navigate to the dashboard and measure with Instruments:
+
+1. How many times does `currentStreak` evaluate per dashboard render?
+2. How long does each evaluation take at 1,000+ entries?
+3. Does the total time exceed 16ms (one frame)?
+
+If it does, implement the `cachedStreak` pattern from the Iteration section. If it does not, document the measurement and leave the code as-is.
+
+<details>
+<summary>Hint</summary>
+
+Create a test data generator:
+
+```swift
+#if DEBUG
+func generateTestCheckins(context: ModelContext, profile: UserProfile) {
+    let calendar = Calendar.current
+    for dayOffset in 0..<365 {
+        guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: Date()) else { continue }
+
+        // Morning pledge
+        let pledge = DailyCheckin(checkinType: .morningPledge)
+        pledge.date = date
+        pledge.userProfile = profile
+        context.insert(pledge)
+
+        // Evening check-in
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: MoodRating.allCases.randomElement() ?? .neutral,
+            gamblingFree: Double.random(in: 0...1) > 0.05 // 95% gambling-free
+        )
+        checkin.date = date
+        checkin.userProfile = profile
+        context.insert(checkin)
+    }
+    try? context.save()
+}
+#endif
+```
+
+Then in DashboardView, add a temporary measurement:
+
+```swift
+.onAppear {
+    #if DEBUG
+    let start = CFAbsoluteTimeGetCurrent()
+    let streak = profile.currentStreak
+    let elapsed = CFAbsoluteTimeGetCurrent() - start
+    print("[Perf] currentStreak = \(streak), took \(elapsed * 1000)ms with \(profile.checkins.count) checkins")
+    #endif
+    isVisible = true
+    updateWidgetData()
+}
+```
+
+If `elapsed` is under 1ms, caching is unnecessary. If it exceeds 5ms, consider the cached approach.
+
+</details>

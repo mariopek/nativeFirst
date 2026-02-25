@@ -1,0 +1,1173 @@
+---
+title: "Navigation Architecture"
+description: "Build a centralized AppRouter with @Observable, a custom animated tab bar with matchedGeometryEffect, a RootView that switches between onboarding and main content, and AnimationPresets for polished transitions."
+courseSlug: "ship-native"
+module: 2
+moduleTitle: "Core UI with SwiftUI"
+lesson: 4
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "NavigationStack", "Router Pattern", "TabView", "Custom Tab Bar", "matchedGeometryEffect", "Observation", "AnimationPresets", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your app has screens now. It has a data layer. But right now those screens are islands — isolated views with no way for users to move between them. Navigation is the connective tissue that turns a collection of views into an app.
+
+> **If you took the Vibe Code Native course:** we called a similar object `AppNavigationViewModel` in the generic navigation lesson. Here in BetAway, we use the shorter name `AppRouter` — it does the same job (owns tab selection, navigation path, and presentation state) but the name better reflects its role as a coordinator rather than a view model.
+
+In this lesson we build the full navigation architecture for BetAway: a central `AppRouter` that owns all navigation state, a `RootView` that switches between onboarding and main content, a `MainTabView` with a custom animated tab bar using `matchedGeometryEffect`, and an `AnimationPresets` enum that keeps every transition consistent. No enum-based route pushing for most navigation — the real app uses `TabView` with a `NavigationStack` per tab, controlled by a single `@Observable` router.
+
+## What You'll Learn
+
+- How to build an `AppRouter` with `@Observable` that owns tab selection, onboarding state, lock state, and a `NavigationPath`
+- How `RootView` uses the router to switch between onboarding, biometric lock, and the main tab interface
+- How to wire up `MainTabView` with independent `NavigationStack` instances per tab and a hidden system tab bar
+- How to build a custom animated tab bar with `@Namespace` and `matchedGeometryEffect`
+- How to use the `@Bindable var router = router` pattern for getting bindings from `@Environment`
+- How to define reusable `AnimationPresets` so every transition in the app feels intentional
+
+## Why This Matters
+
+Navigation is one of the first things AI gets wrong at scale. It will happily generate a `NavigationLink(destination:)` inside every row, nest `NavigationStack` inside `NavigationStack`, or scatter boolean state across a dozen views to manage sheet presentation. It works for one screen. It falls apart at five.
+
+A centralized router solves this permanently. Every piece of navigation state — which tab is selected, whether onboarding is showing, whether the app is locked, the navigation stack depth — lives in one `@Observable` object. When you later add push notifications that open a specific tab, or a widget that jumps to the journal, the plumbing is already there. You set a property on the router. Done.
+
+This is also the pattern that scales when you ask AI to add new screens. Instead of the AI inventing a new navigation mechanism for each feature, you tell it: "The router owns navigation state. Add what you need to the router and read it in the view." The architecture stays consistent no matter how many screens you add.
+
+## Plan Phase
+
+Before we touch code, let us get AI to think through the navigation architecture. Open Claude Code in the BetAway project and send this:
+
+```
+I need to build the navigation architecture for BetAway, a free
+gambling recovery app. Before writing any code, think through the design.
+
+The app has these screens:
+- Onboarding flow (multi-page, shown on first launch)
+- Dashboard (main tab) — streak, pledge, daily check-in
+- Journal (second tab) — journal entries
+- Progress (third tab) — charts and analytics
+- Settings (fourth tab) — user preferences
+- Biometric lock screen — shown when returning from background
+
+Requirements:
+1. An AppRouter class using @Observable that owns:
+   - showOnboarding (derived from UserDefaults)
+   - isLocked (for biometric lock)
+   - selectedTab (which tab is active)
+   - navigationPath (for push navigation within Dashboard)
+2. A Tab enum inside AppRouter with cases for each tab, including
+   localized names and SF Symbol icons.
+3. A RootView that switches between onboarding, lock screen, and
+   MainTabView based on router state.
+4. A MainTabView with four tabs, each with its own NavigationStack.
+   The system tab bar is hidden — we use a custom animated tab bar.
+5. The custom tab bar uses @Namespace and matchedGeometryEffect
+   for a sliding indicator animation.
+6. An AnimationPresets enum with named spring and eased animations
+   so every transition in the app is consistent.
+
+Think through:
+- How RootView decides what to show
+- How the custom tab bar animation works
+- How each tab maintains independent navigation state
+- What animation presets we need (snappy, smooth, gentle, bouncy, fade)
+
+Give me the plan before any code.
+```
+
+Claude Code will outline the architecture — the `AppRouter` with its `Tab` enum, the `RootView` branching logic, the custom tab bar with `matchedGeometryEffect`, and the animation presets.
+
+Read the plan. Here is what you should verify:
+
+**The router owns all top-level navigation state.** `showOnboarding`, `isLocked`, `selectedTab`, and `navigationPath` all live on `AppRouter`. No view should have its own `@State` for any of these.
+
+**RootView is a simple switch.** It reads `router.showOnboarding` and `router.isLocked` to decide what to display. No complex logic — just a `ZStack` with conditional views and animated transitions.
+
+**Each tab has its own NavigationStack.** If the AI proposes a single `NavigationStack` wrapping the `TabView`, stop it. That is the number one navigation bug in SwiftUI — it causes all tabs to share navigation state.
+
+**The system tab bar is hidden.** The real app uses `.toolbar(.hidden, for: .tabBar)` and renders its own `CustomTabBar` below the `TabView`. This gives full control over the tab bar's appearance, animation, and haptics.
+
+### The Anti-Pattern
+
+Before we build the right thing, let us name the wrong thing so you recognize it when AI generates it:
+
+**Scattered boolean state.** Putting `@State var showOnboarding = false` in one view and `@State var isLocked = false` in another means two places to find and update when the logic changes. A single router object is the source of truth for all navigation state.
+
+**Using the system TabView tab bar for a custom design.** The default `.tabItem` modifier gives you zero control over animation, indicator style, or haptics. If your design calls for a sliding indicator or custom icons, hide the system bar and build your own.
+
+**No animation consistency.** Using `.animation(.default)` everywhere gives you inconsistent timing. A shared `AnimationPresets` enum ensures the same spring response and damping across every transition in the app.
+
+**No central router.** Scattering navigation state across views means every new screen has to discover where the state lives. A single `AppRouter` injected via `.environment()` makes the answer always the same.
+
+If you see any of these in the AI's output, refine before moving on.
+
+## Execute Phase
+
+Now we build. We will create four things: `AnimationPresets`, `AppRouter`, `RootView`, and `MainTabView`. Let us start with the foundation.
+
+### AnimationPresets.swift
+
+Send this prompt:
+
+```
+Create Core/Theme/AnimationPresets.swift — an enum with static
+animation presets:
+- snappy: spring(response: 0.3, dampingFraction: 0.7) — buttons, toggles
+- smooth: spring(response: 0.5, dampingFraction: 0.8) — card transitions
+- gentle: spring(response: 0.7, dampingFraction: 0.85) — onboarding, celebrations
+- bouncy: spring(response: 0.4, dampingFraction: 0.5) — streak counter updates
+- cardEntry: spring(response: 0.6, dampingFraction: 0.75) — cards appearing
+- fade: easeInOut(duration: 0.25) — overlays, modals
+- slowFade: easeInOut(duration: 0.5) — background transitions
+Also add standard duration constants and a stagger delay function.
+```
+
+Here is what Claude Code generates:
+
+```swift
+import SwiftUI
+
+enum AnimationPresets {
+    // MARK: - Spring Animations
+
+    /// Snappy interaction feedback — buttons, toggles, chip selection
+    static let snappy = Animation.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)
+
+    /// Standard transitions — cards appearing, navigation
+    static let smooth = Animation.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)
+
+    /// Gentle, slow animations — onboarding transitions, celebrations
+    static let gentle = Animation.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0)
+
+    /// Bouncy feedback — streak counter update, milestone reached
+    static let bouncy = Animation.spring(response: 0.4, dampingFraction: 0.5, blendDuration: 0)
+
+    /// Entry animation for cards/elements appearing on screen
+    static let cardEntry = Animation.spring(response: 0.6, dampingFraction: 0.75, blendDuration: 0)
+
+    // MARK: - Eased Animations
+
+    /// Fade in/out for overlays, modals
+    static let fade = Animation.easeInOut(duration: 0.25)
+
+    /// Slow fade for background transitions
+    static let slowFade = Animation.easeInOut(duration: 0.5)
+
+    // MARK: - Durations
+    static let shortDuration: Double = 0.2
+    static let standardDuration: Double = 0.35
+    static let longDuration: Double = 0.5
+    static let celebrationDuration: Double = 1.5
+
+    // MARK: - Stagger
+    static let staggerInterval: Double = 0.08
+
+    static func staggerDelay(for index: Int) -> Double {
+        Double(index) * staggerInterval
+    }
+}
+```
+
+This is the animation foundation for the entire app. Every view that animates will use one of these presets instead of inventing its own timing. Let us walk through the design decisions.
+
+**An enum with no cases.** `AnimationPresets` is a namespace — it will never be instantiated. Using an `enum` with no cases instead of a `struct` prevents anyone from accidentally creating an instance.
+
+**Named presets over raw values.** `AnimationPresets.snappy` communicates intent. `.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)` communicates math. When you read `withAnimation(AnimationPresets.gentle)` in the router, you know the transition is meant to feel slow and deliberate. When you read `withAnimation(.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0))`, you have to mentally parse the numbers.
+
+**Stagger delay function.** `staggerDelay(for: index)` computes the delay for staggered list animations. When cards appear one after another, each card uses `AnimationPresets.cardEntry.delay(AnimationPresets.staggerDelay(for: index))`. The interval of 0.08 seconds between items feels natural — fast enough to not bore the user, slow enough to be perceivable.
+
+Review checklist:
+
+- Enum with no cases — pure namespace, cannot be instantiated
+- Spring presets cover the full range — snappy (0.3) to gentle (0.7)
+- Eased presets for fades where spring is wrong
+- Duration constants for non-animation timing (delays, scheduled tasks)
+- Stagger function for list entry animations
+
+### AppRouter.swift
+
+Now the nerve center. Send this:
+
+```
+Create Navigation/AppRouter.swift — an @Observable class with:
+- showOnboarding: Bool (initialized from UserDefaults, checking
+  if onboarding was completed)
+- isLocked: Bool = false (for biometric lock screen)
+- selectedTab: Tab = .dashboard
+- navigationPath = NavigationPath()
+- A Tab enum with cases: dashboard, journal, progress, settings.
+  String raw value, CaseIterable, Identifiable. Each case has an
+  icon property returning an SF Symbol name and a localizedName property.
+- completeOnboarding() — saves to UserDefaults, animates with gentle
+- popToRoot() — resets navigationPath
+- lock() / unlock() — animate with fade / smooth
+- resetForNewUser() — resets everything for testing
+Use AnimationPresets for all animations.
+```
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var showOnboarding: Bool
+    var isLocked: Bool = false
+    var selectedTab: Tab = .dashboard
+    var navigationPath = NavigationPath()
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
+        case journal = "Journal"
+        case progress = "Progress"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(
+                forKey: rawValue, value: nil, table: nil
+            )
+        }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return AppConfig.Icons.house
+            case .journal: return AppConfig.Icons.journal
+            case .progress: return AppConfig.Icons.chart
+            case .settings: return AppConfig.Icons.settings
+            }
+        }
+    }
+
+    init() {
+        self.showOnboarding = !UserDefaults.standard.bool(
+            forKey: AppConfig.StorageKeys.hasCompletedOnboarding
+        )
+    }
+
+    func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = false
+        }
+    }
+
+    func popToRoot() {
+        navigationPath = NavigationPath()
+    }
+
+    func lock() {
+        withAnimation(AnimationPresets.fade) {
+            isLocked = true
+        }
+    }
+
+    func unlock() {
+        withAnimation(AnimationPresets.smooth) {
+            isLocked = false
+        }
+    }
+
+    func resetForNewUser() {
+        UserDefaults.standard.set(false, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = true
+            selectedTab = .dashboard
+            navigationPath = NavigationPath()
+        }
+    }
+}
+```
+
+This is the nerve center of the app's navigation. Let us walk through every decision.
+
+**`@Observable` instead of `ObservableObject`.** This is the iOS 17+ approach. No `@Published` wrappers needed — every stored property is automatically observed. Any view that reads `router.showOnboarding` or `router.selectedTab` will re-render when those values change.
+
+**`showOnboarding` initialized from UserDefaults.** The router checks `hasCompletedOnboarding` at init time and inverts it. This means the very first launch shows onboarding, and every subsequent launch skips straight to the main app. The state is derived from persistent storage, not hardcoded.
+
+**`Tab` as a `String` raw value enum.** The raw value serves as both the display name and the localization key. `CaseIterable` gives us `Tab.allCases` for the custom tab bar. `Identifiable` (with `id` returning `rawValue`) lets us use `ForEach(AppRouter.Tab.allCases)` directly.
+
+**Each tab knows its icon.** The `icon` property returns an SF Symbol name from `AppConfig.Icons`. This keeps icon definitions centralized — if you change the journal icon from `book.fill` to `text.book.closed.fill`, you change it in one place.
+
+**`withAnimation` inside router methods.** Notice that `completeOnboarding()` wraps the state change in `withAnimation(AnimationPresets.gentle)`. This means the transition from onboarding to the main app is automatically animated with a gentle spring. The animation is part of the action, not the view. This is intentional — whoever calls `router.completeOnboarding()` does not need to remember to wrap it in an animation. The router handles it.
+
+**Different animations for different actions.** Locking uses `AnimationPresets.fade` (quick, no bounce) because it should feel instant and secure. Unlocking uses `AnimationPresets.smooth` (medium spring) because it should feel welcoming. Completing onboarding uses `AnimationPresets.gentle` (slow spring) because it is a celebratory moment. These choices are not arbitrary — they match the emotional weight of each transition.
+
+**`resetForNewUser()` for development.** This method resets everything — UserDefaults, onboarding state, tab selection, navigation path. During development you will call this from a debug button in Settings to test the onboarding flow without reinstalling the app.
+
+Review checklist:
+
+- `@Observable` — modern observation, no `@Published` boilerplate
+- `NavigationPath` — type-erased, Codable-ready navigation stack
+- All state centralized — onboarding, lock, tab, path all on one object
+- Animations baked into methods — callers do not need to handle transitions
+- `Tab` has localization and icon support — ready for the custom tab bar
+
+### RootView.swift
+
+The root view is the traffic cop. It reads the router and decides what to show. Send this:
+
+```
+Create Views/RootView.swift — the root view of the app.
+It reads AppRouter from the environment and uses a ZStack to
+switch between:
+- OnboardingContainerView (when router.showOnboarding is true)
+- BiometricLockView (when router.isLocked is true)
+- MainTabView (default state)
+Use asymmetric transitions and AnimationPresets.
+Also add a splash screen overlay that fades out after 2.5 seconds.
+Lock the app when the scene phase goes to background if biometric
+lock is enabled.
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct RootView: View {
+    @Environment(AppRouter.self) private var router
+    @Environment(\.scenePhase) private var scenePhase
+    @Query private var profiles: [UserProfile]
+    @State private var showSplash = true
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
+
+            // Main content (loads underneath splash)
+            Group {
+                if router.showOnboarding {
+                    OnboardingContainerView()
+                        .transition(.asymmetric(
+                            insertion: .opacity,
+                            removal: .opacity.combined(with: .scale(scale: 0.95))
+                        ))
+                } else if router.isLocked {
+                    BiometricLockView()
+                        .transition(.opacity)
+                } else {
+                    MainTabView()
+                        .transition(.opacity.combined(with: .scale(scale: 1.02)))
+                }
+            }
+            .animation(AnimationPresets.gentle, value: router.showOnboarding)
+            .animation(AnimationPresets.smooth, value: router.isLocked)
+
+            // Splash overlay — covers everything, fades out after 2.5s
+            if showSplash {
+                SplashScreenView()
+                    .transition(.opacity.combined(with: .scale(scale: 1.05)))
+                    .zIndex(1)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(2.5))
+            withAnimation(AnimationPresets.gentle) {
+                showSplash = false
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background,
+               profile?.biometricLockEnabled == true {
+                router.lock()
+            }
+        }
+    }
+}
+```
+
+This view is simple on purpose. Let us break down the decisions.
+
+**A `ZStack`, not an `if/else` chain.** The `ZStack` with a shared background means views can animate in and out simultaneously. When onboarding completes, the `OnboardingContainerView` fades out (with a slight scale-down) while `MainTabView` fades in (with a slight scale-up). If we used a simple `if/else`, only one transition would play.
+
+**`Group` wrapping the conditional views.** The `Group` lets us apply `.animation()` modifiers to the entire block. Without it, we would need to add animation modifiers to each branch individually.
+
+**Asymmetric transitions.** The onboarding removal uses `.opacity.combined(with: .scale(scale: 0.95))` — it fades out while shrinking slightly, creating a "receding into the background" effect. The `MainTabView` insertion uses `.scale(scale: 1.02)` — it appears to gently expand into place. These are subtle but they give the transitions a polished feel.
+
+**Separate `.animation()` modifiers for each state.** `router.showOnboarding` animates with `gentle` (slow, deliberate — onboarding completion is a moment). `router.isLocked` animates with `smooth` (medium speed — lock/unlock should feel responsive but not jarring).
+
+**Splash screen with `zIndex(1)`.** The splash sits on top of everything in the `ZStack`. The `.allowsHitTesting(false)` prevents it from blocking interaction as it fades out. The `.task` sleeps for 2.5 seconds then removes it with a gentle animation.
+
+**Scene phase observer for auto-lock.** When the app goes to background and the user has biometric lock enabled in their profile, `router.lock()` fires. When they return, they see the `BiometricLockView` instead of their data. This is a privacy feature critical for a recovery app — users do not want someone picking up their phone and seeing their gambling recovery check-ins.
+
+Review checklist:
+
+- `@Environment(AppRouter.self)` — reads the router without creating a new one
+- Conditional rendering based on router state — clean branching
+- Asymmetric transitions — insertion and removal feel different
+- Each animation tied to its value — no blanket `.animation(.default)`
+- Auto-lock on background — privacy protection
+- Splash overlay — covers initial load
+
+### MainTabView.swift
+
+This is the most complex view. It has four tabs, each with its own `NavigationStack`, a hidden system tab bar, and a custom animated replacement. Send this:
+
+```
+Create Views/MainTabView.swift with:
+- @Environment(AppRouter.self) and @Bindable pattern
+- TabView(selection:) with four tabs, each in a NavigationStack
+- Only the Dashboard tab binds to router.navigationPath
+- .toolbar(.hidden, for: .tabBar) to hide the system tab bar
+- A custom CustomTabBar component below the TabView
+- CustomTabBar uses @Namespace and matchedGeometryEffect for a
+  sliding active indicator (capsule)
+- Tab switching triggers HapticManager.lightImpact()
+- Spring animation on tab switch: response 0.35, dampingFraction 0.7
+```
+
+```swift
+import SwiftUI
+
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        @Bindable var router = router
+
+        VStack(spacing: 0) {
+            TabView(selection: $router.selectedTab) {
+                NavigationStack(path: $router.navigationPath) {
+                    DashboardView()
+                }
+                .tag(AppRouter.Tab.dashboard)
+
+                NavigationStack {
+                    JournalView()
+                }
+                .tag(AppRouter.Tab.journal)
+
+                NavigationStack {
+                    ProgressAnalyticsView()
+                }
+                .tag(AppRouter.Tab.progress)
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tag(AppRouter.Tab.settings)
+            }
+            .toolbar(.hidden, for: .tabBar)
+
+            // Custom animated tab bar
+            CustomTabBar(selectedTab: $router.selectedTab)
+        }
+    }
+}
+```
+
+Then the custom tab bar:
+
+```swift
+// MARK: - Custom Tab Bar
+
+private struct CustomTabBar: View {
+    @Binding var selectedTab: AppRouter.Tab
+    @Namespace private var tabNamespace
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(AppRouter.Tab.allCases) { tab in
+                TabBarButton(
+                    tab: tab,
+                    isSelected: selectedTab == tab,
+                    namespace: tabNamespace
+                ) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        selectedTab = tab
+                    }
+                    HapticManager.lightImpact()
+                }
+            }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.top, Spacing.xs)
+        .padding(.bottom, Spacing.sm)
+        .background(
+            ColorPalette.surfacePrimary
+                .shadow(color: .black.opacity(0.1), radius: 8, y: -2)
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+}
+```
+
+And each tab bar button:
+
+```swift
+// MARK: - Tab Bar Button
+
+private struct TabBarButton: View {
+    let tab: AppRouter.Tab
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: isSelected
+                    ? tab.icon
+                    : tab.icon.replacingOccurrences(of: ".fill", with: ""))
+                    .font(.system(size: isSelected ? 22 : 20,
+                                  weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected
+                        ? ColorPalette.accent
+                        : ColorPalette.textTertiary)
+                    .scaleEffect(isSelected ? 1.0 : 0.85)
+                    .symbolEffect(.bounce, value: isSelected)
+
+                Text(tab.localizedName)
+                    .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                    .foregroundStyle(isSelected
+                        ? ColorPalette.accent
+                        : ColorPalette.textTertiary)
+
+                // Active indicator
+                if isSelected {
+                    Capsule()
+                        .fill(ColorPalette.accent)
+                        .frame(width: 20, height: 3)
+                        .matchedGeometryEffect(id: "activeTab", in: namespace)
+                } else {
+                    Capsule()
+                        .fill(.clear)
+                        .frame(width: 20, height: 3)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+This is the most important file. Let me break down every decision.
+
+**`@Bindable var router = router` inside the body.** This is the iOS 17+ pattern for `@Observable` objects. When you receive an `@Observable` object from the environment via `@Environment(AppRouter.self)`, you need to create a local `@Bindable` wrapper to get two-way bindings like `$router.selectedTab` and `$router.navigationPath`. Without this line, you cannot use the `$` prefix. Note that this variable shadows the environment property — the `@Bindable` version is what you use inside `body`.
+
+**`VStack(spacing: 0)` wrapping TabView and CustomTabBar.** The system tab bar is hidden via `.toolbar(.hidden, for: .tabBar)`, so we stack our own custom tab bar below the `TabView` with zero spacing. This gives us pixel-perfect control over the tab bar's appearance.
+
+**Only the Dashboard tab binds to `router.navigationPath`.** The Journal, Progress, and Settings tabs have their own `NavigationStack` instances with no shared path binding. This means pushing a screen in the Dashboard tab has zero effect on the other tabs. This is critical — shared navigation state across tabs is one of the most common SwiftUI bugs.
+
+**`.tag(AppRouter.Tab.dashboard)` instead of the `Tab` struct API.** The real app uses `.tag()` with the `TabView(selection:)` pattern instead of the iOS 18 `Tab` struct. This gives broader compatibility and works naturally with the custom tab bar — we are not using the system tab bar at all, so the `Tab` struct API gives us nothing.
+
+**`@Namespace` and `matchedGeometryEffect`.** This is what makes the tab bar feel alive. The `@Namespace` creates a shared coordinate space. The active tab renders a filled `Capsule` with `.matchedGeometryEffect(id: "activeTab", in: namespace)`. The inactive tabs render a clear capsule at the same size. When the selection changes, SwiftUI smoothly animates the filled capsule from the old tab position to the new one — sliding horizontally across the tab bar. The geometry ID `"activeTab"` is the same across all tabs, so SwiftUI knows these are the "same" view moving between positions.
+
+**Icon state changes.** The selected tab shows the filled icon (`house.fill`), while unselected tabs strip the `.fill` suffix to show the outline variant (`house`). The icon also scales up (`1.0` vs `0.85`) and gains semibold weight when selected. Combined with `.symbolEffect(.bounce, value: isSelected)`, the icon does a subtle bounce animation on selection.
+
+**Haptic feedback.** `HapticManager.lightImpact()` fires on every tab switch. This is a small detail that makes the app feel physically responsive. The haptic is light (not medium or heavy) because tab switching is a frequent, casual action.
+
+**Spring animation wrapping the selection.** The `withAnimation(.spring(response: 0.35, dampingFraction: 0.7))` on tab selection means the `matchedGeometryEffect` sliding, the icon scale change, and the color transition all animate together with the same spring timing. The 0.7 damping gives a slight overshoot that feels playful without being distracting.
+
+Review checklist:
+
+- Each tab has its own `NavigationStack` — independent navigation state
+- Only Dashboard binds to `router.navigationPath` — push navigation works here
+- System tab bar hidden — full control over appearance
+- `@Namespace` + `matchedGeometryEffect` — smooth sliding indicator
+- Haptic feedback on tab switch — physical responsiveness
+- `@Bindable` pattern for environment observation — required for `$` bindings
+- `private struct` for `CustomTabBar` and `TabBarButton` — file-scoped, not reusable elsewhere
+
+## Iteration
+
+The core architecture is solid, but let us connect it at the top level.
+
+### Refinement 1 — Inject the router at the App level
+
+The router needs to be created and injected above `RootView` so it is available everywhere. Send this:
+
+```
+Update the App struct (BetFreeApp.swift) to create the AppRouter
+as @State and inject it via .environment() on RootView.
+Also set up the SwiftData ModelContainer and force dark mode with
+.preferredColorScheme(.dark).
+```
+
+```swift
+import SwiftUI
+import SwiftData
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            // If the database is corrupted, try deleting and recreating
+            let urls = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            )
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent(
+                        "default.store\(suffix)"
+                    )
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+Several things to notice here.
+
+**`@State private var appRouter = AppRouter()`.** The `@State` wrapper ensures the router survives view redraws. Without it, every time `BetFreeApp.body` is re-evaluated, a new `AppRouter` would be created, losing all navigation state. `@State` keeps the same instance alive for the lifetime of the app.
+
+**`.environment(appRouter)` — no custom EnvironmentKey.** With `@Observable` (iOS 17+), you inject the object directly via `.environment()` and read it with `@Environment(AppRouter.self)`. There is no need to define a custom `EnvironmentKey` or write an `EnvironmentValues` extension. This is a major simplification over the old `ObservableObject` pattern that required `@EnvironmentObject`.
+
+**`RootView()` is the only child.** The app struct does not render `MainTabView` directly. It renders `RootView`, which conditionally renders either onboarding, the lock screen, or `MainTabView`. This separation means `BetFreeApp` never needs to know about navigation branching — it just injects dependencies and renders the root.
+
+**ModelContainer with corruption recovery.** The `sharedModelContainer` computed property tries to create the SwiftData container. If it fails (corrupted database), it deletes the store files and tries again. This is a production safeguard — SwiftData migrations can occasionally corrupt the database during development, and without this recovery logic the app would crash on every launch until the user deletes and reinstalls.
+
+### Refinement 2 — How onboarding completes
+
+The onboarding flow calls `router.completeOnboarding()` on its final page. Here is how the `OnboardingContainerView` uses the router:
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct OnboardingContainerView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(AppRouter.self) private var router
+    @State private var viewModel = OnboardingViewModel()
+
+    var body: some View {
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                // Back button
+                HStack {
+                    if viewModel.currentPage > 0 {
+                        Button {
+                            viewModel.goBack()
+                        } label: {
+                            Image(systemName: AppConfig.Icons.chevronLeft)
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(ColorPalette.textSecondary)
+                                .frame(width: 44, height: 44)
+                        }
+                        .transition(.opacity)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, Spacing.md)
+                .frame(height: 44)
+                .animation(AnimationPresets.fade, value: viewModel.currentPage)
+
+                // Pages
+                TabView(selection: $viewModel.currentPage) {
+                    WelcomeView()
+                        .tag(0)
+
+                    GamblingProfileView(viewModel: viewModel)
+                        .tag(1)
+
+                    FinancialImpactView(viewModel: viewModel)
+                        .tag(2)
+
+                    QuitDateView(viewModel: viewModel)
+                        .tag(3)
+
+                    NotificationPreferencesView(viewModel: viewModel)
+                        .tag(4)
+
+                    PaywallView()
+                        .tag(5)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .animation(AnimationPresets.smooth, value: viewModel.currentPage)
+
+                // Bottom controls
+                VStack(spacing: Spacing.lg) {
+                    PageIndicator(
+                        totalPages: OnboardingViewModel.totalPages,
+                        currentPage: viewModel.currentPage
+                    )
+
+                    BFButton(
+                        title: viewModel.buttonTitle,
+                        isDisabled: !viewModel.canAdvance
+                    ) {
+                        if viewModel.isLastPage {
+                            viewModel.createProfile(in: modelContext, router: router)
+                        } else {
+                            viewModel.advance()
+                        }
+                    }
+                    .padding(.horizontal, Spacing.xl)
+                }
+                .padding(.bottom, Spacing.xxl)
+            }
+        }
+    }
+}
+```
+
+The key line is `viewModel.createProfile(in: modelContext, router: router)`. The view model receives the router and calls `router.completeOnboarding()` after saving the user profile to SwiftData. This triggers the animated transition in `RootView` — onboarding fades out, `MainTabView` fades in. The view itself does not manage this transition at all. It just calls a method on the router and the architecture handles the rest.
+
+Notice that onboarding also uses `TabView` with `.tabViewStyle(.page(indexDisplayMode: .never))` for its page-swiping interface, and `AnimationPresets.smooth` for page transitions. The same animation system is used everywhere.
+
+## Verify Phase
+
+Build and run. Here is the verification checklist:
+
+1. **First launch shows onboarding.** The `AppRouter` reads `hasCompletedOnboarding` from UserDefaults. On a fresh install, this is `false`, so `showOnboarding` is `true`. You see the onboarding flow.
+
+2. **Completing onboarding transitions to main app.** After the final onboarding page, `router.completeOnboarding()` fires. The onboarding view fades out with a slight scale-down. `MainTabView` fades in with a slight scale-up. The animation uses `AnimationPresets.gentle`.
+
+3. **Tab switching works with animation.** Tap each tab in the custom tab bar. The capsule indicator slides smoothly from one tab to another via `matchedGeometryEffect`. The icon bounces via `.symbolEffect(.bounce)`. You feel a light haptic on each tap.
+
+4. **Tab state is independent.** Navigate deep into Dashboard (push to a detail), switch to Settings, switch back to Dashboard. You should be exactly where you left off — on the detail view, not the root.
+
+5. **Custom tab bar replaces system bar.** You should see your custom tab bar at the bottom — not the default iOS tab bar. If you see both, the `.toolbar(.hidden, for: .tabBar)` is missing.
+
+6. **No double navigation bars.** If you see two navigation bars stacked on any screen, you have a nested `NavigationStack` bug. Check that child views do not create their own stacks.
+
+7. **Biometric lock works.** If enabled, send the app to background and return. You should see the `BiometricLockView`, not the main content. After authenticating, `router.unlock()` animates back to `MainTabView`.
+
+8. **Splash screen fades out.** On launch, the splash screen covers everything for 2.5 seconds, then fades out with `AnimationPresets.gentle`. Content should be loaded underneath by the time it disappears.
+
+If all eight checks pass, your navigation architecture is solid.
+
+## Final Code
+
+Here are the key files in their final form.
+
+### AnimationPresets.swift
+
+```swift
+import SwiftUI
+
+enum AnimationPresets {
+    // MARK: - Spring Animations
+
+    /// Snappy interaction feedback — buttons, toggles, chip selection
+    static let snappy = Animation.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)
+
+    /// Standard transitions — cards appearing, navigation
+    static let smooth = Animation.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)
+
+    /// Gentle, slow animations — onboarding transitions, celebrations
+    static let gentle = Animation.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0)
+
+    /// Bouncy feedback — streak counter update, milestone reached
+    static let bouncy = Animation.spring(response: 0.4, dampingFraction: 0.5, blendDuration: 0)
+
+    /// Entry animation for cards/elements appearing on screen
+    static let cardEntry = Animation.spring(response: 0.6, dampingFraction: 0.75, blendDuration: 0)
+
+    // MARK: - Eased Animations
+
+    /// Fade in/out for overlays, modals
+    static let fade = Animation.easeInOut(duration: 0.25)
+
+    /// Slow fade for background transitions
+    static let slowFade = Animation.easeInOut(duration: 0.5)
+
+    // MARK: - Durations
+    static let shortDuration: Double = 0.2
+    static let standardDuration: Double = 0.35
+    static let longDuration: Double = 0.5
+    static let celebrationDuration: Double = 1.5
+
+    // MARK: - Stagger
+    static let staggerInterval: Double = 0.08
+
+    static func staggerDelay(for index: Int) -> Double {
+        Double(index) * staggerInterval
+    }
+}
+```
+
+### AppRouter.swift
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var showOnboarding: Bool
+    var isLocked: Bool = false
+    var selectedTab: Tab = .dashboard
+    var navigationPath = NavigationPath()
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
+        case journal = "Journal"
+        case progress = "Progress"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(
+                forKey: rawValue, value: nil, table: nil
+            )
+        }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return AppConfig.Icons.house
+            case .journal: return AppConfig.Icons.journal
+            case .progress: return AppConfig.Icons.chart
+            case .settings: return AppConfig.Icons.settings
+            }
+        }
+    }
+
+    init() {
+        self.showOnboarding = !UserDefaults.standard.bool(
+            forKey: AppConfig.StorageKeys.hasCompletedOnboarding
+        )
+    }
+
+    func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = false
+        }
+    }
+
+    func popToRoot() {
+        navigationPath = NavigationPath()
+    }
+
+    func lock() {
+        withAnimation(AnimationPresets.fade) {
+            isLocked = true
+        }
+    }
+
+    func unlock() {
+        withAnimation(AnimationPresets.smooth) {
+            isLocked = false
+        }
+    }
+
+    func resetForNewUser() {
+        UserDefaults.standard.set(false, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = true
+            selectedTab = .dashboard
+            navigationPath = NavigationPath()
+        }
+    }
+}
+```
+
+### RootView.swift
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct RootView: View {
+    @Environment(AppRouter.self) private var router
+    @Environment(\.scenePhase) private var scenePhase
+    @Query private var profiles: [UserProfile]
+    @State private var showSplash = true
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
+
+            // Main content (loads underneath splash)
+            Group {
+                if router.showOnboarding {
+                    OnboardingContainerView()
+                        .transition(.asymmetric(
+                            insertion: .opacity,
+                            removal: .opacity.combined(with: .scale(scale: 0.95))
+                        ))
+                } else if router.isLocked {
+                    BiometricLockView()
+                        .transition(.opacity)
+                } else {
+                    MainTabView()
+                        .transition(.opacity.combined(with: .scale(scale: 1.02)))
+                }
+            }
+            .animation(AnimationPresets.gentle, value: router.showOnboarding)
+            .animation(AnimationPresets.smooth, value: router.isLocked)
+
+            // Splash overlay — covers everything, fades out after 2.5s
+            if showSplash {
+                SplashScreenView()
+                    .transition(.opacity.combined(with: .scale(scale: 1.05)))
+                    .zIndex(1)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(2.5))
+            withAnimation(AnimationPresets.gentle) {
+                showSplash = false
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background,
+               profile?.biometricLockEnabled == true {
+                router.lock()
+            }
+        }
+    }
+}
+```
+
+### MainTabView.swift
+
+```swift
+import SwiftUI
+
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        @Bindable var router = router
+
+        VStack(spacing: 0) {
+            TabView(selection: $router.selectedTab) {
+                NavigationStack(path: $router.navigationPath) {
+                    DashboardView()
+                }
+                .tag(AppRouter.Tab.dashboard)
+
+                NavigationStack {
+                    JournalView()
+                }
+                .tag(AppRouter.Tab.journal)
+
+                NavigationStack {
+                    ProgressAnalyticsView()
+                }
+                .tag(AppRouter.Tab.progress)
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tag(AppRouter.Tab.settings)
+            }
+            .toolbar(.hidden, for: .tabBar)
+
+            // Custom animated tab bar
+            CustomTabBar(selectedTab: $router.selectedTab)
+        }
+    }
+}
+
+// MARK: - Custom Tab Bar
+
+private struct CustomTabBar: View {
+    @Binding var selectedTab: AppRouter.Tab
+    @Namespace private var tabNamespace
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(AppRouter.Tab.allCases) { tab in
+                TabBarButton(
+                    tab: tab,
+                    isSelected: selectedTab == tab,
+                    namespace: tabNamespace
+                ) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        selectedTab = tab
+                    }
+                    HapticManager.lightImpact()
+                }
+            }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.top, Spacing.xs)
+        .padding(.bottom, Spacing.sm)
+        .background(
+            ColorPalette.surfacePrimary
+                .shadow(color: .black.opacity(0.1), radius: 8, y: -2)
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+}
+
+// MARK: - Tab Bar Button
+
+private struct TabBarButton: View {
+    let tab: AppRouter.Tab
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: isSelected
+                    ? tab.icon
+                    : tab.icon.replacingOccurrences(of: ".fill", with: ""))
+                    .font(.system(size: isSelected ? 22 : 20,
+                                  weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected
+                        ? ColorPalette.accent
+                        : ColorPalette.textTertiary)
+                    .scaleEffect(isSelected ? 1.0 : 0.85)
+                    .symbolEffect(.bounce, value: isSelected)
+
+                Text(tab.localizedName)
+                    .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                    .foregroundStyle(isSelected
+                        ? ColorPalette.accent
+                        : ColorPalette.textTertiary)
+
+                // Active indicator
+                if isSelected {
+                    Capsule()
+                        .fill(ColorPalette.accent)
+                        .frame(width: 20, height: 3)
+                        .matchedGeometryEffect(id: "activeTab", in: namespace)
+                } else {
+                    Capsule()
+                        .fill(.clear)
+                        .frame(width: 20, height: 3)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+### BetFreeApp.swift
+
+```swift
+import SwiftUI
+import SwiftData
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            let urls = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            )
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent(
+                        "default.store\(suffix)"
+                    )
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+## Checkpoint
+
+At this point you should have:
+
+- An `AnimationPresets` enum with named spring and eased animations used throughout the entire app
+- An `AppRouter` with `@Observable` managing onboarding state, lock state, tab selection, and navigation path — with animations baked into every state-change method
+- A `RootView` that switches between onboarding, biometric lock, and main content with asymmetric transitions and a splash screen overlay
+- A `MainTabView` with four tabs, each with its own `NavigationStack`, a hidden system tab bar, and a custom animated replacement
+- A `CustomTabBar` with `matchedGeometryEffect` for a sliding indicator, haptic feedback, and spring animations
+- The `@Environment(AppRouter.self)` and `@Bindable var router = router` pattern used everywhere — no custom `EnvironmentKey`, no `@EnvironmentObject`
+- Router injection at the `App` level via `.environment(appRouter)` on `RootView`
+- Zero nested `NavigationStack` bugs, zero scattered boolean state, zero hardcoded animation values
+
+Your navigation is centralized, animated, and extensible. Adding a new tab is a four-step process: add a case to `Tab`, add a `NavigationStack` in `MainTabView`, add a `TabBarButton` entry (automatic via `CaseIterable`), and build the view. Adding a new app state (like a maintenance mode screen) means adding a property to `AppRouter` and a branch in `RootView`. The architecture stays consistent no matter how the app grows.
+
+---
+
+## Challenge
+
+**Add a fifth tab with deep-link support.**
+
+BetAway could benefit from a "Community" tab — a feed of anonymized recovery milestones from other users. Implement this:
+
+1. Add a `.community` case to `AppRouter.Tab` with a `person.2.fill` icon and "Community" as the raw value.
+2. Add the corresponding `NavigationStack` and `.tag()` in `MainTabView` — the `CustomTabBar` picks it up automatically thanks to `CaseIterable`.
+3. Add a `handleDeepLink(_ url: URL)` method to `AppRouter` that parses a URL scheme like `betaway://community` and switches to the correct tab.
+4. Wire the deep link handler into `BetFreeApp` using `.onOpenURL`.
+
+This tests whether your architecture handles growth cleanly. Adding a tab should require changes in exactly two places: the `Tab` enum and `MainTabView`. If you find yourself modifying the custom tab bar code, stop — `CaseIterable` and `ForEach` should handle it automatically. That is the whole point of the architecture.
+
+**Bonus:** Make the deep link handler also support `betaway://dashboard/checkin/{id}` — switch to the dashboard tab, then push a check-in detail onto `router.navigationPath`. This tests programmatic navigation across tab switch + stack push in a single action.

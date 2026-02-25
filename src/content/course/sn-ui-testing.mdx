@@ -1,0 +1,1180 @@
+---
+title: "UI Testing with XCUITest"
+description: "Build reliable UI test suites for BetAway using XCUITest, page object pattern, and AI-assisted test generation — covering DashboardView, MainTabView, the pledge flow, urge timer, and SettingsView."
+courseSlug: "ship-native"
+module: 6
+moduleTitle: "Quality & Testing"
+lesson: 2
+duration: "30 min read"
+difficulty: "intermediate"
+topics: ["Testing", "XCUITest", "UI Testing", "Page Object Pattern", "Accessibility", "Automation", "Swift", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Unit tests verify that your ViewModels compute the right values. But they cannot tell you whether the user can actually tap a button, complete the morning pledge, and see their streak update on the dashboard. The `DashboardViewModel` might return the correct `milestoneProgress`, but if the `StreakCardView` binding is wrong or the tab navigation pushes to the wrong destination, the user sees a blank screen while all your unit tests pass green.
+
+UI tests fill that gap. They launch your app in a real simulator, tap real buttons, type real text, and assert on what is actually visible on screen. They are slower than unit tests and more brittle if written carelessly — but when written well, they catch an entire class of bugs that no other test can reach.
+
+## What You'll Learn
+
+1. **Set up XCUITest with launch arguments** that configure the app for deterministic test runs — no server calls, no persisted data, no randomness.
+2. **Build page objects** that encapsulate screen-specific element queries for `DashboardView`, `PledgeContainerView`, `UrgeContainerView`, and `SettingsView`, so your tests read like user stories instead of XPath expressions.
+3. **Write end-to-end UI test cases** that cover the morning pledge flow, dashboard display, tab navigation between Dashboard/Journal/Progress/Settings, and the urge timer.
+4. **Prompt AI to generate UI tests**, then review and harden the output against the most common XCUITest pitfalls — timing, element identification, and test isolation.
+
+## Why This Matters
+
+Every iOS developer has shipped a build where the logic was correct but the UI was broken. A button was hidden behind a safe area. A sheet dismissed itself immediately because a state variable reset too early. A navigation stack pushed two screens instead of one. These bugs are invisible to unit tests because unit tests never instantiate a real view hierarchy.
+
+XCUITest runs your actual app binary. It sees what the user sees. When you add a new feature and accidentally break the tab navigation in `MainTabView`, a UI test catches it in CI before your beta testers do. The cost is speed — UI tests take seconds, not milliseconds. The payoff is confidence that the screens your users touch actually work.
+
+The page object pattern makes this sustainable. Without it, every UI test is a wall of `app.buttons["Save"].tap()` calls that break the moment you rename a button. With page objects, you change the identifier in one place, and every test that touches that screen keeps working.
+
+## Plan Phase: Designing the UI Test Strategy
+
+Before launching the simulator, plan the scope. Send this to Claude Code:
+
+```
+I need to build a UI test suite for BetAway using XCUITest.
+Before writing any code, help me plan the test strategy.
+
+The app has these screens (via MainTabView with custom tab bar):
+- Dashboard (DashboardView): displays streak count, savings total,
+  milestone progress, daily quote, pledge card, and an emergency
+  urge button. Tabs: Dashboard, Journal, Progress, Settings.
+- Morning Pledge (MorningPledgeView): mood selection with 5
+  MoodRating options, pledge reason picker, notes field, submit.
+- Evening Check-in (EveningCheckinView): mood, gambling-free toggle,
+  triggers, notes, submit.
+- Urge Flow (UrgeContainerView): acknowledge phase, 15-minute
+  timer with breathing exercise, log phase, complete phase.
+- Settings (SettingsView): notifications toggle, biometric lock,
+  haptic feedback, language, emergency contacts, version display.
+- Journal (JournalView): list of journal entries, create new entry.
+- Progress (ProgressView): mood chart, urge chart, trigger stats.
+
+Plan:
+1. What launch arguments should we use to put the app in
+   a testable state (mock data, skip onboarding, etc.)?
+2. Which screens need page objects and what elements
+   should each page object expose?
+3. What end-to-end flows should we test?
+4. What should we NOT test with UI tests?
+
+Do NOT write code yet. Think through the design.
+```
+
+### AI Plan Review
+
+A good plan separates what belongs in UI tests from what belongs in unit tests. Here is what to look for:
+
+- **Launch arguments for test configuration.** The app should check for arguments like `--uitesting` and `--reset-data` at startup. When present, it swaps to an in-memory `ModelContainer`, injects a pre-configured `UserProfile`, skips onboarding, and disables animations. This makes tests deterministic. Without this, tests depend on whatever data the last test run left behind.
+- **Page objects for every screen the tests touch.** `DashboardView`, `PledgeContainerView`, `UrgeContainerView`, and `SettingsView` each get a page object. Each page object wraps `XCUIApplication` queries and exposes methods like `tapPledgeCard()`, `selectMood(.good)`, and `verifyStreakCount()`. Tests never call `app.buttons[...]` directly.
+- **Test user-visible flows, not implementation details.** A good UI test says "complete the morning pledge and verify the dashboard updates." A bad UI test checks that a specific `@Observable` property changed.
+- Watch for the AI suggesting too many UI tests. If it proposes 30 test cases, push back. UI tests are slow. Test the critical paths: morning pledge, tab navigation, urge flow start, empty vs. populated dashboard, settings toggle. Leave edge cases to unit tests.
+- **Reject tests that depend on network responses.** UI tests must run against mock data injected via launch arguments. If the AI suggests testing "loading indicators while fetching from CloudKit," that belongs in a unit test — not a UI test that depends on a server being available.
+
+### Anti-Pattern: Fragile Element Queries
+
+Here is a UI test that breaks every time you change a label:
+
+```swift
+// BAD — hardcoded strings without accessibility identifiers
+func testCompletePledge() {
+    app.buttons["Take Today's Pledge"].tap()
+    app.buttons["🙂"].tap()
+    app.textFields["Why are you pledging today?"].tap()
+    app.textFields["Why are you pledging today?"].typeText("For my family")
+    app.buttons["Submit Pledge"].tap()
+}
+```
+
+This test is a maintenance nightmare. Rename the button from "Take Today's Pledge" to "Start Pledge" and the test fails. Localize the app and the test fails in every non-English locale. A better approach uses accessibility identifiers:
+
+```swift
+// GOOD — accessibility identifiers are stable and locale-independent
+func testCompletePledge() {
+    let dashboard = DashboardPageObject(app: app)
+    dashboard.tapPledgeCard()
+
+    let pledge = PledgePageObject(app: app)
+    pledge.selectMood(.good)
+    pledge.selectReason("For my family")
+    pledge.tapSubmit()
+}
+```
+
+Same test, but it survives renaming, localization, and design changes. The page object encapsulates the identifier, so if it does change, you fix it in one place.
+
+## Execute Phase: Building the UI Test Infrastructure
+
+Now we build. Send this prompt:
+
+```
+Create the UI test infrastructure for BetAway using XCUITest.
+Generate these files:
+
+1. BetAwayUITests/Pages/DashboardPageObject.swift
+   - Wraps XCUIApplication queries for DashboardView
+   - Properties: streakCount, savingsText, isPledgeCardVisible,
+     isUrgeButtonVisible
+   - Methods: tapPledgeCard(), tapUrgeButton(), tapTab(_ tab:)
+
+2. BetAwayUITests/Pages/PledgePageObject.swift
+   - Wraps queries for MorningPledgeView / EveningCheckinView
+   - Methods: selectMood(_ rating:), selectReason(_ text:),
+     typeNotes(_ text:), tapSubmit()
+   - Properties: isDisplayed, isSubmitEnabled, isCelebrationVisible
+
+3. BetAwayUITests/Pages/UrgePageObject.swift
+   - Wraps queries for UrgeContainerView phases
+   - Methods: tapStartTimer(), tapSkipTimer(), tapLogUrge()
+   - Properties: isTimerVisible, timerDisplayText, currentPhase
+
+4. BetAwayUITests/BetAwayUITests.swift
+   - XCUITest setup with launch arguments: --uitesting,
+     --reset-data, --disable-animations, --skip-onboarding
+   - Test cases:
+     a. Dashboard displays streak and savings after launch
+     b. Tab navigation between Dashboard, Journal, Progress, Settings
+     c. Morning pledge flow (happy path)
+     d. Urge flow — start timer, skip, log
+     e. Settings version label is visible
+   - Use setUpWithError/tearDownWithError for clean state
+
+Use Swift 6, strict concurrency. Use XCTest framework
+(XCUITest is built on XCTest, not Swift Testing).
+Accessibility identifiers should follow the pattern
+"screenName-elementName" (e.g., "dashboard-streak-count").
+```
+
+### Code Review
+
+Here is what Claude Code should produce. Let me walk through the key decisions.
+
+**Launch argument handling in the app:**
+
+```swift
+// In BetFreeApp.swift — production code
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+
+    init() {
+        UserDefaults.standard.register(defaults: [
+            AppConfig.StorageKeys.hapticFeedbackEnabled: true
+        ])
+
+        if CommandLine.arguments.contains("--uitesting") {
+            // Use in-memory ModelContainer for test isolation
+        }
+        if CommandLine.arguments.contains("--skip-onboarding") {
+            UserDefaults.standard.set(
+                true,
+                forKey: AppConfig.StorageKeys.hasCompletedOnboarding
+            )
+        }
+        if CommandLine.arguments.contains("--disable-animations") {
+            UIView.setAnimationsEnabled(false)
+        }
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+- **`CommandLine.arguments` is the standard way** to pass configuration from XCUITest to the app under test. The test process sets `launchArguments` on `XCUIApplication`, and the app reads them at startup.
+- **`--skip-onboarding`** sets the `hasCompletedOnboarding` UserDefaults key so the `AppRouter` skips the onboarding flow and goes straight to `MainTabView`. Without this, every UI test would have to tap through onboarding first.
+- **Disabling animations** eliminates an entire class of timing failures. Animations cause elements to be "not hittable" while they are mid-transition. In tests, visual polish adds zero value and constant flakiness.
+- Watch for the AI putting this logic in `AppDelegate` instead of `App.init()`. Both work, but since BetAway uses the SwiftUI app lifecycle (`@main struct BetFreeApp: App`), the `init()` is the correct location.
+
+**Page Object Pattern:**
+
+```swift
+// BetAwayUITests/Pages/DashboardPageObject.swift
+import XCTest
+
+struct DashboardPageObject {
+    let app: XCUIApplication
+
+    // MARK: - Elements
+
+    private var streakCountLabel: XCUIElement {
+        app.staticTexts["dashboard-streak-count"]
+    }
+
+    private var savingsLabel: XCUIElement {
+        app.staticTexts["dashboard-savings-total"]
+    }
+
+    private var pledgeCard: XCUIElement {
+        app.otherElements["dashboard-pledge-card"]
+    }
+
+    private var urgeButton: XCUIElement {
+        app.buttons["dashboard-urge-button"]
+    }
+
+    private var quoteCard: XCUIElement {
+        app.otherElements["dashboard-quote-card"]
+    }
+
+    // MARK: - Tab Bar
+
+    private func tabButton(_ tab: String) -> XCUIElement {
+        app.buttons["tab-\(tab)"]
+    }
+
+    // MARK: - Existence Checks
+
+    var isDisplayed: Bool {
+        streakCountLabel.waitForExistence(timeout: 5)
+    }
+
+    var isPledgeCardVisible: Bool {
+        pledgeCard.waitForExistence(timeout: 3)
+    }
+
+    var isUrgeButtonVisible: Bool {
+        urgeButton.waitForExistence(timeout: 3)
+    }
+
+    var streakText: String? {
+        guard streakCountLabel.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return streakCountLabel.label
+    }
+
+    var savingsText: String? {
+        guard savingsLabel.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return savingsLabel.label
+    }
+}
+```
+
+- **Struct, not class.** Page objects are stateless query wrappers. They hold a reference to `XCUIApplication` and nothing else. No reason for reference semantics.
+- **Computed properties for elements.** Every property re-queries the app hierarchy each time it is accessed. This is correct — XCUITest elements are proxies that resolve lazily. Caching them in a stored property causes stale reference bugs.
+- **`waitForExistence(timeout:)` in `isDisplayed`.** This is the single most important XCUITest pattern. Never assume an element is immediately available. Screens take time to appear, especially after tab transitions in `MainTabView`.
+- **Watch for the AI using `sleep()` instead of `waitForExistence`.** If you see `Thread.sleep(forTimeInterval: 2)` anywhere in the generated code, replace it with `waitForExistence(timeout:)` or `XCTAssert` with a timeout. Hard sleeps make tests slow and still flaky.
+
+Review checklist for the page object actions:
+
+```swift
+extension DashboardPageObject {
+    // MARK: - Actions
+
+    func tapPledgeCard() {
+        XCTAssertTrue(
+            pledgeCard.waitForExistence(timeout: 5),
+            "Pledge card did not appear on dashboard"
+        )
+        pledgeCard.tap()
+    }
+
+    func tapUrgeButton() {
+        XCTAssertTrue(
+            urgeButton.waitForExistence(timeout: 5),
+            "Urge button did not appear on dashboard"
+        )
+        urgeButton.tap()
+    }
+
+    func tapTab(_ tab: String) {
+        let button = tabButton(tab)
+        XCTAssertTrue(
+            button.waitForExistence(timeout: 5),
+            "Tab '\(tab)' did not appear in tab bar"
+        )
+        button.tap()
+    }
+}
+```
+
+- **Every action waits before tapping.** The `waitForExistence` call before every `tap()` is defensive but correct. The custom tab bar in `MainTabView` renders asynchronously after the view loads.
+- **`XCTFail`-style assertions for missing elements.** If the pledge card does not exist (because the user already pledged today), the test fails immediately with a clear message.
+- 5-second timeouts are generous. In practice, most transitions complete in under one second. Five seconds is the upper bound for slow CI machines. If your tests run locally on a fast Mac, you could lower this to 3 seconds. But 5 is a safe default that prevents CI flakes.
+
+## Iteration: Hardening the Tests
+
+The first pass compiles but has common weaknesses. Send this follow-up:
+
+```
+Review the UI tests you generated and fix these issues:
+
+1. The tests are not isolated — if "morning pledge" fails
+   mid-flow, the next test starts on the wrong screen.
+   Each test must start from a known state.
+
+2. Add waitForExistence calls before EVERY element
+   interaction, not just taps. Element existence must be
+   verified before reading .label or .value properties.
+
+3. The dashboard page object needs a method to verify that
+   the streak count is a specific value, not just that it exists.
+
+4. Add XCTExpectFailure for the urge timer completion test
+   if the 15-minute timer is not skippable in test mode.
+
+5. Add a test for the settings screen that verifies the
+   version string format (e.g., "1.0 (1)").
+```
+
+The AI should return an improved version addressing each point. Here is what matters:
+
+**Test isolation fix** — each test should call `app.terminate()` and `app.launch()` in `setUp`, not just `launch()`. Terminating first ensures no leftover state:
+
+```swift
+override func setUpWithError() throws {
+    continueAfterFailure = false
+    app = XCUIApplication()
+    app.launchArguments = [
+        "--uitesting",
+        "--reset-data",
+        "--disable-animations",
+        "--skip-onboarding"
+    ]
+    app.terminate()
+    app.launch()
+}
+```
+
+**`XCTExpectFailure` for known gaps** — this keeps the test suite green while documenting what is not yet implemented:
+
+```swift
+func testUrgeTimerCompletion() throws {
+    XCTExpectFailure("15-minute timer not skippable in UI test mode") {
+        // ... timer completion test code ...
+    }
+}
+```
+
+**Streak verification by value** — more precise than just checking existence:
+
+```swift
+func verifyStreakCount(_ expected: String) {
+    XCTAssertTrue(
+        streakCountLabel.waitForExistence(timeout: 5),
+        "Streak count label did not appear"
+    )
+    XCTAssertEqual(
+        streakCountLabel.label,
+        expected,
+        "Streak count should show '\(expected)'"
+    )
+}
+```
+
+## Verify Phase: Running the UI Tests
+
+UI tests require more verification than unit tests because they interact with the full system.
+
+**1. Run on the simulator first.** Select a specific simulator device (iPhone 16 Pro is a good default) and run the full UI test suite. Every test should pass. If a test fails, read the failure message — XCUITest failures include screenshots of the moment of failure, which Xcode displays in the test report.
+
+**2. Check test timing.** The full UI test suite should complete in under 60 seconds for five test cases. If individual tests take more than 15 seconds, look for unnecessary `waitForExistence` calls with long timeouts that are actually waiting because the element never appears.
+
+**3. Verify test isolation.** Run each test individually by clicking the diamond next to its name. Then run the entire suite. Results should be identical. If a test only passes when run after another test, the second test depends on state created by the first — usually data that was not cleaned up.
+
+**4. Run on a second simulator size.** Choose iPhone SE (3rd generation) to verify that element queries work on a smaller screen. Elements that are off-screen on smaller devices require scrolling, which XCUITest handles automatically for `tap()` but not for existence checks.
+
+**5. CI considerations.** UI tests run on CI machines without a display. Use `xcodebuild test` with the `-destination` flag pointing to a simulator. Ensure your CI configuration installs the required simulator runtime. UI tests that pass locally but fail in CI are almost always caused by missing simulators or animation timing differences.
+
+## Final Code
+
+Here is the complete, final implementation for all files. These are the versions that should be in your UI test target after the plan, execute, and iterate phases.
+
+### BetAwayUITests/Pages/DashboardPageObject.swift
+
+```swift
+import XCTest
+
+struct DashboardPageObject {
+    let app: XCUIApplication
+
+    // MARK: - Elements
+
+    private var streakCountLabel: XCUIElement {
+        app.staticTexts["dashboard-streak-count"]
+    }
+
+    private var savingsLabel: XCUIElement {
+        app.staticTexts["dashboard-savings-total"]
+    }
+
+    private var pledgeCard: XCUIElement {
+        app.otherElements["dashboard-pledge-card"]
+    }
+
+    private var urgeButton: XCUIElement {
+        app.buttons["dashboard-urge-button"]
+    }
+
+    private var quoteCard: XCUIElement {
+        app.otherElements["dashboard-quote-card"]
+    }
+
+    private var milestoneCard: XCUIElement {
+        app.otherElements["dashboard-milestone-card"]
+    }
+
+    // MARK: - Tab Bar (custom tab bar in MainTabView)
+
+    private func tabButton(_ tab: String) -> XCUIElement {
+        app.buttons["tab-\(tab)"]
+    }
+
+    // MARK: - Computed Properties
+
+    var isDisplayed: Bool {
+        streakCountLabel.waitForExistence(timeout: 5)
+    }
+
+    var isPledgeCardVisible: Bool {
+        pledgeCard.waitForExistence(timeout: 3)
+    }
+
+    var isUrgeButtonVisible: Bool {
+        urgeButton.waitForExistence(timeout: 3)
+    }
+
+    var streakText: String? {
+        guard streakCountLabel.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return streakCountLabel.label
+    }
+
+    var savingsText: String? {
+        guard savingsLabel.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return savingsLabel.label
+    }
+
+    // MARK: - Actions
+
+    func tapPledgeCard() {
+        XCTAssertTrue(
+            pledgeCard.waitForExistence(timeout: 5),
+            "Pledge card did not appear on dashboard"
+        )
+        pledgeCard.tap()
+    }
+
+    func tapUrgeButton() {
+        XCTAssertTrue(
+            urgeButton.waitForExistence(timeout: 5),
+            "Emergency urge button did not appear on dashboard"
+        )
+        urgeButton.tap()
+    }
+
+    func tapTab(_ tab: String) {
+        let button = tabButton(tab)
+        XCTAssertTrue(
+            button.waitForExistence(timeout: 5),
+            "Tab '\(tab)' did not appear in custom tab bar"
+        )
+        button.tap()
+    }
+
+    func verifyStreakCount(_ expected: String) {
+        XCTAssertTrue(
+            streakCountLabel.waitForExistence(timeout: 5),
+            "Streak count label did not appear"
+        )
+        XCTAssertEqual(
+            streakCountLabel.label,
+            expected,
+            "Streak count should show '\(expected)'"
+        )
+    }
+}
+```
+
+### BetAwayUITests/Pages/PledgePageObject.swift
+
+```swift
+import XCTest
+
+struct PledgePageObject {
+    let app: XCUIApplication
+
+    // MARK: - Elements
+
+    private var moodVeryBadButton: XCUIElement {
+        app.buttons["pledge-mood-veryBad"]
+    }
+
+    private var moodBadButton: XCUIElement {
+        app.buttons["pledge-mood-bad"]
+    }
+
+    private var moodNeutralButton: XCUIElement {
+        app.buttons["pledge-mood-neutral"]
+    }
+
+    private var moodGoodButton: XCUIElement {
+        app.buttons["pledge-mood-good"]
+    }
+
+    private var moodVeryGoodButton: XCUIElement {
+        app.buttons["pledge-mood-veryGood"]
+    }
+
+    private var notesField: XCUIElement {
+        app.textViews["pledge-notes-field"]
+    }
+
+    private var submitButton: XCUIElement {
+        app.buttons["pledge-submit-button"]
+    }
+
+    private var celebrationView: XCUIElement {
+        app.otherElements["pledge-celebration"]
+    }
+
+    // MARK: - Pledge Reason Buttons
+
+    private func reasonButton(_ reason: String) -> XCUIElement {
+        app.buttons["pledge-reason-\(reason)"]
+    }
+
+    // MARK: - Computed Properties
+
+    var isDisplayed: Bool {
+        moodNeutralButton.waitForExistence(timeout: 5)
+    }
+
+    var isSubmitEnabled: Bool {
+        submitButton.exists && submitButton.isEnabled
+    }
+
+    var isCelebrationVisible: Bool {
+        celebrationView.waitForExistence(timeout: 5)
+    }
+
+    // MARK: - Actions
+
+    func selectMood(_ mood: String) {
+        let button: XCUIElement
+        switch mood {
+        case "veryBad": button = moodVeryBadButton
+        case "bad": button = moodBadButton
+        case "neutral": button = moodNeutralButton
+        case "good": button = moodGoodButton
+        case "veryGood": button = moodVeryGoodButton
+        default:
+            XCTFail("Unknown mood rating: \(mood)")
+            return
+        }
+        XCTAssertTrue(
+            button.waitForExistence(timeout: 5),
+            "Mood button '\(mood)' did not appear"
+        )
+        button.tap()
+    }
+
+    func selectReason(_ reason: String) {
+        let button = reasonButton(reason)
+        XCTAssertTrue(
+            button.waitForExistence(timeout: 5),
+            "Reason button '\(reason)' did not appear"
+        )
+        button.tap()
+    }
+
+    func typeNotes(_ text: String) {
+        XCTAssertTrue(
+            notesField.waitForExistence(timeout: 5),
+            "Notes field did not appear"
+        )
+        notesField.tap()
+        notesField.typeText(text)
+    }
+
+    func tapSubmit() {
+        XCTAssertTrue(
+            submitButton.waitForExistence(timeout: 5),
+            "Submit button did not appear"
+        )
+        submitButton.tap()
+    }
+
+    /// Completes the morning pledge with defaults.
+    func completePledge(
+        mood: String = "good",
+        notes: String = "UI test pledge"
+    ) {
+        selectMood(mood)
+        typeNotes(notes)
+        tapSubmit()
+    }
+}
+```
+
+### BetAwayUITests/Pages/UrgePageObject.swift
+
+```swift
+import XCTest
+
+struct UrgePageObject {
+    let app: XCUIApplication
+
+    // MARK: - Elements
+
+    private var acknowledgeButton: XCUIElement {
+        app.buttons["urge-acknowledge-button"]
+    }
+
+    private var timerView: XCUIElement {
+        app.otherElements["urge-timer-view"]
+    }
+
+    private var timerDisplay: XCUIElement {
+        app.staticTexts["urge-timer-display"]
+    }
+
+    private var skipTimerButton: XCUIElement {
+        app.buttons["urge-skip-timer"]
+    }
+
+    private var intensitySlider: XCUIElement {
+        app.sliders["urge-intensity-slider"]
+    }
+
+    private var logSubmitButton: XCUIElement {
+        app.buttons["urge-log-submit"]
+    }
+
+    private var completeView: XCUIElement {
+        app.otherElements["urge-complete-view"]
+    }
+
+    private var closeButton: XCUIElement {
+        app.buttons["urge-close-button"]
+    }
+
+    // MARK: - Computed Properties
+
+    var isDisplayed: Bool {
+        acknowledgeButton.waitForExistence(timeout: 5)
+    }
+
+    var isTimerVisible: Bool {
+        timerView.waitForExistence(timeout: 3)
+    }
+
+    var timerDisplayText: String? {
+        guard timerDisplay.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return timerDisplay.label
+    }
+
+    var isCompletePhaseVisible: Bool {
+        completeView.waitForExistence(timeout: 5)
+    }
+
+    // MARK: - Actions
+
+    func tapStartTimer() {
+        XCTAssertTrue(
+            acknowledgeButton.waitForExistence(timeout: 5),
+            "Acknowledge/start button did not appear"
+        )
+        acknowledgeButton.tap()
+    }
+
+    func tapSkipTimer() {
+        XCTAssertTrue(
+            skipTimerButton.waitForExistence(timeout: 5),
+            "Skip timer button did not appear"
+        )
+        skipTimerButton.tap()
+    }
+
+    func tapLogSubmit() {
+        XCTAssertTrue(
+            logSubmitButton.waitForExistence(timeout: 5),
+            "Log submit button did not appear"
+        )
+        logSubmitButton.tap()
+    }
+
+    func tapClose() {
+        XCTAssertTrue(
+            closeButton.waitForExistence(timeout: 5),
+            "Close button did not appear"
+        )
+        closeButton.tap()
+    }
+
+    /// Completes the full urge flow: acknowledge, skip timer, log.
+    func completeUrgeFlow() {
+        tapStartTimer()
+        tapSkipTimer()
+        tapLogSubmit()
+    }
+}
+```
+
+### BetAwayUITests/Pages/SettingsPageObject.swift
+
+```swift
+import XCTest
+
+struct SettingsPageObject {
+    let app: XCUIApplication
+
+    // MARK: - Elements
+
+    var notificationsToggle: XCUIElement {
+        app.switches["settings-notifications-toggle"]
+    }
+
+    var biometricToggle: XCUIElement {
+        app.switches["settings-biometric-toggle"]
+    }
+
+    var hapticToggle: XCUIElement {
+        app.switches["settings-haptic-toggle"]
+    }
+
+    var versionLabel: XCUIElement {
+        app.staticTexts["settings-version-label"]
+    }
+
+    var resetButton: XCUIElement {
+        app.buttons["settings-reset-button"]
+    }
+
+    var languageButton: XCUIElement {
+        app.buttons["settings-language-button"]
+    }
+
+    // MARK: - Computed Properties
+
+    var isDisplayed: Bool {
+        versionLabel.waitForExistence(timeout: 5)
+    }
+
+    var versionText: String? {
+        guard versionLabel.waitForExistence(timeout: 3) else {
+            return nil
+        }
+        return versionLabel.label
+    }
+
+    // MARK: - Actions
+
+    func toggleNotifications() {
+        XCTAssertTrue(
+            notificationsToggle.waitForExistence(timeout: 5),
+            "Notifications toggle did not appear"
+        )
+        notificationsToggle.tap()
+    }
+
+    func toggleHapticFeedback() {
+        XCTAssertTrue(
+            hapticToggle.waitForExistence(timeout: 5),
+            "Haptic feedback toggle did not appear"
+        )
+        hapticToggle.tap()
+    }
+}
+```
+
+### BetAwayUITests/BetAwayUITests.swift
+
+```swift
+import XCTest
+
+final class BetAwayUITests: XCTestCase {
+
+    // MARK: - Properties
+
+    private var app: XCUIApplication!
+    private var dashboard: DashboardPageObject!
+    private var pledge: PledgePageObject!
+    private var urge: UrgePageObject!
+    private var settings: SettingsPageObject!
+
+    // MARK: - Lifecycle
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+
+        app = XCUIApplication()
+        app.launchArguments = [
+            "--uitesting",
+            "--reset-data",
+            "--disable-animations",
+            "--skip-onboarding"
+        ]
+        app.terminate()
+        app.launch()
+
+        dashboard = DashboardPageObject(app: app)
+        pledge = PledgePageObject(app: app)
+        urge = UrgePageObject(app: app)
+        settings = SettingsPageObject(app: app)
+    }
+
+    override func tearDownWithError() throws {
+        app.terminate()
+        app = nil
+        dashboard = nil
+        pledge = nil
+        urge = nil
+        settings = nil
+    }
+
+    // MARK: - Dashboard Tests
+
+    func testDashboardDisplaysAfterLaunch() throws {
+        // The app launches with --skip-onboarding so we land on
+        // MainTabView with Dashboard selected
+        XCTAssertTrue(
+            dashboard.isDisplayed,
+            "Dashboard should be visible after launch"
+        )
+    }
+
+    func testDashboardShowsStreakAndSavings() throws {
+        XCTAssertTrue(dashboard.isDisplayed)
+        XCTAssertNotNil(
+            dashboard.streakText,
+            "Streak count should be visible on dashboard"
+        )
+        XCTAssertNotNil(
+            dashboard.savingsText,
+            "Savings total should be visible on dashboard"
+        )
+    }
+
+    func testDashboardShowsUrgeButton() throws {
+        XCTAssertTrue(dashboard.isDisplayed)
+        XCTAssertTrue(
+            dashboard.isUrgeButtonVisible,
+            "Emergency urge button should be visible"
+        )
+    }
+
+    // MARK: - Tab Navigation Tests
+
+    func testTabNavigationBetweenAllTabs() throws {
+        // Start on Dashboard
+        XCTAssertTrue(dashboard.isDisplayed)
+
+        // Navigate to Journal
+        dashboard.tapTab("journal")
+        let journalTitle = app.staticTexts["journal-title"]
+        XCTAssertTrue(
+            journalTitle.waitForExistence(timeout: 5),
+            "Journal screen should be displayed"
+        )
+
+        // Navigate to Progress
+        dashboard.tapTab("progress")
+        let progressTitle = app.staticTexts["progress-title"]
+        XCTAssertTrue(
+            progressTitle.waitForExistence(timeout: 5),
+            "Progress screen should be displayed"
+        )
+
+        // Navigate to Settings
+        dashboard.tapTab("settings")
+        XCTAssertTrue(
+            settings.isDisplayed,
+            "Settings screen should be displayed"
+        )
+
+        // Navigate back to Dashboard
+        dashboard.tapTab("dashboard")
+        XCTAssertTrue(
+            dashboard.isDisplayed,
+            "Dashboard should be displayed after switching back"
+        )
+    }
+
+    // MARK: - Morning Pledge Flow Tests
+
+    func testMorningPledgeHappyPath() throws {
+        XCTAssertTrue(dashboard.isDisplayed)
+
+        // Tap the pledge card to start the flow
+        dashboard.tapPledgeCard()
+        XCTAssertTrue(
+            pledge.isDisplayed,
+            "Pledge screen should appear after tapping pledge card"
+        )
+
+        // Select mood and submit
+        pledge.selectMood("good")
+        pledge.tapSubmit()
+
+        // Should show celebration and return to dashboard
+        XCTAssertTrue(
+            pledge.isCelebrationVisible,
+            "Celebration animation should appear after pledge"
+        )
+    }
+
+    func testMorningPledgeWithNotes() throws {
+        dashboard.tapPledgeCard()
+        XCTAssertTrue(pledge.isDisplayed)
+
+        pledge.selectMood("veryGood")
+        pledge.typeNotes("Feeling strong today")
+        pledge.tapSubmit()
+
+        XCTAssertTrue(
+            pledge.isCelebrationVisible,
+            "Celebration should appear after pledge with notes"
+        )
+    }
+
+    // MARK: - Urge Flow Tests
+
+    func testUrgeFlowStartAndSkip() throws {
+        XCTAssertTrue(dashboard.isDisplayed)
+
+        // Launch the urge flow
+        dashboard.tapUrgeButton()
+        XCTAssertTrue(
+            urge.isDisplayed,
+            "Urge flow should appear after tapping urge button"
+        )
+
+        // Start the timer
+        urge.tapStartTimer()
+        XCTAssertTrue(
+            urge.isTimerVisible,
+            "Timer should be visible after starting"
+        )
+
+        // Skip the timer
+        urge.tapSkipTimer()
+
+        // Should move to the log phase
+        let logSubmit = app.buttons["urge-log-submit"]
+        XCTAssertTrue(
+            logSubmit.waitForExistence(timeout: 5),
+            "Log submit button should appear after skipping timer"
+        )
+    }
+
+    func testUrgeFlowFullCompletion() throws {
+        dashboard.tapUrgeButton()
+        XCTAssertTrue(urge.isDisplayed)
+
+        urge.completeUrgeFlow()
+
+        XCTAssertTrue(
+            urge.isCompletePhaseVisible,
+            "Complete phase should be visible after logging urge"
+        )
+    }
+
+    // MARK: - Settings Tests
+
+    func testSettingsShowsVersionLabel() throws {
+        dashboard.tapTab("settings")
+        XCTAssertTrue(
+            settings.isDisplayed,
+            "Settings screen should be displayed"
+        )
+
+        let version = settings.versionText
+        XCTAssertNotNil(
+            version,
+            "Version label should be visible in settings"
+        )
+        // Version format should be like "1.0 (1)"
+        XCTAssertTrue(
+            version?.contains("(") == true,
+            "Version should include build number in parentheses"
+        )
+    }
+
+    func testSettingsNotificationsToggleExists() throws {
+        dashboard.tapTab("settings")
+        XCTAssertTrue(settings.isDisplayed)
+
+        XCTAssertTrue(
+            settings.notificationsToggle.waitForExistence(timeout: 5),
+            "Notifications toggle should exist in settings"
+        )
+    }
+
+    // MARK: - Multiple Interactions
+
+    func testPledgeThenViewDashboard() throws {
+        // Complete a pledge
+        dashboard.tapPledgeCard()
+        pledge.completePledge(mood: "good")
+
+        // Wait for celebration to finish, then dismiss
+        XCTAssertTrue(pledge.isCelebrationVisible)
+
+        // The dashboard should reflect the pledge was taken
+        // (pledge card state changes after completion)
+        XCTAssertTrue(
+            dashboard.isDisplayed,
+            "Dashboard should be visible after pledge flow"
+        )
+    }
+}
+```
+
+### Adding Accessibility Identifiers to Views
+
+The UI tests depend on accessibility identifiers in your SwiftUI views. Here is the pattern for adding them. This goes in your production code, not the test target:
+
+```swift
+// In DashboardView.swift — add identifiers to key elements
+struct DashboardView: View {
+    @Environment(AppRouter.self) private var router
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+    @State private var showUrgeFlow = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                if let profile {
+                    // Streak Card
+                    StreakCardView(profile: profile, viewModel: viewModel)
+                        .accessibilityIdentifier("dashboard-streak-card")
+
+                    // Savings Card
+                    SavingsCardView(profile: profile)
+                        .accessibilityIdentifier("dashboard-savings-card")
+
+                    // Pledge Card
+                    DashboardPledgeCard(profile: profile)
+                        .accessibilityIdentifier("dashboard-pledge-card")
+
+                    // Emergency Urge Button
+                    EmergencyUrgeButton { showUrgeFlow = true }
+                        .accessibilityIdentifier("dashboard-urge-button")
+                }
+            }
+        }
+    }
+}
+
+// In StreakCardView — add identifier to the streak count text
+Text("\(profile.currentStreak)")
+    .accessibilityIdentifier("dashboard-streak-count")
+
+// In SavingsCardView — add identifier to the savings amount
+Text("$\(Int(profile.totalSaved))")
+    .accessibilityIdentifier("dashboard-savings-total")
+```
+
+Key points for accessibility identifiers:
+
+- **Use the `screenName-elementName` convention** consistently. It prevents collisions between screens and makes identifiers self-documenting in test code.
+- **Tab bar buttons use `tab-dashboard`, `tab-journal`, etc.** In `MainTabView`'s `CustomTabBar`, add `.accessibilityIdentifier("tab-\(tab.rawValue.lowercased())")` to each `TabBarButton`.
+- Do not add identifiers to every view. Only add them to elements that UI tests need to interact with or assert on. Over-identifying clutters the accessibility tree and can confuse VoiceOver users.
+
+## Checkpoint
+
+Before moving to the next lesson, verify every item:
+
+- [ ] `BetAwayUITests` target exists in the Xcode project with a valid test host configuration
+- [ ] `DashboardPageObject` compiles and exposes methods for streak verification, pledge card tap, urge button tap, and tab navigation
+- [ ] `PledgePageObject` compiles and exposes methods for mood selection, notes, and submit
+- [ ] `UrgePageObject` compiles and can start timer, skip timer, and log an urge
+- [ ] Launch arguments `--uitesting`, `--reset-data`, `--disable-animations`, and `--skip-onboarding` are handled in `BetFreeApp.init()`
+- [ ] The `testDashboardDisplaysAfterLaunch` test passes end-to-end on iPhone 16 Pro simulator
+- [ ] The `testTabNavigationBetweenAllTabs` test navigates through all four tabs in `MainTabView`
+- [ ] Every element interaction in page objects uses `waitForExistence(timeout:)` before tapping or reading
+- [ ] No test uses `Thread.sleep` or `sleep()` — all waiting is done through XCUITest expectations
+- [ ] All SwiftUI views involved in testing have `.accessibilityIdentifier()` modifiers with the `screenName-elementName` pattern
+- [ ] The full UI test suite completes in under 60 seconds on a local simulator
+
+If a test passes locally but fails in CI, the most common causes are: (1) the simulator runtime is not installed on the CI machine, (2) animations are not disabled and the CI machine is slower, or (3) a previous test left the app in an unexpected state. The `--reset-data` flag and `app.terminate()` in `setUp` prevent the third issue.
+
+## Challenge
+
+**Add a UI test for the Journal screen.**
+
+Build a `JournalPageObject` and write test cases that cover:
+1. Navigate to the Journal tab via `MainTabView`
+2. Verify the empty state is displayed when no entries exist
+3. Tap "New Entry" and verify the journal entry form appears
+4. Create a journal entry with a title, content, and mood selection
+5. Verify the new entry appears in the journal list after saving
+
+<details>
+<summary>Hint</summary>
+
+The Journal page object follows the same pattern as the other page objects. Use `app.textFields` for the title field and `app.textViews` for the content body — XCUITest represents SwiftUI `TextField` and `TextEditor` differently:
+
+```swift
+struct JournalPageObject {
+    let app: XCUIApplication
+
+    var emptyStateView: XCUIElement {
+        app.otherElements["journal-empty-state"]
+    }
+
+    var newEntryButton: XCUIElement {
+        app.buttons["journal-new-entry"]
+    }
+
+    var titleField: XCUIElement {
+        app.textFields["journal-entry-title"]
+    }
+
+    var contentField: XCUIElement {
+        app.textViews["journal-entry-content"]
+    }
+
+    var saveButton: XCUIElement {
+        app.buttons["journal-save-button"]
+    }
+
+    var isDisplayed: Bool {
+        newEntryButton.waitForExistence(timeout: 5)
+    }
+
+    func tapNewEntry() {
+        XCTAssertTrue(
+            newEntryButton.waitForExistence(timeout: 5),
+            "New entry button did not appear"
+        )
+        newEntryButton.tap()
+    }
+
+    func createEntry(title: String, content: String) {
+        tapNewEntry()
+        titleField.tap()
+        titleField.typeText(title)
+        contentField.tap()
+        contentField.typeText(content)
+        saveButton.tap()
+    }
+}
+```
+
+For the persistence test, create an entry, navigate to another tab, navigate back to Journal, and verify the entry still appears. Access entry cells with `app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'journal-entry-'"))`.
+</details>

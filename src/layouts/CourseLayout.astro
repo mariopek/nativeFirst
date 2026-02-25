@@ -1,14 +1,17 @@
 ---
 import PageLayout from './PageLayout.astro';
 import { formatDate } from '../lib/utils';
-import { SITE, AUTHORS, COURSE } from '../lib/constants';
+import { SITE, AUTHORS } from '../lib/constants';
 import readingTime from 'reading-time';
 import CourseProgress from '../components/course/CourseProgress.astro';
 import CourseSidebar from '../components/course/CourseSidebar.astro';
 import TableOfContents from '../components/course/TableOfContents.astro';
 import LessonNav from '../components/course/LessonNav.astro';
 import PremiumCTA from '../components/course/PremiumCTA.astro';
+import DownloadSource from '../components/course/DownloadSource.astro';
 import BlogComments from '../components/blog/BlogComments';
+import MarkComplete from '../components/course/MarkComplete';
+import SidebarProgress from '../components/course/SidebarProgress';
 
 interface Props {
   lesson: {
@@ -40,9 +43,17 @@ interface Props {
   prevLesson: { id: string; data: { title: string; module: number; lesson: number } } | null;
   nextLesson: { id: string; data: { title: string; module: number; lesson: number } } | null;
   currentIndex: number;
+  courseData: {
+    slug: string;
+    title: string;
+    subtitle: string;
+    isPremium?: boolean;
+  } | null;
 }
 
-const { lesson, headings, allLessons, prevLesson, nextLesson, currentIndex } = Astro.props;
+const { lesson, headings, allLessons, prevLesson, nextLesson, currentIndex, courseData } = Astro.props;
+const courseName = courseData?.title ?? 'Course';
+const courseSlug = courseData?.slug ?? 'vibe-code-native';
 const rt = readingTime(lesson.body || '');
 const authorInfo = AUTHORS[lesson.data.author] || { role: 'Team Member', bio: 'Writer at NativeFirst.' };
 
@@ -72,8 +83,8 @@ const articleSchema = {
   },
   isPartOf: {
     '@type': 'Course',
-    name: 'Vibe Code Native — Build Real iOS Apps with AI',
-    url: `${SITE.url}/learn/${COURSE.slug}`,
+    name: `${courseName} — ${courseData?.subtitle ?? ''}`,
+    url: `${SITE.url}/learn/${courseSlug}`,
     provider: {
       '@type': 'Organization',
       name: 'NativeFirst',
@@ -97,21 +108,21 @@ const breadcrumbSchema = {
   itemListElement: [
     { '@type': 'ListItem', position: 1, name: 'Home', item: SITE.url },
     { '@type': 'ListItem', position: 2, name: 'Courses', item: `${SITE.url}/learn` },
-    { '@type': 'ListItem', position: 3, name: COURSE.title, item: `${SITE.url}/learn/${COURSE.slug}` },
+    { '@type': 'ListItem', position: 3, name: courseName, item: `${SITE.url}/learn/${courseSlug}` },
     { '@type': 'ListItem', position: 4, name: `Module ${lesson.data.module}: ${lesson.data.moduleTitle}` },
     { '@type': 'ListItem', position: 5, name: lesson.data.title, item: new URL(`/learn/${lesson.id}`, Astro.site).toString() },
   ],
 };
 
 const difficultyColors: Record<string, string> = {
-  beginner: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-  intermediate: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
-  advanced: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+  beginner: 'bg-accent-green/10 text-accent-green',
+  intermediate: 'bg-accent-yellow/10 text-accent-yellow',
+  advanced: 'bg-accent-pink/10 text-accent-pink',
 };
 ---
 
 <PageLayout
-  title={`${lesson.data.title} — Vibe Code Native — ${SITE.name}`}
+  title={`${lesson.data.title} — ${courseName} — ${SITE.name}`}
   description={lesson.data.description}
   type="article"
   keywords={articleKeywords}
@@ -121,63 +132,74 @@ const difficultyColors: Record<string, string> = {
   <script type="application/ld+json" set:html={JSON.stringify(articleSchema)} />
   <script type="application/ld+json" set:html={JSON.stringify(breadcrumbSchema)} />
 
-  <article class="py-12 sm:py-20 bg-white dark:bg-slate-950">
+  <article class="py-12 sm:py-20 bg-bg">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="lg:grid lg:grid-cols-[1fr_280px] lg:gap-12">
         <!-- Main content -->
         <div class="min-w-0">
           <!-- Breadcrumb -->
-          <nav class="mb-6 text-sm" aria-label="Breadcrumb">
-            <ol class="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-              <li><a href="/learn" class="hover:text-purple-600 dark:hover:text-purple-400 transition-colors">Learn</a></li>
-              <li><span class="text-slate-300 dark:text-slate-600">/</span></li>
+          <nav class="mb-6 text-sm font-mono" aria-label="Breadcrumb">
+            <ol class="flex items-center gap-2 text-text-muted">
+              <li><a href="/learn" class="hover:text-accent transition-colors">Learn</a></li>
+              <li><span class="text-accent">/</span></li>
               <li><span>Module {lesson.data.module}</span></li>
-              <li><span class="text-slate-300 dark:text-slate-600">/</span></li>
-              <li class="text-slate-900 dark:text-white font-medium truncate">{lesson.data.title}</li>
+              <li><span class="text-accent">/</span></li>
+              <li class="text-white font-medium truncate">{lesson.data.title}</li>
             </ol>
           </nav>
 
           <!-- Header -->
           <header class="mb-10">
             <div class="flex items-center gap-2 mb-4 flex-wrap">
-              <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+              <span class="tag">
                 Module {lesson.data.module} &middot; Lesson {lesson.data.lesson}
               </span>
-              <span class={`px-2.5 py-0.5 rounded-full text-xs font-medium ${difficultyColors[lesson.data.difficulty] || difficultyColors.beginner}`}>
+              <span class={`badge ${difficultyColors[lesson.data.difficulty] || difficultyColors.beginner}`}>
                 {lesson.data.difficulty}
               </span>
             </div>
 
-            <h1 class="font-display font-extrabold text-3xl sm:text-4xl text-slate-900 dark:text-white mb-4 leading-tight">
+            <h1 class="font-display font-black tracking-tight text-3xl sm:text-4xl text-white mb-4 leading-tight">
               {lesson.data.title}
             </h1>
 
-            <div class="flex items-center gap-4 text-sm text-slate-500 dark:text-slate-400">
+            <div class="flex items-center gap-4 text-sm font-mono text-text-muted">
               <span class="flex items-center gap-1.5">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                 </svg>
                 {lesson.data.author}
               </span>
-              <span class="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600"></span>
+              <span class="w-1 h-1 rounded-full bg-accent"></span>
               <span>{rt.text}</span>
             </div>
           </header>
 
           <!-- Content -->
-          <div class="prose prose-lg dark:prose-invert prose-headings:font-display prose-headings:font-bold prose-a:text-purple-600 dark:prose-a:text-purple-400 prose-a:no-underline hover:prose-a:underline prose-img:rounded-xl prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-800 max-w-none">
+          <div class="prose prose-invert prose-lg prose-headings:font-display prose-headings:font-bold prose-a:text-accent prose-a:no-underline hover:prose-a:underline prose-img:rounded-xl prose-pre:bg-surface prose-pre:border prose-pre:border-border max-w-none">
             <slot />
           </div>
 
+          <!-- Mark as Complete -->
+          <MarkComplete
+            client:visible
+            lessonSlug={lesson.id}
+            courseSlug={courseSlug}
+            nextLessonHref={nextLesson ? `/learn/${nextLesson.id}` : undefined}
+          />
+
+          <!-- Download Source Code (premium only) -->
+          <DownloadSource courseSlug={courseData?.slug} />
+
           <!-- Premium CTA -->
-          <PremiumCTA variant="inline" />
+          <PremiumCTA variant="inline" courseSlug={courseData?.slug} />
 
           <!-- Lesson Navigation -->
           <LessonNav prev={prevLesson} next={nextLesson} />
 
           <!-- Author Card -->
-          <div class="mt-10 pt-10 border-t border-slate-200 dark:border-slate-800">
-            <div class="flex items-center gap-5 p-6 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+          <div class="mt-10 pt-10 border-t border-border">
+            <div class="flex items-center gap-5 p-6 rounded-2xl bg-surface border border-border">
               <div class="w-16 h-16 rounded-full gradient-brand flex items-center justify-center flex-shrink-0">
                 <span class="text-white font-display font-bold text-xl">
                   {lesson.data.author.charAt(0)}
@@ -185,14 +207,14 @@ const difficultyColors: Record<string, string> = {
               </div>
               <div>
                 <div class="flex items-center gap-2">
-                  <p class="font-display font-semibold text-slate-900 dark:text-white">
+                  <p class="font-display font-semibold text-white">
                     {lesson.data.author}
                   </p>
-                  <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+                  <span class="tag">
                     {authorInfo.role}
                   </span>
                 </div>
-                <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                <p class="text-sm text-text-muted mt-1">
                   {authorInfo.bio}
                 </p>
               </div>
@@ -207,8 +229,8 @@ const difficultyColors: Record<string, string> = {
           <!-- Back to course -->
           <div class="text-center mt-12">
             <a
-              href={`/learn/${COURSE.slug}`}
-              class="inline-flex items-center gap-2 text-sm font-medium text-purple-600 dark:text-purple-400 hover:gap-3 transition-all"
+              href={`/learn/${courseSlug}`}
+              class="inline-flex items-center gap-2 text-sm font-medium text-accent hover:gap-3 transition-all"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
@@ -222,11 +244,11 @@ const difficultyColors: Record<string, string> = {
         <aside class="hidden lg:block">
           <div class="sticky top-24 max-h-[calc(100vh-6rem)] flex flex-col">
             <div class="flex-shrink-0">
-              <CourseProgress
+              <SidebarProgress
+                client:visible
+                totalLessons={allLessons.length}
                 currentModule={lesson.data.module}
                 currentLesson={lesson.data.lesson}
-                totalLessons={allLessons.length}
-                currentIndex={currentIndex}
               />
             </div>
             <div class="overflow-y-auto flex-1 min-h-0 sidebar-scroll">
@@ -239,3 +261,39 @@ const difficultyColors: Record<string, string> = {
     </div>
   </article>
 </PageLayout>
+
+<script>
+  const copyIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>`;
+  const checkIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+  function initCopyButtons() {
+    document.querySelectorAll('pre').forEach((pre) => {
+      if (pre.hasAttribute('data-copy-init')) return;
+      pre.setAttribute('data-copy-init', '');
+      pre.style.position = 'relative';
+
+      const button = document.createElement('button');
+      button.className = 'copy-code-btn';
+      button.setAttribute('aria-label', 'Copy code');
+      button.innerHTML = copyIcon;
+
+      button.addEventListener('click', async () => {
+        const code = pre.querySelector('code');
+        const text = code ? code.textContent || '' : pre.textContent || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          button.innerHTML = checkIcon;
+          setTimeout(() => { button.innerHTML = copyIcon; }, 2000);
+        } catch {
+          button.textContent = 'Failed';
+          setTimeout(() => { button.innerHTML = copyIcon; }, 2000);
+        }
+      });
+
+      pre.appendChild(button);
+    });
+  }
+
+  initCopyButtons();
+  document.addEventListener('astro:page-load', initCopyButtons);
+</script>

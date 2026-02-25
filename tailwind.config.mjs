@@ -1,41 +1,45 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./src/**/*.{astro,html,js,jsx,md,mdx,svelte,ts,tsx,vue}'],
-  darkMode: 'class',
   theme: {
     extend: {
-      colors: {
-        brand: {
-          purple: '#9333ea',
-          cyan: '#06b6d4',
-        },
-      },
       fontFamily: {
         sans: ['Inter Variable', 'system-ui', 'sans-serif'],
-        display: ['Bricolage Grotesque', 'system-ui', 'sans-serif'],
+        display: ['Inter Variable', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
       },
-      backgroundImage: {
-        'gradient-brand': 'linear-gradient(135deg, #9333ea 0%, #06b6d4 100%)',
-      },
-      typography: ({ theme }) => ({
+      typography: () => ({
         DEFAULT: {
           css: {
-            '--tw-prose-links': theme('colors.purple.600'),
+            '--tw-prose-body': '#e0e0e0',
+            '--tw-prose-headings': '#ffffff',
+            '--tw-prose-lead': '#bbbbbb',
+            '--tw-prose-links': '#ff6e00',
+            '--tw-prose-bold': '#ffffff',
+            '--tw-prose-counters': '#888888',
+            '--tw-prose-bullets': '#888888',
+            '--tw-prose-hr': '#222222',
+            '--tw-prose-quotes': '#e0e0e0',
+            '--tw-prose-quote-borders': '#ff6e00',
+            '--tw-prose-captions': '#888888',
+            '--tw-prose-code': '#ff6e00',
+            '--tw-prose-pre-code': '#e0e0e0',
+            '--tw-prose-pre-bg': '#111111',
+            '--tw-prose-th-borders': '#333333',
+            '--tw-prose-td-borders': '#222222',
             'a:hover': {
-              color: theme('colors.purple.700'),
+              color: '#ffd600',
             },
             code: {
-              backgroundColor: theme('colors.slate.100'),
+              backgroundColor: '#1a1a1a',
               padding: '0.125rem 0.25rem',
               borderRadius: '0.25rem',
               fontWeight: '400',
             },
-          },
-        },
-        invert: {
-          css: {
-            code: {
-              backgroundColor: theme('colors.slate.800'),
+            pre: {
+              backgroundColor: '#111111',
+              borderWidth: '1px',
+              borderColor: '#222222',
             },
           },
         },

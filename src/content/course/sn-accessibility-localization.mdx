@@ -1,0 +1,1090 @@
+---
+title: "Accessibility & Localization"
+description: "Implement runtime language switching with LanguageManager supporting 12 languages, add localizedName properties to every enum, and localize mission-critical strings like the medical disclaimer through bundle lookup."
+courseSlug: "ship-native"
+module: 7
+moduleTitle: "Production Polish"
+lesson: 2
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["Accessibility", "Localization", "LanguageManager", "String Catalogs", "Runtime Localization", "Multi-language", "i18n", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+There is a question I ask every developer before they ship: "Can someone who speaks Korean use your app?" The answer is almost always an uncomfortable silence followed by "It is English only."
+
+BetAway is a gambling recovery app. Gambling addiction does not respect language boundaries. If you launch in English only, you are ignoring the majority of smartphone users worldwide. And if your enums display raw English strings like "Sports Betting" and "Several times a week" to a Japanese user, your app looks unfinished.
+
+BetAway solves this with a `LanguageManager` that supports 12 languages with runtime switching — the user picks a language in Settings and the entire app updates immediately without restarting. Every enum has a `localizedName` property that looks up translations from the correct `.lproj` bundle. The mission statement, medical disclaimer, and helpline numbers all change based on the selected language.
+
+This is not the standard iOS localization approach (which relies on the system language). BetAway uses in-app language switching because recovery apps serve international communities where users may prefer a specific language regardless of their device settings.
+
+## What You'll Learn
+
+- Build a `LanguageManager` that supports 12 languages with runtime switching and automatic device language detection
+- Add `localizedName` properties to every enum (`GamblingType`, `GamblingFrequency`, `MoodRating`, `CheckinType`, `CopingStrategy`, `PredefinedTrigger`) using `.lproj` bundle lookup
+- Localize mission-critical strings like the medical disclaimer and helpline numbers through `AppConfig` computed properties
+- Wire language switching through `LanguagePickerView` in Settings with immediate effect
+- Use `Localizable.xcstrings` String Catalogs with translations for all 12 languages
+
+## Why This Matters
+
+Apple reviews apps for localization quality. While they will not reject you for being English-only, they actively feature well-localized apps. The App Store editorial team looks for inclusive design when choosing "App of the Day" and similar placements.
+
+Beyond the business case: BetAway's target audience includes people in crisis. When someone is struggling with a gambling urge at 2 AM, they need to understand the app's coping exercises and emergency helpline numbers in their native language. A recovery app that only works in English has excluded most of the world from getting help.
+
+BetAway supports English, German, French, Spanish, Italian, Portuguese (Portugal), Portuguese (Brazil), Russian, Japanese, Korean, Arabic, and Balkan (Croatian/Serbian/Bosnian) — 12 languages covering the majority of gambling markets worldwide. String Catalogs make adding each language a translation task, not an engineering task.
+
+### Set Up Localization From Day One
+
+If you know your app will support multiple languages — even if you plan to launch with just one — set up the localization infrastructure at the very beginning of the project. This means creating the `LanguageManager`, establishing the `localizedName` pattern for enums, and using `LanguageManager.shared.localized()` for every user-facing string from the first commit.
+
+Why? Because if you wait until halfway through development — or worse, until the app is "done" — you will face a massive refactoring job. Every hardcoded `"Sports Betting"` string, every `Text("Good Morning")`, every `static let disclaimer = "..."` becomes a search-and-replace nightmare. You have to audit every view, every view model, every enum, and every config.
+
+Here is what "doing it late" actually looks like with real numbers from BetAway:
+
+- **~400 user-facing strings** across 30+ Swift files (views, view models, enums, configs, notification content)
+- **12 supported languages**
+- That is **~4,800 individual translations** that need to exist in the String Catalog
+
+If you built the entire app in English first and then decided "let's add 11 more languages," the work breaks down into two phases — and the first one is the killer:
+
+**Phase 1 — Refactoring (the engineering nightmare):** You have to find every hardcoded string in 30+ files, replace each one with `LanguageManager.shared.localized("...")`, convert every `static let` into a `computed var`, add `localizedName` to every enum, make sure no view uses `.rawValue` for display, and test that nothing broke. For BetAway's codebase, this is easily 2-3 full days of careful, file-by-file auditing. If you are using AI-assisted development, it is hundreds of thousands of tokens spent on refactoring — the AI has to read every file, understand the context, rewrite strings, and you have to review every change. It is the worst kind of AI task: high token cost, low creative value, and high risk of subtle bugs (a missed string that stays English, a format string with wrong `%@` placement).
+
+**Phase 2 — Translation (the easy part):** Once the infrastructure is in place, you export the `Localizable.xcstrings` file and hand it to translators. Each language needs ~400 strings translated. This is a content task, not an engineering task. It scales linearly and can be done in parallel by different translators.
+
+But if you set up the pattern on day one, **Phase 1 never exists.** You write `LanguageManager.shared.localized("Good Morning")` instead of `"Good Morning"` from the start — it takes the same amount of effort. Every new enum gets `localizedName` as part of its initial implementation. Every `AppConfig` property starts as a computed `var`. When it is time to add languages, you skip straight to Phase 2. No refactoring. No auditing. No wasted tokens.
+
+BetAway went from 1 to 12 languages by adding `.lproj` bundles — the engineering work was already done because the localization system was built into the foundation.
+
+The rule is simple: **if there is any chance your app will be multilingual, build the localization layer first.** The cost of doing it early is near zero. The cost of doing it late is proportional to the size of your codebase multiplied by the number of languages you want to support.
+
+## Plan Phase: Defining What We Build
+
+Start with a plan prompt:
+
+```
+I need to make BetAway fully localized with runtime language
+switching. Do NOT write code yet — just audit and plan.
+
+The app has these elements that need localization:
+1. A LanguageManager that detects the device language, allows
+   the user to override it in Settings, and provides the correct
+   .lproj bundle for string lookup
+2. Enums: GamblingType (9 cases), GamblingFrequency (4 cases),
+   MoodRating (5 cases), CheckinType (2 cases), CopingStrategy
+   (7 cases), PredefinedTrigger (12 cases), RiskLevel (3 cases),
+   Badge.BadgeCategory (5 cases)
+3. AppConfig computed properties: missionStatement, medicalDisclaimer,
+   appTagline — all must use LanguageManager for runtime localization
+4. Helpline numbers that change per language (US helpline for
+   English, BZgA for German, etc.)
+5. Milestone titles and descriptions
+6. Notification content (morning pledge, evening check-in)
+7. All SwiftUI Text() views throughout the app
+
+Audit for:
+- Hardcoded English strings that are not localizable
+- Enums that display rawValue instead of localized strings
+- Static strings in AppConfig that should be computed properties
+  using LanguageManager
+- Views that need to respond to language changes immediately
+
+Then create a plan with specific tasks for each issue found.
+```
+
+### Plan Analysis
+
+The AI should identify several concrete patterns. Here is what to look for:
+
+**Keep** — The `LanguageManager` should be a singleton (`static var shared`) so it can be accessed from enums and services that are not SwiftUI views. Enums like `GamblingType` are plain Swift types — they cannot use `@Environment` — so they need `LanguageManager.shared.bundle` to look up translations.
+
+**Keep** — Every enum should have a `localizedName` computed property that calls `LanguageManager.shared.bundle.localizedString(forKey:value:table:)` using the enum's `rawValue` as the key. This way the raw value is the English string (which doubles as the default) and the translation comes from the `.lproj` bundle.
+
+**Question** — If the AI suggests using `String(localized:)` for everything, push back. `String(localized:)` uses the system locale, not the app's chosen language. BetAway's runtime language switching requires using the bundle from `LanguageManager` directly.
+
+### Anti-Pattern: Using System Locale Instead of App Language
+
+```swift
+// Do NOT do this — uses system locale, ignores app language setting
+Text(String(localized: "Good Morning"))
+
+// Do NOT do this — rawValue is English, not localized
+Text(gamblingType.rawValue)
+
+// Do NOT do this — static string that cannot change at runtime
+static let missionStatement = "BetAway is built with one mission..."
+```
+
+The first uses `String(localized:)` which always reads from the system locale. If the user has their iPhone set to English but has chosen German in BetAway's settings, this still shows English. The second displays the raw enum value. The third is a `let` constant that can never change when the language switches.
+
+## Execute Phase: Implementation
+
+Send this prompt:
+
+```
+Implement the LanguageManager and localization pattern for BetAway.
+
+1. LanguageManager (@Observable, singleton):
+   - AppLanguage enum with 12 cases: english, german, french,
+     spanish, italian, portuguesePT, portugueseBR, russian,
+     japanese, korean, arabic, balkans
+   - Each case has displayName (native), flag emoji, and rawValue
+     (locale code like "en", "de", "pt-BR", "hr")
+   - Auto-detect best match from device locale on first launch
+   - User can override in Settings, stored in UserDefaults
+   - Provides bundle (Bundle) for the current language's .lproj
+   - Provides locale (Locale) for SwiftUI environment
+   - localized(_:) method for simple string lookup
+   - localized(_:_:) method for format strings with arguments
+
+2. Every enum gets a localizedName computed property using
+   LanguageManager.shared.bundle.localizedString(forKey:...)
+
+3. AppConfig uses computed properties (var, not let) for
+   missionStatement, medicalDisclaimer, appTagline — all
+   calling LanguageManager.shared.localized()
+
+4. LanguagePickerView in Settings that lists all languages
+   with flag + native name and a checkmark for the current one
+
+5. Wire into BetFreeApp with .environment(\.locale, languageManager.locale)
+```
+
+### AI Output Review
+
+**LanguageManager:**
+
+```swift
+import Foundation
+import SwiftUI
+
+@Observable
+final class LanguageManager {
+    // MARK: - Singleton (for use outside SwiftUI environment — enums, services, etc.)
+    static var shared: LanguageManager!
+
+    // MARK: - Supported Languages
+
+    /// All languages that the app has translations for.
+    enum AppLanguage: String, CaseIterable, Identifiable {
+        case english    = "en"
+        case german     = "de"
+        case french     = "fr"
+        case spanish    = "es"
+        case italian    = "it"
+        case portuguesePT = "pt-PT"
+        case portugueseBR = "pt-BR"
+        case russian    = "ru"
+        case japanese   = "ja"
+        case korean     = "ko"
+        case arabic     = "ar"
+        case balkans    = "hr"   // Croatian / Serbian / Bosnian
+
+        var id: String { rawValue }
+
+        /// Native display name for each language (shown in the picker).
+        var displayName: String {
+            switch self {
+            case .english:      return "English"
+            case .german:       return "Deutsch"
+            case .french:       return "Français"
+            case .spanish:      return "Español"
+            case .italian:      return "Italiano"
+            case .portuguesePT: return "Português (PT)"
+            case .portugueseBR: return "Português (BR)"
+            case .russian:      return "Русский"
+            case .japanese:     return "日本語"
+            case .korean:       return "한국어"
+            case .arabic:       return "العربية"
+            case .balkans:      return "Balkan (HR/SR/BS)"
+            }
+        }
+
+        /// Flag emoji for visual identification.
+        var flag: String {
+            switch self {
+            case .english:      return "🇬🇧"
+            case .german:       return "🇩🇪"
+            case .french:       return "🇫🇷"
+            case .spanish:      return "🇪🇸"
+            case .italian:      return "🇮🇹"
+            case .portuguesePT: return "🇵🇹"
+            case .portugueseBR: return "🇧🇷"
+            case .russian:      return "🇷🇺"
+            case .japanese:     return "🇯🇵"
+            case .korean:       return "🇰🇷"
+            case .arabic:       return "🇸🇦"
+            case .balkans:      return "🇭🇷"
+            }
+        }
+    }
+
+    // MARK: - Storage Keys
+    private static let languageOverrideKey = "appLanguageOverride"
+
+    // MARK: - State
+    /// The currently active language — drives the whole app's localization.
+    var currentLanguage: AppLanguage
+
+    // MARK: - Runtime Bundle & Locale
+
+    /// The .lproj sub-bundle for the current language.
+    /// Used by `localized(_:)` and enum `localizedName` properties.
+    var bundle: Bundle {
+        let code = currentLanguage.rawValue
+
+        // Try exact match first (e.g., "pt-BR", "pt-PT", "hr")
+        if let path = Bundle.main.path(forResource: code, ofType: "lproj"),
+           let lprojBundle = Bundle(path: path) {
+            return lprojBundle
+        }
+
+        // Try with underscore variant (e.g., "pt_BR")
+        let underscored = code.replacingOccurrences(of: "-", with: "_")
+        if underscored != code,
+           let path = Bundle.main.path(forResource: underscored, ofType: "lproj"),
+           let lprojBundle = Bundle(path: path) {
+            return lprojBundle
+        }
+
+        // Try base language code (e.g., "pt" from "pt-PT")
+        let baseCode = String(code.prefix(2))
+        if baseCode != code,
+           let path = Bundle.main.path(forResource: baseCode, ofType: "lproj"),
+           let lprojBundle = Bundle(path: path) {
+            return lprojBundle
+        }
+
+        // Fallback to main bundle (English)
+        return Bundle.main
+    }
+
+    /// Locale for SwiftUI environment — makes Text("literal") auto-localize.
+    var locale: Locale {
+        Locale(identifier: currentLanguage.rawValue)
+    }
+
+    // MARK: - Initialization
+
+    init() {
+        // 1. Check for a user-chosen override in UserDefaults
+        if let savedCode = UserDefaults.standard.string(forKey: Self.languageOverrideKey),
+           let saved = AppLanguage(rawValue: savedCode) {
+            self.currentLanguage = saved
+        } else {
+            // 2. No override — detect from device locale
+            self.currentLanguage = Self.detectBestMatch()
+        }
+
+        // Set singleton for use outside SwiftUI environment
+        Self.shared = self
+    }
+
+    // MARK: - Language Detection
+
+    /// Find the best matching `AppLanguage` for the device's current locale.
+    static func detectBestMatch() -> AppLanguage {
+        // preferredLanguages returns ordered by user preference, e.g. ["hr-HR", "en-US"]
+        let preferred = Locale.preferredLanguages
+
+        for langCode in preferred {
+            // Try exact match first (e.g. "pt-BR", "pt-PT")
+            if let exact = AppLanguage(rawValue: langCode) {
+                return exact
+            }
+
+            // Normalize: "pt-BR" from system might come as "pt_BR" or "pt-BR"
+            let normalized = langCode.replacingOccurrences(of: "_", with: "-")
+            if let exact = AppLanguage(rawValue: normalized) {
+                return exact
+            }
+
+            // Try matching just the language prefix (e.g. "de-AT" → "de")
+            let prefix = String(langCode.prefix(2))
+
+            // Balkans: sr, hr, bs all map to .balkans
+            if ["sr", "hr", "bs"].contains(prefix) {
+                return .balkans
+            }
+
+            // Portuguese: default to PT if no region specified
+            if prefix == "pt" {
+                // Check if region is BR
+                if normalized.contains("BR") {
+                    return .portugueseBR
+                }
+                return .portuguesePT
+            }
+
+            // Simple 2-letter code match
+            if let match = AppLanguage(rawValue: prefix) {
+                return match
+            }
+        }
+
+        // 3. Fallback
+        return .english
+    }
+
+    // MARK: - Language Switching
+
+    /// User explicitly selected a language in Settings. Takes effect immediately.
+    func setLanguage(_ language: AppLanguage) {
+        UserDefaults.standard.set(language.rawValue, forKey: Self.languageOverrideKey)
+        currentLanguage = language
+    }
+
+    /// Reset to "System Default" — remove the override.
+    func resetToSystem() {
+        UserDefaults.standard.removeObject(forKey: Self.languageOverrideKey)
+        let detected = Self.detectBestMatch()
+        currentLanguage = detected
+    }
+
+    /// Whether the user has explicitly chosen a language (vs system auto-detect).
+    var isUsingOverride: Bool {
+        UserDefaults.standard.string(forKey: Self.languageOverrideKey) != nil
+    }
+
+    // MARK: - String Lookup Helpers
+
+    /// Look up a localized string from the current language bundle.
+    /// Use this instead of `String(localized:)` for runtime switching.
+    func localized(_ key: String) -> String {
+        bundle.localizedString(forKey: key, value: nil, table: nil)
+    }
+
+    /// Look up a localized format string and apply arguments.
+    func localized(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = bundle.localizedString(forKey: key, value: nil, table: nil)
+        return String(format: format, arguments: arguments)
+    }
+}
+```
+
+Review checklist:
+
+- The `shared` singleton is set in `init()` — this is the only way enums and services outside the SwiftUI environment can access the current language. It is a force-unwrapped implicitly unwrapped optional (`static var shared: LanguageManager!`) because it is guaranteed to be set before any enum accesses it (the app creates `LanguageManager` in `BetFreeApp`).
+- The `bundle` property uses a three-tier fallback: exact match (e.g., `"pt-BR"`), underscore variant (e.g., `"pt_BR"`), base language code (e.g., `"pt"`). This handles the inconsistency between Xcode's `.lproj` naming and Apple's locale codes.
+- `detectBestMatch()` handles Balkan languages specially — Croatian (`hr`), Serbian (`sr`), and Bosnian (`bs`) all map to `.balkans` because the written forms are mutually intelligible.
+- `setLanguage()` saves to `UserDefaults` and updates `currentLanguage` immediately. Because `LanguageManager` is `@Observable`, any SwiftUI view observing it re-renders instantly.
+- `localized(_:)` uses `bundle.localizedString(forKey:value:table:)` instead of `String(localized:)`. This is the key difference — `String(localized:)` uses the system locale, while `bundle.localizedString` uses whichever `.lproj` bundle the `LanguageManager` has resolved.
+
+### Enum localizedName Pattern
+
+Every enum in BetAway follows the same pattern: the `rawValue` is the English string, and `localizedName` looks it up in the current language bundle. Here is the complete `Enums.swift`:
+
+```swift
+import Foundation
+
+// MARK: - Gambling Type
+
+enum GamblingType: String, Codable, CaseIterable, Identifiable {
+    case sportsBetting = "Sports Betting"
+    case onlineCasino = "Online Casino"
+    case poker = "Poker"
+    case slots = "Slots/Machines"
+    case lottery = "Lottery/Scratch Cards"
+    case inPersonCasino = "In-Person Casino"
+    case esportsBetting = "eSports Betting"
+    case cryptoGambling = "Crypto Gambling"
+    case other = "Other"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+
+    var icon: String {
+        switch self {
+        case .sportsBetting: return "sportscourt.fill"
+        case .onlineCasino: return "desktopcomputer"
+        case .poker: return "suit.spade.fill"
+        case .slots: return "die.face.5.fill"
+        case .lottery: return "ticket.fill"
+        case .inPersonCasino: return "building.columns.fill"
+        case .esportsBetting: return "gamecontroller.fill"
+        case .cryptoGambling: return "bitcoinsign.circle.fill"
+        case .other: return "questionmark.circle.fill"
+        }
+    }
+}
+
+// MARK: - Frequency
+
+enum GamblingFrequency: String, Codable, CaseIterable, Identifiable {
+    case daily = "Daily"
+    case severalTimesWeek = "Several times a week"
+    case weekly = "Weekly"
+    case lessOften = "Less often"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+}
+
+// MARK: - Risk Level
+
+enum RiskLevel: String, Codable, CaseIterable {
+    case low = "Low"
+    case medium = "Medium"
+    case high = "High"
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+}
+
+// MARK: - Mood Rating
+
+enum MoodRating: Int, Codable, CaseIterable, Identifiable {
+    case veryBad = 1
+    case bad = 2
+    case neutral = 3
+    case good = 4
+    case veryGood = 5
+
+    var id: Int { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .veryBad: return "😣"
+        case .bad: return "😔"
+        case .neutral: return "😐"
+        case .good: return "🙂"
+        case .veryGood: return "😊"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .veryBad: return LanguageManager.shared.localized("Very Bad")
+        case .bad: return LanguageManager.shared.localized("Bad")
+        case .neutral: return LanguageManager.shared.localized("Okay")
+        case .good: return LanguageManager.shared.localized("Good")
+        case .veryGood: return LanguageManager.shared.localized("Great")
+        }
+    }
+}
+
+// MARK: - Check-in Type
+
+enum CheckinType: String, Codable {
+    case morningPledge = "Morning Pledge"
+    case eveningCheckin = "Evening Check-in"
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+}
+
+// MARK: - Coping Strategy
+
+enum CopingStrategy: String, Codable, CaseIterable, Identifiable {
+    case breathingExercise = "Breathing Exercise"
+    case groundingExercise = "Grounding Exercise"
+    case calledSomeone = "Called Someone"
+    case physicalActivity = "Physical Activity"
+    case journaled = "Journaled"
+    case distraction = "Distraction Activity"
+    case other = "Other"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+
+    var icon: String {
+        switch self {
+        case .breathingExercise: return "wind"
+        case .groundingExercise: return "leaf.fill"
+        case .calledSomeone: return "phone.fill"
+        case .physicalActivity: return "figure.walk"
+        case .journaled: return "book.fill"
+        case .distraction: return "gamecontroller.fill"
+        case .other: return "ellipsis.circle.fill"
+        }
+    }
+}
+
+// MARK: - Predefined Triggers
+
+enum PredefinedTrigger: String, Codable, CaseIterable, Identifiable {
+    case liveSports = "Watching live sports"
+    case bettingPromo = "Betting app promotion"
+    case stressed = "Feeling stressed"
+    case bored = "Feeling bored"
+    case gamblingAds = "Seeing gambling ads"
+    case friendsTalking = "Friends talking about bets"
+    case payday = "Payday / received money"
+    case argument = "Argument with someone"
+    case alcohol = "Drinking alcohol"
+    case lateNight = "Late night / can't sleep"
+    case winningMemory = "Remembering a win"
+    case chasingLosses = "Wanting to chase losses"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+    }
+
+    var icon: String {
+        switch self {
+        case .liveSports: return "sportscourt.fill"
+        case .bettingPromo: return "bell.badge.fill"
+        case .stressed: return "brain.head.profile"
+        case .bored: return "clock.fill"
+        case .gamblingAds: return "rectangle.on.rectangle.angled"
+        case .friendsTalking: return "person.2.fill"
+        case .payday: return "banknote.fill"
+        case .argument: return "exclamationmark.bubble.fill"
+        case .alcohol: return "wineglass.fill"
+        case .lateNight: return "moon.fill"
+        case .winningMemory: return "star.fill"
+        case .chasingLosses: return "arrow.uturn.backward.circle.fill"
+        }
+    }
+}
+
+// MARK: - Milestone
+
+struct Milestone: Identifiable {
+    let id: Int
+    let days: Int
+    let titleKey: String
+    let descriptionKey: String
+    let icon: String
+
+    var title: String { LanguageManager.shared.bundle.localizedString(forKey: titleKey, value: nil, table: nil) }
+    var description: String { LanguageManager.shared.bundle.localizedString(forKey: descriptionKey, value: nil, table: nil) }
+
+    static let all: [Milestone] = [
+        Milestone(id: 1, days: 1, titleKey: "Day 1", descriptionKey: "The hardest step is the first one", icon: "leaf.fill"),
+        Milestone(id: 2, days: 3, titleKey: "3 Days", descriptionKey: "72 hours. Your brain is already adjusting", icon: "seedling"),
+        Milestone(id: 3, days: 7, titleKey: "1 Week", descriptionKey: "One full week! This is real progress", icon: "star.fill"),
+        Milestone(id: 4, days: 14, titleKey: "2 Weeks", descriptionKey: "Dopamine receptors are recovering", icon: "star.circle.fill"),
+        Milestone(id: 5, days: 30, titleKey: "1 Month", descriptionKey: "You're building a new identity", icon: "trophy.fill"),
+        Milestone(id: 6, days: 60, titleKey: "2 Months", descriptionKey: "New habits are forming", icon: "diamond.fill"),
+        Milestone(id: 7, days: 90, titleKey: "90 Days", descriptionKey: "Clinical recovery benchmark", icon: "crown.fill"),
+        Milestone(id: 8, days: 180, titleKey: "6 Months", descriptionKey: "Half a year. Incredible strength", icon: "medal.fill"),
+        Milestone(id: 9, days: 365, titleKey: "1 Year", descriptionKey: "ONE YEAR BET-FREE", icon: "rosette"),
+    ]
+
+    static func current(for days: Int) -> Milestone? {
+        all.last { $0.days <= days }
+    }
+
+    static func next(for days: Int) -> Milestone? {
+        all.first { $0.days > days }
+    }
+}
+```
+
+The pattern is consistent across every enum:
+
+1. The `rawValue` is the English string — `"Sports Betting"`, `"Daily"`, `"Watching live sports"`, etc.
+2. The `localizedName` (or `label` for `MoodRating`) calls `LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)`.
+3. The `Localizable.xcstrings` String Catalog has entries for each raw value in all 12 languages.
+4. `Milestone` uses `titleKey` and `descriptionKey` instead of `rawValue` because it is a struct, not an enum. Same lookup mechanism.
+
+The `MoodRating` enum uses `LanguageManager.shared.localized()` instead of `bundle.localizedString()` directly — both work, but `localized()` is the convenience wrapper. The choice is cosmetic.
+
+### Badge.BadgeCategory — Another localizedName Example
+
+Even nested enums follow the pattern. The `Badge.BadgeCategory` enum in `BadgeManager.swift` uses the same approach:
+
+```swift
+struct Badge: Identifiable, Equatable {
+    let id: String
+    let titleKey: String
+    let descriptionKey: String
+    let icon: String
+    let category: BadgeCategory
+    let requirement: Int
+
+    var title: String { LanguageManager.shared.bundle.localizedString(forKey: titleKey, value: nil, table: nil) }
+    var description: String { LanguageManager.shared.bundle.localizedString(forKey: descriptionKey, value: nil, table: nil) }
+
+    enum BadgeCategory: String, CaseIterable, Identifiable {
+        case streak = "Streak"
+        case urges = "Urges"
+        case journal = "Journal"
+        case pledge = "Pledges"
+        case savings = "Savings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+        }
+
+        var icon: String {
+            switch self {
+            case .streak: return "flame.fill"
+            case .urges: return "shield.checkered"
+            case .journal: return "book.fill"
+            case .pledge: return "hand.raised.fill"
+            case .savings: return "dollarsign.circle.fill"
+            }
+        }
+    }
+}
+```
+
+Every badge title ("First Step", "One Week Warrior", "Monthly Master") and description ("Complete 1 day bet-free", "Complete 7 days bet-free") gets the same treatment. The `titleKey` and `descriptionKey` are English strings that serve as lookup keys in the String Catalog.
+
+### AppConfig — Localized Computed Properties
+
+`AppConfig` uses computed properties (`var`, not `let`) for any string that needs localization. The mission statement and medical disclaimer are the most important — they appear in Settings and contain the app name and helpline number, which are interpolated using format strings:
+
+```swift
+enum AppConfig {
+    // MARK: - App Identity
+    static let appName = "BetAway"
+    static var appTagline: String { LanguageManager.shared.localized("Your path to freedom") }
+
+    // MARK: - Helplines
+
+    struct HelplineInfo: Identifiable {
+        let id = UUID()
+        let name: String
+        let number: String
+    }
+
+    static let helplineUS = "1-800-522-4700"
+    static let helplineText = "800GAM"
+
+    /// Returns relevant gambling helplines based on the selected app language
+    static func helplines(for language: LanguageManager.AppLanguage) -> [HelplineInfo] {
+        switch language {
+        case .english:
+            return [
+                HelplineInfo(name: "National Problem Gambling Helpline (US)", number: "1-800-522-4700"),
+                HelplineInfo(name: "GamCare (UK)", number: "0808-8020-133"),
+            ]
+        case .german:
+            return [HelplineInfo(name: "BZgA Glücksspielsucht", number: "0800-1372700")]
+        case .french:
+            return [HelplineInfo(name: "Joueurs Info Service", number: "09 74 75 13 13")]
+        case .spanish:
+            return [HelplineInfo(name: "Línea de Atención al Juego", number: "024")]
+        case .italian:
+            return [HelplineInfo(name: "Telefono Verde Gioco d'Azzardo", number: "800-558-822")]
+        case .portuguesePT:
+            return [HelplineInfo(name: "Linha Vida (Portugal)", number: "213 950 911")]
+        case .portugueseBR:
+            return [HelplineInfo(name: "CVV — Centro de Valorização da Vida", number: "188")]
+        case .russian:
+            return [HelplineInfo(name: "Телефон доверия", number: "8-800-2000-122")]
+        case .japanese:
+            return [HelplineInfo(name: "ギャンブル依存症相談", number: "0570-064-556")]
+        case .korean:
+            return [HelplineInfo(name: "도박문제 상담전화", number: "1577-0199")]
+        case .arabic:
+            return [HelplineInfo(name: "National Problem Gambling Helpline", number: "1-800-522-4700")]
+        case .balkans:
+            return [HelplineInfo(name: "Centar za pomoć ovisnicima", number: "01 4833 888")]
+        }
+    }
+
+    // MARK: - Mission
+    static var missionStatement: String {
+        LanguageManager.shared.localized(
+            "%@ is built with one mission — to help anyone struggling with gambling take back control of their life. This app is completely free, with no hidden costs, no paywalls, and no ads. If even one person breaks free from gambling because of %@, we consider that mission accomplished.",
+            appName, appName
+        )
+    }
+
+    // MARK: - Legal
+    static var medicalDisclaimer: String {
+        LanguageManager.shared.localized(
+            "%@ is a self-help tool and is not a substitute for professional treatment. If you are experiencing a gambling crisis, please contact the National Problem Gambling Helpline at %@ or text %@.",
+            appName, helplineUS, helplineText
+        )
+    }
+}
+```
+
+Three things to notice:
+
+1. **`appTagline` is a computed `var`.** Every time it is accessed, it calls `LanguageManager.shared.localized()`, which reads from the current language bundle. If the user switches from English to Spanish, the next access returns the Spanish version.
+
+2. **`missionStatement` and `medicalDisclaimer` use format strings.** The English key contains `%@` placeholders that get filled with `appName`, `helplineUS`, and `helplineText`. The String Catalog has the translated format string for each language, with `%@` in the correct positions for that language's grammar.
+
+3. **`helplines(for:)` returns different phone numbers per language.** A German user sees the BZgA number. A Japanese user sees the Japanese gambling helpline. This is not just translation — it is content that changes entirely based on locale.
+
+### LanguagePickerView
+
+The language picker is a simple `List` that shows each language with its flag and native name. A checkmark indicates the current selection:
+
+```swift
+import SwiftUI
+
+struct LanguagePickerView: View {
+    let selectedLanguage: LanguageManager.AppLanguage
+    let onSelect: (LanguageManager.AppLanguage) -> Void
+
+    var body: some View {
+        List {
+            ForEach(LanguageManager.AppLanguage.allCases) { language in
+                Button {
+                    onSelect(language)
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        Text(language.flag)
+                            .font(.title2)
+
+                        Text(language.displayName)
+                            .font(Typography.body())
+                            .foregroundStyle(ColorPalette.textPrimary)
+
+                        Spacer()
+
+                        if language == selectedLanguage {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(ColorPalette.accent)
+                                .font(.system(size: 20))
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.vertical, Spacing.xxs)
+                }
+            }
+        }
+        .navigationTitle("Language")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    onSelect(selectedLanguage)
+                }
+            }
+        }
+    }
+}
+```
+
+The `displayName` property shows the native name — "Deutsch" for German, "Francais" for French — so a user who does not read English can still find their language. The `flag` emoji provides visual identification.
+
+### SettingsView — Language Section
+
+In `SettingsView`, the language picker is presented as a sheet. When the user selects a new language, `languageManager.setLanguage()` fires and the entire app re-renders:
+
+```swift
+// Inside SettingsView — Language Section
+Section {
+    Button {
+        showLanguagePicker = true
+    } label: {
+        HStack {
+            Label("Language", systemImage: "globe")
+            Spacer()
+            Text("\(languageManager.currentLanguage.flag) \(languageManager.currentLanguage.displayName)")
+                .font(Typography.caption())
+                .foregroundStyle(ColorPalette.textSecondary)
+            Image(systemName: AppConfig.Icons.chevronRight)
+                .font(.system(size: 14))
+                .foregroundStyle(ColorPalette.textTertiary)
+        }
+    }
+    .foregroundStyle(ColorPalette.textPrimary)
+} header: {
+    Text("Language")
+} footer: {
+    Text("Language changes take effect immediately.")
+}
+```
+
+And the sheet presentation:
+
+```swift
+.sheet(isPresented: $showLanguagePicker) {
+    NavigationStack {
+        LanguagePickerView(
+            selectedLanguage: languageManager.currentLanguage,
+            onSelect: { language in
+                showLanguagePicker = false
+                if language.rawValue != languageManager.currentLanguage.rawValue {
+                    languageManager.setLanguage(language)
+                }
+            }
+        )
+    }
+    .presentationDetents([.medium, .large])
+}
+```
+
+The guard `if language.rawValue != languageManager.currentLanguage.rawValue` prevents unnecessary re-renders when the user taps "Done" without changing anything.
+
+### BetFreeApp — Wiring It All Together
+
+The `LanguageManager` is created as `@State` in the app struct and injected into the environment. The `.locale` environment value is also set so SwiftUI's built-in `Text()` localization uses the correct language:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+The `.environment(languageManager)` makes the `LanguageManager` available to any view via `@Environment(LanguageManager.self)`. The `.environment(\.locale, languageManager.locale)` tells SwiftUI to use the app's chosen locale for date formatting, number formatting, and `Text()` localization.
+
+### Localized Strings in Views
+
+Throughout the app, views that need dynamic strings use `LanguageManager.shared.localized()`. For example, the `MorningPledgeView` localizes its success toast and the pledge reasons:
+
+```swift
+// In MorningPledgeView — success toast
+PledgeSuccessToast(
+    icon: AppConfig.Icons.checkmark,
+    iconColor: ColorPalette.success,
+    title: LanguageManager.shared.localized("Pledge taken!"),
+    subtitle: LanguageManager.shared.localized("Come back tonight for your check-in."),
+    emoji: viewModel.selectedMood.emoji
+)
+```
+
+And the `PledgeViewModel` provides localized pledge reasons:
+
+```swift
+// In PledgeViewModel
+static var pledgeReasons: [String] {
+    [
+        LanguageManager.shared.localized("For my family"),
+        LanguageManager.shared.localized("For my financial freedom"),
+        LanguageManager.shared.localized("For my mental health"),
+        LanguageManager.shared.localized("To prove I can do this"),
+        LanguageManager.shared.localized("For a better future"),
+        LanguageManager.shared.localized("Because I deserve peace"),
+    ]
+}
+```
+
+The `EveningCheckinView` uses the same pattern for its feedback messages:
+
+```swift
+// In EveningCheckinView — success toast
+PledgeSuccessToast(
+    icon: viewModel.gamblingFree ? AppConfig.Icons.checkmark : AppConfig.Icons.heart,
+    iconColor: viewModel.gamblingFree ? ColorPalette.success : ColorPalette.accent,
+    title: viewModel.gamblingFree
+        ? LanguageManager.shared.localized("Another great day!")
+        : LanguageManager.shared.localized("Tomorrow is a new day"),
+    subtitle: viewModel.gamblingFree
+        ? LanguageManager.shared.localized("You stayed strong. Rest well tonight.")
+        : LanguageManager.shared.localized("Your honesty takes real courage."),
+    emoji: viewModel.selectedMood.emoji
+)
+```
+
+And language-aware helpline numbers appear in the relapse section:
+
+```swift
+// In EveningCheckinView — relapse helpline
+if let helpline = AppConfig.helplines(for: LanguageManager.shared.currentLanguage).first {
+    HStack(spacing: Spacing.xs) {
+        Image(systemName: AppConfig.Icons.info)
+            .foregroundStyle(ColorPalette.infoBadge)
+        Text("Need help? Call \(helpline.number)")
+            .font(Typography.caption())
+            .foregroundStyle(ColorPalette.textSecondary)
+    }
+}
+```
+
+## Iteration
+
+After the initial implementation, test and refine. Send this follow-up:
+
+```
+I tested the localization and found these issues:
+
+1. The Settings view displays gambling types using .localizedName
+   but the list is joined with ", " — for Arabic (RTL), the
+   comma separator should be language-appropriate. Verify the
+   gambling types display correctly.
+
+2. The medical disclaimer in Settings uses AppConfig.medicalDisclaimer
+   which interpolates the helpline number. When the language is
+   German, the disclaimer should reference the German helpline
+   (BZgA 0800-1372700), not the US helpline. Currently it always
+   shows the US number. Is this correct or should the disclaimer
+   be language-specific?
+
+3. Milestone descriptions like "The hardest step is the first one"
+   need to be in the String Catalog. Verify all milestone titleKeys
+   and descriptionKeys are present in the .xcstrings file.
+
+Fix these three issues if they are real problems.
+```
+
+The gambling types display in Settings uses `.localizedName` correctly:
+
+```swift
+// In SettingsView — Profile Section
+HStack {
+    Label("Types", systemImage: "list.bullet")
+    Spacer()
+    Text(profile.gamblingTypes.map(\.localizedName).joined(separator: ", "))
+        .font(Typography.caption())
+        .foregroundStyle(ColorPalette.textSecondary)
+        .lineLimit(1)
+}
+```
+
+The `.map(\.localizedName)` transforms each `GamblingType` into its localized string before joining. When the app is in Spanish, this shows "Apuestas deportivas, Casino en linea" instead of "Sports Betting, Online Casino."
+
+## Verify Phase
+
+Test each of these:
+
+1. **Language switching** — Open Settings, change the language from English to Japanese. Every screen should update immediately: dashboard greeting, pledge reasons, mood labels, milestone descriptions, badge titles, settings labels. No English strings should remain except proper nouns like "BetAway."
+2. **Enum localization** — In the onboarding gambling profile screen, check that all 9 `GamblingType` options display in the current language. Switch to Korean and verify they show Korean text.
+3. **Medical disclaimer** — In Settings, scroll to the disclaimer. Switch languages. The disclaimer text should change but always include the correct helpline number for the current language.
+4. **Helpline numbers** — Switch to German. The About section should show "BZgA Glucksspielsucht" with the German number. Switch to Japanese. It should show the Japanese gambling helpline number.
+5. **Milestone descriptions** — Check the progress/milestones screen. All titles ("Day 1", "1 Week", "90 Days") and descriptions ("The hardest step is the first one") should be in the current language.
+6. **Notification content** — With the app in French, toggle notifications off then on. The morning notification should say the French version of "Good Morning" / "Start your day with a pledge to stay bet-free."
+7. **First launch detection** — Delete the app and reinstall. Set the device language to Spanish before launching. The app should auto-detect Spanish and start localized without the user needing to visit Settings.
+
+## Final Code
+
+The complete `LanguageManager`, `Enums.swift` with all `localizedName` properties, and `AppConfig` with localized computed properties are shown in the Execute Phase above. Here is how they connect in the Settings view where all three systems converge — language picker, localized enums, and localized config:
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct SettingsView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(AppRouter.self) private var router
+    @Environment(LanguageManager.self) private var languageManager
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = SettingsViewModel()
+    @State private var showLanguagePicker = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        List {
+            if let profile {
+                // Profile Section — uses enum .localizedName
+                Section {
+                    HStack {
+                        Label("Quit Date", systemImage: AppConfig.Icons.calendar)
+                        Spacer()
+                        Text(profile.quitDate, style: .date)
+                            .foregroundStyle(ColorPalette.textSecondary)
+                    }
+
+                    HStack {
+                        Label("Types", systemImage: "list.bullet")
+                        Spacer()
+                        Text(profile.gamblingTypes.map(\.localizedName).joined(separator: ", "))
+                            .font(Typography.caption())
+                            .foregroundStyle(ColorPalette.textSecondary)
+                            .lineLimit(1)
+                    }
+                } header: {
+                    Text("Profile")
+                }
+
+                // Language Section — LanguageManager integration
+                Section {
+                    Button {
+                        showLanguagePicker = true
+                    } label: {
+                        HStack {
+                            Label("Language", systemImage: "globe")
+                            Spacer()
+                            Text("\(languageManager.currentLanguage.flag) \(languageManager.currentLanguage.displayName)")
+                                .font(Typography.caption())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                            Image(systemName: AppConfig.Icons.chevronRight)
+                                .font(.system(size: 14))
+                                .foregroundStyle(ColorPalette.textTertiary)
+                        }
+                    }
+                    .foregroundStyle(ColorPalette.textPrimary)
+                } header: {
+                    Text("Language")
+                } footer: {
+                    Text("Language changes take effect immediately.")
+                }
+
+                // About Section — language-aware helplines
+                Section {
+                    ForEach(AppConfig.helplines(for: languageManager.currentLanguage)) { helpline in
+                        HStack {
+                            Label(helpline.name, systemImage: "phone.fill")
+                            Spacer()
+                            Text(helpline.number)
+                                .foregroundStyle(ColorPalette.accent)
+                        }
+                    }
+                } header: {
+                    Text("About")
+                }
+
+                // Disclaimer — localized computed property
+                Section {
+                    Text(AppConfig.medicalDisclaimer)
+                        .font(Typography.caption())
+                        .foregroundStyle(ColorPalette.textTertiary)
+                }
+            }
+        }
+    }
+}
+```
+
+This view demonstrates all three localization systems working together:
+
+1. **Enum `.localizedName`** — `profile.gamblingTypes.map(\.localizedName)` translates each gambling type.
+2. **`LanguageManager` environment** — `languageManager.currentLanguage` drives the language picker display and helpline lookup.
+3. **`AppConfig` computed property** — `AppConfig.medicalDisclaimer` re-evaluates through `LanguageManager.shared.localized()` on every access.
+
+When the user changes language, all three update simultaneously because `LanguageManager` is `@Observable` and every computed property reads from its `bundle`.
+
+## Checkpoint
+
+Verify these before moving on:
+
+- [ ] `LanguageManager` auto-detects the device language on first launch and maps it to the closest supported `AppLanguage`
+- [ ] Selecting a language in `LanguagePickerView` calls `setLanguage()` which saves to `UserDefaults` and updates `currentLanguage` immediately
+- [ ] Every enum (`GamblingType`, `GamblingFrequency`, `MoodRating`, `CheckinType`, `CopingStrategy`, `PredefinedTrigger`, `RiskLevel`, `Badge.BadgeCategory`) has a `localizedName` property using `LanguageManager.shared.bundle.localizedString()`
+- [ ] `Milestone` title and description use the same bundle lookup with `titleKey` and `descriptionKey`
+- [ ] `AppConfig.missionStatement` and `AppConfig.medicalDisclaimer` are computed `var` properties using `LanguageManager.shared.localized()` with format string arguments
+- [ ] `AppConfig.helplines(for:)` returns country-appropriate helpline numbers for each supported language
+- [ ] `BetFreeApp` injects both `.environment(languageManager)` and `.environment(\.locale, languageManager.locale)` into the view hierarchy
+- [ ] `LanguageManager.shared` singleton is set in `init()` so enums and services outside SwiftUI can access the current language bundle
+- [ ] Notification content in `NotificationManager` uses `LanguageManager.shared.localized()` so reminders arrive in the app's language
+- [ ] The Balkan language detection correctly maps Croatian, Serbian, and Bosnian device languages to `.balkans`
+
+## Challenge
+
+**Add a "Translate with AI" feature for journal entries.** When the app language is not English and the user writes a journal entry, add an option to translate it to English (or vice versa) using an on-device translation API. Use Apple's `Translation` framework (iOS 17.4+) to perform the translation without sending data to a server. Show the original and translated text side by side in the journal detail view. Store the translated version alongside the original in the `JournalEntry` SwiftData model.
+
+**Hint:** Import the `Translation` framework and use `.translationTask()` modifier on a SwiftUI view. The source language can be detected automatically. For the target language, use `Locale.Language(identifier: languageManager.currentLanguage.rawValue)`. Store the translation in a new optional `translatedText: String?` property on `JournalEntry`.

@@ -1,0 +1,702 @@
+---
+title: "Debugging Workflow with AI"
+description: "Master a systematic debugging workflow using BetFree's real patterns — ModelContainer corruption recovery, Task lifecycle debugging, HapticManager state inspection, and SharedDataManager data flow tracing."
+courseSlug: "ship-native"
+module: 6
+moduleTitle: "Quality & Testing"
+lesson: 3
+duration: "25 min read"
+difficulty: "intermediate"
+topics: ["Debugging", "Task Cancellation", "ModelContainer", "LLDB", "Instruments", "SwiftUI", "Performance", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your tests pass. Your app compiles. You tap through the pledge flow and everything looks fine. Then a tester reports that the urge timer keeps running after they dismiss the sheet. Or the app crashes on launch — but only on their device, never on yours. Or the dashboard shows stale streak data after a reset.
+
+These are not problems that unit tests catch. These are runtime problems — corrupted databases, orphaned Tasks, stale UserDefaults data, state that survives navigation when it should not. Solving them requires understanding how the real code handles these edge cases, and a systematic process for narrowing down root causes.
+
+This lesson builds that toolkit using BetFree's actual production code.
+
+## What You'll Learn
+
+1. **Debug the ModelContainer corruption recovery** — understand how `BetFreeApp.swift` handles a corrupted database by deleting and recreating the store, and how to verify this path works.
+2. **Trace Task lifecycle bugs** — use `UrgeViewModel`'s timer and breath cycle Tasks to understand cancellation, orphaned tasks, and the `Task.isCancelled` double-check pattern.
+3. **Inspect HapticManager state** — debug the `isEnabled` guard that reads from `UserDefaults` and understand why haptics sometimes silently fail.
+4. **Trace SharedDataManager data flow** — follow widget data from `DashboardView.updateWidgetData()` through `SharedDataManager` to the App Group `UserDefaults`.
+5. **Use LLDB effectively** with breakpoint actions, watchpoints, and expression evaluation to inspect and modify state without recompiling.
+
+## Why This Matters
+
+Most developers debug by adding `print()` statements, running the app, reading the console, and deleting the prints when they find the bug. This works for trivial issues. It does not work when the bug only appears on a physical device, or when the timing of the print changes the behavior, or when you need to inspect the state of a cancelled Task mid-flight, or when the crash happens in production and you have no console.
+
+BetFree's codebase has real debugging challenges: a ModelContainer that deletes and recreates itself, Tasks that must be cancelled cleanly across 15 minutes of execution, haptic feedback that silently no-ops based on UserDefaults, and widget data shared through App Groups. Each of these has a specific debugging approach.
+
+## Plan Phase: Identifying What to Debug
+
+Before writing any debug tooling, identify the real debugging scenarios in BetFree. Send this to Claude Code:
+
+```
+I need to build a debugging strategy for BetAway/BetFree,
+a SwiftUI recovery tracking app. Before writing code, help me
+plan the approach.
+
+The app has:
+- ModelContainer with corruption recovery (delete + recreate store)
+- UrgeViewModel with a 15-minute timer Task and breath cycle Task
+- HapticManager that checks UserDefaults before firing
+- SharedDataManager writing to App Group UserDefaults for widgets
+- SettingsViewModel.resetAllData deleting four SwiftData models
+
+I need to debug:
+1. Database corruption — how do I verify the recovery path works?
+2. Task cancellation — how do I confirm Tasks are actually cancelled?
+3. Haptic feedback not firing — how do I trace the UserDefaults check?
+4. Widget data stale — how do I verify SharedDataManager writes?
+5. Reset partially failing — how do I know which model deletion failed?
+
+Do NOT write code yet. Design the debugging approach.
+```
+
+### AI Plan Review
+
+The AI should return a structured plan. Here is what to look for:
+
+- **Database corruption:** The plan should suggest intentionally corrupting the store file, then launching the app and verifying it recovers. The key is checking that all three files (`.store`, `.store-shm`, `.store-wal`) are deleted.
+- **Task cancellation:** The plan should suggest setting breakpoints on `Task.isCancelled` checks and on `timerTask?.cancel()` to verify the cancellation chain.
+- **HapticManager:** The plan should trace the `isEnabled` property that reads from `UserDefaults.standard.bool(forKey:)` — the most common reason haptics silently fail.
+- **SharedDataManager:** The plan should suggest inspecting the App Group `UserDefaults` with `po UserDefaults(suiteName:)` in LLDB.
+- **Reject** any suggestion to add print statements. Use LLDB breakpoint actions instead — they do not require recompilation and can be removed without code changes.
+
+## Execute Phase: Debugging Real Code
+
+### Scenario 1: Debugging Database Corruption Recovery
+
+The real `BetFreeApp.swift` has a two-phase ModelContainer initialization. If the first attempt fails (corrupted database), it deletes the store files and tries again:
+
+```swift
+var sharedModelContainer: ModelContainer = {
+    let schema = Schema([
+        UserProfile.self,
+        DailyCheckin.self,
+        UrgeLog.self,
+        JournalEntry.self,
+    ])
+    let modelConfiguration = ModelConfiguration(
+        schema: schema,
+        isStoredInMemoryOnly: false
+    )
+
+    do {
+        return try ModelContainer(for: schema, configurations: [modelConfiguration])
+    } catch {
+        // If the database is corrupted, try deleting and recreating
+        let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        if let appSupportURL = urls.first {
+            let storeURL = appSupportURL.appendingPathComponent("default.store")
+            try? FileManager.default.removeItem(at: storeURL)
+
+            // Also remove related files (.store-shm, .store-wal)
+            for suffix in ["-shm", "-wal"] {
+                let relatedURL = appSupportURL.appendingPathComponent("default.store\(suffix)")
+                try? FileManager.default.removeItem(at: relatedURL)
+            }
+        }
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            fatalError("Could not create ModelContainer after reset: \(error)")
+        }
+    }
+}()
+```
+
+**How to debug this path:**
+
+1. **Find the store location.** Set a breakpoint on the `catch` block (the outer one). In LLDB:
+```
+(lldb) po FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+```
+This gives you the directory where `default.store` lives.
+
+2. **Intentionally corrupt the database.** With the app closed, navigate to that directory in Terminal and overwrite the store:
+```
+echo "corrupted" > /path/to/Application\ Support/default.store
+```
+
+3. **Relaunch and verify recovery.** The first `ModelContainer(for:)` will throw. Set a breakpoint on the `try? FileManager.default.removeItem(at: storeURL)` line. When it hits:
+```
+(lldb) po storeURL
+(lldb) po FileManager.default.fileExists(atPath: storeURL.path)
+```
+Verify the file exists and is about to be deleted.
+
+4. **Verify the second attempt succeeds.** Set a breakpoint on the second `return try ModelContainer(...)`. If it returns successfully, the recovery worked. If it hits `fatalError`, something else is wrong (disk full, permissions).
+
+### Scenario 2: Debugging Task Cancellation in UrgeViewModel
+
+The `UrgeViewModel` creates two Tasks — the timer and the breath cycle. Both must be cancelled cleanly:
+
+```swift
+func startTimer() {
+    withAnimation(AnimationPresets.smooth) {
+        phase = .timer
+        isTimerRunning = true
+    }
+
+    timerTask = Task { @MainActor in
+        while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+            try? await Task.sleep(for: .seconds(1))
+            if !Task.isCancelled {
+                timerSeconds += 1
+            }
+        }
+        if !Task.isCancelled {
+            isTimerRunning = false
+            HapticManager.timerComplete()
+            moveToLog()
+        }
+    }
+
+    // Start breathing animation cycle
+    startBreathCycle()
+}
+
+func skipTimer() {
+    timerTask?.cancel()
+    isTimerRunning = false
+    moveToLog()
+}
+
+func reset() {
+    timerTask?.cancel()
+    phase = .acknowledge
+    timerSeconds = 0
+    isTimerRunning = false
+    breathPhase = .inhale
+    selectedIntensity = 5
+    selectedTrigger = nil
+    selectedStrategy = nil
+    notes = ""
+    didResist = true
+    showCompletionCelebration = false
+    showBreathingExercise = false
+    showGroundingExercise = false
+    showMovementSuggestions = false
+    showCallHelpline = false
+    showEmergencyContacts = false
+}
+```
+
+**Bug: "Timer keeps running after dismiss"**
+
+This bug happens when `reset()` is not called after the sheet is dismissed. The `timerTask` continues because nobody cancelled it.
+
+**Debugging approach:**
+
+1. Set a breakpoint on `timerTask?.cancel()` inside `reset()`.
+2. Set a conditional breakpoint on `timerSeconds += 1`:
+```
+(lldb) br s -f UrgeViewModel.swift -l <line_of_increment>
+(lldb) br mod -c "self.timerSeconds > 5" <breakpoint_id>
+```
+3. Dismiss the urge sheet. If the conditional breakpoint hits after dismissal, the Task was not cancelled.
+
+4. Check if `timerTask` is nil:
+```
+(lldb) v self.timerTask
+(lldb) po self.timerTask == nil
+```
+If `timerTask` is nil, `cancel()` was called on nil and had no effect. The Task reference was lost.
+
+**Bug: "Completion haptic fires after skip"**
+
+This bug happens if the `if !Task.isCancelled` check after the loop is missing. The timer loop exits because `Task.isCancelled` is true, but the code after the loop runs unconditionally.
+
+Set a breakpoint on `HapticManager.timerComplete()`:
+```
+(lldb) br s -n "HapticManager.timerComplete"
+```
+Then tap "Skip." If the breakpoint hits, the cancellation guard is missing.
+
+### Scenario 3: Debugging HapticManager Silent Failures
+
+`HapticManager` checks `UserDefaults` before firing any haptic:
+
+```swift
+import UIKit
+
+/// Centralized haptic feedback manager.
+/// All methods are no-ops when haptic feedback is disabled in settings.
+enum HapticManager {
+
+    // MARK: - Haptic Types
+
+    /// Light impact — button presses, chip selection
+    static func lightImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    /// Medium impact — urge resisted, toggle change
+    static func mediumImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    /// Heavy impact — badge unlocked (part 1)
+    static func heavyImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .heavy)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    /// Success notification — pledge submitted, check-in submitted
+    static func success() {
+        guard isEnabled else { return }
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(.success)
+    }
+
+    /// Warning notification
+    static func warning() {
+        guard isEnabled else { return }
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(.warning)
+    }
+
+    /// Badge unlocked — compound: heavy impact followed by success after short delay
+    static func badgeUnlocked() {
+        guard isEnabled else { return }
+        heavyImpact()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            success()
+        }
+    }
+
+    /// Timer complete — notification success
+    static func timerComplete() {
+        success()
+    }
+
+    // MARK: - Enable/Disable
+
+    private static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hapticFeedbackEnabled)
+    }
+}
+```
+
+**Bug: "Haptics do not work"**
+
+The most common cause: `UserDefaults` returns `false` for a key that was never registered. BetFree handles this in `BetFreeApp.init()`:
+
+```swift
+init() {
+    UserDefaults.standard.register(defaults: [
+        AppConfig.StorageKeys.hapticFeedbackEnabled: true
+    ])
+    Self.registerCustomFonts()
+}
+```
+
+If this registration does not run (e.g., you are testing a view in isolation without launching the full app), `isEnabled` returns `false` by default.
+
+**Debugging approach:**
+
+1. Set a breakpoint on any haptic method, e.g., `lightImpact()`.
+2. When it hits, check the guard:
+```
+(lldb) po UserDefaults.standard.bool(forKey: "hapticFeedbackEnabled")
+(lldb) po HapticManager.isEnabled
+```
+
+3. If `isEnabled` is `false`, check if `register(defaults:)` ran:
+```
+(lldb) po UserDefaults.standard.dictionaryRepresentation()["hapticFeedbackEnabled"]
+```
+If it returns `nil`, the defaults were never registered. If it returns `0`, the user explicitly disabled haptics in settings.
+
+**Note about `timerComplete()`:** This method calls `success()` directly without its own `isEnabled` guard. The guard is inside `success()`. This is intentional — `timerComplete()` is a semantic alias, not a separate haptic type.
+
+### Scenario 4: Debugging SharedDataManager Widget Data
+
+`DashboardView` calls `updateWidgetData()` on appear, which writes to App Group `UserDefaults`:
+
+```swift
+private func updateWidgetData() {
+    guard let profile else { return }
+    SharedDataManager.updateWidgetData(
+        currentStreak: profile.currentStreak,
+        totalSaved: profile.totalSaved,
+        quitDate: profile.quitDate,
+        hasPledgedToday: profile.hasPledgedToday(),
+        hasCheckedInToday: profile.hasCheckedInToday()
+    )
+}
+```
+
+`SharedDataManager` writes each value to a shared `UserDefaults` suite:
+
+```swift
+import Foundation
+
+/// Manages shared data between the main app and widget extension via App Groups
+enum SharedDataManager {
+    static let appGroupID = "group.com.pekmario.betfreeapp"
+    static let suiteName = appGroupID
+
+    private static var defaults: UserDefaults? {
+        UserDefaults(suiteName: suiteName)
+    }
+
+    // MARK: - Keys
+
+    enum Keys {
+        static let currentStreak = "widget_currentStreak"
+        static let totalSaved = "widget_totalSaved"
+        static let quitDate = "widget_quitDate"
+        static let currencySymbol = "widget_currencySymbol"
+        static let hasPledgedToday = "widget_hasPledgedToday"
+        static let hasCheckedInToday = "widget_hasCheckedInToday"
+        static let lastUpdated = "widget_lastUpdated"
+    }
+
+    // MARK: - Write (called from main app)
+
+    static func updateWidgetData(
+        currentStreak: Int,
+        totalSaved: Double,
+        quitDate: Date,
+        hasPledgedToday: Bool,
+        hasCheckedInToday: Bool
+    ) {
+        defaults?.set(currentStreak, forKey: Keys.currentStreak)
+        defaults?.set(totalSaved, forKey: Keys.totalSaved)
+        defaults?.set(quitDate, forKey: Keys.quitDate)
+        defaults?.set(AppConfig.defaultCurrencySymbol, forKey: Keys.currencySymbol)
+        defaults?.set(hasPledgedToday, forKey: Keys.hasPledgedToday)
+        defaults?.set(hasCheckedInToday, forKey: Keys.hasCheckedInToday)
+        defaults?.set(Date(), forKey: Keys.lastUpdated)
+    }
+
+    // MARK: - Read (called from widget)
+
+    static var currentStreak: Int {
+        defaults?.integer(forKey: Keys.currentStreak) ?? 0
+    }
+
+    static var totalSaved: Double {
+        defaults?.double(forKey: Keys.totalSaved) ?? 0
+    }
+
+    static var quitDate: Date {
+        defaults?.object(forKey: Keys.quitDate) as? Date ?? Date()
+    }
+
+    static var currencySymbol: String {
+        defaults?.string(forKey: Keys.currencySymbol) ?? "$"
+    }
+
+    static var hasPledgedToday: Bool {
+        defaults?.bool(forKey: Keys.hasPledgedToday) ?? false
+    }
+
+    static var hasCheckedInToday: Bool {
+        defaults?.bool(forKey: Keys.hasCheckedInToday) ?? false
+    }
+}
+```
+
+**Bug: "Widget shows wrong streak count"**
+
+**Debugging approach:**
+
+1. Set a breakpoint on `SharedDataManager.updateWidgetData`. When it hits:
+```
+(lldb) po currentStreak
+(lldb) po totalSaved
+(lldb) po hasPledgedToday
+```
+Verify the values are correct before they are written.
+
+2. Check if the App Group `UserDefaults` is accessible:
+```
+(lldb) po UserDefaults(suiteName: "group.com.pekmario.betfreeapp")
+```
+If this returns `nil`, the App Group is not configured in the entitlements file.
+
+3. After the write, verify the values persisted:
+```
+(lldb) po UserDefaults(suiteName: "group.com.pekmario.betfreeapp")?.integer(forKey: "widget_currentStreak")
+```
+
+4. The silent failure pattern: `defaults?.set(...)` uses optional chaining. If `defaults` is `nil` (App Group misconfigured), every write silently does nothing. No error. No crash. Just stale widget data.
+
+### Scenario 5: Debugging the Reset Flow
+
+`SettingsViewModel.resetAllData` has a subtle bug surface: if one model deletion fails, the rest are skipped, but the navigation reset still happens:
+
+```swift
+func resetAllData(context: ModelContext, router: AppRouter) {
+    do {
+        try context.delete(model: UserProfile.self)
+        try context.delete(model: DailyCheckin.self)
+        try context.delete(model: UrgeLog.self)
+        try context.delete(model: JournalEntry.self)
+    } catch {
+        // SwiftData delete errors are non-fatal for MVP
+    }
+
+    notificationManager.cancelAll()
+    router.resetForNewUser()
+}
+```
+
+**Bug: "After reset, old journal entries still appear"**
+
+If `UserProfile` deletion fails (because of a relationship constraint), the `catch` fires and `DailyCheckin`, `UrgeLog`, and `JournalEntry` deletions never execute.
+
+**Debugging approach:**
+
+1. Set a breakpoint on each `try context.delete(model:)` line.
+2. Step through each one. If the debugger jumps from `UserProfile` deletion to the `catch` block, that model failed:
+```
+(lldb) po error
+(lldb) po error.localizedDescription
+```
+
+3. After the reset, verify what is left in the database:
+```
+(lldb) po try? context.fetch(FetchDescriptor<JournalEntry>()).count
+(lldb) po try? context.fetch(FetchDescriptor<UrgeLog>()).count
+```
+If the count is non-zero, those models were not deleted.
+
+## Verify Phase: Testing the Debug Toolkit
+
+**1. Database recovery path is reachable.** Corrupt the store file manually and relaunch. The app should not crash — it should show the onboarding screen with a fresh database. Set a breakpoint on the `fatalError` line to confirm it is never reached during normal recovery.
+
+**2. Task cancellation is verifiable.** Start the urge timer, then call `skipTimer()`. Set a breakpoint on `timerSeconds += 1`. It should not hit after `skip` is called. If it does, the cancellation is not propagating correctly.
+
+**3. HapticManager state is inspectable.** At any breakpoint, you can check the haptic state:
+```
+(lldb) po UserDefaults.standard.bool(forKey: "hapticFeedbackEnabled")
+```
+This tells you immediately whether haptics will fire or silently no-op.
+
+**4. SharedDataManager writes are traceable.** After navigating to the dashboard, check the App Group UserDefaults:
+```
+(lldb) po UserDefaults(suiteName: "group.com.pekmario.betfreeapp")?.dictionaryRepresentation()
+```
+This dumps every key-value pair in the shared suite.
+
+**5. Reset completeness is verifiable.** After calling `resetAllData`, query each model type to confirm zero counts. Any non-zero count means a deletion was skipped.
+
+**6. LLDB commands work in a live session.** Set a breakpoint in `DashboardViewModel`. When it hits, try these commands in the Xcode debug console:
+
+```
+(lldb) po self.greeting
+(lldb) v self.showCelebration
+(lldb) expr self.showCelebration = true
+(lldb) breakpoint set -n "UrgeViewModel.startTimer"
+```
+
+All four should execute without errors. If `po` fails with "expression produced error," try `v` instead — it reads memory directly without running code.
+
+## Final Code
+
+### Debugging the UserProfile Computed Properties
+
+`UserProfile` has computed properties that recalculate on every access. This is a common source of debugging confusion — the value might change between breakpoint hits because the underlying data changed:
+
+```swift
+var currentStreak: Int {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date())
+    let quitStart = calendar.startOfDay(for: quitDate)
+
+    // If quit date is in the future, no streak yet
+    if quitStart > today { return 0 }
+
+    // Check for any relapse (evening checkin where gamblingFree == false)
+    let relapses = checkins
+        .filter { !$0.gamblingFree && $0.checkinTypeRaw == CheckinType.eveningCheckin.rawValue }
+        .sorted { $0.date > $1.date }
+
+    if let lastRelapse = relapses.first {
+        let relapsDay = calendar.startOfDay(for: lastRelapse.date)
+        let daysSinceRelapse = calendar.dateComponents([.day], from: relapsDay, to: today).day ?? 0
+        return max(0, daysSinceRelapse)
+    }
+
+    return daysSinceQuit
+}
+
+var totalSaved: Double {
+    let weeks = Double(daysSinceQuit) / 7.0
+    return weeks * averageWeeklySpend
+}
+
+var daysSinceQuit: Int {
+    max(0, Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: quitDate), to: Calendar.current.startOfDay(for: Date())).day ?? 0)
+}
+```
+
+**Debugging tip:** `currentStreak` iterates all checkins, filters for relapses, and sorts them — on every access. If you call `po profile.currentStreak` twice at the same breakpoint, you get the same result. But if the user submits an evening check-in between accesses (in a different thread or after continuing), the value changes because the `checkins` relationship changed.
+
+To debug streak calculation issues:
+```
+(lldb) po profile.checkins.count
+(lldb) po profile.checkins.filter { !$0.gamblingFree }.count
+(lldb) po profile.quitDate
+(lldb) po profile.currentStreak
+```
+
+This tells you how many total check-ins exist, how many relapses there are, when the quit date is, and what the resulting streak is. From these four values, you can manually verify the calculation.
+
+### LLDB Commands Quick Reference
+
+Use these commands in the Xcode debug console when a breakpoint hits. This table covers the commands you will use most often when debugging BetAway.
+
+| Command | What It Does | Example |
+|---|---|---|
+| `po <expr>` | Print object using `debugDescription` | `po self.phase` |
+| `v <var>` | Print variable by reading memory directly | `v self.isTimerRunning` |
+| `p <expr>` | Print with full type information | `p timerSeconds` |
+| `expr <code>` | Evaluate arbitrary Swift in current frame | `expr self.isTimerRunning = true` |
+| `fr v` | Show all variables in the current frame | `fr v` |
+| `bt` | Backtrace of current thread | `bt` |
+| `bt all` | Backtrace of every thread | `bt all` |
+| `br s -n <func>` | Set breakpoint on function name | `br s -n "startTimer"` |
+| `br s -f <file> -l <line>` | Set breakpoint on file and line | `br s -f UrgeViewModel.swift -l 80` |
+| `br mod -c "<cond>" <id>` | Add condition to breakpoint | `br mod -c "timerSeconds > 60" 3` |
+| `br com add <id>` | Add auto-run commands to breakpoint | `br com add 3` |
+| `w s v <var>` | Watchpoint: break when variable changes | `w s v self.timerSeconds` |
+| `w s e -- <addr>` | Watchpoint: break on memory address change | `w s e -- 0x7fff5fbff8a0` |
+| `image lookup -a <addr>` | Find symbol at crash address | `image lookup -a 0x1000042a0` |
+| `thread return` | Force-return from current function | `thread return` |
+
+**When `po` fails:** If you see "expression produced error," use `v` instead. `po` evaluates Swift code to produce output, which can fail if the expression context is ambiguous. `v` reads the variable directly from memory and almost never fails.
+
+**Breakpoint actions without stopping:** Right-click a breakpoint in Xcode, choose Edit Breakpoint, add a "Log Message" action with `%B` (breakpoint name) and `%H` (hit count), then check "Automatically continue after evaluating actions." This gives you `print()`-style debugging without modifying code or pausing execution.
+
+**Watchpoints for Task state:** If `timerSeconds` changes unexpectedly (e.g., after cancellation), set a watchpoint with `w s v self.timerSeconds`. The debugger will break at the exact line that mutates the property — even if the mutation comes from a different Task.
+
+### Instruments Workflow for BetFree
+
+Follow this checklist when profiling BetAway with Instruments.
+
+```
+INSTRUMENTS PROFILING WORKFLOW
+==============================
+
+SETUP:
+  [ ] Build with Release configuration (Product > Scheme > Edit >
+      Profile action > Build Configuration > Release)
+  [ ] Use a physical device, not the Simulator
+  [ ] Close unnecessary apps to reduce noise
+  [ ] Disable Low Power Mode (throttles CPU)
+
+TIME PROFILER (finding slow code):
+  [ ] Open Instruments > Time Profiler
+  [ ] Record for 30–60 seconds of normal usage
+  [ ] Focus on the heaviest stack trace (Call Tree view)
+  [ ] Check "Hide System Libraries" to see only your code
+  [ ] Check "Invert Call Tree" to see leaf functions first
+  [ ] Look for: main thread work > 16ms (causes frame drops)
+  [ ] Look for: UserProfile.currentStreak recalculating excessively
+
+SWIFTUI VIEW BODY TRACKING:
+  [ ] Use Self._printChanges() in view body during debug:
+        let _ = Self._printChanges()
+  [ ] Watch for: DashboardView body called on every timer tick
+  [ ] Watch for: @Observable property causing unrelated redraws
+  [ ] Profile with Instruments > SwiftUI template (Xcode 16+)
+
+TASK LIFECYCLE:
+  [ ] Set breakpoints on Task creation in UrgeViewModel.startTimer()
+  [ ] Set breakpoints on timerTask?.cancel() in skipTimer() and reset()
+  [ ] Verify no Tasks survive after UrgeContainerView is dismissed
+  [ ] Check for: orphaned breath cycle Task after isTimerRunning = false
+
+USERDEFAULTS INSPECTION:
+  [ ] At any breakpoint, dump standard defaults:
+      po UserDefaults.standard.dictionaryRepresentation()
+  [ ] Check haptic setting:
+      po UserDefaults.standard.bool(forKey: "hapticFeedbackEnabled")
+  [ ] Check App Group defaults:
+      po UserDefaults(suiteName: "group.com.pekmario.betfreeapp")?.dictionaryRepresentation()
+```
+
+## Checkpoint
+
+Before moving to the next lesson, verify every item:
+
+- [ ] You can intentionally corrupt the store and verify `BetFreeApp.sharedModelContainer` recovers by deleting the three store files and recreating the container
+- [ ] You can set a breakpoint on `timerSeconds += 1` and confirm it stops firing after `skipTimer()` or `reset()` is called
+- [ ] You can check `HapticManager.isEnabled` from LLDB at any breakpoint to verify whether haptics will fire
+- [ ] You can inspect `SharedDataManager`'s App Group `UserDefaults` from LLDB to verify widget data writes
+- [ ] You can trace `resetAllData` step by step and identify which model deletion (if any) throws
+- [ ] LLDB `po`, `v`, and `expr` commands work at a breakpoint in `UrgeViewModel`
+- [ ] A watchpoint on `timerSeconds` triggers when the property changes value
+- [ ] You understand why `UserProfile.currentStreak` can return different values between breakpoint hits (computed property that re-evaluates on every access)
+
+## Challenge
+
+**Build a Task lifecycle debugger for UrgeViewModel.**
+
+Add a debug-only mechanism that tracks every Task created and cancelled in `UrgeViewModel`. When `startTimer()` creates a Task, log its creation. When `skipTimer()` or `reset()` cancels it, log the cancellation. When the Task's closure exits (either normally or via cancellation), log the exit.
+
+The goal: after dismissing the urge flow, you should be able to verify that zero Tasks from `UrgeViewModel` are still running.
+
+*Hint:* Use a counter or set that tracks active tasks. Increment on Task creation, decrement on Task closure exit. Wrap the counter in `#if DEBUG` so it has zero overhead in release builds.
+
+<details>
+<summary>Hint</summary>
+
+```swift
+#if DEBUG
+private var activeTaskCount = 0
+#endif
+
+func startTimer() {
+    #if DEBUG
+    activeTaskCount += 1
+    print("[UrgeVM] Task created. Active: \(activeTaskCount)")
+    #endif
+
+    timerTask = Task { @MainActor in
+        defer {
+            #if DEBUG
+            activeTaskCount -= 1
+            print("[UrgeVM] Task exited. Active: \(activeTaskCount)")
+            #endif
+        }
+        while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+            try? await Task.sleep(for: .seconds(1))
+            if !Task.isCancelled {
+                timerSeconds += 1
+            }
+        }
+        if !Task.isCancelled {
+            isTimerRunning = false
+            HapticManager.timerComplete()
+            moveToLog()
+        }
+    }
+}
+```
+
+After calling `reset()`, `activeTaskCount` should return to 0 once the cancelled task's defer block runs.
+
+</details>

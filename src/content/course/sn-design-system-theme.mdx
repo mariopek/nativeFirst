@@ -1,0 +1,937 @@
+---
+title: "Design System & Theme"
+description: "Build a cohesive design system for BetAway with a color palette (asset catalog), Nunito custom typography, 4pt spacing grid with radius and shadow tokens, spring/eased animation presets, and reusable SwiftUI components (BFCard, BFProgressRing, BFButton) that support dark mode from day one."
+courseSlug: "ship-native"
+module: 2
+moduleTitle: "Core UI with SwiftUI"
+lesson: 1
+duration: "20 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "Design System", "Theme", "Dark Mode", "Colors", "Typography", "Reusable Components", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Every production app has a design system, whether the team knows it or not. The question is whether it is intentional or accidental. Accidental design systems are the ones where button padding is 12 in one view, 16 in another, and 10 in a third. Where colors are defined inline as `Color(.init(red: 0.4, green: 0.2, blue: 0.8))` and duplicated across fifteen files. Where a "minor" rebrand means touching every single view in the project.
+
+In this lesson, we build BetAway's design system from scratch: a `ColorPalette` enum that pulls named colors from the asset catalog, a `Typography` enum using the custom Nunito font, a `Spacing` enum on a 4pt grid with nested `Radius` and `Shadow` types, an `AnimationPresets` enum for consistent spring and eased animations, and three reusable components — `BFCard`, `BFProgressRing`, and `BFButton`. We also wire everything together through an `AppConfig` that centralizes the app's identity and feature flags. Everything supports dark mode from day one. And we build it with AI — using the Plan-Execute-Iterate workflow.
+
+## What You'll Learn
+
+- Define a semantic color palette with brand gradients, functional status colors, and named asset catalog colors that automatically support dark mode
+- Create a custom-font typography scale using Nunito with weight parameters, plus a 4pt spacing grid with nested corner-radius and shadow tokens
+- Build animation presets (spring and eased) that give the entire app consistent motion
+- Build three reusable components — `BFCard`/`BFGradientCard` (generic card containers), `BFProgressRing` (animated circular progress), and `BFButton` (multi-style button with press animation) — using Swift 6 and modern SwiftUI
+- Use the Plan-Execute-Iterate workflow to generate production-quality theme infrastructure with AI
+
+## Why This Matters
+
+Design systems are not a luxury reserved for large teams. They are the single fastest way to make an app feel cohesive, and they reduce the cost of every future UI change from "touch twelve files" to "change one token." BetAway uses gradients for its brand identity, ring-shaped progress indicators for streaks and goals, and card-based layouts for every major screen. Getting these primitives right in a centralized theme means every screen we build in the next lessons automatically looks correct.
+
+## Plan Phase: Defining What We Build
+
+Before we write any Swift, we need a plan. Here is the prompt I send to Claude Code:
+
+```
+I am building a free gambling recovery app called BetAway using SwiftUI.
+The Xcode project is called BetFree internally. Before writing any code,
+plan a complete design system with:
+
+1. Color palette (ColorPalette enum):
+   - Named colors from the asset catalog (e.g., Color("PrimaryGradientStart"))
+   - Brand gradient colors: primaryGradientStart, primaryGradientEnd, accent
+   - Background and surface colors: appBackground, surfacePrimary, surfaceSecondary
+   - Text colors: textPrimary, textSecondary, textTertiary, textOnPrimary
+   - Functional colors: success, warning, danger, info
+   - Pre-built LinearGradient properties: primaryGradient, streakGradient,
+     savingsGradient, cardGradient, celebrationGradient
+   - All colors defined in the asset catalog with light/dark variants
+
+2. Typography scale (Typography enum):
+   - Use a custom font: Nunito
+   - Static functions with a weight parameter: largeTitle, title1, title2,
+     title3, headline, body, callout, subheadline, footnote, caption
+   - Special-purpose static let properties: streakCounter (72pt bold),
+     savingsCounter (36pt bold), pledgeText (20pt medium), buttonLabel (17pt semibold)
+
+3. Spacing tokens (Spacing enum):
+   - A 4pt grid: xxs(4), xs(8), sm(12), md(16), lg(20), xl(24), xxl(32),
+     xxxl(40), huge(48)
+   - Nested Spacing.Radius enum: small(8), medium(12), large(16), xl(20),
+     xxl(24), pill(100)
+   - Nested Spacing.Shadow enum using a ShadowStyle struct:
+     small, medium, large — with subtle white-glow colors for dark backgrounds
+
+4. Animation presets (AnimationPresets enum):
+   - Spring animations: snappy, smooth, gentle, bouncy, cardEntry
+   - Eased animations: fade, slowFade
+   - Duration constants: shortDuration, standardDuration, longDuration,
+     celebrationDuration
+   - Stagger helpers: staggerInterval, staggerDelay(for:)
+
+5. Three reusable components:
+   - BFCard / BFGradientCard: generic card containers with surface background,
+     rounded corners, and shadow tokens
+   - BFProgressRing: animated circular progress ring with gradient stroke,
+     background track, and spring animations on appear/change
+   - BFButton: multi-style button (primary, secondary, destructive, ghost)
+     with loading state, disabled state, and a press-scale animation style
+
+6. App configuration (AppConfig enum):
+   - App name "BetAway", tagline, version, build number
+   - Feature flags (biometric lock, notifications, tip jar, haptic feedback)
+   - Timing windows for morning pledge and evening check-in
+   - Helpline numbers, storage keys, SF Symbol icon names, tip product IDs
+
+Output only the plan — file names, type signatures, and design
+decisions. Do not write implementation code yet.
+```
+
+The AI responds with a structured plan: six files (`ColorPalette.swift`, `Typography.swift`, `Spacing.swift`, `AnimationPresets.swift`, `BFCard.swift`, `BFProgressRing.swift`, `BFButton.swift`, `AppConfig.swift`), the exact color names from the asset catalog, the spacing scale, the animation curves, and the component APIs. Read through it carefully.
+
+**What to check in the plan:**
+
+- Does the color palette use named asset catalog colors (e.g., `Color("PrimaryGradientStart")`) rather than inline hex values? Asset catalog colors let designers update colors without touching Swift code, and they get automatic dark mode support by defining light/dark variants in the `.xcassets` folder.
+- Are the spacing values on a consistent 4pt grid? The progression should be 4, 8, 12, 16, 20, 24, 32, 40, 48 — every value either a multiple of 4 or close to one.
+- Does the `Typography` enum use `Font.custom("Nunito", size:)` with a configurable weight parameter on each function? This allows callers to override the default weight when needed, e.g. `Typography.body(weight: .bold)`.
+- Do the animation presets use `Animation.spring(response:dampingFraction:)` with physically meaningful values? A `dampingFraction` below 1.0 creates bounce; 0.85+ creates a smooth settle with no overshoot.
+- Do the component APIs use proper SwiftUI conventions — `@ViewBuilder` closures for card content, `LinearGradient` parameters for the progress ring, and `ButtonStyle` for press animations?
+
+### The Anti-Pattern: What a Bad Prompt Looks Like
+
+Here is how NOT to prompt for a design system:
+
+```
+Make me some colors and buttons for my recovery app. Use nice colors
+that look good. Also make it work in dark mode.
+```
+
+This gives the AI zero constraints. "Nice colors" is subjective. "Look good" is unmeasurable. The AI will pick arbitrary values, and you will end up with scattered inline colors — the exact accidental design system we are trying to avoid. Always specify structure: how many colors, what they represent, what file they live in, and what API they expose.
+
+## Execute Phase: Implementation
+
+Now we tell the AI to build it. Here is the implementation prompt:
+
+```
+Implement the design system we planned. Create these files:
+
+1. ColorPalette.swift — enum with static Color properties pulled
+   from the asset catalog:
+   - Brand: primaryGradientStart, primaryGradientEnd, accent
+   - Backgrounds: background (AppBackground), surfacePrimary, surfaceSecondary
+   - Text: textPrimary, textSecondary, textTertiary, textOnPrimary (.white)
+   - Functional: success, warning, danger, infoBadge
+   - Pre-built LinearGradient statics: primaryGradient (topLeading→bottomTrailing),
+     streakGradient (orange→red, top→bottom), savingsGradient (success→mint),
+     cardGradient (surfacePrimary→surfaceSecondary), celebrationGradient
+     (yellow→orange→pink, leading→trailing)
+
+2. Typography.swift — enum using custom "Nunito" font:
+   - Static functions with default weight: largeTitle(.bold), title1(.bold),
+     title2(.semibold), title3(.semibold), headline(.semibold),
+     body(.regular), callout(.regular), subheadline(.regular),
+     footnote(.regular), caption(.regular)
+   - Sizes: 34, 28, 22, 20, 17, 17, 16, 15, 13, 12
+   - Special statics: streakCounter (72pt bold), savingsCounter (36pt bold),
+     pledgeText (20pt medium), buttonLabel (17pt semibold)
+
+3. Spacing.swift — enum with CGFloat constants on a 4pt grid:
+   - xxs=4, xs=8, sm=12, md=16, lg=20, xl=24, xxl=32, xxxl=40, huge=48
+   - Nested Radius enum: small=8, medium=12, large=16, xl=20, xxl=24, pill=100
+   - Nested Shadow enum with ShadowStyle struct — use white.opacity glow
+     colors appropriate for dark backgrounds (0.03, 0.04, 0.06)
+
+4. AnimationPresets.swift — enum with spring and eased animations:
+   - snappy: spring(0.3, 0.7), smooth: spring(0.5, 0.8),
+     gentle: spring(0.7, 0.85), bouncy: spring(0.4, 0.5),
+     cardEntry: spring(0.6, 0.75)
+   - fade: easeInOut(0.25), slowFade: easeInOut(0.5)
+   - Duration constants and stagger helpers
+
+5. BFCard.swift — two generic card views:
+   - BFCard: takes padding and @ViewBuilder content, uses surfacePrimary
+     background, Radius.large corners, Shadow.medium
+   - BFGradientCard: takes gradient (defaults to primaryGradient),
+     padding, and @ViewBuilder content, Radius.xl corners, Shadow.large
+
+6. BFProgressRing.swift — animated circular progress:
+   - Takes progress (0–1), lineWidth, size, gradient, trackColor
+   - @State animatedProgress starts at 0, animates with gentle spring
+     on appear, smooth spring on change
+   - ZStack with Circle().stroke track and Circle().trim().stroke ring
+
+7. BFButton.swift — multi-style button:
+   - Style enum: primary, secondary, destructive, ghost
+   - Takes LocalizedStringKey title, optional icon, style, isLoading,
+     isDisabled, action
+   - Style-dependent foreground/background/border colors
+   - BFButtonPressStyle: scaleEffect 0.97 on press with snappy animation
+   - BFSmallButton variant: capsule shaped, compact padding
+
+Use Swift 6. All files should import SwiftUI. Use the Spacing, ColorPalette,
+Typography, and AnimationPresets types across all components.
+Do not use any third-party dependencies.
+```
+
+### Reviewing the AI Output
+
+The AI generates all the files. Here is how I review them, using the traffic-light system:
+
+**ColorPalette.swift review:**
+
+- Does every `Color` use a string initializer like `Color("PrimaryGradientStart")` referencing the asset catalog? If the AI hardcoded hex values instead, that defeats the purpose — asset catalog colors automatically switch between light and dark mode without any Swift-side branching.
+- Are the gradients using `LinearGradient` with meaningful start/end points? The primary brand gradient goes from `topLeading` to `bottomTrailing`, the streak gradient is vertical (top to bottom), and the celebration gradient is horizontal (leading to trailing). These directions create distinct visual identities for each use case.
+- Is `textOnPrimary` simply `Color.white`? On a vibrant brand gradient, white text gives the best contrast. If the AI tried to make this adaptive for dark mode, that is wrong — text on a gradient is always white regardless of system appearance.
+
+**Typography.swift review:**
+
+- Does every function use `.custom("Nunito", size:)` rather than `.system()`? The whole point of the custom font is consistent brand identity. If the AI mixed in system fonts, the app will feel inconsistent.
+- Does each function accept a `weight` parameter with a sensible default? `largeTitle` defaults to `.bold`, `body` defaults to `.regular`. This lets callers override the weight without defining a separate function for every combination.
+- Are the special-purpose statics (`streakCounter`, `savingsCounter`, `pledgeText`, `buttonLabel`) defined as `static let` rather than functions? These are fixed configurations that never change weight, so a computed property or let is cleaner than a function.
+
+**Spacing.swift review:**
+
+- Are the values on the 4pt grid? Check: 4, 8, 12, 16, 20, 24, 32, 40, 48 — yes, every value is a multiple of 4.
+- Does the `ShadowStyle` struct use `Color.white.opacity(...)` for the shadow color? On a dark background, a white glow at very low opacity (0.03 to 0.06) creates a subtle elevation effect. If the AI used `Color.black.opacity(...)`, that only works on light backgrounds.
+- Are the `Radius` values separate from the `Spacing` values? They live in a nested `Spacing.Radius` enum, which prevents confusion between `Spacing.sm` (12pt padding) and `Spacing.Radius.small` (8pt corner radius).
+
+**AnimationPresets.swift review:**
+
+- Is `dampingFraction` below 1.0 for all spring animations? Values from 0.5 to 0.85 produce a natural settle. If the AI used 1.0, the animation has no spring character at all — it behaves like a basic ease-out.
+- Is the `snappy` animation actually snappy? Response 0.3 with damping 0.7 completes in about 0.3 seconds with a small bounce — perfect for button presses. If the response is too high (like 0.8), the animation will feel sluggish.
+- Does the stagger helper use multiplication (`Double(index) * staggerInterval`)? This creates a linear delay cascade. If the AI used an exponential formula, the later items will take too long to appear.
+
+**BFCard.swift review:**
+
+- Does `BFCard` use `@ViewBuilder` for the content closure? This allows callers to pass multiple views without wrapping them in a container.
+- Is the shadow applied using the `ShadowStyle` struct from `Spacing.Shadow`? The card should reference `Spacing.Shadow.medium.color`, `.radius`, `.x`, `.y` — not inline shadow values. This ensures every card in the app has the same elevation.
+- Does `BFGradientCard` default its gradient to `ColorPalette.primaryGradient`? This means callers can create a gradient card with no configuration: `BFGradientCard { ... }`.
+
+**BFProgressRing.swift review:**
+
+- Does the ring use `@State private var animatedProgress` starting at 0? The progress animates from 0 to the target value on appear, creating a satisfying fill animation.
+- Does it use `AnimationPresets.gentle` for the initial appear animation and `AnimationPresets.smooth` for subsequent changes? The gentle spring (response 0.7) gives a slower, more dramatic fill on first load, while smooth (response 0.5) is snappier for live updates.
+- Is the ring rotated by -90 degrees? SwiftUI draws circles starting from the 3 o'clock position. Rotating -90 degrees makes the progress start from the 12 o'clock position, which is the expected behavior for a progress indicator.
+
+**BFButton.swift review:**
+
+- Does it support four styles: primary, secondary, destructive, ghost? Each style needs distinct foreground, background, and border colors. Primary is accent-colored with white text. Secondary is transparent with accent text and a subtle border. Destructive is red with white text. Ghost is transparent with primary text and a surface border.
+- Is `BFButtonPressStyle` a `ButtonStyle` that applies `scaleEffect(0.97)` on press? This subtle scale-down gives satisfying tactile feedback without being distracting.
+- Does the press style trigger `HapticManager.lightImpact()` on press? This pairs the visual feedback with physical feedback on devices that support haptics.
+
+## Iteration
+
+After the first pass, there are usually one or two things to fix. Here is the follow-up prompt I send:
+
+```
+Three fixes for the design system:
+
+1. In BFButton.swift, the BFButtonPressStyle needs to trigger
+   HapticManager.lightImpact() when the button is pressed (onChange
+   of isPressed). Add that call inside the ButtonStyle.
+
+2. In BFProgressRing.swift, make sure onChange uses the new
+   Swift 5.9+ syntax: onChange(of: progress) { _, newValue in ... }
+   instead of the deprecated onChange(of:perform:) single-parameter
+   closure.
+
+3. In Typography.swift, add a BFSmallButton companion view that
+   uses Typography.subheadline(weight: .semibold) for its label
+   and Capsule() as its clip shape, with configurable foreground
+   and background colors.
+```
+
+This is the refinement step. We are not rewriting the code — we are making targeted corrections based on our review. Each fix takes the AI about 10 seconds to apply.
+
+## Verify Phase
+
+Build and run. Here is what to check in the simulator:
+
+**Color accuracy.** Open the app in both light and dark mode (use Environment Overrides in the simulator toolbar). Every color from `ColorPalette` should switch correctly. The brand gradient should feel vibrant in both modes. Surface colors should provide enough contrast against the background. Verify that `textOnPrimary` (white) is always legible against the primary gradient.
+
+**Custom font rendering.** Check that "Nunito" is loading correctly. If you see the system font (SF Pro) instead of Nunito, the font files are not included in the target or the `Info.plist` entry is missing. Every `Typography` function should render in Nunito at the expected size and weight.
+
+**Spacing consistency.** Visually inspect padding and gaps. All cards should have the same internal padding (`Spacing.md` = 16pt). All corner radii should feel consistent — `Spacing.Radius.large` (16pt) for standard cards, `Spacing.Radius.xl` (20pt) for gradient cards, `Spacing.Radius.pill` (100pt) for capsule shapes.
+
+**Shadow rendering.** On dark backgrounds, the white-glow shadows should be barely perceptible — they create a subtle sense of elevation without looking like traditional drop shadows. If the shadows are invisible, increase the opacity slightly. If they are too bright, reduce it. The current values (0.03 to 0.06 opacity) are a good starting point.
+
+**Animation feel.** Tap a `BFButton` — the press should feel snappy with the 0.97 scale effect. Navigate to a screen with `BFProgressRing` — the ring should fill smoothly on appear with the gentle spring. Trigger a progress change — it should animate with the smooth spring. If any animation feels sluggish or janky, check that the correct `AnimationPresets` value is being used.
+
+**Component states.** Test `BFButton` in all four styles (primary, secondary, destructive, ghost), plus the loading state (should show a `ProgressView`) and disabled state (should be 50% opacity and non-interactive). Test `BFSmallButton` as a compact variant with custom colors.
+
+**Card rendering.** Place content inside `BFCard` and `BFGradientCard`. The card should expand to full width with leading alignment. The gradient card should use `ColorPalette.primaryGradient` by default but accept a custom gradient.
+
+## Final Code
+
+Here is the complete, verified implementation of all files.
+
+### ColorPalette.swift
+
+```swift
+import SwiftUI
+
+enum ColorPalette {
+    // MARK: - Primary Brand
+    static let primaryGradientStart = Color("PrimaryGradientStart")
+    static let primaryGradientEnd = Color("PrimaryGradientEnd")
+    static let accent = Color("AccentPrimary")
+
+    // MARK: - Backgrounds
+    static let background = Color("AppBackground")
+    static let surfacePrimary = Color("SurfacePrimary")
+    static let surfaceSecondary = Color("SurfaceSecondary")
+
+    // MARK: - Text
+    static let textPrimary = Color("TextPrimary")
+    static let textSecondary = Color("TextSecondary")
+    static let textTertiary = Color("TextTertiary")
+    static let textOnPrimary = Color.white
+
+    // MARK: - Functional
+    static let success = Color("Success")
+    static let warning = Color("Warning")
+    static let danger = Color("Danger")
+    static let infoBadge = Color("Info")
+
+    // MARK: - Gradients
+    static let primaryGradient = LinearGradient(
+        colors: [primaryGradientStart, primaryGradientEnd],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    static let streakGradient = LinearGradient(
+        colors: [Color.orange, Color.red],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    static let savingsGradient = LinearGradient(
+        colors: [success, Color.mint],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    static let cardGradient = LinearGradient(
+        colors: [surfacePrimary, surfaceSecondary],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    static let celebrationGradient = LinearGradient(
+        colors: [Color.yellow, Color.orange, Color.pink],
+        startPoint: .leading,
+        endPoint: .trailing
+    )
+}
+```
+
+### Typography.swift
+
+```swift
+import SwiftUI
+
+enum Typography {
+    // MARK: - Font Name
+    private static let fontName = "Nunito"
+
+    // MARK: - Display
+    static func largeTitle(weight: Font.Weight = .bold) -> Font {
+        .custom(fontName, size: 34).weight(weight)
+    }
+
+    static func title1(weight: Font.Weight = .bold) -> Font {
+        .custom(fontName, size: 28).weight(weight)
+    }
+
+    static func title2(weight: Font.Weight = .semibold) -> Font {
+        .custom(fontName, size: 22).weight(weight)
+    }
+
+    static func title3(weight: Font.Weight = .semibold) -> Font {
+        .custom(fontName, size: 20).weight(weight)
+    }
+
+    // MARK: - Body
+    static func headline(weight: Font.Weight = .semibold) -> Font {
+        .custom(fontName, size: 17).weight(weight)
+    }
+
+    static func body(weight: Font.Weight = .regular) -> Font {
+        .custom(fontName, size: 17).weight(weight)
+    }
+
+    static func callout(weight: Font.Weight = .regular) -> Font {
+        .custom(fontName, size: 16).weight(weight)
+    }
+
+    static func subheadline(weight: Font.Weight = .regular) -> Font {
+        .custom(fontName, size: 15).weight(weight)
+    }
+
+    static func footnote(weight: Font.Weight = .regular) -> Font {
+        .custom(fontName, size: 13).weight(weight)
+    }
+
+    static func caption(weight: Font.Weight = .regular) -> Font {
+        .custom(fontName, size: 12).weight(weight)
+    }
+
+    // MARK: - Special Styles
+    static let streakCounter: Font = .custom(fontName, size: 72).weight(.bold)
+    static let savingsCounter: Font = .custom(fontName, size: 36).weight(.bold)
+    static let pledgeText: Font = .custom(fontName, size: 20).weight(.medium)
+    static let buttonLabel: Font = .custom(fontName, size: 17).weight(.semibold)
+}
+```
+
+### Spacing.swift
+
+```swift
+import SwiftUI
+
+enum Spacing {
+    /// 4pt
+    static let xxs: CGFloat = 4
+    /// 8pt
+    static let xs: CGFloat = 8
+    /// 12pt
+    static let sm: CGFloat = 12
+    /// 16pt — standard padding
+    static let md: CGFloat = 16
+    /// 20pt
+    static let lg: CGFloat = 20
+    /// 24pt
+    static let xl: CGFloat = 24
+    /// 32pt
+    static let xxl: CGFloat = 32
+    /// 40pt
+    static let xxxl: CGFloat = 40
+    /// 48pt
+    static let huge: CGFloat = 48
+
+    // MARK: - Corner Radii
+    enum Radius {
+        static let small: CGFloat = 8
+        static let medium: CGFloat = 12
+        static let large: CGFloat = 16
+        static let xl: CGFloat = 20
+        static let xxl: CGFloat = 24
+        static let pill: CGFloat = 100
+    }
+
+    // MARK: - Shadows (subtle glow on dark backgrounds)
+    enum Shadow {
+        static let small = ShadowStyle(color: .white.opacity(0.03), radius: 4, x: 0, y: 2)
+        static let medium = ShadowStyle(color: .white.opacity(0.04), radius: 8, x: 0, y: 4)
+        static let large = ShadowStyle(color: .white.opacity(0.06), radius: 16, x: 0, y: 8)
+    }
+}
+
+struct ShadowStyle {
+    let color: Color
+    let radius: CGFloat
+    let x: CGFloat
+    let y: CGFloat
+}
+```
+
+### AnimationPresets.swift
+
+```swift
+import SwiftUI
+
+enum AnimationPresets {
+    // MARK: - Spring Animations
+
+    /// Snappy interaction feedback — buttons, toggles, chip selection
+    static let snappy = Animation.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)
+
+    /// Standard transitions — cards appearing, navigation
+    static let smooth = Animation.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)
+
+    /// Gentle, slow animations — onboarding transitions, celebrations
+    static let gentle = Animation.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0)
+
+    /// Bouncy feedback — streak counter update, milestone reached
+    static let bouncy = Animation.spring(response: 0.4, dampingFraction: 0.5, blendDuration: 0)
+
+    /// Entry animation for cards/elements appearing on screen
+    static let cardEntry = Animation.spring(response: 0.6, dampingFraction: 0.75, blendDuration: 0)
+
+    // MARK: - Eased Animations
+
+    /// Fade in/out for overlays, modals
+    static let fade = Animation.easeInOut(duration: 0.25)
+
+    /// Slow fade for background transitions
+    static let slowFade = Animation.easeInOut(duration: 0.5)
+
+    // MARK: - Durations
+    static let shortDuration: Double = 0.2
+    static let standardDuration: Double = 0.35
+    static let longDuration: Double = 0.5
+    static let celebrationDuration: Double = 1.5
+
+    // MARK: - Stagger
+    static let staggerInterval: Double = 0.08
+
+    static func staggerDelay(for index: Int) -> Double {
+        Double(index) * staggerInterval
+    }
+}
+```
+
+### AppConfig.swift
+
+```swift
+import Foundation
+
+enum AppConfig {
+    // MARK: - App Identity
+    static let appName = "BetAway"
+    static var appTagline: String { LanguageManager.shared.localized("Your path to freedom") }
+    static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    static let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+
+    // MARK: - Feature Flags
+    static let enableBiometricLock = true
+    static let enableNotifications = true
+    static let enableTipJar = true
+    static let enableHapticFeedback = true
+
+    // MARK: - Support
+    static let feedbackEmail = "info@nativefirstapp.com"
+
+    // MARK: - Defaults
+    static let defaultCurrency = "USD"
+    static let defaultCurrencySymbol = "$"
+    static let defaultWeeklySpend: Double = 100
+    static let maxWeeklySpendSlider: Double = 2000
+
+    // MARK: - Timing
+    static let morningPledgeWindowStart = 5
+    static let morningPledgeWindowEnd = 12
+    static let eveningCheckinWindowStart = 18
+    static let eveningCheckinWindowEnd = 23
+    static let defaultMorningHour = 8
+    static let defaultMorningMinute = 0
+    static let defaultEveningHour = 21
+    static let defaultEveningMinute = 0
+
+    // MARK: - Helplines
+
+    struct HelplineInfo: Identifiable {
+        let id = UUID()
+        let name: String
+        let number: String
+    }
+
+    static let helplineUS = "1-800-522-4700"
+    static let helplineText = "800GAM"
+    static let helplineUK = "0808-8020-133"
+
+    /// Returns relevant gambling helplines based on the selected app language
+    static func helplines(for language: LanguageManager.AppLanguage) -> [HelplineInfo] {
+        switch language {
+        case .english:
+            return [
+                HelplineInfo(name: "National Problem Gambling Helpline (US)", number: "1-800-522-4700"),
+                HelplineInfo(name: "GamCare (UK)", number: "0808-8020-133"),
+            ]
+        case .german:
+            return [HelplineInfo(name: "BZgA Glücksspielsucht", number: "0800-1372700")]
+        case .french:
+            return [HelplineInfo(name: "Joueurs Info Service", number: "09 74 75 13 13")]
+        case .spanish:
+            return [HelplineInfo(name: "Línea de Atención al Juego", number: "024")]
+        case .italian:
+            return [HelplineInfo(name: "Telefono Verde Gioco d'Azzardo", number: "800-558-822")]
+        case .portuguesePT:
+            return [HelplineInfo(name: "Linha Vida (Portugal)", number: "213 950 911")]
+        case .portugueseBR:
+            return [HelplineInfo(name: "CVV — Centro de Valorização da Vida", number: "188")]
+        case .russian:
+            return [HelplineInfo(name: "Телефон доверия", number: "8-800-2000-122")]
+        case .japanese:
+            return [HelplineInfo(name: "ギャンブル依存症相談", number: "0570-064-556")]
+        case .korean:
+            return [HelplineInfo(name: "도박문제 상담전화", number: "1577-0199")]
+        case .arabic:
+            return [HelplineInfo(name: "National Problem Gambling Helpline", number: "1-800-522-4700")]
+        case .balkans:
+            return [HelplineInfo(name: "Centar za pomoć ovisnicima", number: "01 4833 888")]
+        }
+    }
+
+    // MARK: - Mission
+    static var missionStatement: String {
+        LanguageManager.shared.localized(
+            "%@ is built with one mission — to help anyone struggling with gambling take back control of their life. This app is completely free, with no hidden costs, no paywalls, and no ads. If even one person breaks free from gambling because of %@, we consider that mission accomplished.",
+            appName, appName
+        )
+    }
+
+    // MARK: - Legal
+    static var medicalDisclaimer: String {
+        LanguageManager.shared.localized(
+            "%@ is a self-help tool and is not a substitute for professional treatment. If you are experiencing a gambling crisis, please contact the National Problem Gambling Helpline at %@ or text %@.",
+            appName, helplineUS, helplineText
+        )
+    }
+
+    // MARK: - Storage Keys
+    enum StorageKeys {
+        static let hasCompletedOnboarding = "hasCompletedOnboarding"
+        static let biometricLockEnabled = "biometricLockEnabled"
+        static let lastPledgeDate = "lastPledgeDate"
+        static let lastCheckinDate = "lastCheckinDate"
+        static let morningReminderHour = "morningReminderHour"
+        static let morningReminderMinute = "morningReminderMinute"
+        static let eveningReminderHour = "eveningReminderHour"
+        static let eveningReminderMinute = "eveningReminderMinute"
+        static let hapticFeedbackEnabled = "hapticFeedbackEnabled"
+    }
+
+    // MARK: - SF Symbol Names
+    enum Icons {
+        static let streak = "flame.fill"
+        static let savings = "dollarsign.circle.fill"
+        static let pledge = "hand.raised.fill"
+        static let settings = "gearshape.fill"
+        static let lock = "lock.shield.fill"
+        static let unlock = "lock.open.fill"
+        static let calendar = "calendar"
+        static let checkmark = "checkmark.circle.fill"
+        static let checkmarkEmpty = "circle"
+        static let warning = "exclamationmark.triangle.fill"
+        static let heart = "heart.fill"
+        static let trophy = "trophy.fill"
+        static let chart = "chart.line.uptrend.xyaxis"
+        static let journal = "book.fill"
+        static let close = "xmark"
+        static let chevronRight = "chevron.right"
+        static let chevronLeft = "chevron.left"
+        static let house = "house.fill"
+        static let moon = "moon.fill"
+        static let sun = "sun.max.fill"
+        static let person = "person.fill"
+        static let clock = "clock.fill"
+        static let bell = "bell.fill"
+        static let bellSlash = "bell.slash.fill"
+        static let trash = "trash.fill"
+        static let info = "info.circle.fill"
+        static let money = "banknote.fill"
+        static let target = "target"
+        static let sparkles = "sparkles"
+        static let faceID = "faceid"
+        static let touchID = "touchid"
+        static let coffee = "cup.and.saucer.fill"
+        static let envelope = "envelope.fill"
+        static let paperplane = "paperplane.fill"
+        static let haptic = "hand.tap.fill"
+        static let contacts = "person.2.fill"
+        static let quote = "quote.opening"
+    }
+
+    // MARK: - Tip Products
+    enum TipProducts {
+        static let smallCoffee = "com.pekmario.BetFree.tip.small"
+        static let largeCoffee = "com.pekmario.BetFree.tip.large"
+    }
+
+    // MARK: - Image Asset Names
+    enum Images {
+        static let appLogo = "AppLogo"
+        static let appLogoShield = "AppLogoShield"
+        static let onboardingWelcome = "OnboardingWelcome"
+    }
+}
+```
+
+### BFCard.swift
+
+```swift
+import SwiftUI
+
+struct BFCard<Content: View>: View {
+    var padding: CGFloat = Spacing.md
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ColorPalette.surfacePrimary)
+            .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+            .shadow(
+                color: Spacing.Shadow.medium.color,
+                radius: Spacing.Shadow.medium.radius,
+                x: Spacing.Shadow.medium.x,
+                y: Spacing.Shadow.medium.y
+            )
+    }
+}
+
+struct BFGradientCard<Content: View>: View {
+    var gradient: LinearGradient = ColorPalette.primaryGradient
+    var padding: CGFloat = Spacing.lg
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(gradient)
+            .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.xl, style: .continuous))
+            .shadow(
+                color: Spacing.Shadow.large.color,
+                radius: Spacing.Shadow.large.radius,
+                x: Spacing.Shadow.large.x,
+                y: Spacing.Shadow.large.y
+            )
+    }
+}
+```
+
+### BFProgressRing.swift
+
+```swift
+import SwiftUI
+
+struct BFProgressRing: View {
+    let progress: Double // 0.0 to 1.0
+    var lineWidth: CGFloat = 12
+    var size: CGFloat = 120
+    var gradient: LinearGradient = ColorPalette.primaryGradient
+    var trackColor: Color = ColorPalette.surfaceSecondary
+
+    @State private var animatedProgress: Double = 0
+
+    var body: some View {
+        ZStack {
+            // Background track
+            Circle()
+                .stroke(trackColor, lineWidth: lineWidth)
+
+            // Progress ring
+            Circle()
+                .trim(from: 0, to: animatedProgress)
+                .stroke(
+                    gradient,
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            withAnimation(AnimationPresets.gentle) {
+                animatedProgress = min(progress, 1.0)
+            }
+        }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(AnimationPresets.smooth) {
+                animatedProgress = min(newValue, 1.0)
+            }
+        }
+    }
+}
+```
+
+### BFButton.swift
+
+```swift
+import SwiftUI
+
+struct BFButton: View {
+    enum Style {
+        case primary
+        case secondary
+        case destructive
+        case ghost
+    }
+
+    let title: LocalizedStringKey
+    var icon: String? = nil
+    var style: Style = .primary
+    var isLoading: Bool = false
+    var isDisabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Spacing.xs) {
+                if isLoading {
+                    ProgressView()
+                        .tint(foregroundColor)
+                } else {
+                    if let icon {
+                        Image(systemName: icon)
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    Text(title)
+                        .font(Typography.buttonLabel)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .foregroundStyle(foregroundColor)
+            .background(backgroundColor)
+            .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous)
+                    .stroke(borderColor, lineWidth: hasBorder ? 1.5 : 0)
+            )
+        }
+        .buttonStyle(BFButtonPressStyle())
+        .disabled(isDisabled || isLoading)
+        .opacity(isDisabled ? 0.5 : 1.0)
+    }
+
+    // MARK: - Style Helpers
+
+    private var foregroundColor: Color {
+        switch style {
+        case .primary: return ColorPalette.textOnPrimary
+        case .secondary: return ColorPalette.accent
+        case .destructive: return .white
+        case .ghost: return ColorPalette.textPrimary
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch style {
+        case .primary: return ColorPalette.accent
+        case .secondary: return ColorPalette.accent.opacity(0.1)
+        case .destructive: return ColorPalette.danger
+        case .ghost: return .clear
+        }
+    }
+
+    private var borderColor: Color {
+        switch style {
+        case .secondary: return ColorPalette.accent.opacity(0.3)
+        case .ghost: return ColorPalette.surfaceSecondary
+        default: return .clear
+        }
+    }
+
+    private var hasBorder: Bool {
+        style == .secondary || style == .ghost
+    }
+}
+
+// MARK: - Button Press Animation Style
+
+struct BFButtonPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(AnimationPresets.snappy, value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, isPressed in
+                if isPressed {
+                    HapticManager.lightImpact()
+                }
+            }
+    }
+}
+
+// MARK: - Small Button Variant
+
+struct BFSmallButton: View {
+    let title: LocalizedStringKey
+    var icon: String? = nil
+    var foreground: Color = ColorPalette.accent
+    var background: Color = ColorPalette.accent.opacity(0.1)
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Spacing.xxs) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Text(title)
+                    .font(Typography.subheadline(weight: .semibold))
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.xs)
+            .foregroundStyle(foreground)
+            .background(background)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(BFButtonPressStyle())
+    }
+}
+```
+
+## Checkpoint
+
+Before moving to the next lesson, verify every item:
+
+- [ ] `ColorPalette.swift` compiles with no warnings and all named colors resolve from the asset catalog
+- [ ] All gradient properties (`primaryGradient`, `streakGradient`, `savingsGradient`, `cardGradient`, `celebrationGradient`) render correctly in both light and dark mode
+- [ ] `Typography.swift` loads the Nunito custom font — verify by checking that text does not fall back to SF Pro
+- [ ] Every `Typography` function accepts a `weight` parameter and applies it correctly
+- [ ] `Spacing` values are on the 4pt grid: 4, 8, 12, 16, 20, 24, 32, 40, 48
+- [ ] `Spacing.Radius` values are separate from spacing values and appropriate for corner radii
+- [ ] `Spacing.Shadow` uses white-glow colors (white with low opacity) suitable for dark backgrounds
+- [ ] `AnimationPresets.snappy` feels responsive on button press (response: 0.3, damping: 0.7)
+- [ ] `AnimationPresets.gentle` creates a slow, satisfying fill for `BFProgressRing` on appear
+- [ ] `BFCard` renders with `surfacePrimary` background, `Radius.large` corners, and `Shadow.medium`
+- [ ] `BFGradientCard` defaults to `primaryGradient` and uses `Radius.xl` corners with `Shadow.large`
+- [ ] `BFProgressRing` animates from 0 to target on appear and re-animates on progress change
+- [ ] `BFProgressRing` starts from the 12 o'clock position (rotated -90 degrees)
+- [ ] `BFButton` renders correctly in all four styles: primary, secondary, destructive, ghost
+- [ ] `BFButton` loading state shows a `ProgressView` and disabled state reduces opacity to 0.5
+- [ ] `BFButtonPressStyle` applies a 0.97 scale-down on press with `AnimationPresets.snappy`
+- [ ] `BFSmallButton` renders as a compact capsule-shaped button with customizable colors
+- [ ] `AppConfig.appName` returns "BetAway"
+- [ ] No hardcoded color values exist outside of `ColorPalette.swift` — every component references the palette
+- [ ] No magic-number spacing — every padding, gap, and radius value uses `Spacing` tokens
+
+## Challenge
+
+Build a `BFStreakCard` view that combines `BFGradientCard` and `BFProgressRing` to display a user's current gambling-free streak. It should take a `currentDay: Int` and `goalDays: Int`, calculate the progress as a fraction, and display the day count inside the ring using `Typography.streakCounter`. Below the ring, show a motivational message and a `BFSmallButton` labeled "Share Milestone" that triggers a share action. Use `ColorPalette.streakGradient` for the card background and the ring gradient.
+
+<details>
+<summary>Hint</summary>
+
+Use `BFGradientCard` with a custom gradient parameter, and nest the `BFProgressRing` inside it. Calculate progress with `Double(currentDay) / Double(goalDays)` and clamp it to 1.0. Overlay the day count on the ring using a `ZStack`:
+
+```swift
+BFGradientCard(gradient: ColorPalette.streakGradient) {
+    VStack(spacing: Spacing.md) {
+        ZStack {
+            BFProgressRing(
+                progress: min(Double(currentDay) / Double(goalDays), 1.0),
+                lineWidth: 10,
+                size: 140,
+                gradient: ColorPalette.streakGradient,
+                trackColor: .white.opacity(0.2)
+            )
+            Text("\(currentDay)")
+                .font(Typography.streakCounter)
+                .foregroundStyle(ColorPalette.textOnPrimary)
+        }
+
+        Text("days gambling-free")
+            .font(Typography.headline())
+            .foregroundStyle(ColorPalette.textOnPrimary.opacity(0.9))
+
+        BFSmallButton(
+            title: "Share Milestone",
+            icon: AppConfig.Icons.paperplane,
+            foreground: .white,
+            background: .white.opacity(0.2)
+        ) {
+            // Share action
+        }
+    }
+}
+```
+
+Use `AnimationPresets.bouncy` if you want the day count to animate when it changes.
+</details>

@@ -1,0 +1,1204 @@
+---
+title: "Search, Filter & Sort"
+description: "Build BetFree's journal list, progress analytics, and time-range filtering using SwiftData @Query, SwiftUI Charts, and client-side filtering with ProgressViewModel."
+courseSlug: "ship-native"
+module: 3
+moduleTitle: "Data Layer & Persistence"
+lesson: 2
+duration: "22 min read"
+difficulty: "intermediate"
+topics: ["SwiftData", "Query", "Filtering", "Sorting", "Search", "Charts", "Progress Analytics", "BetFree"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Our models can create, read, update, and delete recovery check-ins, journal entries, and urge logs. That is necessary, but not sufficient. Users do not browse raw lists of data — they want to see their mood trends over the last week, filter journal entries by mood, spot their most common triggers, and sort entries to find patterns. This lesson adds that querying and visualization power using SwiftData's `@Query` macro, `SortDescriptor`, SwiftUI Charts, and a `ProgressViewModel` that computes analytics from raw data.
+
+We are going to build three things: a `JournalView` with a sorted, searchable list of journal entries; a `ProgressAnalyticsView` with mood trend charts, urge frequency charts, trigger breakdowns, and summary stats; and a `ProgressViewModel` that transforms raw SwiftData model arrays into chart-ready data points with configurable time ranges. By the end, BetFree will feel like a real tool for recovery insight — not just a data dump.
+
+## What You'll Learn
+
+- How to use SwiftData's `@Query` macro with `sort` and `order` parameters for declarative data fetching
+- Building a `ProgressViewModel` that computes mood trends, urge frequency, trigger rankings, and summary statistics from raw model arrays
+- Using SwiftUI Charts (`LineMark`, `AreaMark`, `PointMark`, `BarMark`) to visualize recovery data
+- Implementing time-range filtering (7D, 30D, 90D) with client-side `Calendar`-based date math
+- Creating a journal list with `NavigationLink`, context menus for deletion, and staggered entrance animations
+- Building a journal entry form with mood selection, writing prompts, and edit/create modes
+
+## Why This Matters
+
+BetFree is a recovery app. Recovery data accumulates fast — a user who checks in twice daily and logs urges has hundreds of records after a few months. Showing all of them in a flat list is useless. The value of a recovery app is in the ability to ask questions: "Is my mood trending up?" "How many urges did I resist this week?" "What are my top triggers?" Without filtering and visualization, the data exists but the insight does not.
+
+On the technical side, this is where SwiftData's `@Query` macro earns its place. It provides declarative, reactive data fetching — when a new check-in is inserted, the query automatically updates and SwiftUI re-renders. Combined with SwiftUI Charts for visualization and a ViewModel for computed analytics, we get a full data-to-insight pipeline with minimal boilerplate.
+
+## Plan Phase
+
+### The Prompt
+
+```
+I need to add journal browsing and progress analytics to BetFree.
+Before writing any code, think through:
+
+1. Journal: How should we display journal entries? Sorted by date,
+   with mood emoji, title preview, content preview, and prompt tag.
+   Users need to create, edit, and delete entries.
+
+2. Progress analytics: What metrics matter for gambling recovery?
+   - Mood trend over time (line chart from check-in mood data)
+   - Urge frequency over time (bar chart from urge logs)
+   - Top triggers (ranked list from urge logs)
+   - Summary stats: resist rate, total urges, journal entries, pledges
+
+3. Time-range filtering: Users should switch between 7-day, 30-day,
+   and 90-day views. How do we filter the data?
+
+4. What data structures does the ViewModel need to produce for
+   the chart views?
+
+Then outline the files we need and their responsibilities.
+```
+
+### Analysis
+
+Claude Code's plan should identify these pieces:
+
+1. **JournalView.swift** — A list of journal entries using `@Query(sort: \JournalEntry.createdAt, order: .reverse)`. Each row shows mood emoji, title, content preview, date, and prompt tag. Tapping navigates to detail. Context menu for deletion.
+
+2. **JournalEntryView.swift** — The create/edit form with mood selection, writing prompts, title, and content. Handles both new entries and editing existing ones.
+
+3. **JournalDetailView.swift** — Full-screen view of a single journal entry with edit and delete actions.
+
+4. **ProgressAnalyticsView.swift** — The analytics dashboard with time-range picker, summary stats, mood chart, urge chart, and trigger breakdown.
+
+5. **ProgressViewModel.swift** — An `@Observable` class that takes raw `[DailyCheckin]`, `[UrgeLog]`, and `[JournalEntry]` arrays and computes chart-ready data structures for each time range.
+
+This separation is correct. The `@Query` macro in the views fetches raw data. The ViewModel transforms it into chart-compatible structures. The views render the charts. If the AI suggests putting chart computation logic inside the view, push back — that couples presentation to data transformation.
+
+### Anti-Pattern: Client-Side Over-Fetching
+
+Here is what we are NOT going to do:
+
+```swift
+// BAD — fetching everything, no sorting at the database level
+@Query private var entries: [JournalEntry]
+
+// Then manually sorting in the view
+var sortedEntries: [JournalEntry] {
+    entries.sorted { $0.createdAt > $1.createdAt }
+}
+```
+
+SwiftData's `@Query` macro accepts `sort` and `order` parameters that push sorting down to the SQLite layer. Use them. Sorting in Swift after fetching is O(n log n) on every re-render. Sorting at the database level is O(n log n) once, cached by SQLite. For a journal with 500 entries, the difference is measurable.
+
+The second anti-pattern is computing analytics on every frame:
+
+```swift
+// BAD — recomputing chart data inside the view body
+var body: some View {
+    let moodData = computeMoodTrend(from: checkins) // Called on EVERY render
+    Chart(moodData) { ... }
+}
+```
+
+Move chart computation into the ViewModel so it can be called explicitly when the time range changes, not on every SwiftUI render cycle.
+
+## Execute Phase
+
+### JournalEntry Model
+
+The journal entry model stores mood, title, content, and an optional writing prompt. It relates to `UserProfile` through a SwiftData relationship.
+
+```swift
+// JournalEntry.swift
+
+import Foundation
+import SwiftData
+
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
+
+    @Relationship(inverse: \UserProfile.journalEntries) var userProfile: UserProfile?
+
+    var moodRating: MoodRating? {
+        get { MoodRating(rawValue: mood) }
+        set { mood = newValue?.rawValue ?? 3 }
+    }
+
+    init(
+        title: String = "",
+        content: String = "",
+        mood: MoodRating = .neutral,
+        promptUsed: String = ""
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.title = title
+        self.content = content
+        self.mood = mood.rawValue
+        self.promptUsed = promptUsed
+    }
+}
+```
+
+**Review:**
+
+- The `mood` field stores the raw `Int` value from `MoodRating`. The computed `moodRating` property converts back and forth. This is the same pattern used in `DailyCheckin` — raw storage with type-safe computed access.
+- `promptUsed` stores the raw value of a `JournalPrompt` enum case (e.g., "What am I grateful for?"). This records which prompt the user chose, so the detail view can display it as a tag.
+- The init takes `MoodRating` directly — no raw value conversion needed at the call site.
+
+### JournalView — The Sorted List
+
+This view uses `@Query` with sorting to display journal entries in reverse chronological order.
+
+```swift
+// JournalView.swift
+
+import SwiftUI
+import SwiftData
+
+struct JournalView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var entries: [JournalEntry]
+    @Query private var profiles: [UserProfile]
+    @State private var showNewEntry = false
+    @State private var isVisible = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ZStack {
+            ColorPalette.background
+                .ignoresSafeArea()
+
+            if entries.isEmpty {
+                emptyState
+            } else {
+                entryList
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showNewEntry = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(ColorPalette.accent)
+                }
+            }
+        }
+        .sheet(isPresented: $showNewEntry) {
+            NavigationStack {
+                JournalEntryView(profile: profile)
+            }
+        }
+        .onAppear { isVisible = true }
+    }
+
+    // MARK: - Empty State
+
+    private var emptyState: some View {
+        VStack(spacing: Spacing.lg) {
+            Image(systemName: AppConfig.Icons.journal)
+                .font(.system(size: 48))
+                .foregroundStyle(ColorPalette.textTertiary)
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+            VStack(spacing: Spacing.xs) {
+                Text("Your journal is empty")
+                    .font(Typography.title3())
+                    .foregroundStyle(ColorPalette.textPrimary)
+
+                Text("Writing about your feelings helps\nprocess emotions and track patterns.")
+                    .font(Typography.callout())
+                    .foregroundStyle(ColorPalette.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .staggeredAppear(index: 1, isVisible: isVisible)
+
+            BFButton(title: "Write First Entry", icon: "pencil.line") {
+                showNewEntry = true
+            }
+            .padding(.horizontal, Spacing.xxl)
+            .staggeredAppear(index: 2, isVisible: isVisible)
+        }
+    }
+
+    // MARK: - Entry List
+
+    private var entryList: some View {
+        ScrollView {
+            LazyVStack(spacing: Spacing.sm) {
+                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                    NavigationLink(destination: JournalDetailView(entry: entry)) {
+                        JournalEntryCard(entry: entry)
+                    }
+                    .buttonStyle(.plain)
+                    .staggeredAppear(index: index, isVisible: isVisible)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            withAnimation(AnimationPresets.smooth) {
+                                modelContext.delete(entry)
+                            }
+                        } label: {
+                            Label("Delete Entry", systemImage: AppConfig.Icons.trash)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.sm)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+```
+
+**The critical line is the `@Query` declaration:**
+
+```swift
+@Query(sort: \JournalEntry.createdAt, order: .reverse) private var entries: [JournalEntry]
+```
+
+This tells SwiftData to fetch all `JournalEntry` records sorted by `createdAt` in reverse order (newest first). The sort happens at the SQLite level, not in Swift. The query is **reactive** — when a new entry is inserted anywhere in the app, SwiftUI automatically re-renders this list with the new entry at the top. No manual refresh needed.
+
+**Other patterns worth noting:**
+
+- **`LazyVStack` instead of `List`** — we use `LazyVStack` inside a `ScrollView` for full control over styling. `List` imposes its own cell styling, separators, and background colors that would clash with our design system.
+- **`contextMenu` for deletion** — long-pressing a journal card shows a context menu with "Delete Entry." The deletion is wrapped in `withAnimation(AnimationPresets.smooth)` so the card animates out instead of popping.
+- **`staggeredAppear(index:isVisible:)`** — each card gets its index, creating a cascading entrance animation when the view first appears. The `LazyVStack` means only visible cards are rendered, so the stagger only applies to the initial viewport.
+
+### JournalEntryCard — The Row Component
+
+Each journal entry in the list is displayed as a card:
+
+```swift
+// JournalEntryCard — used in JournalView
+
+struct JournalEntryCard: View {
+    let entry: JournalEntry
+
+    private var dateFormatted: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: entry.createdAt)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack {
+                if let mood = entry.moodRating {
+                    Text(mood.emoji)
+                        .font(.system(size: 20))
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.title.isEmpty ? "Untitled" : entry.title)
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+                        .lineLimit(1)
+
+                    Text(dateFormatted)
+                        .font(Typography.caption())
+                        .foregroundStyle(ColorPalette.textTertiary)
+                }
+
+                Spacer()
+
+                Image(systemName: AppConfig.Icons.chevronRight)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+
+            if !entry.content.isEmpty {
+                Text(entry.content)
+                    .font(Typography.callout())
+                    .foregroundStyle(ColorPalette.textSecondary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }
+
+            if !entry.promptUsed.isEmpty {
+                HStack(spacing: Spacing.xxs) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10))
+                    Text(entry.promptUsed)
+                        .font(Typography.caption())
+                        .lineLimit(1)
+                }
+                .foregroundStyle(ColorPalette.accent.opacity(0.7))
+            }
+        }
+        .padding(Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.medium, style: .continuous))
+    }
+}
+```
+
+The card shows four pieces of information in a compact layout: mood emoji + title + date in the header row, content preview (3-line limit) in the body, and the prompt tag at the bottom (only if a prompt was used). The sparkles icon next to the prompt tag signals "this entry was prompted" — a visual cue that helps users spot patterns in what prompts resonate.
+
+### JournalEntryView — Create and Edit
+
+The journal entry form handles both creating new entries and editing existing ones. The same view, different modes.
+
+```swift
+// JournalEntryView.swift
+
+import SwiftUI
+import SwiftData
+
+struct JournalEntryView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    let profile: UserProfile?
+    var editingEntry: JournalEntry?
+
+    @State private var title = ""
+    @State private var content = ""
+    @State private var selectedMood: MoodRating = .neutral
+    @State private var selectedPrompt: JournalPrompt?
+    @State private var isVisible = false
+
+    private var isEditing: Bool { editingEntry != nil }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xl) {
+                // Mood selector
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("How are you feeling?")
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    HStack(spacing: Spacing.md) {
+                        ForEach(MoodRating.allCases) { mood in
+                            Button {
+                                withAnimation(AnimationPresets.snappy) {
+                                    selectedMood = mood
+                                }
+                            } label: {
+                                VStack(spacing: Spacing.xxs) {
+                                    Text(mood.emoji)
+                                        .font(.system(size: selectedMood == mood ? 36 : 28))
+
+                                    Text(mood.label)
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(
+                                            selectedMood == mood
+                                                ? ColorPalette.accent
+                                                : ColorPalette.textTertiary
+                                        )
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, Spacing.xs)
+                                .background(
+                                    selectedMood == mood
+                                        ? ColorPalette.accent.opacity(0.1)
+                                        : Color.clear
+                                )
+                                .clipShape(RoundedRectangle(
+                                    cornerRadius: Spacing.Radius.small, style: .continuous
+                                ))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+                // Prompts (hide when editing)
+                if !isEditing {
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Need a prompt?")
+                            .font(Typography.headline())
+                            .foregroundStyle(ColorPalette.textPrimary)
+
+                        FlowLayout(spacing: Spacing.xs) {
+                            ForEach(JournalPrompt.allCases) { prompt in
+                                Button {
+                                    withAnimation(AnimationPresets.snappy) {
+                                        if selectedPrompt == prompt {
+                                            selectedPrompt = nil
+                                        } else {
+                                            selectedPrompt = prompt
+                                            if title.isEmpty {
+                                                title = prompt.localizedName
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Text(prompt.localizedName)
+                                        .font(Typography.caption(weight: .medium))
+                                        .padding(.horizontal, Spacing.sm)
+                                        .padding(.vertical, Spacing.xs)
+                                        .foregroundStyle(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.textOnPrimary
+                                                : ColorPalette.textPrimary
+                                        )
+                                        .background(
+                                            selectedPrompt == prompt
+                                                ? ColorPalette.accent
+                                                : ColorPalette.surfaceSecondary
+                                        )
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(BFButtonPressStyle())
+                            }
+                        }
+                    }
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+                }
+
+                // Title
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("Title (optional)")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+
+                    TextField("What's on your mind?", text: $title)
+                        .font(Typography.body())
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                }
+
+                // Content
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("Write your thoughts")
+                        .font(Typography.subheadline(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+
+                    TextField("Start writing...", text: $content, axis: .vertical)
+                        .font(Typography.body())
+                        .lineLimit(6...12)
+                        .padding(Spacing.sm)
+                        .background(ColorPalette.surfaceSecondary)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: Spacing.Radius.medium, style: .continuous
+                        ))
+                }
+
+                // Save button
+                BFButton(
+                    title: isEditing ? LocalizedStringKey("Save Changes")
+                                     : LocalizedStringKey("Save Entry"),
+                    icon: AppConfig.Icons.checkmark
+                ) {
+                    saveEntry()
+                }
+                .disabled(content.isEmpty)
+                .opacity(content.isEmpty ? 0.5 : 1.0)
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationTitle(isEditing ? "Edit Entry" : "New Entry")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { dismiss() }
+                    .foregroundStyle(ColorPalette.textSecondary)
+            }
+        }
+        .onAppear {
+            if let entry = editingEntry {
+                title = entry.title
+                content = entry.content
+                selectedMood = entry.moodRating ?? .neutral
+                if !entry.promptUsed.isEmpty {
+                    selectedPrompt = JournalPrompt.allCases
+                        .first { $0.rawValue == entry.promptUsed }
+                }
+            }
+            isVisible = true
+        }
+    }
+
+    private func saveEntry() {
+        if let entry = editingEntry {
+            entry.title = title
+            entry.content = content
+            entry.moodRating = selectedMood
+            entry.promptUsed = selectedPrompt?.rawValue ?? entry.promptUsed
+        } else {
+            let entry = JournalEntry(
+                title: title,
+                content: content,
+                mood: selectedMood,
+                promptUsed: selectedPrompt?.rawValue ?? ""
+            )
+            entry.userProfile = profile
+            modelContext.insert(entry)
+        }
+        dismiss()
+    }
+}
+
+// MARK: - Journal Prompts
+
+enum JournalPrompt: String, CaseIterable, Identifiable {
+    case gratitude = "What am I grateful for?"
+    case trigger = "What triggered me today?"
+    case wins = "What went well today?"
+    case feelings = "How am I feeling right now?"
+    case future = "What do I look forward to?"
+    case challenge = "What challenged me?"
+    case growth = "How have I grown?"
+    case support = "Who supports me?"
+
+    var id: String { rawValue }
+
+    var localizedName: String {
+        LanguageManager.shared.bundle.localizedString(
+            forKey: rawValue, value: nil, table: nil
+        )
+    }
+}
+```
+
+**Key design decisions:**
+
+- **Single view for create and edit.** The `editingEntry` parameter is optional. If nil, it creates a new entry. If provided, it populates the fields from the existing entry and saves changes to it. This avoids duplicating the entire form.
+- **Prompt auto-fills the title.** When the user selects a prompt (e.g., "What am I grateful for?"), the title field auto-fills with that prompt text — but only if the title is empty. If the user already typed a title, the prompt does not overwrite it.
+- **The save button is disabled when content is empty.** Title is optional, prompt is optional, but content is required. The button dims to 50% opacity with `.disabled(content.isEmpty)`. This is a visual + functional guard.
+- **Prompts section is hidden in edit mode.** When editing an existing entry, the prompts are not relevant — the user already picked one (or did not) when they created the entry.
+
+## Iteration: ProgressViewModel
+
+The journal list handles fetching and display with `@Query`. But progress analytics requires computation — we need to transform raw arrays of check-ins and urge logs into chart-ready data structures. That is the ProgressViewModel's job.
+
+```swift
+// ProgressViewModel.swift
+
+import SwiftUI
+import SwiftData
+
+@Observable
+final class ProgressViewModel {
+    var selectedTimeRange: TimeRange = .week
+
+    enum TimeRange: String, CaseIterable, Identifiable {
+        case week = "7D"
+        case month = "30D"
+        case threeMonths = "90D"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(
+                forKey: rawValue, value: nil, table: nil
+            )
+        }
+
+        var days: Int {
+            switch self {
+            case .week: return 7
+            case .month: return 30
+            case .threeMonths: return 90
+            }
+        }
+    }
+
+    // MARK: - Mood Chart Data
+
+    struct MoodDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let value: Double
+        let label: String
+    }
+
+    func moodData(from checkins: [DailyCheckin], days: Int) -> [MoodDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today)
+            else { return nil }
+
+            let dayCheckins = checkins.filter {
+                calendar.isDate($0.date, inSameDayAs: date)
+            }
+            guard !dayCheckins.isEmpty else { return nil }
+
+            let avgMood = Double(dayCheckins.map(\.mood).reduce(0, +))
+                        / Double(dayCheckins.count)
+            let label = MoodRating(rawValue: Int(avgMood.rounded())) ?? .neutral
+
+            return MoodDataPoint(date: date, value: avgMood, label: label.emoji)
+        }
+        .reversed()
+    }
+
+    // MARK: - Urge Chart Data
+
+    struct UrgeDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let count: Int
+        let avgIntensity: Double
+    }
+
+    func urgeData(from urgeLogs: [UrgeLog], days: Int) -> [UrgeDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today)
+            else { return nil }
+
+            let dayUrges = urgeLogs.filter {
+                calendar.isDate($0.timestamp, inSameDayAs: date)
+            }
+            let avgIntensity = dayUrges.isEmpty
+                ? 0
+                : Double(dayUrges.map(\.intensity).reduce(0, +))
+                  / Double(dayUrges.count)
+
+            return UrgeDataPoint(
+                date: date, count: dayUrges.count, avgIntensity: avgIntensity
+            )
+        }
+        .reversed()
+    }
+
+    // MARK: - Trigger Stats
+
+    struct TriggerStat: Identifiable {
+        let id = UUID()
+        let trigger: PredefinedTrigger
+        let count: Int
+        let percentage: Double
+    }
+
+    func topTriggers(from urgeLogs: [UrgeLog], limit: Int = 5) -> [TriggerStat] {
+        let triggeredLogs = urgeLogs.filter { !$0.triggerRaw.isEmpty }
+        guard !triggeredLogs.isEmpty else { return [] }
+
+        var counts: [String: Int] = [:]
+        for log in triggeredLogs {
+            counts[log.triggerRaw, default: 0] += 1
+        }
+
+        let total = Double(triggeredLogs.count)
+
+        return counts
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .compactMap { key, value in
+                guard let trigger = PredefinedTrigger(rawValue: key)
+                else { return nil }
+                return TriggerStat(
+                    trigger: trigger,
+                    count: value,
+                    percentage: Double(value) / total
+                )
+            }
+    }
+
+    // MARK: - Summary Stats
+
+    struct SummaryStats {
+        let totalUrges: Int
+        let resistedUrges: Int
+        let resistRate: Double
+        let avgMood: Double
+        let journalEntries: Int
+        let pledgesMade: Int
+    }
+
+    func summaryStats(
+        urgeLogs: [UrgeLog],
+        checkins: [DailyCheckin],
+        journalEntries: [JournalEntry],
+        days: Int
+    ) -> SummaryStats {
+        let calendar = Calendar.current
+        let cutoff = calendar.date(byAdding: .day, value: -days, to: Date())
+                   ?? Date()
+
+        let periodUrges = urgeLogs.filter { $0.timestamp >= cutoff }
+        let periodCheckins = checkins.filter { $0.date >= cutoff }
+        let periodJournals = journalEntries.filter { $0.createdAt >= cutoff }
+
+        let resisted = periodUrges.filter(\.didResist).count
+        let resistRate = periodUrges.isEmpty
+            ? 1.0
+            : Double(resisted) / Double(periodUrges.count)
+
+        let moodCheckins = periodCheckins.filter { $0.mood > 0 }
+        let avgMood = moodCheckins.isEmpty
+            ? 3.0
+            : Double(moodCheckins.map(\.mood).reduce(0, +))
+              / Double(moodCheckins.count)
+
+        let pledges = periodCheckins
+            .filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }
+            .count
+
+        return SummaryStats(
+            totalUrges: periodUrges.count,
+            resistedUrges: resisted,
+            resistRate: resistRate,
+            avgMood: avgMood,
+            journalEntries: periodJournals.count,
+            pledgesMade: pledges
+        )
+    }
+}
+```
+
+**This ViewModel is the data transformation layer.** Let me walk through each method.
+
+**`moodData(from:days:)`** iterates backward from today through the specified number of days. For each day, it finds all check-ins that fall on that date using `calendar.isDate(_:inSameDayAs:)`, averages their mood values, and produces a `MoodDataPoint`. Days with no check-ins are skipped (`compactMap` + `guard !dayCheckins.isEmpty`), which creates gaps in the chart where the user did not check in. The result is reversed so the chart reads left-to-right (oldest to newest).
+
+**`urgeData(from:days:)`** follows the same pattern but counts urges per day instead of averaging mood. Days with zero urges still produce a data point with `count: 0` — these show as zero-height bars in the chart, which is meaningful ("no urges today" is worth displaying).
+
+**`topTriggers(from:limit:)`** counts how many times each trigger appears across all urge logs, sorts by frequency, and takes the top 5. The `percentage` field is used by the view to render proportional progress bars. This is a simple frequency analysis that surfaces which triggers are most dangerous for this user.
+
+**`summaryStats(urgeLogs:checkins:journalEntries:days:)`** computes four key metrics filtered to the selected time range: resist rate (urges resisted / total urges), total urges, journal entries written, and pledges taken. The default resist rate is 1.0 (100%) when there are no urges — because the user never gave in.
+
+### ProgressAnalyticsView — The Dashboard
+
+This is the main analytics view. It combines the time-range picker, summary cards, mood chart, urge chart, and trigger breakdown.
+
+```swift
+// ProgressAnalyticsView.swift (key sections)
+
+import SwiftUI
+import SwiftData
+import Charts
+
+struct ProgressAnalyticsView: View {
+    @Query private var profiles: [UserProfile]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse)
+        private var journalEntries: [JournalEntry]
+    @State private var viewModel = ProgressViewModel()
+    @State private var isVisible = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                timeRangePicker
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+                summaryCards
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+                moodChart
+                    .staggeredAppear(index: 2, isVisible: isVisible)
+                urgeChart
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+                triggersSection
+                    .staggeredAppear(index: 4, isVisible: isVisible)
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { isVisible = true }
+    }
+
+    // MARK: - Time Range Picker
+
+    private var timeRangePicker: some View {
+        HStack(spacing: Spacing.xs) {
+            ForEach(ProgressViewModel.TimeRange.allCases) { range in
+                Button {
+                    withAnimation(AnimationPresets.snappy) {
+                        viewModel.selectedTimeRange = range
+                    }
+                } label: {
+                    Text(range.localizedName)
+                        .font(Typography.subheadline(weight: .semibold))
+                        .padding(.horizontal, Spacing.md)
+                        .padding(.vertical, Spacing.xs)
+                        .foregroundStyle(
+                            viewModel.selectedTimeRange == range
+                                ? ColorPalette.textOnPrimary
+                                : ColorPalette.textSecondary
+                        )
+                        .background(
+                            viewModel.selectedTimeRange == range
+                                ? ColorPalette.accent
+                                : ColorPalette.surfaceSecondary
+                        )
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(BFButtonPressStyle())
+            }
+            Spacer()
+        }
+    }
+}
+```
+
+**The three `@Query` declarations are the data pipeline:**
+
+```swift
+@Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+@Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+@Query(sort: \JournalEntry.createdAt, order: .reverse) private var journalEntries: [JournalEntry]
+```
+
+Each `@Query` fetches all records of that type, sorted newest-first at the database level. The ViewModel's methods then filter these arrays by the selected time range. This approach — fetch all, filter in the ViewModel — works well for the data volumes in a personal recovery app (hundreds to low thousands of records). For larger datasets, you would use `#Predicate` in a `FetchDescriptor` instead.
+
+### Mood Trend Chart
+
+The mood chart uses SwiftUI Charts to render a line with an area fill and point marks:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var moodChart: some View {
+    let data = viewModel.moodData(
+        from: checkins, days: viewModel.selectedTimeRange.days
+    )
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "face.smiling")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Mood Trend")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if data.isEmpty {
+                emptyChartState(message: "Check in daily to see your mood trends")
+            } else {
+                Chart(data) { point in
+                    LineMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .interpolationMethod(.catmullRom)
+
+                    AreaMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                ColorPalette.accent.opacity(0.3),
+                                ColorPalette.accent.opacity(0.05)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .symbolSize(30)
+                }
+                .chartYScale(domain: 1...5)
+                .chartYAxis {
+                    AxisMarks(values: [1, 2, 3, 4, 5]) { value in
+                        AxisValueLabel {
+                            if let intVal = value.as(Int.self) {
+                                Text(MoodRating(rawValue: intVal)?.emoji ?? "")
+                                    .font(.system(size: 12))
+                            }
+                        }
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .frame(height: 180)
+            }
+        }
+    }
+}
+```
+
+**Chart construction details:**
+
+- **Three mark types layered:** `LineMark` draws the trend line. `AreaMark` fills below it with a gradient fade. `PointMark` adds dots at each data point. This layering creates a polished chart that is more visually appealing than a plain line.
+- **`.interpolationMethod(.catmullRom)`** — smooth curves instead of straight line segments between points. Catmull-Rom interpolation passes through every data point (unlike Bezier, which approximates), so the chart is both smooth and accurate.
+- **Y-axis uses emoji labels.** Instead of numbers 1-5, the Y-axis shows the mood emoji at each level. `AxisMarks(values: [1, 2, 3, 4, 5])` with a custom `AxisValueLabel` maps each integer to `MoodRating(rawValue:)?.emoji`. This makes the chart instantly readable — you can see your mood trend without reading numbers.
+- **`.chartYScale(domain: 1...5)`** — fixed Y-axis range. Without this, the chart would auto-scale to the data range, making a user who is always in the 3-4 range look like they are swinging between extremes. The fixed 1-5 range preserves context.
+
+### Urge Frequency Chart
+
+The urge chart uses bar marks, colored by whether urges occurred:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var urgeChart: some View {
+    let data = viewModel.urgeData(
+        from: urgeLogs, days: viewModel.selectedTimeRange.days
+    )
+    let hasData = data.contains { $0.count > 0 }
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(ColorPalette.danger)
+                Text("Urge Frequency")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if !hasData {
+                emptyChartState(message: "No urges logged yet — that's great!")
+            } else {
+                Chart(data) { point in
+                    BarMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Count", point.count)
+                    )
+                    .foregroundStyle(
+                        point.count == 0
+                            ? ColorPalette.success.opacity(0.3)
+                            : ColorPalette.danger.opacity(0.7)
+                    )
+                    .cornerRadius(4)
+                }
+                .chartYAxis {
+                    AxisMarks { _ in
+                        AxisValueLabel()
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                    }
+                }
+                .frame(height: 150)
+            }
+        }
+    }
+}
+```
+
+The color coding is significant: days with urges are red (`ColorPalette.danger`), days without are faint green (`ColorPalette.success.opacity(0.3)`). This means zero-urge days are still visible as subtle green bars — a visual reward for clean days. The empty state message ("No urges logged yet — that's great!") frames the absence of data positively.
+
+### Top Triggers Section
+
+The trigger breakdown shows a ranked list with proportional progress bars:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var triggersSection: some View {
+    let triggers = viewModel.topTriggers(from: urgeLogs)
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "bolt.fill")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Top Triggers")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if triggers.isEmpty {
+                emptyChartState(message: "Triggers will appear as you log urges")
+            } else {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(triggers) { stat in
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: stat.trigger.icon)
+                                .font(.system(size: 14))
+                                .foregroundStyle(ColorPalette.warning)
+                                .frame(width: 24)
+
+                            Text(stat.trigger.localizedName)
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textPrimary)
+                                .lineLimit(1)
+
+                            Spacer()
+
+                            Text("\(stat.count)x")
+                                .font(Typography.subheadline(weight: .semibold))
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.surfaceSecondary)
+                                    .frame(height: 4)
+
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.warning)
+                                    .frame(
+                                        width: geo.size.width * stat.percentage,
+                                        height: 4
+                                    )
+                            }
+                        }
+                        .frame(height: 4)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Each trigger shows its SF Symbol icon, localized name, occurrence count, and a proportional bar. The bar width is `geo.size.width * stat.percentage` — so the most frequent trigger fills the full width, and others are proportional. This gives an instant visual ranking without needing to compare numbers.
+
+### Summary Stats Cards
+
+The summary cards show four key metrics in a 2x2 grid:
+
+```swift
+// Inside ProgressAnalyticsView
+
+private var summaryCards: some View {
+    let stats = viewModel.summaryStats(
+        urgeLogs: urgeLogs,
+        checkins: checkins,
+        journalEntries: journalEntries,
+        days: viewModel.selectedTimeRange.days
+    )
+
+    return VStack(spacing: Spacing.sm) {
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: "shield.checkered",
+                title: "Resist Rate",
+                value: "\(Int(stats.resistRate * 100))%",
+                color: stats.resistRate >= 0.8
+                    ? ColorPalette.success : ColorPalette.warning
+            )
+            StatMiniCard(
+                icon: "exclamationmark.shield.fill",
+                title: "Urges",
+                value: "\(stats.totalUrges)",
+                color: ColorPalette.danger
+            )
+        }
+
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: AppConfig.Icons.journal,
+                title: "Journal",
+                value: "\(stats.journalEntries)",
+                color: ColorPalette.infoBadge
+            )
+            StatMiniCard(
+                icon: AppConfig.Icons.pledge,
+                title: "Pledges",
+                value: "\(stats.pledgesMade)",
+                color: ColorPalette.accent
+            )
+        }
+    }
+}
+```
+
+The resist rate card color-codes itself: green when 80%+ ("you're doing great"), yellow below 80% ("room for improvement"). This is a subtle but motivating visual cue. The `.contentTransition(.numericText())` modifier on the `StatMiniCard` value text means switching time ranges animates the number change instead of popping.
+
+### X-Axis Stride
+
+The X-axis label density adjusts based on the selected time range:
+
+```swift
+private var xAxisStride: Int {
+    switch viewModel.selectedTimeRange {
+    case .week: return 1      // Label every day
+    case .month: return 7     // Label every 7 days
+    case .threeMonths: return 14  // Label every 14 days
+    }
+}
+```
+
+Without this, the 90-day view would have 90 X-axis labels overlapping each other. The stride ensures labels are always readable — daily for the week view, weekly for the month, biweekly for the quarter.
+
+## Verify Phase
+
+Build and run. Here is what to test:
+
+1. **Journal — empty state.** With no journal entries, the empty state should show with "Your journal is empty" and a "Write First Entry" button.
+
+2. **Journal — create entry.** Tap the + button. Select a mood. Pick a prompt — the title should auto-fill. Write content. Save. The entry should appear at the top of the list with the mood emoji, title, content preview, and prompt tag.
+
+3. **Journal — edit and delete.** Tap an entry to see the detail view. Tap the menu → Edit. Change the content. Save. The list should reflect the update. Long-press an entry → Delete. The card should animate out.
+
+4. **Progress — time range switching.** Open the progress tab. Tap 7D, 30D, 90D. The summary stats should change with each range. The charts should update. Verify the resist rate percentage changes when switching ranges.
+
+5. **Progress — mood chart.** With multiple check-ins at different mood levels, the mood chart should show a line with emoji Y-axis labels. Verify the Catmull-Rom interpolation creates smooth curves.
+
+6. **Progress — urge chart.** With some urge logs, the bar chart should show red bars on urge days and subtle green on clean days. Verify the "No urges logged" empty state appears when there are no urge logs.
+
+7. **Progress — triggers.** With urge logs that have different triggers selected, the top triggers section should show a ranked list with proportional bars.
+
+## Checkpoint
+
+At this point in BetFree, the data layer and visualization are fully capable:
+
+- Journal entries can be created, edited, and deleted with mood, prompts, and full-text content
+- The journal list uses `@Query` with database-level sorting for reactive, efficient display
+- Progress analytics show mood trends (line chart), urge frequency (bar chart), trigger rankings, and summary statistics
+- Time-range filtering (7D, 30D, 90D) works through Calendar-based date math in the ViewModel
+- SwiftUI Charts renders publication-quality visualizations with custom axis labels, gradients, and color coding
+
+Before moving on, verify:
+
+1. Build succeeds with zero warnings
+2. Journal list shows entries sorted newest-first
+3. Creating a new entry immediately appears at the top of the list (reactive `@Query`)
+4. Progress charts render correctly for each time range
+5. Summary stats update when switching time ranges
+6. Empty states display correctly when there is no data
+
+If all six pass, you are ready for the next lesson.
+
+## Challenge
+
+**Add a mood filter to the journal list.**
+
+Right now, `JournalView` shows all entries. Add a horizontal row of mood emoji filter chips (one per `MoodRating` case) above the list. When a chip is active, filter the list to only show entries with that mood. When no chip is active, show all entries.
+
+This requires:
+1. A `@State private var selectedMoodFilter: MoodRating?` in `JournalView`
+2. A computed property that filters `entries` by the selected mood (or returns all if nil)
+3. A `ScrollView(.horizontal)` of mood emoji buttons above the `LazyVStack`
+
+The filtering happens in Swift (not at the query level) because `@Query` does not support dynamic predicates that change at runtime. For the data volumes in a personal journal (hundreds of entries), client-side filtering is instant. If you need database-level filtering with dynamic criteria, use a `FetchDescriptor` with `#Predicate` inside a service method — but for this use case, client-side is the right call.

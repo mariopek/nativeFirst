@@ -1,0 +1,724 @@
+---
+title: "Error Handling & Edge Cases"
+description: "Implement real error recovery patterns from BetFree — ModelContainer corruption recovery, SettingsViewModel.resetAllData error handling, and UrgeViewModel Task cancellation that keep the app running when things go wrong."
+courseSlug: "ship-native"
+module: 7
+moduleTitle: "Production Polish"
+lesson: 1
+duration: "22 min read"
+difficulty: "intermediate"
+topics: ["Error Handling", "ModelContainer Recovery", "Task Cancellation", "SwiftData", "Graceful Degradation", "UX", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+Your BetAway app works. The happy path is solid — the user makes their morning pledge, the streak counter updates, the dashboard animates in. Ship it, right?
+
+Not yet. Force quit the app mid-save and reopen it. What happens? Let the SwiftData database corrupt after a failed migration. What happens? Start a 15-minute urge timer and navigate away before it finishes. What happens?
+
+If the answer to any of those is "I am not sure," this lesson is going to fix that. We are going to look at real error handling patterns from the BetFree codebase — not theoretical examples, but actual production code that handles database corruption, data reset failures, and Task lifecycle management.
+
+## What You'll Learn
+
+- Study the real `ModelContainer` error recovery pattern in `BetFreeApp.swift` — how the app deletes and recreates a corrupted database at launch
+- Examine `SettingsViewModel.resetAllData` — a real try/catch pattern that deletes all four SwiftData model types and handles failure gracefully
+- Understand `UrgeViewModel`'s Task cancellation pattern — how the urge timer starts, checks `Task.isCancelled`, and cleans up on `reset()`
+- Build reusable `ErrorView` and `EmptyStateView` components with retry logic
+
+## Why This Matters
+
+App Store reviewers test edge cases. They turn off Wi-Fi. They deny permissions. They tap buttons rapidly. Users do the same — except they leave one-star reviews when something breaks. The difference between a 3.5-star app and a 4.8-star app is almost never features. It is how the app behaves when things go wrong.
+
+BetAway stores sensitive recovery data in SwiftData. That database can corrupt. The user can reset all their data. Background tasks like the urge timer need clean cancellation. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
+
+## Plan Phase: Defining What We Build
+
+Before writing any code, let us get a plan from the AI. Send this prompt to Claude Code:
+
+```
+I need to add production-quality error handling to BetAway.
+Do NOT write code yet — just create a plan.
+
+The app has these failure points:
+1. SwiftData ModelContainer can fail to initialize (corrupted database, migration error)
+2. Resetting all user data (deleting four SwiftData model types) can partially fail
+3. Background Tasks (urge timer, breath cycle) need clean cancellation when the user navigates away or resets
+
+I want:
+- A database corruption recovery pattern that deletes and recreates the store
+- try/catch handling on multi-model deletion with graceful degradation
+- Task cancellation patterns using Task.isCancelled checks
+- Reusable ErrorView with a retry button
+- Reusable EmptyStateView
+
+Think through:
+1. What happens if ModelContainer init throws?
+2. What happens if deleting one model type succeeds but another fails?
+3. What happens if a Task is cancelled between iterations?
+4. What does the user see for each failure mode?
+```
+
+### Plan Analysis
+
+The AI should return something structured around database recovery, multi-model deletion, and Task lifecycle. Look for these in its response:
+
+**Keep** — A two-phase ModelContainer recovery: try to create, and if that fails, delete the store files and try again. This is exactly what BetFree does in production.
+
+**Keep** — Individual try/catch for each SwiftData model deletion. If deleting `UrgeLog` fails, that should not prevent deleting `JournalEntry`.
+
+**Question** — If the AI suggests wrapping all four deletions in a single try block, push back. A failure deleting one model should not abort the entire reset.
+
+### Anti-Pattern: The Lazy Catch
+
+This is what you will see in most AI-generated code if you do not ask for better:
+
+```swift
+// Do NOT do this
+func resetAllData(context: ModelContext) {
+    do {
+        try context.delete(model: UserProfile.self)
+        try context.delete(model: DailyCheckin.self)
+        try context.delete(model: UrgeLog.self)
+        try context.delete(model: JournalEntry.self)
+    } catch {
+        print("Something went wrong")  // Useless — which model failed? Is the data half-deleted?
+    }
+}
+```
+
+This pattern has two problems. First, if `DailyCheckin` deletion throws, `UrgeLog` and `JournalEntry` never get deleted — the user's data is half-reset. Second, "Something went wrong" tells the user nothing. They have no idea if their reset worked.
+
+## Execute Phase: Implementation
+
+Now we build. Send this prompt:
+
+```
+Implement error handling for BetAway based on our plan.
+
+1. Show me the ModelContainer error recovery pattern — try to create the container, and if it fails, delete the .store, .store-shm, and .store-wal files, then try again. If that also fails, fatalError.
+
+2. Show me a SettingsViewModel.resetAllData that deletes UserProfile, DailyCheckin, UrgeLog, and JournalEntry with try/catch, then cancels notifications and resets navigation.
+
+3. Show me an UrgeViewModel with a timerTask that checks Task.isCancelled on every tick, and a reset() method that cancels it cleanly.
+
+4. Create a reusable ErrorView and EmptyStateView.
+
+Use Swift 6, strict concurrency, @Observable pattern.
+```
+
+### AI Output Review
+
+Here is the code the AI should produce. Review each piece carefully.
+
+**BetFreeApp.swift — ModelContainer Error Recovery:**
+
+This is the actual pattern from BetFree's production code. When the database is corrupted, the app deletes the store files and recreates the container:
+
+```swift
+import SwiftUI
+import SwiftData
+import CoreText
+
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
+
+    init() {
+        UserDefaults.standard.register(defaults: [
+            AppConfig.StorageKeys.hapticFeedbackEnabled: true
+        ])
+        Self.registerCustomFonts()
+    }
+
+    /// Register bundled custom fonts at runtime (no Info.plist needed)
+    private static func registerCustomFonts() {
+        let fontNames = ["Nunito-Variable"]
+        for name in fontNames {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else { continue }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            // If the database is corrupted, try deleting and recreating
+            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+
+                // Also remove related files (.store-shm, .store-wal)
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent("default.store\(suffix)")
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
+        }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
+    }
+}
+```
+
+Review checklist:
+
+- The `sharedModelContainer` is a computed closure that runs once at launch. The first `do/catch` attempts normal initialization
+- If that fails, it finds the Application Support directory, deletes `default.store`, `default.store-shm`, and `default.store-wal` — all three SQLite-related files
+- The `try?` on `removeItem` is intentional — if the file does not exist, we do not care. The point is to ensure a clean slate
+- The second `do/catch` tries again with a fresh database. If this also fails, something is fundamentally wrong with the device (disk full, permissions), and `fatalError` is appropriate
+- The user loses all their data in this scenario, but the app does not crash on launch. A fresh start is better than an infinite crash loop
+- Watch for AI adding retry logic here. There is no point retrying a database creation — it either works or the environment is broken
+
+**SettingsViewModel.swift — Multi-Model Deletion:**
+
+This is the real `resetAllData` from BetFree. Notice how it handles the deletion and then unconditionally cancels notifications and resets the router:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@Observable
+final class SettingsViewModel {
+    var showResetConfirmation = false
+    var showQuitDatePicker = false
+    var showTipJar = false
+    var showFeedback = false
+    var showDataExport = false
+    let notificationManager = NotificationManager()
+
+    func toggleNotifications(enabled: Bool, profile: UserProfile) {
+        if enabled {
+            Task {
+                let granted = await notificationManager.requestAuthorization()
+                if granted {
+                    notificationManager.updateSchedule(
+                        morningHour: profile.morningReminderHour,
+                        morningMinute: profile.morningReminderMinute,
+                        eveningHour: profile.eveningReminderHour,
+                        eveningMinute: profile.eveningReminderMinute,
+                        enabled: true
+                    )
+                } else {
+                    await MainActor.run {
+                        profile.notificationsEnabled = false
+                    }
+                }
+            }
+        } else {
+            notificationManager.cancelAll()
+        }
+    }
+
+    func resetAllData(context: ModelContext, router: AppRouter) {
+        do {
+            try context.delete(model: UserProfile.self)
+            try context.delete(model: DailyCheckin.self)
+            try context.delete(model: UrgeLog.self)
+            try context.delete(model: JournalEntry.self)
+        } catch {
+            // SwiftData delete errors are non-fatal for MVP
+        }
+
+        notificationManager.cancelAll()
+        router.resetForNewUser()
+    }
+}
+```
+
+Review checklist:
+
+- The four `try` calls are inside a single `do` block. If `UserProfile` deletion fails, the remaining three models are skipped. For an MVP, the comment acknowledges this trade-off — "non-fatal for MVP"
+- Critically, `notificationManager.cancelAll()` and `router.resetForNewUser()` run **outside** the `do/catch`. Even if the database deletion fails completely, the app still cancels notifications and resets to the onboarding screen. The user gets a clean navigation state regardless
+- `router.resetForNewUser()` sets `hasCompletedOnboarding` to `false` in UserDefaults and animates back to onboarding — giving the user a fresh start
+- The empty `catch` block is a deliberate choice here, not laziness. For a reset operation, partial failure is acceptable — the user is wiping everything anyway, and the next launch will create fresh data
+- If you want to improve this, you could make each deletion independent with separate try/catch blocks
+
+**UrgeViewModel.swift — Task Cancellation Pattern:**
+
+This is the most instructive error handling pattern in BetFree. The urge timer runs for up to 15 minutes, ticking every second. It must handle cancellation cleanly when the user skips the timer or resets the flow:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@Observable
+final class UrgeViewModel {
+    // MARK: - State
+    var phase: UrgePhase = .acknowledge
+    var timerSeconds: Int = 0
+    var isTimerRunning: Bool = false
+    var breathPhase: BreathPhase = .inhale
+    var selectedIntensity: Int = 5
+    var selectedTrigger: PredefinedTrigger?
+    var selectedStrategy: CopingStrategy?
+    var notes: String = ""
+    var didResist: Bool = true
+    var showCompletionCelebration: Bool = false
+
+    // Distraction toolkit
+    var showBreathingExercise: Bool = false
+    var showGroundingExercise: Bool = false
+    var showMovementSuggestions: Bool = false
+    var showCallHelpline: Bool = false
+    var showEmergencyContacts: Bool = false
+
+    private var timerTask: Task<Void, Never>?
+
+    // MARK: - Constants
+    static let urgeTimerDuration: Int = 15 * 60 // 15 minutes
+    static let breathCycleDuration: Double = 8.0 // 4s in, 4s out
+
+    enum UrgePhase: CaseIterable {
+        case acknowledge
+        case timer
+        case log
+        case complete
+    }
+
+    enum BreathPhase {
+        case inhale
+        case exhale
+    }
+
+    // MARK: - Computed
+
+    var timerProgress: Double {
+        Double(timerSeconds) / Double(Self.urgeTimerDuration)
+    }
+
+    var timerDisplay: String {
+        let remaining = max(0, Self.urgeTimerDuration - timerSeconds)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var timerMinutesElapsed: Int {
+        timerSeconds / 60
+    }
+
+    var encouragementText: String {
+        switch timerSeconds {
+        case 0..<60: return LanguageManager.shared.localized("You're doing great. Stay with it.")
+        case 60..<180: return LanguageManager.shared.localized("The first minutes are the hardest. Keep breathing.")
+        case 180..<300: return LanguageManager.shared.localized("Almost halfway through the peak. Stay strong.")
+        case 300..<600: return LanguageManager.shared.localized("The peak is passing. You've got this.")
+        case 600..<900: return LanguageManager.shared.localized("You're nearly there. The urge is fading.")
+        default: return LanguageManager.shared.localized("Incredible strength. The urge has passed.")
+        }
+    }
+
+    // MARK: - Actions
+
+    func startTimer() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .timer
+            isTimerRunning = true
+        }
+
+        timerTask = Task { @MainActor in
+            while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+                try? await Task.sleep(for: .seconds(1))
+                if !Task.isCancelled {
+                    timerSeconds += 1
+                }
+            }
+            if !Task.isCancelled {
+                isTimerRunning = false
+                HapticManager.timerComplete()
+                moveToLog()
+            }
+        }
+
+        // Start breathing animation cycle
+        startBreathCycle()
+    }
+
+    func skipTimer() {
+        timerTask?.cancel()
+        isTimerRunning = false
+        moveToLog()
+    }
+
+    func moveToLog() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .log
+        }
+    }
+
+    func submitUrge(profile: UserProfile, context: ModelContext) {
+        let urge = UrgeLog(
+            intensity: selectedIntensity,
+            trigger: selectedTrigger,
+            copingStrategy: selectedStrategy,
+            didResist: didResist,
+            notes: notes
+        )
+        urge.durationSeconds = TimeInterval(timerSeconds)
+        urge.userProfile = profile
+        context.insert(urge)
+
+        withAnimation(AnimationPresets.bouncy) {
+            phase = .complete
+            showCompletionCelebration = true
+        }
+
+        if didResist {
+            HapticManager.mediumImpact()
+        }
+    }
+
+    func reset() {
+        timerTask?.cancel()
+        phase = .acknowledge
+        timerSeconds = 0
+        isTimerRunning = false
+        breathPhase = .inhale
+        selectedIntensity = 5
+        selectedTrigger = nil
+        selectedStrategy = nil
+        notes = ""
+        didResist = true
+        showCompletionCelebration = false
+        showBreathingExercise = false
+        showGroundingExercise = false
+        showMovementSuggestions = false
+        showCallHelpline = false
+        showEmergencyContacts = false
+    }
+
+    // MARK: - Breath Cycle
+
+    private func startBreathCycle() {
+        Task { @MainActor in
+            while isTimerRunning && !Task.isCancelled {
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .inhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .exhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+            }
+        }
+    }
+}
+```
+
+This is the richest error handling example in the codebase. Let us break down the three cancellation patterns:
+
+**Pattern 1 — The timer loop with double-check:**
+
+```swift
+timerTask = Task { @MainActor in
+    while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+        try? await Task.sleep(for: .seconds(1))
+        if !Task.isCancelled {
+            timerSeconds += 1
+        }
+    }
+    if !Task.isCancelled {
+        isTimerRunning = false
+        HapticManager.timerComplete()
+        moveToLog()
+    }
+}
+```
+
+Notice the **three** cancellation checks:
+1. `while !Task.isCancelled` — checked before each sleep. If cancelled while awake, the loop exits immediately
+2. `if !Task.isCancelled` after the sleep — `Task.sleep` throws `CancellationError` when cancelled, but the `try?` swallows it. This second check catches the case where the task was cancelled during the sleep
+3. `if !Task.isCancelled` after the loop — prevents the completion haptic and navigation from firing if the timer was cancelled (e.g., user tapped "Skip")
+
+Without that third check, cancelling the timer would still trigger `HapticManager.timerComplete()` and `moveToLog()` — the user would get a vibration and a screen transition they did not expect.
+
+**Pattern 2 — The breath cycle with dual exit conditions:**
+
+```swift
+while isTimerRunning && !Task.isCancelled {
+```
+
+The breath cycle checks both `isTimerRunning` (set to `false` by `skipTimer()`) and `Task.isCancelled`. Either condition stops the animation loop. This prevents orphaned breath animations that continue after the timer screen disappears.
+
+**Pattern 3 — The reset() method as cleanup:**
+
+```swift
+func reset() {
+    timerTask?.cancel()
+    phase = .acknowledge
+    timerSeconds = 0
+    isTimerRunning = false
+    // ... reset all state
+}
+```
+
+`timerTask?.cancel()` is the first line. The optional chain (`?.`) handles the case where the timer was never started — `reset()` is safe to call regardless of the current phase. After cancellation, every piece of state is explicitly set back to its initial value. No state is left dangling.
+
+## Iteration
+
+The initial implementation covers the core patterns. Now let us build the reusable view components. Send this follow-up:
+
+```
+Now create reusable ErrorView and EmptyStateView components
+for BetAway. Use ContentUnavailableView (iOS 17+).
+
+ErrorView should:
+- Accept a title, message, and optional retry closure
+- Show a system image based on error type
+- Only show "Try Again" for transient errors
+
+EmptyStateView should:
+- Accept a title, system image, description, and optional action
+- Work for empty states across the app (no pledges yet, no journal entries, no urge logs)
+```
+
+Here is the `ErrorView`:
+
+```swift
+import SwiftUI
+
+struct ErrorView: View {
+    let title: String
+    let message: String
+    let systemImage: String
+    let onRetry: (() -> Void)?
+
+    init(
+        _ title: String,
+        message: String,
+        systemImage: String = "exclamationmark.triangle",
+        onRetry: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.message = message
+        self.systemImage = systemImage
+        self.onRetry = onRetry
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(message)
+        } actions: {
+            if let onRetry {
+                Button("Try Again") {
+                    onRetry()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+```
+
+And the `EmptyStateView`:
+
+```swift
+import SwiftUI
+
+struct EmptyStateView: View {
+    let title: String
+    let systemImage: String
+    let description: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+
+    init(
+        _ title: String,
+        systemImage: String,
+        description: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.description = description
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(description)
+        } actions: {
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+#Preview("No Pledges") {
+    EmptyStateView(
+        "No Pledges Yet",
+        systemImage: "hand.raised.fill",
+        description: "Make your first morning pledge to start your recovery streak.",
+        actionTitle: "Make Pledge"
+    ) {
+        print("Tapped")
+    }
+}
+```
+
+## Verify Phase
+
+Before moving on, verify each of these scenarios manually:
+
+1. **Database corruption** — Delete the app, modify the store file to be invalid, and relaunch. The `sharedModelContainer` closure should delete the corrupt files and create a fresh database. The user sees onboarding, not a crash
+2. **Reset all data** — Go to Settings and tap "Reset All Data." All four model types should be deleted. Notifications should be cancelled. The app should navigate back to onboarding. If one model deletion fails, notifications and navigation reset still happen
+3. **Timer cancellation — skip** — Start the urge timer, wait a few seconds, then tap "Skip." The timer should stop immediately. No completion haptic should fire. The log screen should appear
+4. **Timer cancellation — reset** — Start the urge timer, then dismiss the urge flow entirely. Call `reset()`. The timer should stop. All state should return to defaults. No orphaned breath cycle animation should continue
+5. **Timer completion** — Let the 15-minute timer run to completion (or reduce the constant for testing). `HapticManager.timerComplete()` should fire and the log screen should appear automatically
+6. **Rapid taps** — Tap "Start Timer" multiple times quickly. Only one `timerTask` should be active — each call to `startTimer()` overwrites the previous `timerTask` reference
+
+## Final Code
+
+Here is the `AppRouter.resetForNewUser()` method that `SettingsViewModel` calls after the data reset. This completes the picture — even if the data deletion partially fails, the user gets a clean navigation state:
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var showOnboarding: Bool
+    var isLocked: Bool = false
+    var selectedTab: Tab = .dashboard
+    var navigationPath = NavigationPath()
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
+        case journal = "Journal"
+        case progress = "Progress"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+        }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return AppConfig.Icons.house
+            case .journal: return AppConfig.Icons.journal
+            case .progress: return AppConfig.Icons.chart
+            case .settings: return AppConfig.Icons.settings
+            }
+        }
+    }
+
+    init() {
+        self.showOnboarding = !UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+    }
+
+    func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = false
+        }
+    }
+
+    func popToRoot() {
+        navigationPath = NavigationPath()
+    }
+
+    func lock() {
+        withAnimation(AnimationPresets.fade) {
+            isLocked = true
+        }
+    }
+
+    func unlock() {
+        withAnimation(AnimationPresets.smooth) {
+            isLocked = false
+        }
+    }
+
+    func resetForNewUser() {
+        UserDefaults.standard.set(false, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = true
+            selectedTab = .dashboard
+            navigationPath = NavigationPath()
+        }
+    }
+}
+```
+
+Notice that `resetForNewUser()` does three things inside a single `withAnimation` block:
+1. Sets `showOnboarding = true` — the `RootView` switches from the main tab view to the onboarding flow
+2. Resets `selectedTab = .dashboard` — so when the user completes onboarding again, they land on the dashboard
+3. Clears `navigationPath` — so there are no leftover navigation states from the previous session
+
+This is graceful degradation in practice. The data deletion might fail, but the user's experience is always clean.
+
+## Checkpoint
+
+Test these before continuing to the next lesson:
+
+- [ ] `BetFreeApp.sharedModelContainer` recovers from a corrupted database by deleting all three store files (`.store`, `.store-shm`, `.store-wal`) and recreating the container
+- [ ] `SettingsViewModel.resetAllData` deletes all four model types and resets navigation even if the database deletion fails
+- [ ] `UrgeViewModel.startTimer()` checks `Task.isCancelled` three times — before sleep, after sleep, and after the loop
+- [ ] `UrgeViewModel.skipTimer()` cancels the task and navigates to the log screen without triggering the completion haptic
+- [ ] `UrgeViewModel.reset()` cancels the timer task and resets every piece of state to its initial value
+- [ ] The breath cycle exits when either `isTimerRunning` becomes false or the Task is cancelled
+- [ ] `AppRouter.resetForNewUser()` provides a clean slate even if the data reset partially failed
+
+## Challenge
+
+**Improve the multi-model deletion in `SettingsViewModel.resetAllData`.** Currently, if `UserProfile` deletion fails, the remaining three models are skipped. Refactor to use independent try/catch blocks for each model type so that a failure on one does not prevent the others from being deleted. Log which models failed and which succeeded. Keep the current behavior where `notificationManager.cancelAll()` and `router.resetForNewUser()` always run regardless of deletion outcomes.
+
+*Hint:* Create an array of model types and iterate over them, wrapping each deletion in its own do/catch:
+
+```swift
+let modelTypes: [any PersistentModel.Type] = [
+    UserProfile.self,
+    DailyCheckin.self,
+    UrgeLog.self,
+    JournalEntry.self,
+]
+
+for type in modelTypes {
+    do {
+        try context.delete(model: type)
+    } catch {
+        // Log which model failed, continue with the rest
+    }
+}
+```

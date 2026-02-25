@@ -1,0 +1,1348 @@
+---
+title: "Home Screen — Recovery Dashboard"
+description: "Build the main dashboard view — a card-based ScrollView with greeting header, StreakCardView, QuoteCardView, SavingsCardView, StatsCardView, DashboardPledgeCard, WeeklySummaryCard, MilestoneCardView, and EmergencyUrgeButton, backed by a DashboardViewModel using @Observable."
+courseSlug: "ship-native"
+module: 2
+moduleTitle: "Core UI with SwiftUI"
+lesson: 2
+duration: "24 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "ScrollView", "Dashboard", "@Observable", "@Query", "SwiftData", "Staggered Animations", "Card Layout", "BetAway"]
+author: "Mario"
+draft: false
+pubDate: 2026-02-22
+---
+
+The data layer exists. Models are defined, the service layer is wired, SwiftData persists user profiles. Now we build the screen users will open dozens of times a day — the recovery dashboard.
+
+This is the home screen of BetFree. It is not a simple list of check-ins. It is a rich, card-based ScrollView that shows the user's entire recovery state at a glance: a time-based greeting, the current bet-free streak with milestone progress, a daily motivational quote, savings and time-saved stats, a daily pledge and check-in card, a weekly summary with urge-resistance metrics, upcoming milestones, and an emergency urge button at the bottom. Get this screen right and the app feels real. Get it wrong and nothing else matters.
+
+## What You'll Learn
+
+By the end of this lesson you will have:
+
+1. A `DashboardViewModel` using `@Observable` with time-based greeting logic, milestone progress calculation, and next-milestone text
+2. A `DashboardView` that uses `@Query` for the `UserProfile`, staggered appear animations for each card, and a `.fullScreenCover` for the urge flow
+3. Card components — `StreakCardView`, `QuoteCardView`, `SavingsCardView`, `StatsCardView`, `DashboardPledgeCard`, `WeeklySummaryCard`, `MilestoneCardView` — each encapsulating one piece of the recovery dashboard
+4. An `EmergencyUrgeButton` with a pulsing animation that launches the urge support flow
+5. A `MainTabView` with a custom animated tab bar that hosts the dashboard as its first tab
+
+## Why This Matters
+
+Every health app, recovery app, and habit tracker has a dashboard. The patterns here — card-based composition, staggered animations for polish, `@Query` for reactive SwiftData reads, computed properties for time-based UI, and milestone progress tracking — show up in virtually every production iOS app. Master them once and you reuse them everywhere.
+
+The dashboard is also where architecture decisions surface. A monolithic view with all the logic inline becomes unmaintainable fast. We split the ViewModel from the View, each card into its own file, and use composition to keep every piece small and testable.
+
+## Plan Phase: Defining What We Build
+
+Open Claude Code in your BetFree project directory. Before writing any implementation code, we ask the AI to plan.
+
+### The Prompt
+
+```
+I need to build the home screen for BetFree — a rich card-based
+recovery dashboard. Before writing code, plan the implementation.
+
+Requirements:
+- ScrollView with a VStack of card components (not List, not LazyVStack)
+- Time-based greeting header (morning/afternoon/evening/night)
+- StreakCardView: gradient card showing current streak days, milestone
+  progress ring, and next milestone text
+- QuoteCardView: daily motivational quote with serif font
+- SavingsCardView + StatsCardView: side-by-side cards showing money
+  saved and hours reclaimed
+- DashboardPledgeCard: morning pledge + evening check-in status
+- WeeklySummaryCard: pledges, urges, resistance rate, journals
+- MilestoneCardView: current milestone achieved + progress to next
+- EmergencyUrgeButton: pulsing danger button for urge support
+- Staggered appear animations on each card
+- @Query for UserProfile from SwiftData
+- .fullScreenCover for the urge flow
+- ViewModel uses @Observable, has greeting computed properties
+  (time-based), milestoneProgress calculation, nextMilestoneText
+- Swift 6, iOS 17+
+
+Think through:
+1. What files do we need?
+2. What is the data flow from SwiftData to the view?
+3. How does the ViewModel compute greetings and milestone progress?
+4. What are the edge cases?
+```
+
+### What the AI Should Return
+
+The plan should identify these files:
+
+- **DashboardViewModel.swift** — `@Observable` class with time-based greeting, milestone progress, and next milestone text
+- **DashboardView.swift** — the main screen with `ScrollView`, `VStack`, `@Query` for `UserProfile`, staggered animations, and `.fullScreenCover` for urge flow
+- **StreakCardView.swift** — gradient card with streak count, progress ring, and milestone labels
+- **QuoteCardView.swift** — daily quote in a serif-styled card
+- **SavingsCardView.swift** — money saved with annualized pace
+- **StatsCardView.swift** — hours reclaimed display (often in the same file as SavingsCardView)
+- **DashboardPledgeCard.swift** — morning pledge and evening check-in tracker
+- **WeeklySummaryCard.swift** — weekly stats with `@Query` for urge logs, check-ins, and journal entries
+- **MilestoneCardView.swift** — current/next milestone with progress bar
+- **EmergencyUrgeButton.swift** — pulsing button in `QuickActionsView`
+- **MainTabView.swift** — tab container with custom animated tab bar
+
+The data flow: `@Query` reads `UserProfile` from SwiftData. The `DashboardViewModel` is a lightweight `@Observable` that computes time-of-day greetings and milestone math from the profile. Each card receives the profile (or specific data) as a parameter. The `WeeklySummaryCard` runs its own `@Query` calls for `UrgeLog`, `DailyCheckin`, and `JournalEntry`.
+
+Edge cases the AI should flag: no profile yet (post-onboarding timing), zero streak days, no milestones achieved, all daily tasks completed vs. pending, zero urges in a week, and the greeting switching at boundary hours.
+
+### The Anti-Pattern
+
+What you do NOT want to build:
+
+- **A flat list of check-ins** — the real dashboard is not a timeline of log entries. It is a composition of purpose-built cards that each show a different facet of recovery. Building a simple `LazyVStack` of check-in rows misses the entire architecture.
+- **All logic in the View** — time-based greetings, milestone math, and progress calculations belong in the ViewModel. Putting `Calendar.current.component(.hour, from: Date())` directly in the view body makes it untestable and cluttered.
+- **A single monolithic file** — cramming greeting, streak, quote, savings, pledge, summary, milestones, and the emergency button into one `DashboardView.swift` produces a 500+ line file that nobody can maintain. Each card is its own file.
+
+If the AI's plan includes any of these, correct it before moving to implementation.
+
+## Execute Phase: Implementation
+
+Now we execute. Send the implementation prompt.
+
+### The Prompt
+
+```
+Build the recovery dashboard based on our plan. Create these files:
+
+1. DashboardViewModel.swift
+   - @Observable class
+   - greeting: String computed property (time-based: morning,
+     afternoon, evening, night)
+   - greetingIcon: String computed property (sun or moon)
+   - milestoneProgress(for:) method using Milestone.next/current
+   - nextMilestoneText(for:) returning optional countdown string
+   - showCelebration: Bool state property
+
+2. DashboardView.swift
+   - @Query for [UserProfile], use profiles.first
+   - @State viewModel, @State isVisible, @State showUrgeFlow
+   - ScrollView > VStack with each card component
+   - Greeting header with icon + "Day X of your journey"
+   - .staggeredAppear(index:isVisible:) on every card
+   - .fullScreenCover for UrgeContainerView
+   - .onAppear sets isVisible = true, updates widget data
+   - Custom toolbar with app logo
+
+3. Card components (one file each):
+   - StreakCardView: gradient card, AnimatedCounter, BFProgressRing
+   - QuoteCardView: serif quote text, author attribution
+   - SavingsCardView: money saved with annualized pace
+   - StatsCardView: hours reclaimed counter
+   - DashboardPledgeCard: pledge + check-in status with CTA button
+   - WeeklySummaryCard: @Query urge logs, check-ins, journals
+   - MilestoneCardView: current milestone + progress bar to next
+   - EmergencyUrgeButton: pulsing PhaseAnimator danger button
+
+Use the app's design system (ColorPalette, Typography, Spacing,
+BFCard, BFGradientCard). Swift 6, iOS 17+.
+```
+
+### Reviewing the AI Output
+
+The AI will generate all the files. Here is what to check:
+
+**DashboardViewModel** — verify it uses `@Observable` (not `ObservableObject`), that `greeting` is a computed property switching on `Calendar.current.component(.hour, from: Date())`, and that `milestoneProgress(for:)` calculates the ratio between the current milestone and the next. Common mistake: the AI might make greeting a stored property that never updates — it must be computed so it recalculates each time the view reads it.
+
+**DashboardView** — verify it uses `@Query private var profiles: [UserProfile]` and accesses `profiles.first`. Check that `isVisible` drives staggered animations and that `.fullScreenCover(isPresented: $showUrgeFlow)` presents `UrgeContainerView`. Watch for the AI forgetting the toolbar logo or the widget data update on appear.
+
+**Card Components** — verify `StreakCardView` uses `BFGradientCard` with a progress ring overlay, `QuoteCardView` uses a serif font with `MotivationalQuotes.quoteForToday()`, `WeeklySummaryCard` runs its own `@Query` for `UrgeLog`, `DailyCheckin`, and `JournalEntry`, and `EmergencyUrgeButton` uses `PhaseAnimator` for the pulsing effect.
+
+Here is the scoring:
+
+- The ViewModel uses `@Observable` with computed greeting properties -- **correct**
+- Each card is its own struct in its own file -- **correct**
+- DashboardView uses `@Query` for UserProfile -- **correct**
+- Staggered animations use `.staggeredAppear(index:isVisible:)` -- **correct**
+- `.fullScreenCover` presents the urge flow -- **correct**
+- ViewModel greeting is a stored property instead of computed -- **fix this**, it must recalculate on every access
+- WeeklySummaryCard fetches data inline instead of using `@Query` -- **fix this**, SwiftData `@Query` keeps it reactive
+
+## Iteration
+
+The first pass is functional but needs refinement. Send this follow-up:
+
+```
+Two fixes for the dashboard:
+
+1. The ViewModel greeting must be a computed property, not stored.
+   It reads Calendar.current.component(.hour, from: Date()) each
+   time. If stored, it shows "Good morning" all day after the
+   first read.
+
+2. WeeklySummaryCard should use @Query with sort descriptors for
+   UrgeLog, DailyCheckin, and JournalEntry directly. Then filter
+   in computed properties for the last 7 days. This keeps the
+   card reactive — when a new urge is logged, the summary updates
+   automatically without manual refresh.
+
+Also add: the EmergencyUrgeButton should use PhaseAnimator to
+pulse the danger circle continuously. Two phases (false, true)
+with easeInOut(duration: 2.0) scaling between 1.0 and 1.3. This
+draws the eye without being aggressive.
+```
+
+This is the "yes, but..." pattern from Module 1. The structure is right, we are correcting details. Two minutes of prompting, and the output goes from good to production-ready.
+
+## Verify Phase
+
+Build and run in the simulator. Check each state:
+
+1. **Greeting header** — open the app at different times. Morning shows "Good morning" with a sun icon, afternoon shows "Good afternoon" with a sun icon, evening shows "Good evening" with a moon, night shows "Good night" with a moon. The greeting line below says "Day X of your journey" matching the user's current streak.
+
+2. **Streak card** — the gradient card displays the current bet-free streak with an animated counter. The progress ring on the right shows how far the user is toward the next milestone. Below the streak count, the next milestone countdown text reads something like "5 day(s) to First Week."
+
+3. **Quote card** — a motivational quote renders in serif font with an author attribution. The quote changes daily based on `MotivationalQuotes.quoteForToday()`.
+
+4. **Savings and stats row** — two side-by-side cards. The left card shows total money saved with an annualized pace below it. The right card shows hours reclaimed.
+
+5. **Pledge card** — shows "Morning Pledge" and "Evening Check-in" with pending/completed status. If tasks remain, a CTA button appears ("Take Today's Pledge" or "Complete Evening Check-in"). When both are done, a green "Complete" label replaces the CTA.
+
+6. **Weekly summary** — four stats in a row: pledges (X/7), urges, resistance percentage, journals. A motivational message below adapts to the user's actual performance.
+
+7. **Milestones** — current milestone shows with a checkmark and progress bar toward the next. If no milestone is achieved yet, it shows the first target.
+
+8. **Emergency urge button** — a pulsing button at the bottom with "Feeling an urge?" and "Tap here for immediate support." Tapping it opens the `UrgeContainerView` as a full-screen cover.
+
+9. **Staggered animations** — on first appear, each card fades and slides in with a staggered delay. This gives the dashboard a polished, cascading reveal.
+
+10. **No profile edge case** — if no `UserProfile` exists (should not happen after onboarding), the view shows a "Setting up your profile..." fallback instead of crashing.
+
+## Final Code
+
+Here are the production files. These are the actual files from the BetFree project.
+
+### DashboardViewModel.swift
+
+```swift
+import SwiftUI
+
+@Observable
+final class DashboardViewModel {
+    var showCelebration = false
+
+    var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return LanguageManager.shared.localized("Good morning")
+        case 12..<17: return LanguageManager.shared.localized("Good afternoon")
+        case 17..<22: return LanguageManager.shared.localized("Good evening")
+        default: return LanguageManager.shared.localized("Good night")
+        }
+    }
+
+    var greetingIcon: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return AppConfig.Icons.sun
+        case 12..<17: return AppConfig.Icons.sun
+        case 17..<22: return AppConfig.Icons.moon
+        default: return AppConfig.Icons.moon
+        }
+    }
+
+    func milestoneProgress(for profile: UserProfile) -> Double {
+        guard let nextMilestone = Milestone.next(for: profile.currentStreak) else {
+            return 1.0
+        }
+        let currentMilestone = Milestone.current(for: profile.currentStreak)
+        let start = Double(currentMilestone?.days ?? 0)
+        let end = Double(nextMilestone.days)
+        let current = Double(profile.currentStreak)
+
+        guard end > start else { return 1.0 }
+        return (current - start) / (end - start)
+    }
+
+    func nextMilestoneText(for profile: UserProfile) -> String? {
+        guard let next = Milestone.next(for: profile.currentStreak) else { return nil }
+        let remaining = next.days - profile.currentStreak
+        return LanguageManager.shared.localized("%lld day(s) to %@", remaining, next.title)
+    }
+}
+```
+
+A few things worth noting.
+
+**`greeting` and `greetingIcon` are computed properties.** They read `Calendar.current.component(.hour, from: Date())` every time the view accesses them. This means the greeting updates if the user leaves the app open across time boundaries. If these were stored properties set in `init`, the greeting would freeze at whatever time the ViewModel was created.
+
+**`milestoneProgress(for:)` takes the profile as a parameter.** The ViewModel does not own the profile — the view gets it from `@Query`. The ViewModel computes derived values from whatever profile the view passes in. This keeps the ViewModel lightweight and avoids duplicating the SwiftData source of truth.
+
+**The progress calculation** finds the distance between the current milestone and the next, then computes how far the user's streak has progressed between them. If there is no next milestone (the user has achieved the highest one), it returns `1.0` — the ring is full.
+
+**`nextMilestoneText(for:)` returns an optional.** When the user has achieved the highest milestone, there is no "next" — the text is `nil` and the view can hide the countdown label. The localized string uses `%lld` for the integer day count, matching Apple's localization format for plurals.
+
+### DashboardView.swift
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct DashboardView: View {
+    @Environment(AppRouter.self) private var router
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+    @State private var isVisible = false
+    @State private var showUrgeFlow = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                // Greeting
+                if let profile {
+                    HStack {
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            HStack(spacing: Spacing.xs) {
+                                Image(systemName: viewModel.greetingIcon)
+                                    .foregroundStyle(ColorPalette.warning)
+                                Text(viewModel.greeting)
+                                    .font(Typography.title3())
+                                    .foregroundStyle(ColorPalette.textPrimary)
+                            }
+
+                            Text("Day \(profile.currentStreak) of your journey")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+
+                    // Streak Card
+                    StreakCardView(profile: profile, viewModel: viewModel)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 1, isVisible: isVisible)
+
+                    // Daily Quote
+                    QuoteCardView(quote: MotivationalQuotes.quoteForToday())
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 2, isVisible: isVisible)
+
+                    // Savings & Stats Row
+                    HStack(spacing: Spacing.sm) {
+                        SavingsCardView(profile: profile)
+                        StatsCardView(profile: profile)
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+
+                    // Daily Check-in (Pledge + Evening Check-in)
+                    DashboardPledgeCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 4, isVisible: isVisible)
+
+                    // Weekly Summary
+                    WeeklySummaryCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 5, isVisible: isVisible)
+
+                    // Milestones
+                    MilestoneCardView(currentStreak: profile.currentStreak)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 6, isVisible: isVisible)
+
+                    // Emergency Urge Button
+                    EmergencyUrgeButton { showUrgeFlow = true }
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 7, isVisible: isVisible)
+                } else {
+                    // No profile — shouldn't happen after onboarding
+                    Text("Setting up your profile...")
+                        .font(Typography.body())
+                        .foregroundStyle(ColorPalette.textSecondary)
+                }
+            }
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Image(AppConfig.Images.appLogoShield)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: 44)
+                    .shadow(color: ColorPalette.accent.opacity(0.3), radius: 4, y: 2)
+            }
+        }
+        .onAppear {
+            isVisible = true
+            updateWidgetData()
+        }
+        .fullScreenCover(isPresented: $showUrgeFlow) {
+            UrgeContainerView()
+        }
+    }
+
+    private func updateWidgetData() {
+        guard let profile else { return }
+        SharedDataManager.updateWidgetData(
+            currentStreak: profile.currentStreak,
+            totalSaved: profile.totalSaved,
+            quitDate: profile.quitDate,
+            hasPledgedToday: profile.hasPledgedToday(),
+            hasCheckedInToday: profile.hasCheckedInToday()
+        )
+    }
+}
+```
+
+Let me walk through the key decisions.
+
+**`@Query private var profiles: [UserProfile]` with `profiles.first`.** SwiftData's `@Query` returns an array even when you expect one record. The computed property `profile` unwraps `profiles.first` so the rest of the view can use optional binding cleanly. When SwiftData updates the profile (streak changes, pledge completes), the `@Query` automatically triggers a view update — no manual refresh needed.
+
+**`@State private var isVisible = false` drives staggered animations.** On `.onAppear`, `isVisible` flips to `true`. Each card uses `.staggeredAppear(index: N, isVisible: isVisible)` where the index determines the delay. Card 0 (greeting) appears instantly, card 1 (streak) a beat later, card 2 (quote) after that, and so on. This cascading reveal gives the dashboard a polished feel without being slow.
+
+**`.fullScreenCover(isPresented: $showUrgeFlow)` for the urge flow.** The emergency urge button sets `showUrgeFlow = true`, which presents `UrgeContainerView` as a full-screen modal. This is deliberate — when a user is experiencing a gambling urge, the support flow should take over the entire screen. A sheet that can be dismissed with a swipe is too easy to abandon.
+
+**`updateWidgetData()` on appear.** Every time the user opens the dashboard, widget data is synced through `SharedDataManager`. This keeps the home screen widget current with the latest streak, savings, and pledge status.
+
+**No `.task` or `.refreshable`** — unlike a list-based dashboard, the card-based layout reads from `@Query` and computed properties. The data is reactive through SwiftData. There is no async fetch to trigger.
+
+### StreakCardView.swift
+
+```swift
+import SwiftUI
+
+struct StreakCardView: View {
+    let profile: UserProfile
+    let viewModel: DashboardViewModel
+
+    var body: some View {
+        BFGradientCard(gradient: ColorPalette.primaryGradient) {
+            VStack(spacing: Spacing.md) {
+                HStack {
+                    VStack(alignment: .leading, spacing: Spacing.xxs) {
+                        Text("BET-FREE STREAK")
+                            .font(Typography.caption(weight: .bold))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .tracking(1.5)
+
+                        AnimatedCounter(
+                            value: profile.currentStreak,
+                            suffix: profile.currentStreak == 1 ? " day" : " days",
+                            font: Typography.largeTitle(),
+                            color: .white
+                        )
+                    }
+
+                    Spacer()
+
+                    // Progress ring to next milestone
+                    BFProgressRing(
+                        progress: viewModel.milestoneProgress(for: profile),
+                        lineWidth: 6,
+                        size: 60,
+                        gradient: LinearGradient(
+                            colors: [.white.opacity(0.9), .white.opacity(0.5)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        trackColor: .white.opacity(0.2)
+                    )
+                    .overlay {
+                        if let milestone = Milestone.current(for: profile.currentStreak) {
+                            Image(systemName: milestone.icon)
+                                .font(.system(size: 18))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+
+                // Next milestone text
+                if let nextText = viewModel.nextMilestoneText(for: profile) {
+                    HStack(spacing: Spacing.xxs) {
+                        Image(systemName: AppConfig.Icons.target)
+                            .font(.system(size: 12))
+                        Text(nextText)
+                            .font(Typography.caption(weight: .medium))
+                    }
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Current milestone
+                if let current = Milestone.current(for: profile.currentStreak) {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: current.icon)
+                            .font(.system(size: 14))
+                        Text(current.description)
+                            .font(Typography.caption(weight: .medium))
+                    }
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+}
+```
+
+**`BFGradientCard` wraps the entire card.** This is a reusable design-system component that applies a gradient background with rounded corners and padding. The streak card uses `ColorPalette.primaryGradient` — the app's signature gradient — so it stands out as the most important card on the dashboard.
+
+**`AnimatedCounter` for the streak number.** Instead of a static `Text("\(profile.currentStreak)")`, the counter animates when the value changes. When the user's streak increments from 6 to 7, the number rolls up. This micro-animation makes the streak feel alive.
+
+**`BFProgressRing` shows milestone progress.** The ring fills proportionally between the current milestone and the next. The `viewModel.milestoneProgress(for:)` call returns a 0-to-1 value. Inside the ring, the current milestone's icon is overlaid — a visual anchor for what the user has already achieved.
+
+### QuoteCardView.swift
+
+```swift
+import SwiftUI
+
+struct QuoteCardView: View {
+    let quote: MotivationalQuote
+
+    var body: some View {
+        BFCard {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                // Quote icon
+                Image(systemName: AppConfig.Icons.quote)
+                    .font(.system(size: 24))
+                    .foregroundStyle(ColorPalette.accent.opacity(0.6))
+
+                // Quote text — serif font for literary feel
+                Text(quote.text)
+                    .font(.system(size: 16, weight: .medium, design: .serif))
+                    .foregroundStyle(ColorPalette.textPrimary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Author attribution
+                HStack {
+                    Spacer()
+                    Text("— \(quote.author)")
+                        .font(Typography.caption(weight: .medium))
+                        .foregroundStyle(ColorPalette.textTertiary)
+                        .italic()
+                }
+            }
+        }
+    }
+}
+```
+
+**Serif font for the quote text.** `.system(size: 16, weight: .medium, design: .serif)` gives the quote a literary feel that visually separates it from the rest of the dashboard's sans-serif typography. The extra `.lineSpacing(4)` adds breathing room between lines for readability.
+
+**`.fixedSize(horizontal: false, vertical: true)`** prevents the quote text from being truncated. Quotes vary in length — some are one line, others are three. This modifier tells SwiftUI to expand vertically as needed without constraining width.
+
+**Author attribution is right-aligned and italic.** The dash-prefixed author name sits at the trailing edge, following typographic convention for quotations.
+
+### SavingsCardView.swift and StatsCardView.swift
+
+```swift
+import SwiftUI
+
+struct SavingsCardView: View {
+    let profile: UserProfile
+
+    var body: some View {
+        BFCard {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.xxs) {
+                    Image(systemName: AppConfig.Icons.savings)
+                        .font(.system(size: 14))
+                        .foregroundStyle(ColorPalette.success)
+
+                    Text("Saved")
+                        .font(Typography.caption(weight: .semibold))
+                        .foregroundStyle(ColorPalette.textSecondary)
+                }
+
+                AnimatedDecimalCounter(
+                    value: profile.totalSaved,
+                    prefix: AppConfig.defaultCurrencySymbol,
+                    decimals: 0,
+                    font: Typography.title2(),
+                    color: ColorPalette.success
+                )
+
+                Text("\(AppConfig.defaultCurrencySymbol)\(Int(profile.annualizedSavings))/yr pace")
+                    .font(Typography.caption())
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+        }
+    }
+}
+
+struct StatsCardView: View {
+    let profile: UserProfile
+
+    var body: some View {
+        BFCard {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.xxs) {
+                    Image(systemName: AppConfig.Icons.clock)
+                        .font(.system(size: 14))
+                        .foregroundStyle(ColorPalette.infoBadge)
+
+                    Text("Time Saved")
+                        .font(Typography.caption(weight: .semibold))
+                        .foregroundStyle(ColorPalette.textSecondary)
+                }
+
+                AnimatedDecimalCounter(
+                    value: profile.hoursSaved,
+                    decimals: 0,
+                    font: Typography.title2(),
+                    color: ColorPalette.infoBadge
+                )
+
+                Text("hours reclaimed")
+                    .font(Typography.caption())
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+        }
+    }
+}
+```
+
+**These two cards live in the same file** because they are structurally identical — icon + label header, animated counter, subtitle. They sit side-by-side in an `HStack` on the dashboard, forming a compact stats row.
+
+**`AnimatedDecimalCounter` for both values.** Like `AnimatedCounter` for the streak, this component animates when the value changes. `decimals: 0` rounds to whole numbers — "$1,247" not "$1,247.50" — because precision at this level would be false accuracy for estimated savings.
+
+**The annualized pace** extrapolates current savings to a yearly rate. This reframes the number psychologically — "$42 saved" feels small, but "$15,330/yr pace" feels significant. It is the same data, presented to motivate.
+
+### DashboardPledgeCard.swift
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct DashboardPledgeCard: View {
+    let profile: UserProfile
+    @State private var showPledgeFlow = false
+
+    private var hasPledged: Bool { profile.hasPledgedToday() }
+    private var hasCheckedIn: Bool { profile.hasCheckedInToday() }
+    private var allDone: Bool { hasPledged && hasCheckedIn }
+
+    var body: some View {
+        Button {
+            if !allDone {
+                showPledgeFlow = true
+            }
+        } label: {
+            BFCard {
+                VStack(spacing: Spacing.sm) {
+                    // Header
+                    HStack {
+                        Text("Daily Check-in")
+                            .font(Typography.headline())
+                            .foregroundStyle(ColorPalette.textPrimary)
+
+                        Spacer()
+
+                        if allDone {
+                            Label("Complete", systemImage: AppConfig.Icons.checkmark)
+                                .font(Typography.caption(weight: .semibold))
+                                .foregroundStyle(ColorPalette.success)
+                        }
+                    }
+
+                    // Status rows
+                    PledgeStatusRow(
+                        icon: AppConfig.Icons.sun,
+                        iconColor: ColorPalette.warning,
+                        title: "Morning Pledge",
+                        isCompleted: hasPledged
+                    )
+
+                    Divider()
+
+                    PledgeStatusRow(
+                        icon: AppConfig.Icons.moon,
+                        iconColor: ColorPalette.accent,
+                        title: "Evening Check-in",
+                        isCompleted: hasCheckedIn
+                    )
+
+                    // Mood (if available)
+                    if let mood = profile.todaysMood() {
+                        Divider()
+
+                        HStack(spacing: Spacing.xs) {
+                            Text("Mood")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+
+                            Spacer()
+
+                            Text(mood.emoji)
+                                .font(.system(size: 22))
+
+                            Text(mood.label)
+                                .font(Typography.subheadline(weight: .medium))
+                                .foregroundStyle(ColorPalette.textPrimary)
+                        }
+                    }
+
+                    // CTA when not all done
+                    if !allDone {
+                        HStack(spacing: Spacing.xs) {
+                            Image(systemName: ctaIcon)
+                                .font(.system(size: 14, weight: .semibold))
+
+                            Text(ctaText)
+                                .font(Typography.subheadline(weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, Spacing.sm)
+                        .background(ctaColor)
+                        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.medium, style: .continuous))
+                        .padding(.top, Spacing.xxs)
+                    }
+                }
+            }
+        }
+        .buttonStyle(BFButtonPressStyle())
+        .disabled(allDone)
+        .sheet(isPresented: $showPledgeFlow) {
+            NavigationStack {
+                PledgeContainerView()
+            }
+        }
+    }
+
+    // MARK: - CTA Helpers
+
+    private var ctaText: String {
+        if !hasPledged {
+            return LanguageManager.shared.localized("Take Today's Pledge")
+        } else {
+            return LanguageManager.shared.localized("Complete Evening Check-in")
+        }
+    }
+
+    private var ctaIcon: String {
+        if !hasPledged {
+            return AppConfig.Icons.pledge
+        } else {
+            return AppConfig.Icons.moon
+        }
+    }
+
+    private var ctaColor: Color {
+        if !hasPledged {
+            return ColorPalette.accent
+        } else {
+            return ColorPalette.accent.opacity(0.85)
+        }
+    }
+}
+
+// MARK: - Pledge Status Row
+
+private struct PledgeStatusRow: View {
+    let icon: String
+    let iconColor: Color
+    let title: LocalizedStringKey
+    let isCompleted: Bool
+
+    var body: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundStyle(iconColor)
+                .frame(width: 24)
+
+            Text(title)
+                .font(Typography.subheadline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            Spacer()
+
+            if isCompleted {
+                Image(systemName: AppConfig.Icons.checkmark)
+                    .font(.system(size: 18))
+                    .foregroundStyle(ColorPalette.success)
+                    .transition(.scale.combined(with: .opacity))
+            } else {
+                Text("Pending")
+                    .font(Typography.caption(weight: .medium))
+                    .foregroundStyle(ColorPalette.textTertiary)
+                    .padding(.horizontal, Spacing.xs)
+                    .padding(.vertical, Spacing.xxs)
+                    .background(ColorPalette.surfaceSecondary)
+                    .clipShape(Capsule())
+            }
+        }
+    }
+}
+```
+
+**The entire card is a `Button`.** Tapping anywhere on the card opens the pledge flow. When all daily tasks are complete, `.disabled(allDone)` prevents further taps and the CTA button disappears, replaced by a green "Complete" label. This is a clear state transition — incomplete has an action, complete does not.
+
+**The CTA adapts based on what is pending.** If the morning pledge is not done, the button says "Take Today's Pledge" with a pledge icon. If the pledge is done but the evening check-in is not, it switches to "Complete Evening Check-in" with a moon icon. This contextual messaging guides the user to the next action without them having to think.
+
+**`PledgeStatusRow` is a `private struct`.** It is only used inside this file. Making it private keeps the module's public API clean and prevents accidental reuse in the wrong context.
+
+### WeeklySummaryCard.swift
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct WeeklySummaryCard: View {
+    let profile: UserProfile
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var allUrgeLogs: [UrgeLog]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var allCheckins: [DailyCheckin]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var allJournals: [JournalEntry]
+
+    private var weekStart: Date {
+        let calendar = Calendar.current
+        return calendar.date(byAdding: .day, value: -7, to: calendar.startOfDay(for: Date())) ?? Date()
+    }
+
+    private var weekUrges: [UrgeLog] {
+        allUrgeLogs.filter { $0.timestamp >= weekStart }
+    }
+
+    private var weekCheckins: [DailyCheckin] {
+        allCheckins.filter { $0.date >= weekStart }
+    }
+
+    private var weekJournals: [JournalEntry] {
+        allJournals.filter { $0.createdAt >= weekStart }
+    }
+
+    private var pledgeCount: Int {
+        weekCheckins.filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }.count
+    }
+
+    private var urgeCount: Int {
+        weekUrges.count
+    }
+
+    private var resistedCount: Int {
+        weekUrges.filter(\.didResist).count
+    }
+
+    private var avgMoodEmoji: String {
+        let moodCheckins = weekCheckins.filter { $0.mood > 0 }
+        guard !moodCheckins.isEmpty else { return "😐" }
+        let avg = Double(moodCheckins.map(\.mood).reduce(0, +)) / Double(moodCheckins.count)
+        return MoodRating(rawValue: Int(avg.rounded()))?.emoji ?? "😐"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            // Header
+            HStack {
+                Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 16))
+                    .foregroundStyle(ColorPalette.accent)
+
+                Text("This Week")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+
+                Spacer()
+
+                Text(avgMoodEmoji)
+                    .font(.system(size: 20))
+            }
+
+            // Stats row
+            HStack(spacing: 0) {
+                WeeklyStatItem(
+                    value: "\(pledgeCount)/7",
+                    label: "Pledges",
+                    icon: AppConfig.Icons.pledge,
+                    color: ColorPalette.accent
+                )
+
+                WeeklyStatItem(
+                    value: "\(urgeCount)",
+                    label: "Urges",
+                    icon: "exclamationmark.shield.fill",
+                    color: ColorPalette.danger
+                )
+
+                WeeklyStatItem(
+                    value: urgeCount > 0 ? "\(Int(Double(resistedCount) / Double(urgeCount) * 100))%" : "100%",
+                    label: "Resisted",
+                    icon: "shield.checkered",
+                    color: ColorPalette.success
+                )
+
+                WeeklyStatItem(
+                    value: "\(weekJournals.count)",
+                    label: "Journals",
+                    icon: AppConfig.Icons.journal,
+                    color: ColorPalette.infoBadge
+                )
+            }
+
+            // Motivational message
+            Text(motivationalMessage)
+                .font(Typography.caption())
+                .foregroundStyle(ColorPalette.textTertiary)
+                .lineLimit(2)
+        }
+        .padding(Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+    }
+
+    private var motivationalMessage: String {
+        if pledgeCount >= 6 {
+            return LanguageManager.shared.localized("Amazing commitment this week! You pledged almost every day.")
+        } else if resistedCount == urgeCount && urgeCount > 0 {
+            return LanguageManager.shared.localized("You resisted every urge this week. Incredible willpower!")
+        } else if weekJournals.count >= 3 {
+            return LanguageManager.shared.localized("Great journaling habit! Writing helps process your emotions.")
+        } else if urgeCount == 0 {
+            return LanguageManager.shared.localized("No urges logged this week. Keep up the great work!")
+        } else {
+            return LanguageManager.shared.localized("Every day you stay bet-free is a victory. Keep going!")
+        }
+    }
+}
+
+// MARK: - Weekly Stat Item
+
+private struct WeeklyStatItem: View {
+    let value: String
+    let label: LocalizedStringKey
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: Spacing.xxs) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(color)
+
+            Text(value)
+                .font(Typography.headline())
+                .foregroundStyle(ColorPalette.textPrimary)
+
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(ColorPalette.textTertiary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+```
+
+**Three `@Query` properties, each with its own sort.** `WeeklySummaryCard` runs its own SwiftData queries for `UrgeLog`, `DailyCheckin`, and `JournalEntry`. This is the correct pattern — each view that needs data from SwiftData uses `@Query` directly, rather than passing arrays down from a parent. SwiftData keeps these reactive. When the user logs a new urge or writes a journal entry, the weekly summary updates automatically.
+
+**Computed properties filter to the last 7 days.** The `@Query` fetches all records (sorted by date descending), and computed properties like `weekUrges` filter to those within the last week. This is a pragmatic tradeoff — SwiftData `@Query` does not support dynamic date predicates easily, so we fetch all and filter in memory. For a recovery app with at most a few hundred records total, this is fine.
+
+**The motivational message adapts to actual behavior.** It is not random — it reads the user's real data and picks the most relevant encouragement. Six or more pledges? Celebrate commitment. All urges resisted? Celebrate willpower. This makes the dashboard feel personalized, not generic.
+
+### MilestoneCardView.swift
+
+```swift
+import SwiftUI
+
+struct MilestoneCardView: View {
+    let currentStreak: Int
+    @State private var showCelebration = false
+
+    private var currentMilestone: Milestone? {
+        Milestone.current(for: currentStreak)
+    }
+
+    private var nextMilestone: Milestone? {
+        Milestone.next(for: currentStreak)
+    }
+
+    private var progressToNext: Double {
+        guard let next = nextMilestone else { return 1.0 }
+        let previous = currentMilestone?.days ?? 0
+        let total = next.days - previous
+        let current = currentStreak - previous
+        return total > 0 ? Double(current) / Double(total) : 1.0
+    }
+
+    var body: some View {
+        VStack(spacing: Spacing.md) {
+            HStack {
+                Text("Milestones")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+                Spacer()
+            }
+
+            if let current = currentMilestone {
+                // Current milestone achieved
+                BFCard {
+                    VStack(spacing: Spacing.md) {
+                        HStack(spacing: Spacing.md) {
+                            ZStack {
+                                Circle()
+                                    .fill(ColorPalette.warning.opacity(0.15))
+                                    .frame(width: 50, height: 50)
+
+                                Image(systemName: current.icon)
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(ColorPalette.warning)
+                                    .scaleEffect(showCelebration ? 1.2 : 1.0)
+                            }
+
+                            VStack(alignment: .leading, spacing: Spacing.xxs) {
+                                Text(current.title)
+                                    .font(Typography.headline())
+                                    .foregroundStyle(ColorPalette.textPrimary)
+
+                                Text(current.description)
+                                    .font(Typography.caption())
+                                    .foregroundStyle(ColorPalette.textSecondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: AppConfig.Icons.checkmark)
+                                .font(.system(size: 20))
+                                .foregroundStyle(ColorPalette.success)
+                        }
+
+                        // Progress to next
+                        if let next = nextMilestone {
+                            VStack(spacing: Spacing.xs) {
+                                HStack {
+                                    Text("Next: \(next.title)")
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(ColorPalette.textTertiary)
+                                    Spacer()
+                                    Text("\(next.days - currentStreak) days to go")
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(ColorPalette.accent)
+                                }
+
+                                GeometryReader { geometry in
+                                    ZStack(alignment: .leading) {
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .fill(ColorPalette.surfaceSecondary)
+                                            .frame(height: 6)
+
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .fill(ColorPalette.primaryGradient)
+                                            .frame(width: geometry.size.width * progressToNext, height: 6)
+                                            .animation(AnimationPresets.smooth, value: progressToNext)
+                                    }
+                                }
+                                .frame(height: 6)
+                            }
+                        }
+                    }
+                }
+            } else if let next = nextMilestone {
+                // No milestone yet — show first target
+                BFCard {
+                    HStack(spacing: Spacing.md) {
+                        ZStack {
+                            Circle()
+                                .fill(ColorPalette.accent.opacity(0.15))
+                                .frame(width: 50, height: 50)
+
+                            Image(systemName: next.icon)
+                                .font(.system(size: 22))
+                                .foregroundStyle(ColorPalette.accent.opacity(0.6))
+                        }
+
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            Text("First milestone: \(next.title)")
+                                .font(Typography.headline())
+                                .foregroundStyle(ColorPalette.textPrimary)
+
+                            Text("\(next.days - currentStreak) days to go")
+                                .font(Typography.caption())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            withAnimation(AnimationPresets.bouncy.delay(0.5)) {
+                showCelebration = true
+            }
+        }
+    }
+}
+
+// MARK: - Milestone Celebration Overlay
+
+struct MilestoneCelebrationView: View {
+    let milestone: Milestone
+    let onDismiss: () -> Void
+    @State private var isVisible = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.6)
+                .ignoresSafeArea()
+                .onTapGesture { onDismiss() }
+
+            VStack(spacing: Spacing.xl) {
+                ZStack {
+                    Circle()
+                        .fill(ColorPalette.warning.opacity(0.15))
+                        .frame(width: 140, height: 140)
+                        .scaleEffect(isVisible ? 1.0 : 0.3)
+
+                    Image(systemName: milestone.icon)
+                        .font(.system(size: 54))
+                        .foregroundStyle(ColorPalette.warning)
+                        .scaleEffect(isVisible ? 1.0 : 0.0)
+                        .rotationEffect(.degrees(isVisible ? 0 : -30))
+                }
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+                VStack(spacing: Spacing.sm) {
+                    Text(milestone.title)
+                        .font(Typography.largeTitle())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    Text(milestone.description)
+                        .font(Typography.title3(weight: .medium))
+                        .foregroundStyle(ColorPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .staggeredAppear(index: 1, isVisible: isVisible)
+
+                BFButton(title: "Keep Going!", icon: AppConfig.Icons.sparkles) {
+                    onDismiss()
+                }
+                .padding(.horizontal, Spacing.xxl)
+                .staggeredAppear(index: 2, isVisible: isVisible)
+            }
+            .padding(Spacing.xxl)
+        }
+        .onAppear {
+            withAnimation(AnimationPresets.bouncy) {
+                isVisible = true
+            }
+        }
+    }
+}
+```
+
+**Two states: milestone achieved and no milestone yet.** The card branches on whether `Milestone.current(for:)` returns a value. If the user has hit at least one milestone, the card shows it with a checkmark and a progress bar toward the next. If not, it shows the first target as motivation. This eliminates any empty state — there is always something to display.
+
+**`GeometryReader` for the progress bar.** The progress bar width is `geometry.size.width * progressToNext`, giving a proportional fill. The animation preset smooths transitions when the streak changes.
+
+**`MilestoneCelebrationView` is a separate overlay.** When the user hits a new milestone, this full-screen celebration view can be presented. It uses the same `staggeredAppear` pattern as the dashboard, with a bouncy scale-in for the milestone icon and a "Keep Going!" dismiss button.
+
+### EmergencyUrgeButton (in QuickActionsView.swift)
+
+```swift
+import SwiftUI
+
+struct EmergencyUrgeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Spacing.md) {
+                ZStack {
+                    PhaseAnimator([false, true]) { phase in
+                        Circle()
+                            .fill(ColorPalette.danger.opacity(0.2))
+                            .frame(width: 48, height: 48)
+                            .scaleEffect(phase ? 1.3 : 1.0)
+                            .opacity(phase ? 0.3 : 0.8)
+                    } animation: { _ in
+                        .easeInOut(duration: 2.0)
+                    }
+
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(ColorPalette.danger)
+                }
+
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    Text("Feeling an urge?")
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    Text("Tap here for immediate support")
+                        .font(Typography.caption())
+                        .foregroundStyle(ColorPalette.textTertiary)
+                }
+
+                Spacer()
+
+                Image(systemName: AppConfig.Icons.chevronRight)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+            .padding(Spacing.md)
+            .background(ColorPalette.surfacePrimary)
+            .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous)
+                    .stroke(ColorPalette.danger.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(BFButtonPressStyle())
+    }
+}
+```
+
+**`PhaseAnimator` for the pulsing circle.** This is an iOS 17 API that continuously animates between two phases. The danger circle scales between 1.0 and 1.3 with an `easeInOut(duration: 2.0)` animation, creating a gentle pulse that draws the eye without being aggressive. The opacity also shifts from 0.8 to 0.3, so the pulse fades as it grows — a subtle breathing effect.
+
+**The button has a danger-colored border.** The `.overlay` with a `0.3` opacity stroke gives the button a subtle red outline that signals "this is different from the other cards." Combined with the pulsing animation, it communicates urgency without being alarming during normal use.
+
+**The action is a closure, not a navigation link.** The parent (`DashboardView`) passes `{ showUrgeFlow = true }`, which triggers a `.fullScreenCover`. This separation means the button does not know how the urge flow is presented — it just calls the closure.
+
+### MainTabView.swift
+
+```swift
+import SwiftUI
+
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        @Bindable var router = router
+
+        VStack(spacing: 0) {
+            TabView(selection: $router.selectedTab) {
+                NavigationStack(path: $router.navigationPath) {
+                    DashboardView()
+                }
+                .tag(AppRouter.Tab.dashboard)
+
+                NavigationStack {
+                    JournalView()
+                }
+                .tag(AppRouter.Tab.journal)
+
+                NavigationStack {
+                    ProgressAnalyticsView()
+                }
+                .tag(AppRouter.Tab.progress)
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tag(AppRouter.Tab.settings)
+            }
+            .toolbar(.hidden, for: .tabBar)
+
+            // Custom animated tab bar
+            CustomTabBar(selectedTab: $router.selectedTab)
+        }
+    }
+}
+
+// MARK: - Custom Tab Bar
+
+private struct CustomTabBar: View {
+    @Binding var selectedTab: AppRouter.Tab
+    @Namespace private var tabNamespace
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(AppRouter.Tab.allCases) { tab in
+                TabBarButton(
+                    tab: tab,
+                    isSelected: selectedTab == tab,
+                    namespace: tabNamespace
+                ) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        selectedTab = tab
+                    }
+                    HapticManager.lightImpact()
+                }
+            }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.top, Spacing.xs)
+        .padding(.bottom, Spacing.sm)
+        .background(
+            ColorPalette.surfacePrimary
+                .shadow(color: .black.opacity(0.1), radius: 8, y: -2)
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+}
+
+// MARK: - Tab Bar Button
+
+private struct TabBarButton: View {
+    let tab: AppRouter.Tab
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: isSelected ? tab.icon : tab.icon.replacingOccurrences(of: ".fill", with: ""))
+                    .font(.system(size: isSelected ? 22 : 20, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? ColorPalette.accent : ColorPalette.textTertiary)
+                    .scaleEffect(isSelected ? 1.0 : 0.85)
+                    .symbolEffect(.bounce, value: isSelected)
+
+                Text(tab.localizedName)
+                    .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                    .foregroundStyle(isSelected ? ColorPalette.accent : ColorPalette.textTertiary)
+
+                // Active indicator
+                if isSelected {
+                    Capsule()
+                        .fill(ColorPalette.accent)
+                        .frame(width: 20, height: 3)
+                        .matchedGeometryEffect(id: "activeTab", in: namespace)
+                } else {
+                    Capsule()
+                        .fill(.clear)
+                        .frame(width: 20, height: 3)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+**The system tab bar is hidden.** `.toolbar(.hidden, for: .tabBar)` removes the default iOS tab bar entirely. In its place, a custom `CustomTabBar` sits in a `VStack` below the `TabView`. This gives full control over the tab bar design — icon sizes, animations, the active indicator capsule, and haptic feedback.
+
+**`matchedGeometryEffect` for the active indicator.** The accent-colored capsule under the selected tab uses `matchedGeometryEffect` with a shared namespace. When the user switches tabs, the capsule slides from one tab to another with a spring animation rather than appearing and disappearing. This is a single line of code that produces a polished transition.
+
+**`@Bindable var router = router`** inside the body. The `AppRouter` is an `@Observable` class injected via `@Environment`. To create bindings to its properties (`selectedTab`, `navigationPath`), we need `@Bindable`. This local binding pattern is an iOS 17 `@Observable` idiom — it replaces the old `@ObservedObject` binding behavior.
+
+**Each tab gets its own `NavigationStack`.** This means navigation state is independent per tab. Pushing a detail view in the Journal tab does not affect the Dashboard tab's navigation. The Dashboard tab also gets a `path` binding from the router for programmatic navigation.
+
+## Checkpoint
+
+Before moving to the next lesson, verify:
+
+- [ ] Dashboard shows the time-based greeting with the correct icon (sun for morning/afternoon, moon for evening/night)
+- [ ] "Day X of your journey" displays the current streak count from the user profile
+- [ ] Streak card shows an animated counter, a progress ring with milestone icon, and next milestone countdown text
+- [ ] Quote card renders a daily motivational quote in serif font with author attribution
+- [ ] Savings and stats cards display side-by-side with animated counters for money saved and hours reclaimed
+- [ ] Pledge card shows morning pledge and evening check-in status, with a contextual CTA button when tasks are pending
+- [ ] Weekly summary shows pledges, urges, resistance rate, and journal count for the last 7 days
+- [ ] Milestone card shows the current achieved milestone and progress bar toward the next
+- [ ] Emergency urge button pulses with a danger-colored animation and opens the urge flow as a full-screen cover
+- [ ] Cards appear with staggered animations on first load
+- [ ] Custom tab bar at the bottom shows four tabs with animated selection indicator
+
+## Challenge
+
+**Add a "longest streak" indicator to the StreakCardView.**
+
+Right now, the streak card shows only the current streak and progress toward the next milestone. But users who have relapsed and restarted want to know how their current streak compares to their personal best.
+
+Add a small label below the current milestone text in `StreakCardView` that reads "Personal best: X days" when `profile.longestStreak > profile.currentStreak`. When the current streak IS the personal best, show "New personal best!" instead. Use `.foregroundStyle(.white.opacity(0.6))` to keep it visually subordinate to the main streak count.
+
+**Hint:** `UserProfile` already has a `longestStreak` property. You only need to add a conditional `HStack` or `Text` inside the existing `VStack` in `StreakCardView`. No ViewModel changes required.
