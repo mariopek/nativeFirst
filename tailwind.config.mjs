@@ -5,8 +5,8 @@ export default {
     extend: {
       fontFamily: {
         sans: ['Inter Variable', 'system-ui', 'sans-serif'],
-        display: ['JetBrains Mono Variable', 'JetBrains Mono', 'monospace'],
-        mono: ['JetBrains Mono Variable', 'JetBrains Mono', 'monospace'],
+        display: ['Inter Variable', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
       },
       typography: () => ({
         DEFAULT: {
