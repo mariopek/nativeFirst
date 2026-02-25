@@ -41,11 +41,25 @@ BetAway supports English, German, French, Spanish, Italian, Portuguese (Portugal
 
 If you know your app will support multiple languages — even if you plan to launch with just one — set up the localization infrastructure at the very beginning of the project. This means creating the `LanguageManager`, establishing the `localizedName` pattern for enums, and using `LanguageManager.shared.localized()` for every user-facing string from the first commit.
 
-Why? Because if you wait until halfway through development — or worse, until the app is "done" — you will face a massive refactoring job. Every hardcoded `"Sports Betting"` string, every `Text("Good Morning")`, every `static let disclaimer = "..."` becomes a search-and-replace nightmare. You have to audit every view, every view model, every enum, and every config. In BetAway, there are over 400 user-facing strings across 30+ files. Retrofitting localization onto a codebase that size is weeks of tedious, error-prone work.
+Why? Because if you wait until halfway through development — or worse, until the app is "done" — you will face a massive refactoring job. Every hardcoded `"Sports Betting"` string, every `Text("Good Morning")`, every `static let disclaimer = "..."` becomes a search-and-replace nightmare. You have to audit every view, every view model, every enum, and every config.
 
-But if you set up the pattern on day one, adding a new language later is purely a translation task. You hand the `Localizable.xcstrings` file to a translator, they fill in the strings, and the app works in that language. No code changes. No refactoring. BetAway went from 1 to 12 languages by adding `.lproj` bundles — the engineering work was already done because the localization system was built into the foundation.
+Here is what "doing it late" actually looks like with real numbers from BetAway:
 
-The rule is simple: **if there is any chance your app will be multilingual, build the localization layer first.** The cost of doing it early is near zero. The cost of doing it late is proportional to the size of your codebase.
+- **~400 user-facing strings** across 30+ Swift files (views, view models, enums, configs, notification content)
+- **12 supported languages**
+- That is **~4,800 individual translations** that need to exist in the String Catalog
+
+If you built the entire app in English first and then decided "let's add 11 more languages," the work breaks down into two phases — and the first one is the killer:
+
+**Phase 1 — Refactoring (the engineering nightmare):** You have to find every hardcoded string in 30+ files, replace each one with `LanguageManager.shared.localized("...")`, convert every `static let` into a `computed var`, add `localizedName` to every enum, make sure no view uses `.rawValue` for display, and test that nothing broke. For BetAway's codebase, this is easily 2-3 full days of careful, file-by-file auditing. If you are using AI-assisted development, it is hundreds of thousands of tokens spent on refactoring — the AI has to read every file, understand the context, rewrite strings, and you have to review every change. It is the worst kind of AI task: high token cost, low creative value, and high risk of subtle bugs (a missed string that stays English, a format string with wrong `%@` placement).
+
+**Phase 2 — Translation (the easy part):** Once the infrastructure is in place, you export the `Localizable.xcstrings` file and hand it to translators. Each language needs ~400 strings translated. This is a content task, not an engineering task. It scales linearly and can be done in parallel by different translators.
+
+But if you set up the pattern on day one, **Phase 1 never exists.** You write `LanguageManager.shared.localized("Good Morning")` instead of `"Good Morning"` from the start — it takes the same amount of effort. Every new enum gets `localizedName` as part of its initial implementation. Every `AppConfig` property starts as a computed `var`. When it is time to add languages, you skip straight to Phase 2. No refactoring. No auditing. No wasted tokens.
+
+BetAway went from 1 to 12 languages by adding `.lproj` bundles — the engineering work was already done because the localization system was built into the foundation.
+
+The rule is simple: **if there is any chance your app will be multilingual, build the localization layer first.** The cost of doing it early is near zero. The cost of doing it late is proportional to the size of your codebase multiplied by the number of languages you want to support.
 
 ## Plan Phase: Defining What We Build
 
