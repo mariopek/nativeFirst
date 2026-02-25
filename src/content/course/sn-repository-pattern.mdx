@@ -1,601 +1,988 @@
 ---
-title: "Service Layer Implementation"
-description: "Implement protocol-based services with generic CRUD operations, a concrete SwiftData implementation, and dependency injection that makes your code testable from day one."
+title: "Data Access Architecture"
+description: "Learn how BetAway organizes its data layer using @Query for reads, @Observable ViewModels with ModelContext for writes, and dedicated manager types for system services like notifications and haptics."
 courseSlug: "ship-native"
 module: 3
 moduleTitle: "Data Layer & Persistence"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Service Layer", "Protocol", "Dependency Injection", "SwiftData", "CRUD", "Generics", "Testability", "BetAway"]
+topics: ["SwiftData", "@Query", "@Observable", "ModelContext", "ViewModels", "Managers", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-In the previous module we built BetAway's UI layer — the recovery timeline, the check-in flow, and the navigation architecture. Every one of those views is currently backed by placeholder data. Time to fix that.
+In the previous module we built BetAway's UI layer — the recovery timeline, the check-in flow, and the navigation architecture. Every one of those views was backed by placeholder data. Time to fix that.
 
-This lesson introduces the pattern that will underpin every data operation in BetAway: the service layer. By the end, your views will read and write real persisted data, but they will never know — or care — whether that data comes from SwiftData, an in-memory store, or a mock you created for tests.
+This lesson walks through the data access architecture that BetAway actually uses in production. There is no abstract service protocol, no generic CRUD layer, and no dependency injection container. Instead the app relies on three concrete patterns that SwiftData provides out of the box: `@Query` for reads, `@Observable` ViewModels that receive a `ModelContext` for writes, and standalone manager types for system services like notifications and haptics.
 
 ## What You'll Learn
 
-1. **Define a `RecoveryService` protocol** that exposes generic CRUD operations and hides all persistence details from the rest of the app.
-2. **Build `SwiftDataRecoveryService`**, a concrete implementation that uses `ModelContext` for reading and writing recovery check-ins.
-3. **Create a `ServiceProvider`** that acts as a lightweight dependency injection container, so ViewModels receive protocols — never concrete types.
-4. **Write a `MockRecoveryService`** that powers SwiftUI previews and unit tests without touching a database.
+1. **How `@Query` drives all read operations** directly inside SwiftUI views, with sorting and filtering built into the property wrapper.
+2. **How `@Observable` ViewModels handle write logic** by receiving a `ModelContext` from the view at the call site — not through init injection.
+3. **How utility managers (`NotificationManager`, `HapticManager`, `SharedDataManager`) encapsulate system services** so ViewModels stay focused on business logic.
+4. **Why this pragmatic approach works** for a shipping app and where the tradeoffs are.
 
-## Why This Matters
+## Why This Architecture
 
-In a small personal project, calling `modelContext.insert()` directly from a ViewModel works. In a production app, it is a liability.
+Many tutorials teach a formal repository or service protocol pattern: define a protocol, write a SwiftData implementation, write a mock, inject through a container. That approach has real benefits for large teams and projects that need to swap persistence backends.
 
-The moment you want to write a unit test, you need a real SwiftData container — or you skip the test. The moment you want to swap persistence frameworks (Core Data to SwiftData, for instance), you rewrite every ViewModel. The moment two developers touch the same ViewModel, they trip over persistence logic mixed in with business logic.
+BetAway does not need that. It is a single-developer app with one persistence backend (SwiftData) and a focused scope. The architecture it uses instead is simpler:
 
-The service layer solves all three problems with one abstraction. Your ViewModels depend on a protocol. Production injects the SwiftData implementation. Tests inject a mock. The ViewModel code is identical in both cases. This is not academic architecture astronautics — it is the difference between code that ships once and code that ships continuously.
+- **Views own the reads.** SwiftUI's `@Query` property wrapper fetches data reactively. When the underlying store changes, the view re-renders automatically. No ViewModel code required for reads.
+- **ViewModels own the writes.** When a user submits a pledge, logs an urge, or resets their data, a ViewModel method receives the `ModelContext` from the view and performs the insert or delete.
+- **Managers own system services.** Notifications, haptics, widget data sharing, and data export each have a dedicated manager type. These are either `enum`-based (for stateless utilities) or `@Observable` classes (when they hold state like authorization status).
 
-## Plan Phase: Defining What We Build
+This separation keeps each concern in one place. The view knows how to display data. The ViewModel knows when and what to write. The manager knows how to talk to a system framework.
+
+## Plan Phase: Understanding the Data Flow
 
 Open Claude Code in your BetAway project directory and send this planning prompt:
 
 ```
-I need to implement the service layer for BetAway's recovery check-ins.
+I want to understand how BetAway organizes its data access layer.
 
-Before writing code, plan the following:
+Before writing any code, analyze the current project structure and explain:
 
-1. A RecoveryService protocol with these operations:
-   - fetchAll() — returns all check-ins sorted by date descending
-   - fetch(by id: UUID) — returns a single check-in or nil
-   - save(CheckIn) — persists a new check-in
-   - update(CheckIn) — updates an existing check-in
-   - delete(CheckIn) — removes a check-in
+1. How do views read persisted data (UserProfile, DailyCheckin, UrgeLog)?
+2. How do ViewModels write data — do they own a ModelContext or receive one?
+3. What utility managers exist and what system services do they wrap?
+4. Where does each @Model type get inserted into the store?
 
-2. A SwiftDataRecoveryService class that implements the protocol
-   using ModelContext.
-
-3. A ServiceProvider that holds service instances and can
-   be swapped between production and test configurations.
-
-4. A MockRecoveryService for previews and tests.
-
-All code must use Swift 6 strict concurrency. Annotate with
-@MainActor where needed. Do NOT use singletons.
-
-Think through the design first — do not generate code yet.
+Do not generate code yet — just map out the existing patterns.
 ```
 
 ### What you should see in the plan
 
-The AI should identify three things:
+The AI should identify three patterns:
 
-- **Protocol methods are `async throws`.** SwiftData operations can fail, and wrapping them in async keeps the door open for future remote persistence.
-- **`@MainActor` on the concrete service.** `ModelContext` is not `Sendable`. Accessing it off the main actor is a Swift 6 error. The protocol itself should not require `@MainActor` — only the SwiftData implementation needs it.
-- **`ServiceProvider` is a struct, not a class.** It holds protocol references and gets injected via the SwiftUI environment or passed through init. No singletons, no global state.
+- **`@Query` in views for all reads.** Every view that needs data declares a `@Query` property. `DashboardView` queries `UserProfile`. `DataExportView` queries all four model types. The view owns the fetch descriptor — sort order, filtering — right at the declaration site.
+- **ViewModels receive `ModelContext` as a method parameter.** `UrgeViewModel.submitUrge(profile:context:)` takes a `ModelContext` argument. `SettingsViewModel.resetAllData(context:router:)` does the same. The ViewModel never stores the context as a property — it uses it for the duration of one write operation.
+- **Manager types for system concerns.** `NotificationManager` wraps `UNUserNotificationCenter`. `HapticManager` wraps `UIImpactFeedbackGenerator`. `SharedDataManager` wraps `UserDefaults` for App Group widget sharing. These are not data access layers — they are thin wrappers around platform APIs.
 
-### Anti-pattern: What bad looks like
+## The Models
 
-Here is what to reject if the AI proposes it:
+Before looking at reads and writes, here are the three core `@Model` types. These are the tables in BetAway's SwiftData store.
 
-```swift
-// BAD — ViewModel directly owns ModelContext
-@Observable
-class RecoveryTimelineViewModel {
-    private let modelContext: ModelContext  // tight coupling
-
-    func addCheckIn(_ checkIn: CheckIn) {
-        modelContext.insert(checkIn)  // no abstraction
-        try? modelContext.save()    // swallowed error
-    }
-}
-```
-
-This ViewModel cannot be tested without a real SwiftData container. It cannot be reused with a different persistence layer. And it silently swallows errors. If your AI output looks like this, push back.
-
-## Execute Phase: Implementation
-
-Now send the execution prompt:
-
-```
-Implement the plan. Generate:
-
-1. RecoveryService protocol in Services/RecoveryService.swift
-2. SwiftDataRecoveryService in Services/SwiftDataRecoveryService.swift
-3. ServiceProvider in Services/ServiceProvider.swift
-4. MockRecoveryService in Services/MockRecoveryService.swift
-
-Requirements:
-- Swift 6 strict concurrency
-- @MainActor on SwiftDataRecoveryService
-- Protocol methods are async throws
-- Use os.Logger, not print
-- Include MARK comments for sections
-- CheckIn is an existing @Model class with: id (UUID),
-  recoveryStatus (RecoveryStatus enum), note (String), activities ([String]),
-  date (Date), createdAt (Date)
-```
-
-### Review the output
-
-Here is what Claude Code should generate. Read each file carefully — I will flag the things that matter.
-
-**RecoveryService.swift** — the protocol.
+**Models/UserProfile.swift** — the user's recovery profile and settings.
 
 ```swift
 import Foundation
+import SwiftData
 
-protocol RecoveryService: Sendable {
-    func fetchAll() async throws -> [CheckIn]
-    func fetch(by id: UUID) async throws -> CheckIn?
-    func save(_ checkIn: CheckIn) async throws
-    func update(_ checkIn: CheckIn) async throws
-    func delete(_ checkIn: CheckIn) async throws
+@Model
+final class UserProfile {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var quitDate: Date = Date()
+    var displayName: String = ""
+
+    // Gambling profile
+    var gamblingTypesRaw: [String] = []
+    var frequencyRaw: String = GamblingFrequency.weekly.rawValue
+    var averageWeeklySpend: Double = 0
+    var estimatedTotalLosses: Double?
+    var estimatedDebt: Double?
+
+    // Settings
+    var biometricLockEnabled: Bool = false
+    var notificationsEnabled: Bool = true
+    var morningReminderHour: Int = AppConfig.defaultMorningHour
+    var morningReminderMinute: Int = AppConfig.defaultMorningMinute
+    var eveningReminderHour: Int = AppConfig.defaultEveningHour
+    var eveningReminderMinute: Int = AppConfig.defaultEveningMinute
+    var hapticFeedbackEnabled: Bool = true
+    var emergencyContactsData: Data?
+
+    // Relationships
+    @Relationship(deleteRule: .cascade) var checkins: [DailyCheckin] = []
+    @Relationship(deleteRule: .cascade) var urgeLogs: [UrgeLog] = []
+    @Relationship(deleteRule: .cascade) var journalEntries: [JournalEntry] = []
+
+    // MARK: - Computed Properties
+
+    var currentStreak: Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let quitStart = calendar.startOfDay(for: quitDate)
+
+        if quitStart > today { return 0 }
+
+        let relapses = checkins
+            .filter { !$0.gamblingFree && $0.checkinTypeRaw == CheckinType.eveningCheckin.rawValue }
+            .sorted { $0.date > $1.date }
+
+        if let lastRelapse = relapses.first {
+            let relapsDay = calendar.startOfDay(for: lastRelapse.date)
+            let daysSinceRelapse = calendar.dateComponents([.day], from: relapsDay, to: today).day ?? 0
+            return max(0, daysSinceRelapse)
+        }
+
+        return daysSinceQuit
+    }
+
+    var daysSinceQuit: Int {
+        max(0, Calendar.current.dateComponents(
+            [.day],
+            from: Calendar.current.startOfDay(for: quitDate),
+            to: Calendar.current.startOfDay(for: Date())
+        ).day ?? 0)
+    }
+
+    var totalSaved: Double {
+        let weeks = Double(daysSinceQuit) / 7.0
+        return weeks * averageWeeklySpend
+    }
+
+    // MARK: - Init
+
+    init(
+        quitDate: Date = Date(),
+        displayName: String = "",
+        gamblingTypes: [GamblingType] = [],
+        frequency: GamblingFrequency = .weekly,
+        averageWeeklySpend: Double = 0
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.quitDate = quitDate
+        self.displayName = displayName
+        self.gamblingTypesRaw = gamblingTypes.map(\.rawValue)
+        self.frequencyRaw = frequency.rawValue
+        self.averageWeeklySpend = averageWeeklySpend
+    }
+
+    // MARK: - Helpers
+
+    func hasPledgedToday() -> Bool {
+        let calendar = Calendar.current
+        return checkins.contains { checkin in
+            checkin.checkinTypeRaw == CheckinType.morningPledge.rawValue &&
+            calendar.isDateInToday(checkin.date)
+        }
+    }
+
+    func hasCheckedInToday() -> Bool {
+        let calendar = Calendar.current
+        return checkins.contains { checkin in
+            checkin.checkinTypeRaw == CheckinType.eveningCheckin.rawValue &&
+            calendar.isDateInToday(checkin.date)
+        }
+    }
 }
 ```
 
 Review checklist:
 
-- ✅ **`Sendable` conformance.** The protocol itself must be `Sendable` so it can be stored in `@Observable` ViewModels under Swift 6 strict concurrency. Without this, the compiler will reject any ViewModel that holds a `RecoveryService` reference.
-- ✅ **`async throws` on every method.** Even though the SwiftData implementation is synchronous under the hood, marking these as `async throws` keeps the contract flexible. A future network-backed service can conform without protocol changes.
-- ✅ **No `@MainActor` on the protocol.** The abstraction should not force a specific actor. Only the concrete implementation decides its isolation.
-- ⚠️ **Check the `save` vs `update` distinction.** Some AI outputs merge these into a single upsert. For BetAway, keeping them separate is clearer — `save` inserts, `update` modifies an existing record. If the AI merged them, ask it to split.
+- **`@Relationship(deleteRule: .cascade)`** ensures that deleting a `UserProfile` also removes all associated check-ins, urge logs, and journal entries. This is critical for the "Reset All Data" feature in settings.
+- **Computed properties like `currentStreak` live on the model.** The model is the source of truth for derived values. ViewModels and views call `profile.currentStreak` directly rather than recalculating it themselves.
+- **Enum-backed raw values.** SwiftData cannot store Swift enums directly, so the model stores raw strings (`gamblingTypesRaw`, `frequencyRaw`) and exposes computed properties for type-safe access. This is a common SwiftData pattern.
 
-**SwiftDataRecoveryService.swift** — the concrete implementation.
+**Models/DailyCheckin.swift** — morning pledges and evening check-ins.
 
 ```swift
 import Foundation
 import SwiftData
-import os
 
-@MainActor
-final class SwiftDataRecoveryService: RecoveryService {
-    private let modelContext: ModelContext
-    private let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "SwiftDataRecoveryService"
-    )
+@Model
+final class DailyCheckin {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var checkinTypeRaw: String = CheckinType.morningPledge.rawValue
+    var mood: Int = MoodRating.neutral.rawValue
+    var gamblingFree: Bool = true
+    var amountGambled: Double?
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var triggersRaw: [String] = []
+    var riskLevelRaw: String = RiskLevel.low.rawValue
+    var createdAt: Date = Date()
 
-    nonisolated init(modelContext: ModelContext) {
+    @Relationship(inverse: \UserProfile.checkins) var userProfile: UserProfile?
+
+    // MARK: - Computed Properties
+
+    var checkinType: CheckinType {
+        get { CheckinType(rawValue: checkinTypeRaw) ?? .morningPledge }
+        set { checkinTypeRaw = newValue.rawValue }
+    }
+
+    var moodRating: MoodRating {
+        get { MoodRating(rawValue: mood) ?? .neutral }
+        set { mood = newValue.rawValue }
+    }
+
+    // MARK: - Init
+
+    init(
+        checkinType: CheckinType,
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        pledgeReason: String = "",
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.date = Date()
+        self.checkinTypeRaw = checkinType.rawValue
+        self.mood = mood.rawValue
+        self.gamblingFree = gamblingFree
+        self.pledgeReason = pledgeReason
+        self.notes = notes
+        self.createdAt = Date()
+    }
+}
+```
+
+**Models/UrgeLog.swift** — logged urge events with intensity, triggers, and outcome.
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class UrgeLog {
+    var id: UUID = UUID()
+    var timestamp: Date = Date()
+    var intensity: Int = 5
+    var durationSeconds: TimeInterval = 0
+    var triggerRaw: String = ""
+    var copingStrategyRaw: String = ""
+    var didResist: Bool = true
+    var notes: String = ""
+
+    @Relationship(inverse: \UserProfile.urgeLogs) var userProfile: UserProfile?
+
+    // MARK: - Computed Properties
+
+    var trigger: PredefinedTrigger? {
+        get { PredefinedTrigger(rawValue: triggerRaw) }
+        set { triggerRaw = newValue?.rawValue ?? "" }
+    }
+
+    var copingStrategy: CopingStrategy? {
+        get { CopingStrategy(rawValue: copingStrategyRaw) }
+        set { copingStrategyRaw = newValue?.rawValue ?? "" }
+    }
+
+    // MARK: - Init
+
+    init(
+        intensity: Int = 5,
+        trigger: PredefinedTrigger? = nil,
+        copingStrategy: CopingStrategy? = nil,
+        didResist: Bool = true,
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.timestamp = Date()
+        self.intensity = intensity
+        self.triggerRaw = trigger?.rawValue ?? ""
+        self.copingStrategyRaw = copingStrategy?.rawValue ?? ""
+        self.didResist = didResist
+        self.notes = notes
+    }
+}
+```
+
+Note the `@Relationship(inverse:)` annotations on both `DailyCheckin` and `UrgeLog`. These create bidirectional relationships with `UserProfile`. When you set `urge.userProfile = profile`, SwiftData automatically appends the urge to `profile.urgeLogs`. This is how the cascade delete in `UserProfile` knows which records to remove.
+
+## Execute Phase: Reads with @Query
+
+The read side of BetAway's data layer lives entirely inside SwiftUI views. There is no ViewModel method that fetches data, no `loadCheckIns()` function, and no manual refresh logic.
+
+Send this prompt to Claude Code:
+
+```
+Show me how BetAway's views read data from SwiftData.
+Look at DashboardView, DataExportView, and UrgeContainerView.
+What pattern do they all share for loading persisted data?
+```
+
+### How @Query works in practice
+
+Here is `DashboardView` — the main screen of the app:
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct DashboardView: View {
+    @Environment(AppRouter.self) private var router
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+    @State private var isVisible = false
+    @State private var showUrgeFlow = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                if let profile {
+                    HStack {
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            HStack(spacing: Spacing.xs) {
+                                Image(systemName: viewModel.greetingIcon)
+                                    .foregroundStyle(ColorPalette.warning)
+                                Text(viewModel.greeting)
+                                    .font(Typography.title3())
+                                    .foregroundStyle(ColorPalette.textPrimary)
+                            }
+
+                            Text("Day \(profile.currentStreak) of your journey")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    // ...
+                }
+            }
+        }
+    }
+}
+```
+
+Review checklist:
+
+- **`@Query private var profiles: [UserProfile]`** is the entire read layer for this view. SwiftData observes the store and re-renders the view whenever a `UserProfile` is inserted, updated, or deleted. No manual refresh. No completion handler. No `Task { await loadData() }`.
+- **`private var profile: UserProfile? { profiles.first }`** is a convenience computed property. BetAway has exactly one user profile, so every view that queries profiles grabs `.first`.
+- **The ViewModel (`DashboardViewModel`) has no data fetching logic.** It computes derived display values like `greeting` and `greetingIcon` based on the current time. The profile data flows in from the view.
+
+Here is `DataExportView`, which reads all four model types at once:
+
+```swift
+struct DataExportView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Query private var profiles: [UserProfile]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var journalEntries: [JournalEntry]
+    @State private var exportManager = DataExportManager()
+    // ...
+}
+```
+
+Notice the `sort:` and `order:` parameters on each `@Query`. This is the equivalent of building a `FetchDescriptor` with `SortDescriptor` — but declared at the property level. The sort happens inside SwiftData, not in Swift code after the fetch.
+
+### The pattern
+
+Every view in BetAway that needs persisted data follows the same three-line pattern:
+
+```swift
+@Query private var profiles: [UserProfile]
+// or with sorting:
+@Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+// convenience accessor for single-profile apps:
+private var profile: UserProfile? { profiles.first }
+```
+
+There is no service to inject, no protocol to conform to, and no mock to maintain. For previews, you provide a `ModelContainer` with sample data — SwiftData handles the rest.
+
+## Execute Phase: Writes with ViewModels
+
+Writes are more involved than reads. They involve business logic (what to insert, when to trigger haptics, how to handle errors) so they belong in ViewModels rather than views. But the `ModelContext` itself comes from the view at the call site.
+
+Send this prompt:
+
+```
+Show me how BetAway's ViewModels write data to SwiftData.
+Look at UrgeViewModel.submitUrge and SettingsViewModel.resetAllData.
+How does the ModelContext get from the view to the ViewModel?
+```
+
+### UrgeViewModel — inserting a new record
+
+Here is the complete `UrgeViewModel`. Study the `submitUrge` method carefully:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@Observable
+final class UrgeViewModel {
+    // MARK: - State
+    var phase: UrgePhase = .acknowledge
+    var timerSeconds: Int = 0
+    var isTimerRunning: Bool = false
+    var breathPhase: BreathPhase = .inhale
+    var selectedIntensity: Int = 5
+    var selectedTrigger: PredefinedTrigger?
+    var selectedStrategy: CopingStrategy?
+    var notes: String = ""
+    var didResist: Bool = true
+    var showCompletionCelebration: Bool = false
+
+    // Distraction toolkit
+    var showBreathingExercise: Bool = false
+    var showGroundingExercise: Bool = false
+    var showMovementSuggestions: Bool = false
+    var showCallHelpline: Bool = false
+    var showEmergencyContacts: Bool = false
+
+    private var timerTask: Task<Void, Never>?
+
+    // MARK: - Constants
+    static let urgeTimerDuration: Int = 15 * 60 // 15 minutes
+    static let breathCycleDuration: Double = 8.0 // 4s in, 4s out
+
+    enum UrgePhase: CaseIterable {
+        case acknowledge
+        case timer
+        case log
+        case complete
+    }
+
+    enum BreathPhase {
+        case inhale
+        case exhale
+    }
+
+    // MARK: - Computed
+
+    var timerProgress: Double {
+        Double(timerSeconds) / Double(Self.urgeTimerDuration)
+    }
+
+    var timerDisplay: String {
+        let remaining = max(0, Self.urgeTimerDuration - timerSeconds)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var encouragementText: String {
+        switch timerSeconds {
+        case 0..<60: return LanguageManager.shared.localized("You're doing great. Stay with it.")
+        case 60..<180: return LanguageManager.shared.localized("The first minutes are the hardest. Keep breathing.")
+        case 180..<300: return LanguageManager.shared.localized("Almost halfway through the peak. Stay strong.")
+        case 300..<600: return LanguageManager.shared.localized("The peak is passing. You've got this.")
+        case 600..<900: return LanguageManager.shared.localized("You're nearly there. The urge is fading.")
+        default: return LanguageManager.shared.localized("Incredible strength. The urge has passed.")
+        }
+    }
+
+    // MARK: - Actions
+
+    func startTimer() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .timer
+            isTimerRunning = true
+        }
+
+        timerTask = Task { @MainActor in
+            while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+                try? await Task.sleep(for: .seconds(1))
+                if !Task.isCancelled {
+                    timerSeconds += 1
+                }
+            }
+            if !Task.isCancelled {
+                isTimerRunning = false
+                HapticManager.timerComplete()
+                moveToLog()
+            }
+        }
+
+        startBreathCycle()
+    }
+
+    func skipTimer() {
+        timerTask?.cancel()
+        isTimerRunning = false
+        moveToLog()
+    }
+
+    func moveToLog() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .log
+        }
+    }
+
+    func submitUrge(profile: UserProfile, context: ModelContext) {
+        let urge = UrgeLog(
+            intensity: selectedIntensity,
+            trigger: selectedTrigger,
+            copingStrategy: selectedStrategy,
+            didResist: didResist,
+            notes: notes
+        )
+        urge.durationSeconds = TimeInterval(timerSeconds)
+        urge.userProfile = profile
+        context.insert(urge)
+
+        withAnimation(AnimationPresets.bouncy) {
+            phase = .complete
+            showCompletionCelebration = true
+        }
+
+        if didResist {
+            HapticManager.mediumImpact()
+        }
+    }
+
+    func reset() {
+        timerTask?.cancel()
+        phase = .acknowledge
+        timerSeconds = 0
+        isTimerRunning = false
+        breathPhase = .inhale
+        selectedIntensity = 5
+        selectedTrigger = nil
+        selectedStrategy = nil
+        notes = ""
+        didResist = true
+        showCompletionCelebration = false
+        showBreathingExercise = false
+        showGroundingExercise = false
+        showMovementSuggestions = false
+        showCallHelpline = false
+        showEmergencyContacts = false
+    }
+
+    // MARK: - Breath Cycle
+
+    private func startBreathCycle() {
+        Task { @MainActor in
+            while isTimerRunning && !Task.isCancelled {
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .inhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .exhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+            }
+        }
+    }
+}
+```
+
+Review checklist:
+
+- **`func submitUrge(profile: UserProfile, context: ModelContext)`** — the `ModelContext` arrives as a parameter. The ViewModel does not store it, does not own it, and does not create it. The view provides it at the moment of the call.
+- **`context.insert(urge)`** is the only SwiftData write call. There is no `try context.save()` because SwiftData's autosave handles persistence. This is a deliberate tradeoff — simpler code in exchange for slightly less control over save timing.
+- **`urge.userProfile = profile`** sets the inverse relationship. SwiftData automatically adds this urge to `profile.urgeLogs` because of the `@Relationship(inverse:)` annotation on `UrgeLog`.
+- **`HapticManager.mediumImpact()`** is called directly as a static method. The ViewModel knows about the manager but does not own an instance. `HapticManager` is an `enum` with static methods — no state, no lifecycle.
+
+### How the view calls the ViewModel
+
+Here is the call site inside `UrgeLogView`:
+
+```swift
+struct UrgeLogView: View {
+    @Environment(\.modelContext) private var modelContext
+    var viewModel: UrgeViewModel
+    let profile: UserProfile
+
+    var body: some View {
+        // ... form fields ...
+
+        BFButton(title: "Save Urge Log", icon: AppConfig.Icons.checkmark) {
+            viewModel.submitUrge(profile: profile, context: modelContext)
+        }
+    }
+}
+```
+
+The view gets `modelContext` from the SwiftUI environment (injected by the `ModelContainer` at the app root). It passes the context to the ViewModel only when the user taps the button. This is the "pass at the call site" pattern that runs through all of BetAway's write operations.
+
+### SettingsViewModel — deleting data
+
+Here is the other side of writes — bulk deletion:
+
+```swift
+import SwiftUI
+import SwiftData
+
+@Observable
+final class SettingsViewModel {
+    var showResetConfirmation = false
+    var showQuitDatePicker = false
+    var showTipJar = false
+    var showFeedback = false
+    var showDataExport = false
+    let notificationManager = NotificationManager()
+
+    func toggleNotifications(enabled: Bool, profile: UserProfile) {
+        if enabled {
+            Task {
+                let granted = await notificationManager.requestAuthorization()
+                if granted {
+                    notificationManager.updateSchedule(
+                        morningHour: profile.morningReminderHour,
+                        morningMinute: profile.morningReminderMinute,
+                        eveningHour: profile.eveningReminderHour,
+                        eveningMinute: profile.eveningReminderMinute,
+                        enabled: true
+                    )
+                } else {
+                    await MainActor.run {
+                        profile.notificationsEnabled = false
+                    }
+                }
+            }
+        } else {
+            notificationManager.cancelAll()
+        }
+    }
+
+    func resetAllData(context: ModelContext, router: AppRouter) {
+        do {
+            try context.delete(model: UserProfile.self)
+            try context.delete(model: DailyCheckin.self)
+            try context.delete(model: UrgeLog.self)
+            try context.delete(model: JournalEntry.self)
+        } catch {
+            // SwiftData delete errors are non-fatal for MVP
+        }
+
+        notificationManager.cancelAll()
+        router.resetForNewUser()
+    }
+}
+```
+
+Review checklist:
+
+- **`context.delete(model: UserProfile.self)`** deletes every record of that type. This is the SwiftData equivalent of `DELETE FROM user_profiles`. Combined with cascade delete rules, deleting `UserProfile` would also remove related check-ins and urge logs — but the method explicitly deletes each type for clarity.
+- **`notificationManager.cancelAll()`** cleans up scheduled notifications after data is wiped. The ViewModel coordinates between the data layer (SwiftData) and a system service (notifications) — this is legitimate ViewModel responsibility.
+- **`router.resetForNewUser()`** navigates back to onboarding. The ViewModel receives the router as a parameter, same as the context — no stored dependencies.
+- **The `do/catch` swallows errors.** The comment is honest: "SwiftData delete errors are non-fatal for MVP." In a production app with more error surface, you would propagate these. For a local-only recovery app, silent failure on delete is an acceptable tradeoff.
+
+### The anti-pattern this avoids
+
+Here is what BetAway does NOT do:
+
+```swift
+// BAD — ViewModel stores ModelContext as a property
+@Observable
+class RecoveryTimelineViewModel {
+    private let modelContext: ModelContext  // stored dependency
+
+    init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
 
-    // MARK: - Fetch
-
-    func fetchAll() async throws -> [CheckIn] {
-        let descriptor = FetchDescriptor<CheckIn>(
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        let checkIns = try modelContext.fetch(descriptor)
-        logger.debug("Fetched \(checkIns.count) check-ins")
-        return checkIns
-    }
-
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        let predicate = #Predicate<CheckIn> { $0.id == id }
-        var descriptor = FetchDescriptor<CheckIn>(predicate: predicate)
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
-    }
-
-    // MARK: - Mutate
-
-    func save(_ checkIn: CheckIn) async throws {
+    func addCheckIn(_ checkIn: CheckIn) {
         modelContext.insert(checkIn)
-        try modelContext.save()
-        logger.debug("Saved check-in: \(checkIn.id)")
-    }
-
-    func update(_ checkIn: CheckIn) async throws {
-        try modelContext.save()
-        logger.debug("Updated check-in: \(checkIn.id)")
-    }
-
-    func delete(_ checkIn: CheckIn) async throws {
-        modelContext.delete(checkIn)
-        try modelContext.save()
-        logger.debug("Deleted check-in: \(checkIn.id)")
+        try? modelContext.save()
     }
 }
 ```
 
-Review checklist:
+The problem with storing `ModelContext` in the ViewModel is lifecycle coupling. The `ModelContext` is tied to the `ModelContainer`, which is tied to the app's scene. If the ViewModel outlives the view (which `@State` prevents but other ownership patterns do not), you get crashes or stale data. Passing the context at the call site avoids this entirely.
 
-- ✅ **`@MainActor` on the class.** `ModelContext` must be accessed on the main actor in Swift 6. This annotation makes that guarantee at compile time.
-- ✅ **`nonisolated init`.** The initializer does not access actor-isolated state (it only assigns), so marking it `nonisolated` lets you create the service from any context — including the app's `init()`.
-- ✅ **`fetchLimit = 1` on single-fetch.** Small thing, big impact. Without the limit, SwiftData scans every record even though we only need one. For a recovery app this is negligible; for production patterns, it matters.
-- ✅ **Explicit `try modelContext.save()` after every mutation.** SwiftData's autosave is convenient but unpredictable in timing. Explicit saves mean we know exactly when data hits disk.
-- ⚠️ **Check that `update` does not re-insert.** A common AI mistake is calling `modelContext.insert(checkIn)` inside `update`. SwiftData tracks changes on `@Model` objects automatically — you only need to call `save()`. If the AI added an insert, remove it.
+## Execute Phase: Utility Managers
 
-**ServiceProvider.swift** — dependency injection.
+BetAway uses three manager types for system services. These are not data access objects — they wrap platform APIs that do not involve SwiftData.
+
+### NotificationManager — scheduling and authorization
 
 ```swift
 import Foundation
-import SwiftData
-
-struct ServiceProvider: Sendable {
-    let recoveryService: RecoveryService
-
-    // MARK: - Production
-
-    @MainActor
-    static func live(modelContext: ModelContext) -> ServiceProvider {
-        ServiceProvider(
-            recoveryService: SwiftDataRecoveryService(modelContext: modelContext)
-        )
-    }
-
-    // MARK: - Preview & Test
-
-    static var mock: ServiceProvider {
-        ServiceProvider(
-            recoveryService: MockRecoveryService()
-        )
-    }
-}
-```
-
-Review checklist:
-
-- ✅ **Struct, not class.** No shared mutable state. No accidental reference semantics.
-- ✅ **`Sendable` conformance.** Required because this will live in the SwiftUI environment and get passed across actor boundaries.
-- ✅ **Static factory methods.** `ServiceProvider.live(modelContext:)` for production, `ServiceProvider.mock` for previews and tests. Clear, discoverable, impossible to confuse.
-- ❌ **Watch for singletons.** If the AI generates a `static let shared = ...`, reject it. The whole point is explicit injection. Singletons hide dependencies and make testing fragile.
-
-**MockRecoveryService.swift** — for previews and tests.
-
-```swift
-import Foundation
-
-final class MockRecoveryService: RecoveryService, @unchecked Sendable {
-    var checkIns: [CheckIn] = []
-
-    // MARK: - Fetch
-
-    func fetchAll() async throws -> [CheckIn] {
-        checkIns.sorted { $0.date > $1.date }
-    }
-
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        checkIns.first { $0.id == id }
-    }
-
-    // MARK: - Mutate
-
-    func save(_ checkIn: CheckIn) async throws {
-        checkIns.append(checkIn)
-    }
-
-    func update(_ checkIn: CheckIn) async throws {
-        guard let index = checkIns.firstIndex(where: { $0.id == checkIn.id }) else { return }
-        checkIns[index] = checkIn
-    }
-
-    func delete(_ checkIn: CheckIn) async throws {
-        checkIns.removeAll { $0.id == checkIn.id }
-    }
-}
-```
-
-Review checklist:
-
-- ✅ **In-memory array.** No persistence, no setup, instant. Perfect for previews that need sample data and tests that need deterministic behavior.
-- ✅ **`@unchecked Sendable`.** The mock is only used in single-threaded test and preview contexts. Marking it `@unchecked Sendable` satisfies the protocol requirement without adding unnecessary synchronization.
-- ⚠️ **Pre-populate for previews.** The mock is empty by default. For SwiftUI previews, you will want a convenience initializer or static factory that pre-fills sample recovery check-ins. If the AI did not include one, we will add it in the iteration phase.
-
-## Iteration
-
-The generated code is solid but the mock needs sample data for previews. Send this follow-up:
-
-```
-Add a static property to MockRecoveryService called "withSampleData"
-that returns a MockRecoveryService pre-populated with 5 sample
-CheckIn values spanning the last 7 days, covering different
-RecoveryStatus values and activities. This is for SwiftUI previews.
-
-Also show me how a ViewModel should use RecoveryService — create
-a small example of RecoveryTimelineViewModel that depends on the
-protocol, not the concrete type.
-```
-
-The AI should return something like this for the ViewModel usage:
-
-```swift
-import Foundation
-import os
+import UserNotifications
 
 @Observable
-@MainActor
-final class RecoveryTimelineViewModel {
-    private(set) var checkIns: [CheckIn] = []
-    private(set) var isLoading = false
-    var errorMessage: String?
+final class NotificationManager {
+    var isAuthorized = false
 
-    private let service: RecoveryService
-    private let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "RecoveryTimelineViewModel"
-    )
+    private let center = UNUserNotificationCenter.current()
 
-    init(service: RecoveryService) {
-        self.service = service
-    }
+    // MARK: - Authorization
 
-    // MARK: - Loading
-
-    func loadCheckIns() async {
-        isLoading = true
-        defer { isLoading = false }
-
+    func requestAuthorization() async -> Bool {
         do {
-            checkIns = try await service.fetchAll()
+            let granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+            await MainActor.run { isAuthorized = granted }
+            return granted
         } catch {
-            logger.error("Failed to load check-ins: \(error.localizedDescription)")
-            errorMessage = "Could not load your recovery check-ins."
+            return false
         }
     }
 
-    // MARK: - Mutations
-
-    func addCheckIn(_ checkIn: CheckIn) async {
-        do {
-            try await service.save(checkIn)
-            checkIns.insert(checkIn, at: 0)
-        } catch {
-            logger.error("Failed to save check-in: \(error.localizedDescription)")
-            errorMessage = "Could not save your check-in."
+    func checkAuthorizationStatus() async {
+        let settings = await center.notificationSettings()
+        await MainActor.run {
+            isAuthorized = settings.authorizationStatus == .authorized
         }
     }
 
-    func deleteCheckIn(_ checkIn: CheckIn) async {
-        do {
-            try await service.delete(checkIn)
-            checkIns.removeAll { $0.id == checkIn.id }
-        } catch {
-            logger.error("Failed to delete check-in: \(error.localizedDescription)")
-            errorMessage = "Could not delete the check-in."
+    // MARK: - Schedule Reminders
+
+    func scheduleMorningPledge(hour: Int, minute: Int) {
+        let id = "morning_pledge_reminder"
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+
+        let content = UNMutableNotificationContent()
+        content.title = LanguageManager.shared.localized("Good Morning")
+        content.body = LanguageManager.shared.localized("Start your day with a pledge to stay bet-free.")
+        content.sound = .default
+
+        var dateComponents = DateComponents()
+        dateComponents.hour = hour
+        dateComponents.minute = minute
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+
+        center.add(request)
+    }
+
+    // MARK: - Update Schedule
+
+    func updateSchedule(
+        morningHour: Int,
+        morningMinute: Int,
+        eveningHour: Int,
+        eveningMinute: Int,
+        enabled: Bool
+    ) {
+        if enabled {
+            scheduleMorningPledge(hour: morningHour, minute: morningMinute)
+            scheduleEveningCheckin(hour: eveningHour, minute: eveningMinute)
+        } else {
+            cancelAll()
         }
+    }
+
+    // MARK: - Cancel
+
+    func cancelAll() {
+        center.removeAllPendingNotificationRequests()
     }
 }
 ```
 
-Notice what the ViewModel does NOT know:
+- **`@Observable`** because it holds mutable state (`isAuthorized`) that views need to react to.
+- **`SettingsViewModel` owns an instance** via `let notificationManager = NotificationManager()`. This is a value-creating relationship, not dependency injection — the ViewModel creates its own manager because there is no need to swap it for testing at this stage.
 
-- It does not know about `ModelContext`.
-- It does not know about SwiftData.
-- It does not import any persistence framework.
-- It depends on `RecoveryService` — a protocol with five methods.
+### HapticManager — tactile feedback
 
-This means you can test it with `MockRecoveryService`, preview it with sample data, and run it in production with `SwiftDataRecoveryService`. The ViewModel code is identical in all three scenarios.
+```swift
+import UIKit
+
+enum HapticManager {
+
+    static func lightImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    static func mediumImpact() {
+        guard isEnabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    static func success() {
+        guard isEnabled else { return }
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(.success)
+    }
+
+    static func badgeUnlocked() {
+        guard isEnabled else { return }
+        heavyImpact()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            success()
+        }
+    }
+
+    static func timerComplete() {
+        success()
+    }
+
+    private static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hapticFeedbackEnabled)
+    }
+}
+```
+
+- **`enum` with static methods.** No instances, no state, no lifecycle. This is the simplest possible wrapper. You call `HapticManager.success()` and it fires or no-ops based on the user's setting.
+- **`isEnabled` reads from `UserDefaults`** on every call. This respects the user's haptic feedback toggle in settings without needing any observation or notification mechanism.
+
+### SharedDataManager — widget data sharing
+
+```swift
+import Foundation
+
+enum SharedDataManager {
+    static let appGroupID = "group.com.pekmario.betfreeapp"
+    static let suiteName = appGroupID
+
+    private static var defaults: UserDefaults? {
+        UserDefaults(suiteName: suiteName)
+    }
+
+    // MARK: - Keys
+
+    enum Keys {
+        static let currentStreak = "widget_currentStreak"
+        static let totalSaved = "widget_totalSaved"
+        static let quitDate = "widget_quitDate"
+        static let currencySymbol = "widget_currencySymbol"
+        static let hasPledgedToday = "widget_hasPledgedToday"
+        static let hasCheckedInToday = "widget_hasCheckedInToday"
+        static let lastUpdated = "widget_lastUpdated"
+    }
+
+    // MARK: - Write (called from main app)
+
+    static func updateWidgetData(
+        currentStreak: Int,
+        totalSaved: Double,
+        quitDate: Date,
+        hasPledgedToday: Bool,
+        hasCheckedInToday: Bool
+    ) {
+        defaults?.set(currentStreak, forKey: Keys.currentStreak)
+        defaults?.set(totalSaved, forKey: Keys.totalSaved)
+        defaults?.set(quitDate, forKey: Keys.quitDate)
+        defaults?.set(AppConfig.defaultCurrencySymbol, forKey: Keys.currencySymbol)
+        defaults?.set(hasPledgedToday, forKey: Keys.hasPledgedToday)
+        defaults?.set(hasCheckedInToday, forKey: Keys.hasCheckedInToday)
+        defaults?.set(Date(), forKey: Keys.lastUpdated)
+    }
+
+    // MARK: - Read (called from widget)
+
+    static var currentStreak: Int {
+        defaults?.integer(forKey: Keys.currentStreak) ?? 0
+    }
+
+    static var totalSaved: Double {
+        defaults?.double(forKey: Keys.totalSaved) ?? 0
+    }
+}
+```
+
+- **App Groups `UserDefaults`** is the only way to share data between the main app and a widget extension. SwiftData's `ModelContainer` cannot be shared across processes, so `SharedDataManager` serves as a manual sync bridge.
+- **Write from the main app, read from the widget.** The main app calls `updateWidgetData(...)` whenever relevant state changes (pledge submitted, streak updated). The widget reads the static properties.
+
+## DashboardViewModel — pure display logic
+
+Not every ViewModel touches SwiftData. `DashboardViewModel` has zero persistence code — it exists purely to compute display values:
+
+```swift
+import SwiftUI
+
+@Observable
+final class DashboardViewModel {
+    var showCelebration = false
+
+    var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return LanguageManager.shared.localized("Good morning")
+        case 12..<17: return LanguageManager.shared.localized("Good afternoon")
+        case 17..<22: return LanguageManager.shared.localized("Good evening")
+        default: return LanguageManager.shared.localized("Good night")
+        }
+    }
+
+    var greetingIcon: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return AppConfig.Icons.sun
+        case 12..<17: return AppConfig.Icons.sun
+        case 17..<22: return AppConfig.Icons.moon
+        default: return AppConfig.Icons.moon
+        }
+    }
+
+    func milestoneProgress(for profile: UserProfile) -> Double {
+        guard let nextMilestone = Milestone.next(for: profile.currentStreak) else {
+            return 1.0
+        }
+        let currentMilestone = Milestone.current(for: profile.currentStreak)
+        let start = Double(currentMilestone?.days ?? 0)
+        let end = Double(nextMilestone.days)
+        let current = Double(profile.currentStreak)
+
+        guard end > start else { return 1.0 }
+        return (current - start) / (end - start)
+    }
+
+    func nextMilestoneText(for profile: UserProfile) -> String? {
+        guard let next = Milestone.next(for: profile.currentStreak) else { return nil }
+        let remaining = next.days - profile.currentStreak
+        return LanguageManager.shared.localized("%lld day(s) to %@", remaining, next.title)
+    }
+}
+```
+
+This ViewModel imports `SwiftUI` (for `@Observable`) but not `SwiftData`. It receives `UserProfile` as a parameter to its methods, computes derived strings and numbers, and returns them. The view owns the data; the ViewModel owns the display logic. This is the cleanest separation you can get.
 
 ## Verify Phase
 
 Before moving on, verify these things manually. Do not skip this.
 
-**1. Compile check.** Build the project. Swift 6 strict concurrency will catch any actor isolation mistakes. If the compiler complains about sending a non-Sendable type across actor boundaries, the fix is usually adding `@MainActor` to the call site or marking the type `Sendable`.
+**1. Compile check.** Build the project. If the compiler complains about `@Query` types, make sure your `ModelContainer` is set up in the app entry point and passed via `.modelContainer()`.
 
-**2. Protocol conformance.** Make sure `SwiftDataRecoveryService` and `MockRecoveryService` both conform to `RecoveryService` without any warnings. If you see "non-sendable type ... cannot conform to Sendable protocol," double-check your `@unchecked Sendable` annotation on the mock.
+**2. Query reactivity.** Insert a new `DailyCheckin` using `context.insert()` from a ViewModel. Verify that any view with `@Query private var checkins: [DailyCheckin]` updates automatically without a manual refresh call.
 
-**3. Preview test.** Create a quick preview that uses `MockRecoveryService.withSampleData` and verify the sample data renders in your timeline view. Previews should not require a `ModelContainer`.
+**3. Context passing.** Search your project for `ModelContext` — it should appear in `@Environment(\.modelContext)` declarations inside views and as method parameters in ViewModels. It should NOT appear as a stored property on any ViewModel.
 
-**4. No direct `ModelContext` access outside the service.** Search your project for `modelContext` — it should only appear inside `SwiftDataRecoveryService` and the app entry point. If any ViewModel imports SwiftData, something leaked.
+**4. Manager isolation.** Verify that `HapticManager` and `SharedDataManager` have no SwiftData imports. They wrap UIKit and UserDefaults respectively. `NotificationManager` wraps UserNotifications. None of them should know about your models.
 
-**5. Error paths.** Temporarily throw an error from one of the mock methods. Verify that the ViewModel catches it and sets `errorMessage` instead of crashing.
-
-## Final Code
-
-Here is the complete, final implementation for all four files. This is the version that should be in your project after the plan, execute, and iterate phases.
-
-### Services/RecoveryService.swift
-
-```swift
-import Foundation
-
-/// Defines all data operations for recovery check-ins.
-/// Concrete implementations provide the persistence mechanism.
-protocol RecoveryService: Sendable {
-    func fetchAll() async throws -> [CheckIn]
-    func fetch(by id: UUID) async throws -> CheckIn?
-    func save(_ checkIn: CheckIn) async throws
-    func update(_ checkIn: CheckIn) async throws
-    func delete(_ checkIn: CheckIn) async throws
-}
-```
-
-### Services/SwiftDataRecoveryService.swift
-
-```swift
-import Foundation
-import SwiftData
-import os
-
-@MainActor
-final class SwiftDataRecoveryService: RecoveryService {
-    private let modelContext: ModelContext
-    private let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "SwiftDataRecoveryService"
-    )
-
-    nonisolated init(modelContext: ModelContext) {
-        self.modelContext = modelContext
-    }
-
-    // MARK: - Fetch
-
-    func fetchAll() async throws -> [CheckIn] {
-        let descriptor = FetchDescriptor<CheckIn>(
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        let checkIns = try modelContext.fetch(descriptor)
-        logger.debug("Fetched \(checkIns.count) check-ins")
-        return checkIns
-    }
-
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        let predicate = #Predicate<CheckIn> { $0.id == id }
-        var descriptor = FetchDescriptor<CheckIn>(predicate: predicate)
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
-    }
-
-    // MARK: - Mutate
-
-    func save(_ checkIn: CheckIn) async throws {
-        modelContext.insert(checkIn)
-        try modelContext.save()
-        logger.debug("Saved check-in: \(checkIn.id)")
-    }
-
-    func update(_ checkIn: CheckIn) async throws {
-        // SwiftData tracks changes on @Model objects automatically.
-        // Calling save() persists any in-memory mutations.
-        try modelContext.save()
-        logger.debug("Updated check-in: \(checkIn.id)")
-    }
-
-    func delete(_ checkIn: CheckIn) async throws {
-        modelContext.delete(checkIn)
-        try modelContext.save()
-        logger.debug("Deleted check-in: \(checkIn.id)")
-    }
-}
-```
-
-### Services/ServiceProvider.swift
-
-```swift
-import Foundation
-import SwiftData
-
-struct ServiceProvider: Sendable {
-    let recoveryService: RecoveryService
-
-    // MARK: - Production
-
-    @MainActor
-    static func live(modelContext: ModelContext) -> ServiceProvider {
-        ServiceProvider(
-            recoveryService: SwiftDataRecoveryService(modelContext: modelContext)
-        )
-    }
-
-    // MARK: - Preview & Test
-
-    static var mock: ServiceProvider {
-        ServiceProvider(
-            recoveryService: MockRecoveryService.withSampleData
-        )
-    }
-}
-```
-
-### Services/MockRecoveryService.swift
-
-```swift
-import Foundation
-
-final class MockRecoveryService: RecoveryService, @unchecked Sendable {
-    var checkIns: [CheckIn] = []
-
-    // MARK: - Fetch
-
-    func fetchAll() async throws -> [CheckIn] {
-        checkIns.sorted { $0.date > $1.date }
-    }
-
-    func fetch(by id: UUID) async throws -> CheckIn? {
-        checkIns.first { $0.id == id }
-    }
-
-    // MARK: - Mutate
-
-    func save(_ checkIn: CheckIn) async throws {
-        checkIns.append(checkIn)
-    }
-
-    func update(_ checkIn: CheckIn) async throws {
-        guard let index = checkIns.firstIndex(where: { $0.id == checkIn.id }) else {
-            return
-        }
-        checkIns[index] = checkIn
-    }
-
-    func delete(_ checkIn: CheckIn) async throws {
-        checkIns.removeAll { $0.id == checkIn.id }
-    }
-
-    // MARK: - Sample Data
-
-    static var withSampleData: MockRecoveryService {
-        let mock = MockRecoveryService()
-        let calendar = Calendar.current
-
-        mock.checkIns = [
-            CheckIn(
-                recoveryStatus: .strong,
-                note: "Morning run in the park. Felt clear-headed.",
-                activities: ["Exercise", "Outdoors"],
-                date: calendar.date(byAdding: .day, value: 0, to: .now)!
-            ),
-            CheckIn(
-                recoveryStatus: .steady,
-                note: "Productive day at work. No urges.",
-                activities: ["Work", "Coding"],
-                date: calendar.date(byAdding: .day, value: -1, to: .now)!
-            ),
-            CheckIn(
-                recoveryStatus: .managing,
-                note: "Quiet afternoon. Used breathing exercises.",
-                activities: ["Breathing"],
-                date: calendar.date(byAdding: .day, value: -3, to: .now)!
-            ),
-            CheckIn(
-                recoveryStatus: .struggling,
-                note: "Barely slept. Triggered by financial stress.",
-                activities: ["Poor Sleep"],
-                date: calendar.date(byAdding: .day, value: -5, to: .now)!
-            ),
-            CheckIn(
-                recoveryStatus: .strong,
-                note: "Support group meeting. Felt connected.",
-                activities: ["Social", "Support Group"],
-                date: calendar.date(byAdding: .day, value: -6, to: .now)!
-            ),
-        ]
-
-        return mock
-    }
-}
-```
+**5. Cascade deletes.** Call `SettingsViewModel.resetAllData(context:router:)` and verify that all `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` records are removed. Check that scheduled notifications are also cancelled.
 
 ## Checkpoint
 
 Before moving to the next lesson, verify every item:
 
-- [ ] `RecoveryService` protocol exists with five `async throws` methods
-- [ ] `SwiftDataRecoveryService` is annotated `@MainActor` and compiles under Swift 6 strict concurrency
-- [ ] `ServiceProvider` has `.live(modelContext:)` and `.mock` factory methods — no singletons
-- [ ] `MockRecoveryService` has `.withSampleData` and your timeline preview renders without a `ModelContainer`
-- [ ] No ViewModel imports `SwiftData` or references `ModelContext` directly
+- [ ] Views read data exclusively through `@Query` — no fetch methods in ViewModels
+- [ ] ViewModels receive `ModelContext` as a method parameter, never as a stored property
+- [ ] `UrgeViewModel.submitUrge(profile:context:)` creates and inserts an `UrgeLog` correctly
+- [ ] `SettingsViewModel.resetAllData(context:router:)` deletes all model types and cancels notifications
+- [ ] `HapticManager` is a stateless `enum` with static methods gated by a UserDefaults check
+- [ ] `NotificationManager` is `@Observable` and manages its own `isAuthorized` state
+- [ ] `SharedDataManager` uses App Group `UserDefaults` to bridge data to the widget
+- [ ] `DashboardViewModel` has zero SwiftData imports — it computes display values only
 - [ ] The project builds with zero warnings
 
 If any item fails, go back to the relevant section. Do not carry broken foundations into the next lesson.
 
 ## Challenge
 
-**Add a filtered fetch method.**
+**Add a filtered query for this week's check-ins.**
 
-Extend `RecoveryService` with a new method:
+Right now `DataExportView` queries all check-ins with `@Query(sort: \DailyCheckin.date, order: .reverse)`. Create a new `WeeklyReviewView` that shows only check-ins from the past 7 days.
 
-```swift
-func fetchCheckIns(from startDate: Date, to endDate: Date) async throws -> [CheckIn]
-```
+You have two options:
 
-Implement it in both `SwiftDataRecoveryService` (using a `#Predicate` with date range) and `MockRecoveryService` (using `filter`). Then use it in a ViewModel to load only this week's check-ins.
-
-**Hint:** In `SwiftDataRecoveryService`, your predicate will look like this:
+**Option A: Filter in the view with a computed property.**
 
 ```swift
-let predicate = #Predicate<CheckIn> {
-    $0.date >= startDate && $0.date <= endDate
+@Query(sort: \DailyCheckin.date, order: .reverse) private var allCheckins: [DailyCheckin]
+
+private var thisWeeksCheckins: [DailyCheckin] {
+    let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+    return allCheckins.filter { $0.date >= weekAgo }
 }
 ```
 
-Make sure `startDate` and `endDate` are local variables the predicate can capture — `#Predicate` cannot reference `self` properties.
+**Option B: Use a `#Predicate` in the `@Query` initializer.**
+
+```swift
+static var weekFilter: Predicate<DailyCheckin> {
+    let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+    return #Predicate<DailyCheckin> { $0.date >= weekAgo }
+}
+
+@Query(filter: Self.weekFilter, sort: \DailyCheckin.date, order: .reverse)
+private var thisWeeksCheckins: [DailyCheckin]
+```
+
+Option A is simpler. Option B is more efficient because SwiftData filters at the storage level rather than fetching everything into memory first. For BetAway's data volume (one check-in per day), either approach works. For a production app with thousands of records, prefer Option B.
+
+Build the view, wire it into the navigation, and verify that only the last 7 days of check-ins appear.
