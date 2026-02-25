@@ -1,13 +1,13 @@
 ---
 title: "SwiftData Model Layer"
-description: "Design and implement the CheckIn, RecoveryTag, and RecoveryInsight SwiftData models with relationships, configure the ModelContainer, and build the service protocol for data access."
+description: "Design and implement the UserProfile, DailyCheckin, UrgeLog, and JournalEntry SwiftData models with relationships and cascade delete rules, build domain enums, and configure the ModelContainer."
 courseSlug: "ship-native"
 module: 1
 moduleTitle: "Project Foundation"
 lesson: 2
 duration: "25 min read"
 difficulty: "intermediate"
-topics: ["SwiftData", "@Model", "Data Modeling", "Relationships", "Service Layer", "CRUD", "Predicates", "BetAway"]
+topics: ["SwiftData", "@Model", "Data Modeling", "Relationships", "Enums", "Computed Properties", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
@@ -17,18 +17,19 @@ Your architecture is set. Your CLAUDE.md is written. Now we build the thing that
 
 If you get the models wrong, every view, every query, every insight engine built on top of them will be wrong. If you get them right, everything else falls into place. This is why we build models first, views second, and AI features last.
 
-In this lesson, we design three SwiftData models, wire their relationships, configure the ModelContainer, and create a service protocol that gives us a clean, testable API for data access. We do it using the Plan-Execute-Verify workflow — the same workflow you will use for every feature in this course.
+In this lesson, we design four SwiftData models, a rich set of domain enums, wire relationships with cascade delete rules, and learn the raw-value storage pattern that makes SwiftData and Swift enums play nicely together. We do it using the Plan-Execute-Verify workflow — the same workflow you will use for every feature in this course.
 
 ## What You'll Learn
 
-- How to design `@Model` classes with relationships and inverse references using SwiftData
-- How to write `#Predicate` queries for filtered, sorted data access
-- How to configure a `ModelContainer` in a Swift 6 strict concurrency environment
-- How to abstract persistence behind a service protocol so your views never touch SwiftData directly
+- How to design `@Model` classes with one-to-many relationships and cascade delete rules
+- The raw-value storage pattern: store a `String`, expose a computed enum property
+- How to build domain enums (`MoodRating`, `GamblingType`, `CopingStrategy`) that drive the entire UI
+- How to store non-model data (like `EmergencyContact`) as JSON `Data` inside a SwiftData model
+- How to add rich computed properties (`currentStreak`, `totalSaved`) directly on models
 
 ## Why This Matters
 
-Every production iOS app needs a persistence layer, and SwiftData is Apple's answer for Swift-native apps. But SwiftData is opinionated — get the relationships, delete rules, or thread safety wrong and you hit runtime crashes that the compiler will not catch. The service layer pattern we build here is the same pattern used in banking apps, health apps, and anything that ships to the App Store with real user data on the line.
+Every production iOS app needs a persistence layer, and SwiftData is Apple's answer for Swift-native apps. But SwiftData is opinionated — get the relationships, delete rules, or enum storage wrong and you hit runtime crashes that the compiler will not catch. The domain model layer we build here is the heart of BetAway. Every view, every chart, every notification depends on these types being correct.
 
 ## Plan Phase: Defining What We Build
 
@@ -39,693 +40,662 @@ I am building BetAway, a free gambling recovery app for iOS.
 I need the SwiftData model layer. Before writing code, plan
 the following:
 
-1. CheckIn — the core model. Properties: id (UUID),
-   recoveryStatus (Int, 1-5), emoji (String), note (String,
-   optional), createdAt (Date). It should have a many-to-many
-   relationship with RecoveryTag.
+1. UserProfile — the central model. Properties: id (UUID),
+   createdAt, quitDate, displayName, gambling types (stored as
+   raw string array), frequency, averageWeeklySpend,
+   notification settings, biometric lock, emergency contacts
+   (stored as JSON Data). One-to-many relationships with
+   DailyCheckin, UrgeLog, JournalEntry — all with cascade
+   delete rules.
 
-2. RecoveryTag — a tagging model. Properties: id (UUID),
-   name (String), color (String, hex value). It should have
-   an inverse relationship back to CheckIn.
+2. DailyCheckin — daily mood check-in. Properties: id, date,
+   checkin type (morning pledge or evening), mood (1-5),
+   gamblingFree bool, pledgeReason, notes, triggers (raw
+   string array), risk level. Inverse relationship to
+   UserProfile.
 
-3. RecoveryInsight — on-device ML generated daily summary.
-   Properties: id (UUID), date (Date, unique per day),
-   summary (String), sentimentScore (Double, 0.0-1.0),
-   generatedAt (Date).
+3. UrgeLog — gambling urge log. Properties: id, timestamp,
+   intensity (1-10), duration, trigger, coping strategy,
+   didResist bool, notes. Inverse relationship to UserProfile.
 
-4. A RecoveryService protocol that defines CRUD operations
-   for CheckIn, including filtered fetches by date range
-   and recovery status.
+4. JournalEntry — journal entries. Properties: id, createdAt,
+   title, content, mood (1-5), promptUsed. Inverse relationship
+   to UserProfile.
 
-5. ModelContainer configuration for the App struct.
+5. Domain enums — GamblingType, GamblingFrequency, RiskLevel,
+   MoodRating (1-5 with emoji + label), CheckinType, CopingStrategy,
+   PredefinedTrigger. All Codable + CaseIterable.
 
-Think through: relationship types, delete rules, which
-properties need defaults, and how #Predicate queries will
-work for the service. Then implement everything in
-Swift 6 with strict concurrency.
+6. EmergencyContact — a Codable struct (not @Model) stored as
+   JSON Data inside UserProfile.
+
+Think through: the raw-value storage pattern for enums in
+SwiftData, cascade vs nullify delete rules, computed
+properties on models (currentStreak, totalSaved), and how
+to store non-model types as JSON Data. Then implement
+everything in Swift 6.
 ```
 
 ### Why This Prompt Works
 
-This prompt follows every principle from Lesson 1.1. It states the app name and purpose. It lists every model with exact property names and types. It specifies the relationships explicitly — "many-to-many" and "inverse" — because SwiftData will not infer these for you. It asks the AI to think before coding, which triggers chain-of-thought reasoning and catches design issues before they become bugs.
+This prompt is specific about the data architecture. It names every model with exact property types. It specifies relationship directions ("one-to-many from UserProfile") and delete rules ("cascade"). It explicitly asks for the raw-value storage pattern — because SwiftData cannot persist custom enums directly, you must store the `rawValue` String and expose a computed property. If you do not mention this, the AI will try to store enums directly and you will get runtime crashes.
 
-It also specifies Swift 6 strict concurrency, which matters because SwiftData's `ModelContext` is not `Sendable`. If you forget this constraint, the AI will generate code that compiles under Swift 5 but crashes under Swift 6.
+It also calls out the JSON Data pattern for `EmergencyContact`. This is a real production technique — when you have a small, structured type that does not need its own table, encode it as JSON and store it as `Data` on the parent model. Simpler schema, fewer migrations.
 
 ### The Anti-Pattern: What Not to Prompt
 
 ```
-Make SwiftData models for a recovery app. I need check-ins, tags,
-and insights. Also add CRUD.
+Make SwiftData models for a recovery app. I need user profiles,
+check-ins, urges, and journals. Also add enums.
 ```
 
-This will produce code. It will also produce models with `String!` force-unwrapped optionals, missing inverse relationships, no delete rules, and a ViewModel that directly calls `ModelContext` from the view layer. You will spend more time fixing the output than you saved generating it. Vague input produces vague output — always.
+This will produce code. It will also produce models that try to store Swift enums directly in SwiftData (crash), missing inverse relationships, `@Relationship` without delete rules (defaults to `.nullify` when you wanted `.cascade`), and no computed properties. Vague input produces vague output — always.
 
 ## Execute Phase: Implementation
 
-Now we send the planning prompt. Claude Code generates the full model layer. Let us review each file.
+Now we send the planning prompt. Claude Code generates the full model layer. Let us review each file, starting with the domain enums that everything else depends on.
 
-### CheckIn.swift
+### Enums.swift — Domain Types
+
+Before building any `@Model` classes, we define the enums. These drive the entire app — from the onboarding flow (picking gambling types) to the dashboard (displaying mood emoji) to the urge flow (selecting triggers and coping strategies).
 
 ```swift
 import Foundation
-import SwiftData
 
-@Model
-final class CheckIn {
-    @Attribute(.unique) var id: UUID
-    var recoveryStatus: Int
-    var emoji: String
-    var note: String
-    var createdAt: Date
+// MARK: - Gambling Type
 
-    @Relationship(deleteRule: .nullify, inverse: \RecoveryTag.checkIns)
-    var tags: [RecoveryTag]
+enum GamblingType: String, Codable, CaseIterable, Identifiable {
+    case sportsBetting = "Sports Betting"
+    case onlineCasino = "Online Casino"
+    case poker = "Poker"
+    case slots = "Slots/Machines"
+    case lottery = "Lottery/Scratch Cards"
+    case inPersonCasino = "In-Person Casino"
+    case esportsBetting = "eSports Betting"
+    case cryptoGambling = "Crypto Gambling"
+    case other = "Other"
 
-    init(
-        id: UUID = UUID(),
-        recoveryStatus: Int,
-        emoji: String,
-        note: String = "",
-        createdAt: Date = .now
-    ) {
-        self.id = id
-        self.recoveryStatus = recoveryStatus
-        self.emoji = emoji
-        self.note = note
-        self.createdAt = createdAt
-        self.tags = []
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .sportsBetting: return "sportscourt.fill"
+        case .onlineCasino: return "desktopcomputer"
+        case .poker: return "suit.spade.fill"
+        case .slots: return "die.face.5.fill"
+        case .lottery: return "ticket.fill"
+        case .inPersonCasino: return "building.columns.fill"
+        case .esportsBetting: return "gamecontroller.fill"
+        case .cryptoGambling: return "bitcoinsign.circle.fill"
+        case .other: return "questionmark.circle.fill"
+        }
+    }
+}
+
+// MARK: - Mood Rating
+
+enum MoodRating: Int, Codable, CaseIterable, Identifiable {
+    case veryBad = 1
+    case bad = 2
+    case neutral = 3
+    case good = 4
+    case veryGood = 5
+
+    var id: Int { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .veryBad: return "😣"
+        case .bad: return "😔"
+        case .neutral: return "😐"
+        case .good: return "🙂"
+        case .veryGood: return "😊"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .veryBad: return "Very Bad"
+        case .bad: return "Bad"
+        case .neutral: return "Okay"
+        case .good: return "Good"
+        case .veryGood: return "Great"
+        }
+    }
+}
+
+// MARK: - Check-in Type
+
+enum CheckinType: String, Codable {
+    case morningPledge = "Morning Pledge"
+    case eveningCheckin = "Evening Check-in"
+}
+
+// MARK: - Coping Strategy
+
+enum CopingStrategy: String, Codable, CaseIterable, Identifiable {
+    case breathingExercise = "Breathing Exercise"
+    case groundingExercise = "Grounding Exercise"
+    case calledSomeone = "Called Someone"
+    case physicalActivity = "Physical Activity"
+    case journaled = "Journaled"
+    case distraction = "Distraction Activity"
+    case other = "Other"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .breathingExercise: return "wind"
+        case .groundingExercise: return "leaf.fill"
+        case .calledSomeone: return "phone.fill"
+        case .physicalActivity: return "figure.walk"
+        case .journaled: return "book.fill"
+        case .distraction: return "gamecontroller.fill"
+        case .other: return "ellipsis.circle.fill"
+        }
+    }
+}
+
+// MARK: - Predefined Triggers
+
+enum PredefinedTrigger: String, Codable, CaseIterable, Identifiable {
+    case liveSports = "Watching live sports"
+    case bettingPromo = "Betting app promotion"
+    case stressed = "Feeling stressed"
+    case bored = "Feeling bored"
+    case gamblingAds = "Seeing gambling ads"
+    case friendsTalking = "Friends talking about bets"
+    case payday = "Payday / received money"
+    case argument = "Argument with someone"
+    case alcohol = "Drinking alcohol"
+    case lateNight = "Late night / can't sleep"
+    case winningMemory = "Remembering a win"
+    case chasingLosses = "Wanting to chase losses"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .liveSports: return "sportscourt.fill"
+        case .bettingPromo: return "bell.badge.fill"
+        case .stressed: return "brain.head.profile"
+        case .bored: return "clock.fill"
+        case .gamblingAds: return "rectangle.on.rectangle.angled"
+        case .friendsTalking: return "person.2.fill"
+        case .payday: return "banknote.fill"
+        case .argument: return "exclamationmark.bubble.fill"
+        case .alcohol: return "wineglass.fill"
+        case .lateNight: return "moon.fill"
+        case .winningMemory: return "star.fill"
+        case .chasingLosses: return "arrow.uturn.backward.circle.fill"
+        }
     }
 }
 ```
 
-Let us verify the critical details:
+Let us talk about the design decisions:
 
-- **`@Attribute(.unique)` on `id`.** This tells SwiftData to enforce uniqueness at the database level. Without it, you could accidentally insert duplicate check-ins.
-- **`recoveryStatus` is a plain `Int`, not optional.** Every check-in must have a status. The prompt said 1-5, so we enforce that in the service layer, not the model. SwiftData does not support range constraints natively.
-- **`note` defaults to an empty string** instead of being optional. This simplifies every view that displays notes — no nil checking, no `if let`. An empty string and a nil string mean the same thing semantically, so pick the simpler representation.
-- **`deleteRule: .nullify`** on the tags relationship means deleting a check-in removes it from any tag's `checkIns` array without deleting the tags. This is correct — tags are shared across check-ins.
-- **`inverse: \RecoveryTag.checkIns`** explicitly links the two sides of the relationship. If you omit this, SwiftData can silently fail to update the inverse side, leading to stale data.
-- **`tags` is initialized to an empty array** in the init, not as `nil`. For a to-many relationship, an empty array is the correct "no tags" state.
+- **Every enum uses `String` raw values.** This is critical. SwiftData cannot persist custom Swift enums. We will store the `rawValue` in the database and convert back via computed properties. The raw values are human-readable strings, which makes the database debuggable — you can open the SQLite file and see "Sports Betting" instead of an opaque integer.
+- **`CaseIterable` everywhere.** This lets us `ForEach(GamblingType.allCases)` in the UI. No manual arrays.
+- **`Identifiable` everywhere.** Required for `ForEach` and `List` in SwiftUI. The `id` is the raw value.
+- **Each enum owns its SF Symbol icon.** Instead of a mapping dictionary somewhere, the icon lives on the type. When you add a new gambling type, you are forced to add its icon — the compiler enforces it via the `switch` statement.
+- **`MoodRating` uses `Int` raw values (1-5).** This is stored as an `Int` in the database for efficient sorting and aggregation. The `emoji` and `label` are computed.
 
-### RecoveryTag.swift
+### UserProfile.swift — The Central Model
 
 ```swift
 import Foundation
 import SwiftData
 
 @Model
-final class RecoveryTag {
-    @Attribute(.unique) var id: UUID
+final class UserProfile {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var quitDate: Date = Date()
+    var displayName: String = ""
+
+    // Gambling profile
+    var gamblingTypesRaw: [String] = []
+    var frequencyRaw: String = GamblingFrequency.weekly.rawValue
+    var averageWeeklySpend: Double = 0
+    var estimatedTotalLosses: Double?
+    var estimatedDebt: Double?
+
+    // Settings
+    var biometricLockEnabled: Bool = false
+    var notificationsEnabled: Bool = true
+    var morningReminderHour: Int = AppConfig.defaultMorningHour
+    var morningReminderMinute: Int = AppConfig.defaultMorningMinute
+    var eveningReminderHour: Int = AppConfig.defaultEveningHour
+    var eveningReminderMinute: Int = AppConfig.defaultEveningMinute
+    var hapticFeedbackEnabled: Bool = true
+    var emergencyContactsData: Data?
+
+    // Relationships
+    @Relationship(deleteRule: .cascade) var checkins: [DailyCheckin] = []
+    @Relationship(deleteRule: .cascade) var urgeLogs: [UrgeLog] = []
+    @Relationship(deleteRule: .cascade) var journalEntries: [JournalEntry] = []
+
+    // MARK: - Computed Properties
+
+    var gamblingTypes: [GamblingType] {
+        get { gamblingTypesRaw.compactMap { GamblingType(rawValue: $0) } }
+        set { gamblingTypesRaw = newValue.map(\.rawValue) }
+    }
+
+    var emergencyContacts: [EmergencyContact] {
+        get {
+            guard let data = emergencyContactsData else { return [] }
+            return (try? JSONDecoder().decode([EmergencyContact].self, from: data)) ?? []
+        }
+        set {
+            emergencyContactsData = try? JSONEncoder().encode(newValue)
+        }
+    }
+
+    var daysSinceQuit: Int {
+        max(0, Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: quitDate), to: Calendar.current.startOfDay(for: Date())).day ?? 0)
+    }
+
+    var totalSaved: Double {
+        let weeks = Double(daysSinceQuit) / 7.0
+        return weeks * averageWeeklySpend
+    }
+
+    var currentStreak: Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let quitStart = calendar.startOfDay(for: quitDate)
+
+        if quitStart > today { return 0 }
+
+        let relapses = checkins
+            .filter { !$0.gamblingFree && $0.checkinTypeRaw == CheckinType.eveningCheckin.rawValue }
+            .sorted { $0.date > $1.date }
+
+        if let lastRelapse = relapses.first {
+            let relapsDay = calendar.startOfDay(for: lastRelapse.date)
+            let daysSinceRelapse = calendar.dateComponents([.day], from: relapsDay, to: today).day ?? 0
+            return max(0, daysSinceRelapse)
+        }
+
+        return daysSinceQuit
+    }
+
+    // MARK: - Init
+
+    init(
+        quitDate: Date = Date(),
+        displayName: String = "",
+        gamblingTypes: [GamblingType] = [],
+        frequency: GamblingFrequency = .weekly,
+        averageWeeklySpend: Double = 0
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.quitDate = quitDate
+        self.displayName = displayName
+        self.gamblingTypesRaw = gamblingTypes.map(\.rawValue)
+        self.frequencyRaw = frequency.rawValue
+        self.averageWeeklySpend = averageWeeklySpend
+    }
+
+    // MARK: - Helpers
+
+    func hasPledgedToday() -> Bool {
+        let calendar = Calendar.current
+        return checkins.contains { checkin in
+            checkin.checkinTypeRaw == CheckinType.morningPledge.rawValue &&
+            calendar.isDateInToday(checkin.date)
+        }
+    }
+
+    func hasCheckedInToday() -> Bool {
+        let calendar = Calendar.current
+        return checkins.contains { checkin in
+            checkin.checkinTypeRaw == CheckinType.eveningCheckin.rawValue &&
+            calendar.isDateInToday(checkin.date)
+        }
+    }
+}
+```
+
+This is the most complex model in the app. Let us break down the critical patterns:
+
+- **Raw-value storage pattern.** `gamblingTypesRaw: [String]` stores the database value. `gamblingTypes: [GamblingType]` is a computed property that converts. SwiftData persists `[String]` natively. It cannot persist `[GamblingType]`. This pattern appears everywhere in the codebase.
+- **JSON Data for `EmergencyContact`.** This is a `Codable` struct, not an `@Model`. We encode it as JSON and store the `Data` blob. The getter decodes, the setter encodes. This avoids creating a separate database table for a small, simple type.
+- **`@Relationship(deleteRule: .cascade)`** on all three arrays. When a `UserProfile` is deleted, all its checkins, urge logs, and journal entries are deleted too. This is correct — those records have no meaning without their parent profile.
+- **`currentStreak` is a computed property**, not a stored value. It checks for the most recent relapse (an evening check-in where `gamblingFree == false`) and counts days from there. If there are no relapses, it counts from `quitDate`. This logic runs on every access, which is fine — the data set is small (one check-in per day).
+- **`hasPledgedToday()` and `hasCheckedInToday()`** filter the `checkins` array in memory. For a typical user (one morning pledge + one evening check-in per day), this is dozens of records at most. No need for a database query.
+
+### DailyCheckin.swift
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class DailyCheckin {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var checkinTypeRaw: String = CheckinType.morningPledge.rawValue
+    var mood: Int = MoodRating.neutral.rawValue
+    var gamblingFree: Bool = true
+    var amountGambled: Double?
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var triggersRaw: [String] = []
+    var riskLevelRaw: String = RiskLevel.low.rawValue
+    var createdAt: Date = Date()
+
+    @Relationship(inverse: \UserProfile.checkins) var userProfile: UserProfile?
+
+    // MARK: - Computed Properties
+
+    var checkinType: CheckinType {
+        get { CheckinType(rawValue: checkinTypeRaw) ?? .morningPledge }
+        set { checkinTypeRaw = newValue.rawValue }
+    }
+
+    var moodRating: MoodRating {
+        get { MoodRating(rawValue: mood) ?? .neutral }
+        set { mood = newValue.rawValue }
+    }
+
+    var triggers: [PredefinedTrigger] {
+        get { triggersRaw.compactMap { PredefinedTrigger(rawValue: $0) } }
+        set { triggersRaw = newValue.map(\.rawValue) }
+    }
+
+    // MARK: - Init
+
+    init(
+        checkinType: CheckinType,
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        pledgeReason: String = "",
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.date = Date()
+        self.checkinTypeRaw = checkinType.rawValue
+        self.mood = mood.rawValue
+        self.gamblingFree = gamblingFree
+        self.pledgeReason = pledgeReason
+        self.notes = notes
+        self.createdAt = Date()
+    }
+}
+```
+
+Key details:
+
+- **`checkinTypeRaw` stores the raw string, `checkinType` exposes the enum.** Same pattern as `gamblingTypesRaw` on `UserProfile`. The init takes the enum, the stored property is the raw value.
+- **`triggersRaw: [String]`** stores multiple triggers as a string array. The computed `triggers` property converts to `[PredefinedTrigger]` using `compactMap`. If a trigger is renamed in a future version, `compactMap` silently drops the unrecognized value instead of crashing.
+- **`@Relationship(inverse: \UserProfile.checkins)`** declares the inverse side. Only one side declares the inverse — the other side (`UserProfile.checkins`) uses `@Relationship(deleteRule: .cascade)` without `inverse:`.
+- **`gamblingFree: Bool`** — this is the critical field. A `false` value in an evening check-in resets the streak counter.
+
+### UrgeLog.swift
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class UrgeLog {
+    var id: UUID = UUID()
+    var timestamp: Date = Date()
+    var intensity: Int = 5
+    var durationSeconds: TimeInterval = 0
+    var triggerRaw: String = ""
+    var copingStrategyRaw: String = ""
+    var didResist: Bool = true
+    var notes: String = ""
+
+    @Relationship(inverse: \UserProfile.urgeLogs) var userProfile: UserProfile?
+
+    var trigger: PredefinedTrigger? {
+        get { PredefinedTrigger(rawValue: triggerRaw) }
+        set { triggerRaw = newValue?.rawValue ?? "" }
+    }
+
+    var copingStrategy: CopingStrategy? {
+        get { CopingStrategy(rawValue: copingStrategyRaw) }
+        set { copingStrategyRaw = newValue?.rawValue ?? "" }
+    }
+
+    init(
+        intensity: Int = 5,
+        trigger: PredefinedTrigger? = nil,
+        copingStrategy: CopingStrategy? = nil,
+        didResist: Bool = true,
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.timestamp = Date()
+        self.intensity = intensity
+        self.triggerRaw = trigger?.rawValue ?? ""
+        self.copingStrategyRaw = copingStrategy?.rawValue ?? ""
+        self.didResist = didResist
+        self.notes = notes
+    }
+}
+```
+
+- **`trigger` and `copingStrategy` are optional** — the user might log an urge without identifying the trigger. The computed property returns `nil` when the raw string is empty or unrecognized.
+- **`durationSeconds`** is set externally after the urge timer runs. The init defaults to `0`.
+
+### JournalEntry.swift
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
+
+    @Relationship(inverse: \UserProfile.journalEntries) var userProfile: UserProfile?
+
+    var moodRating: MoodRating? {
+        get { MoodRating(rawValue: mood) }
+        set { mood = newValue?.rawValue ?? 3 }
+    }
+
+    init(
+        title: String = "",
+        content: String = "",
+        mood: MoodRating = .neutral,
+        promptUsed: String = ""
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.title = title
+        self.content = content
+        self.mood = mood.rawValue
+        self.promptUsed = promptUsed
+    }
+}
+```
+
+The simplest model. `promptUsed` tracks which journal prompt the user was responding to — useful for analytics later.
+
+### EmergencyContact.swift
+
+```swift
+import Foundation
+
+struct EmergencyContact: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
     var name: String
-    var color: String
+    var phoneNumber: String
 
-    @Relationship(deleteRule: .nullify)
-    var checkIns: [CheckIn]
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        color: String
-    ) {
-        self.id = id
-        self.name = name
-        self.color = color
-        self.checkIns = []
+    var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    static let predefined: [(name: String, color: String)] = [
-        ("Urge", "#E74C3C"),
-        ("Therapy", "#4A90D9"),
-        ("Exercise", "#2ECC71"),
-        ("Social", "#F39C12"),
-        ("Financial", "#1ABC9C"),
-        ("Breathing", "#9B59B6"),
-    ]
-}
-```
-
-Review:
-
-- **`color` is a `String` (hex), not a SwiftUI `Color`.** SwiftData cannot persist `Color` directly. We store the hex value and convert in the view layer. This is the right trade-off.
-- **`deleteRule: .nullify`** on checkIns means deleting a tag removes it from all check-ins' `tags` arrays. Check-ins are never deleted when a tag is removed.
-- **No `inverse:` parameter on `checkIns`.** We already declared the inverse on `CheckIn.tags`. Declaring it on both sides causes a compiler error. One side declares the inverse — the other is the target.
-- **`predefined` is a tuple array, not `@Model` instances.** You cannot create SwiftData objects statically. We seed these into the database at first launch, just like we would with Core Data.
-
-### RecoveryInsight.swift
-
-```swift
-import Foundation
-import SwiftData
-
-@Model
-final class RecoveryInsight {
-    @Attribute(.unique) var id: UUID
-    var date: Date
-    var summary: String
-    var sentimentScore: Double
-    var generatedAt: Date
-
-    init(
-        id: UUID = UUID(),
-        date: Date,
-        summary: String,
-        sentimentScore: Double,
-        generatedAt: Date = .now
-    ) {
-        self.id = id
-        self.date = date
-        self.summary = summary
-        self.sentimentScore = sentimentScore
-        self.generatedAt = generatedAt
+    var callURL: URL? {
+        let cleaned = phoneNumber.replacingOccurrences(of: "[^0-9+]", with: "", options: .regularExpression)
+        guard !cleaned.isEmpty else { return nil }
+        return URL(string: "tel://\(cleaned)")
     }
 }
 ```
 
-This is the simplest model. No relationships — insights are derived data, not relational. A few notes:
-
-- **`date` is the calendar day the insight covers.** We will query by date range. In a production app you would normalize this to `startOfDay` before saving. We handle that in the service.
-- **`sentimentScore` is a `Double` from 0.0 to 1.0.** Like `recoveryStatus`, the range is enforced in the service, not the model. SwiftData models are data containers, not validation layers.
-- **`generatedAt` defaults to `.now`.** This tracks when the on-device ML generated the insight, useful for cache invalidation.
+This is **not** an `@Model` — it is a plain `Codable` struct stored as JSON `Data` inside `UserProfile`. Notice `callURL` strips non-numeric characters from the phone number and builds a `tel://` URL. This handles messy user input like "(555) 123-4567" gracefully.
 
 ### AI Output Review
 
 Here is how I evaluate what the AI generated:
 
-- **Relationship declarations with explicit inverses** — the AI got this right, including the asymmetric pattern where only one side declares `inverse:`
-- **Delete rules are `.nullify` across the board** — correct for a many-to-many where neither side owns the other
-- **No force unwraps anywhere** — every property is either non-optional with a default or genuinely required in the init
-- **`@Attribute(.unique)` on id fields** — good practice, though SwiftData generates its own `persistentModelID` internally. The unique constraint prevents accidental duplicates during sync or migration
+- **Raw-value storage pattern used consistently** — every enum property stores the raw value and exposes a computed getter/setter. This is the only safe way to use custom enums with SwiftData
+- **Cascade delete rules on the parent side** — correct. Deleting a UserProfile cascades to all child records
+- **Inverse declarations only on the child side** — correct. `DailyCheckin`, `UrgeLog`, and `JournalEntry` each declare `inverse:`, while `UserProfile` does not
+- **No force unwraps** — every property has a default value or is genuinely optional
+- **Computed properties for business logic** — `currentStreak` and `totalSaved` derive from the data, not stored redundantly
 
-One thing to watch: the AI might generate `var tags: [RecoveryTag]?` as an optional array. If it does, change it to a non-optional `[RecoveryTag]` initialized to `[]`. Optional arrays in SwiftData relationships create unnecessary nil-checking in every query and view.
+One thing to watch: the AI might try to store `[GamblingType]` directly instead of `[String]`. SwiftData will compile this but crash at runtime. Always store raw values and convert via computed properties.
 
 ## Iteration
 
-The initial generation is solid, but we need the service and the container configuration. Here is the follow-up prompt:
+The initial generation covers the models. Now we need the Milestone struct that drives the dashboard progress UI:
 
 ```
-Now create two things:
+Add a Milestone struct (not @Model — it is static data) with
+these properties: id (Int), days (Int), titleKey (String),
+descriptionKey (String), icon (String — SF Symbol).
 
-1. A RecoveryService protocol in Services/RecoveryService.swift
-   with these methods:
-   - addCheckIn(recoveryStatus:emoji:note:tags:) -> CheckIn
-   - deleteCheckIn(_ checkIn: CheckIn)
-   - fetchCheckIns(from:to:) -> [CheckIn] using #Predicate
-   - fetchCheckIns(recoveryStatus:) -> [CheckIn] using #Predicate
-   - fetchAllTags() -> [RecoveryTag]
-   - addTag(name:color:) -> RecoveryTag
-   - fetchInsight(for date: Date) -> RecoveryInsight?
-   - saveInsight(date:summary:sentimentScore:) -> RecoveryInsight
+Include a static `all` array with milestones at: 1, 3, 7, 14,
+30, 60, 90, 180, 365 days.
 
-2. A SwiftDataRecoveryService class that implements this
-   protocol using a ModelContext. Mark it @MainActor since
-   ModelContext is not Sendable.
+Add two static methods:
+- current(for days: Int) -> Milestone? — returns the most
+  recent milestone the user has passed
+- next(for days: Int) -> Milestone? — returns the next
+  upcoming milestone
 
-3. Update BetAwayApp.swift to configure a ModelContainer
-   with all three models and inject a SwiftDataRecoveryService
-   into the environment.
-
-Use #Predicate for all queries. Handle errors with
-os.Logger, not print(). Use Swift 6 strict concurrency.
+Do not make this an @Model. It is a fixed data set — no
+database storage needed.
 ```
 
-### RecoveryService Protocol and Implementation
+### Milestone Struct
 
 ```swift
-import Foundation
-import SwiftData
-import os
+struct Milestone: Identifiable {
+    let id: Int
+    let days: Int
+    let titleKey: String
+    let descriptionKey: String
+    let icon: String
 
-protocol RecoveryService {
-    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn
-    func deleteCheckIn(_ checkIn: CheckIn)
-    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn]
-    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn]
-    func fetchAllTags() -> [RecoveryTag]
-    func addTag(name: String, color: String) -> RecoveryTag
-    func fetchInsight(for date: Date) -> RecoveryInsight?
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight
-}
-
-@MainActor
-final class SwiftDataRecoveryService: RecoveryService {
-    private let modelContext: ModelContext
-    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
-
-    init(modelContext: ModelContext) {
-        self.modelContext = modelContext
+    var title: String {
+        LanguageManager.shared.bundle.localizedString(forKey: titleKey, value: nil, table: nil)
     }
 
-    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn {
-        let checkIn = CheckIn(recoveryStatus: recoveryStatus, emoji: emoji, note: note)
-        checkIn.tags = tags
-        modelContext.insert(checkIn)
-        save()
-        return checkIn
+    var description: String {
+        LanguageManager.shared.bundle.localizedString(forKey: descriptionKey, value: nil, table: nil)
     }
 
-    func deleteCheckIn(_ checkIn: CheckIn) {
-        modelContext.delete(checkIn)
-        save()
+    static let all: [Milestone] = [
+        Milestone(id: 1, days: 1, titleKey: "Day 1", descriptionKey: "The hardest step is the first one", icon: "leaf.fill"),
+        Milestone(id: 2, days: 3, titleKey: "3 Days", descriptionKey: "72 hours. Your brain is already adjusting", icon: "seedling"),
+        Milestone(id: 3, days: 7, titleKey: "1 Week", descriptionKey: "One full week! This is real progress", icon: "star.fill"),
+        Milestone(id: 4, days: 14, titleKey: "2 Weeks", descriptionKey: "Dopamine receptors are recovering", icon: "star.circle.fill"),
+        Milestone(id: 5, days: 30, titleKey: "1 Month", descriptionKey: "You're building a new identity", icon: "trophy.fill"),
+        Milestone(id: 6, days: 60, titleKey: "2 Months", descriptionKey: "New habits are forming", icon: "diamond.fill"),
+        Milestone(id: 7, days: 90, titleKey: "90 Days", descriptionKey: "Clinical recovery benchmark", icon: "crown.fill"),
+        Milestone(id: 8, days: 180, titleKey: "6 Months", descriptionKey: "Half a year. Incredible strength", icon: "medal.fill"),
+        Milestone(id: 9, days: 365, titleKey: "1 Year", descriptionKey: "ONE YEAR BET-FREE", icon: "rosette"),
+    ]
+
+    static func current(for days: Int) -> Milestone? {
+        all.last { $0.days <= days }
     }
 
-    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn] {
-        let predicate = #Predicate<CheckIn> {
-            $0.createdAt >= startDate && $0.createdAt <= endDate
-        }
-        let descriptor = FetchDescriptor<CheckIn>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch check-ins by date range: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn] {
-        let predicate = #Predicate<CheckIn> {
-            $0.recoveryStatus == recoveryStatus
-        }
-        let descriptor = FetchDescriptor<CheckIn>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch check-ins by recovery status: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func fetchAllTags() -> [RecoveryTag] {
-        let descriptor = FetchDescriptor<RecoveryTag>(
-            sortBy: [SortDescriptor(\.name)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch tags: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func addTag(name: String, color: String) -> RecoveryTag {
-        let tag = RecoveryTag(name: name, color: color)
-        modelContext.insert(tag)
-        save()
-        return tag
-    }
-
-    func fetchInsight(for date: Date) -> RecoveryInsight? {
-        let startOfDay = Calendar.current.startOfDay(for: date)
-        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
-
-        let predicate = #Predicate<RecoveryInsight> {
-            $0.date >= startOfDay && $0.date < endOfDay
-        }
-        let descriptor = FetchDescriptor<RecoveryInsight>(predicate: predicate)
-        do {
-            return try modelContext.fetch(descriptor).first
-        } catch {
-            logger.error("Failed to fetch insight: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight {
-        let normalizedDate = Calendar.current.startOfDay(for: date)
-        let insight = RecoveryInsight(
-            date: normalizedDate,
-            summary: summary,
-            sentimentScore: sentimentScore
-        )
-        modelContext.insert(insight)
-        save()
-        return insight
-    }
-
-    // MARK: - Private
-
-    private func save() {
-        do {
-            try modelContext.save()
-        } catch {
-            logger.error("Failed to save context: \(error.localizedDescription)")
-        }
+    static func next(for days: Int) -> Milestone? {
+        all.first { $0.days > days }
     }
 }
 ```
 
-This is the core of the lesson, so let us break down the decisions that matter.
+This is a good example of knowing when **not** to use SwiftData. Milestones are fixed data — they never change at runtime. Making them an `@Model` would add database overhead for no benefit. A static array is the simplest, fastest solution.
 
-**Why a protocol at all?** Because in Module 6, we write unit tests. Tests need a mock service that returns controlled data without touching a real database. If your views call `ModelContext` directly, you cannot test them without standing up a full SwiftData stack. The protocol gives us a seam to inject either the real implementation or a mock.
-
-**`@MainActor` on the class.** `ModelContext` is bound to the actor that created it. In SwiftUI apps, the main context lives on `@MainActor`. If you try to use it from a background thread under Swift 6 strict concurrency, the compiler stops you. Marking the service `@MainActor` makes this explicit and safe.
-
-**`#Predicate` for every query.** This is SwiftData's compile-time-checked query syntax. Unlike Core Data's `NSPredicate` (which is a runtime string), `#Predicate` catches type errors at compile time. If you rename `createdAt` to `timestamp`, every `#Predicate` that references it will show a compiler error — no silent runtime failures.
-
-**`fetchInsight(for:)` normalizes to start-of-day.** We query for insights by calendar day, not exact timestamp. The predicate uses `>= startOfDay && < endOfDay` (note: strict less-than on the upper bound). This is the correct pattern for day-based queries — using `<=` on the end date would include the first instant of the next day.
-
-**`saveInsight` normalizes the date before insertion.** This ensures that two insights for the same day always have the same `date` value, which prevents duplicates and makes queries reliable.
-
-### ModelContainer Configuration
-
-```swift
-import SwiftUI
-import SwiftData
-
-@main
-struct BetAwayApp: App {
-    let modelContainer: ModelContainer
-
-    init() {
-        do {
-            let schema = Schema([
-                CheckIn.self,
-                RecoveryTag.self,
-                RecoveryInsight.self,
-            ])
-            let configuration = ModelConfiguration(isStoredInMemoryOnly: false)
-            modelContainer = try ModelContainer(for: schema, configurations: [configuration])
-            seedTagsIfNeeded()
-        } catch {
-            fatalError("Failed to create ModelContainer: \(error)")
-        }
-    }
-
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environment(
-                    SwiftDataRecoveryService(modelContext: modelContainer.mainContext)
-                )
-        }
-        .modelContainer(modelContainer)
-    }
-
-    private func seedTagsIfNeeded() {
-        let hasSeeded = UserDefaults.standard.bool(forKey: "hasSeededTags")
-        guard !hasSeeded else { return }
-
-        let context = modelContainer.mainContext
-        for item in RecoveryTag.predefined {
-            let tag = RecoveryTag(name: item.name, color: item.color)
-            context.insert(tag)
-        }
-
-        do {
-            try context.save()
-            UserDefaults.standard.set(true, forKey: "hasSeededTags")
-        } catch {
-            print("Failed to seed tags: \(error)")
-        }
-    }
-}
-```
-
-**`fatalError` in the catch block is intentional.** If the database cannot be created, the app has no persistence. There is no graceful recovery — this is the standard Apple pattern.
-
-**Service injection via `.environment()`.** We create the service once at the app level and inject it into the view hierarchy. Every view that needs data access reads it from the environment. This is dependency injection without any third-party framework.
-
-**Tag seeding uses the same `UserDefaults` flag pattern** we used in the free course. Simple, reliable, one-time execution.
+The `title` and `description` properties go through `LanguageManager` for localization. The `titleKey` and `descriptionKey` are the English strings that also serve as localization keys.
 
 ## Verify Phase
 
 Before moving to the next lesson, verify these things manually:
 
-1. **Build the project.** All four files should compile with zero warnings under Swift 6 strict concurrency. If you see `Sendable` warnings on the service, confirm that `@MainActor` is on the class declaration.
+1. **Build the project.** All model files and enums should compile with zero warnings under Swift 6 strict concurrency.
 
-2. **Check the relationship inverse.** Open `CheckIn.swift` and confirm that `@Relationship(inverse: \RecoveryTag.checkIns)` points to the correct keypath. Open `RecoveryTag.swift` and confirm it does NOT also declare an `inverse:` parameter. Only one side declares the inverse.
+2. **Check the relationship inverses.** Open `DailyCheckin.swift` and confirm `@Relationship(inverse: \UserProfile.checkins)`. Do the same for `UrgeLog` and `JournalEntry`. Confirm `UserProfile` does NOT also declare `inverse:` on its relationship arrays — only one side declares the inverse.
 
-3. **Check delete rules.** Both relationships should use `.nullify`. If the AI generated `.cascade` on either side, change it. Cascade on a many-to-many means deleting one check-in would delete all its tags — and those tags would then be removed from every other check-in that used them. Cascade is almost never correct for many-to-many.
+3. **Check delete rules.** `UserProfile` should use `.cascade` on all three relationship arrays. This is correct for one-to-many where the parent owns the children. If the AI generated `.nullify`, change it — orphaned check-ins with no parent profile are useless data.
 
-4. **Check that no property is force-unwrapped.** Search for `!` in all model files. There should be exactly one — the `endOfDay` calculation in `fetchInsight`, which is safe because `Calendar.date(byAdding:)` only returns nil for absurd inputs.
+4. **Test the raw-value pattern.** Create a `DailyCheckin` with `checkinType: .morningPledge`. Print `checkinTypeRaw` — it should be `"Morning Pledge"`. Set `checkinType = .eveningCheckin`. Print `checkinTypeRaw` again — it should be `"Evening Check-in"`.
 
-5. **Test the service.** Create a temporary button in ContentView that calls `service.addCheckIn(recoveryStatus: 4, emoji: "💪", note: "Test", tags: [])`. Tap it, quit the app, relaunch. The check-in should persist.
+5. **Test computed properties.** Create a `UserProfile` with a `quitDate` of 7 days ago. Check that `daysSinceQuit == 7` and `currentStreak == 7` (with no relapses). Add an evening check-in with `gamblingFree = false` dated 2 days ago. Check that `currentStreak == 2`.
 
-## Final Code
-
-Here is every file, complete and compilable.
-
-**Models/CheckIn.swift**
-
-```swift
-import Foundation
-import SwiftData
-
-@Model
-final class CheckIn {
-    @Attribute(.unique) var id: UUID
-    var recoveryStatus: Int
-    var emoji: String
-    var note: String
-    var createdAt: Date
-
-    @Relationship(deleteRule: .nullify, inverse: \RecoveryTag.checkIns)
-    var tags: [RecoveryTag]
-
-    init(
-        id: UUID = UUID(),
-        recoveryStatus: Int,
-        emoji: String,
-        note: String = "",
-        createdAt: Date = .now
-    ) {
-        self.id = id
-        self.recoveryStatus = recoveryStatus
-        self.emoji = emoji
-        self.note = note
-        self.createdAt = createdAt
-        self.tags = []
-    }
-}
-```
-
-**Models/RecoveryTag.swift**
-
-```swift
-import Foundation
-import SwiftData
-
-@Model
-final class RecoveryTag {
-    @Attribute(.unique) var id: UUID
-    var name: String
-    var color: String
-
-    @Relationship(deleteRule: .nullify)
-    var checkIns: [CheckIn]
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        color: String
-    ) {
-        self.id = id
-        self.name = name
-        self.color = color
-        self.checkIns = []
-    }
-
-    static let predefined: [(name: String, color: String)] = [
-        ("Urge", "#E74C3C"),
-        ("Therapy", "#4A90D9"),
-        ("Exercise", "#2ECC71"),
-        ("Social", "#F39C12"),
-        ("Financial", "#1ABC9C"),
-        ("Breathing", "#9B59B6"),
-    ]
-}
-```
-
-**Models/RecoveryInsight.swift**
-
-```swift
-import Foundation
-import SwiftData
-
-@Model
-final class RecoveryInsight {
-    @Attribute(.unique) var id: UUID
-    var date: Date
-    var summary: String
-    var sentimentScore: Double
-    var generatedAt: Date
-
-    init(
-        id: UUID = UUID(),
-        date: Date,
-        summary: String,
-        sentimentScore: Double,
-        generatedAt: Date = .now
-    ) {
-        self.id = id
-        self.date = date
-        self.summary = summary
-        self.sentimentScore = sentimentScore
-        self.generatedAt = generatedAt
-    }
-}
-```
-
-**Services/RecoveryService.swift**
-
-```swift
-import Foundation
-import SwiftData
-import os
-
-protocol RecoveryService {
-    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn
-    func deleteCheckIn(_ checkIn: CheckIn)
-    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn]
-    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn]
-    func fetchAllTags() -> [RecoveryTag]
-    func addTag(name: String, color: String) -> RecoveryTag
-    func fetchInsight(for date: Date) -> RecoveryInsight?
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight
-}
-
-@MainActor
-final class SwiftDataRecoveryService: RecoveryService {
-    private let modelContext: ModelContext
-    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "RecoveryService")
-
-    init(modelContext: ModelContext) {
-        self.modelContext = modelContext
-    }
-
-    func addCheckIn(recoveryStatus: Int, emoji: String, note: String, tags: [RecoveryTag]) -> CheckIn {
-        let checkIn = CheckIn(recoveryStatus: recoveryStatus, emoji: emoji, note: note)
-        checkIn.tags = tags
-        modelContext.insert(checkIn)
-        save()
-        return checkIn
-    }
-
-    func deleteCheckIn(_ checkIn: CheckIn) {
-        modelContext.delete(checkIn)
-        save()
-    }
-
-    func fetchCheckIns(from startDate: Date, to endDate: Date) -> [CheckIn] {
-        let predicate = #Predicate<CheckIn> {
-            $0.createdAt >= startDate && $0.createdAt <= endDate
-        }
-        let descriptor = FetchDescriptor<CheckIn>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch check-ins by date: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func fetchCheckIns(recoveryStatus: Int) -> [CheckIn] {
-        let predicate = #Predicate<CheckIn> {
-            $0.recoveryStatus == recoveryStatus
-        }
-        let descriptor = FetchDescriptor<CheckIn>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch check-ins by status: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func fetchAllTags() -> [RecoveryTag] {
-        let descriptor = FetchDescriptor<RecoveryTag>(
-            sortBy: [SortDescriptor(\.name)]
-        )
-        do {
-            return try modelContext.fetch(descriptor)
-        } catch {
-            logger.error("Failed to fetch tags: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func addTag(name: String, color: String) -> RecoveryTag {
-        let tag = RecoveryTag(name: name, color: color)
-        modelContext.insert(tag)
-        save()
-        return tag
-    }
-
-    func fetchInsight(for date: Date) -> RecoveryInsight? {
-        let startOfDay = Calendar.current.startOfDay(for: date)
-        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
-
-        let predicate = #Predicate<RecoveryInsight> {
-            $0.date >= startOfDay && $0.date < endOfDay
-        }
-        let descriptor = FetchDescriptor<RecoveryInsight>(predicate: predicate)
-        do {
-            return try modelContext.fetch(descriptor).first
-        } catch {
-            logger.error("Failed to fetch insight: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    func saveInsight(date: Date, summary: String, sentimentScore: Double) -> RecoveryInsight {
-        let normalizedDate = Calendar.current.startOfDay(for: date)
-        let insight = RecoveryInsight(
-            date: normalizedDate,
-            summary: summary,
-            sentimentScore: sentimentScore
-        )
-        modelContext.insert(insight)
-        save()
-        return insight
-    }
-
-    private func save() {
-        do {
-            try modelContext.save()
-        } catch {
-            logger.error("Failed to save context: \(error.localizedDescription)")
-        }
-    }
-}
-```
+6. **Test persistence.** Insert a `UserProfile` and a `DailyCheckin`, quit the app, relaunch. Both should persist. Delete the profile — confirm the check-in is also deleted (cascade).
 
 ## Checkpoint
 
-Before moving to Lesson 1.3, confirm all of these:
+Before moving to Lesson 2.1, confirm all of these:
 
-- [ ] `CheckIn`, `RecoveryTag`, and `RecoveryInsight` compile with zero warnings under Swift 6
-- [ ] The `CheckIn.tags` relationship declares `inverse: \RecoveryTag.checkIns`
-- [ ] `RecoveryTag.checkIns` does NOT also declare an inverse (only one side does)
-- [ ] All delete rules are `.nullify`, not `.cascade`
-- [ ] `RecoveryService` protocol exists with eight methods
-- [ ] `SwiftDataRecoveryService` is marked `@MainActor`
-- [ ] All queries use `#Predicate`, not string-based predicates
-- [ ] `ModelContainer` is configured in `BetAwayApp.init()` with all three model types
-- [ ] Predefined tags are seeded on first launch
-- [ ] You can add a check-in, quit, relaunch, and the check-in persists
+- [ ] `UserProfile`, `DailyCheckin`, `UrgeLog`, `JournalEntry` compile with zero warnings under Swift 6
+- [ ] All enums (`GamblingType`, `MoodRating`, `CheckinType`, `CopingStrategy`, `PredefinedTrigger`) are `Codable` and `CaseIterable`
+- [ ] Every enum property uses the raw-value storage pattern (stored as String/Int, computed getter/setter for the enum)
+- [ ] `UserProfile` has `.cascade` delete rules on all three relationship arrays
+- [ ] Child models declare `inverse:` — parent model does not
+- [ ] `EmergencyContact` is a `Codable` struct stored as JSON `Data`
+- [ ] `currentStreak` correctly resets when there is a relapse
+- [ ] `totalSaved` calculates based on `daysSinceQuit` and `averageWeeklySpend`
+- [ ] `Milestone.current(for:)` and `Milestone.next(for:)` return correct values
+- [ ] `ModelContainer` schema includes all four model types
 
 ## Challenge
 
-**Add a `fetchRecentCheckIns(limit:)` method** to both the protocol and the implementation. It should return the most recent N check-ins, sorted by `createdAt` descending.
+**Add `todaysMood()` and emergency contact management methods to `UserProfile`.**
 
-Hint: `FetchDescriptor` has a `fetchLimit` property. Set it after creating the descriptor:
+The profile needs three methods for emergency contacts (max 3):
 
 ```swift
-var descriptor = FetchDescriptor<CheckIn>(
-    sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-)
-descriptor.fetchLimit = limit
+func addEmergencyContact(_ contact: EmergencyContact) {
+    var contacts = emergencyContacts
+    guard contacts.count < 3 else { return }
+    contacts.append(contact)
+    emergencyContacts = contacts
+}
+
+func removeEmergencyContact(_ contact: EmergencyContact) {
+    var contacts = emergencyContacts
+    contacts.removeAll { $0.id == contact.id }
+    emergencyContacts = contacts
+}
 ```
 
-Try prompting Claude Code for this. Then compare the output with the hint. If the AI generates a `#Predicate` that tries to do the limiting — that is wrong. Limiting is a fetch descriptor concern, not a predicate concern. The predicate filters *which* records match. The fetch limit controls *how many* come back. These are different operations.
+And a mood helper:
+
+```swift
+func todaysMood() -> MoodRating? {
+    let calendar = Calendar.current
+    let todayCheckin = checkins
+        .filter { calendar.isDateInToday($0.date) }
+        .sorted { $0.date > $1.date }
+        .first
+    return todayCheckin.flatMap { MoodRating(rawValue: $0.mood) }
+}
+```
+
+Notice how `todaysMood()` uses `flatMap` on the optional to chain the `MoodRating` init. If there is no check-in today, `first` is `nil`, so `flatMap` returns `nil`. If there is a check-in but the mood value is invalid, `MoodRating(rawValue:)` returns `nil`. Two potential failures handled in one expression.
+
+---
+
+Next up: **Lesson 2.1 — Design System & Theme**, where we build the `ColorPalette`, `Typography`, `Spacing`, and `AnimationPresets` that give BetAway its visual identity.

@@ -21,8 +21,8 @@ In this lesson, we set up the Xcode project, lock in Swift 6 strict concurrency 
 
 - How to create an Xcode project configured for Swift 6 strict concurrency mode
 - The MVVM + Service Layer architecture and why it scales for production apps
-- A folder structure (`App/`, `Core/`, `Features/`, `Data/`, `Tests/`) that keeps a growing codebase navigable
-- How to build an enum-based `AppRouter` for type-safe navigation with `NavigationStack`
+- A folder structure (`App/`, `Core/`, `Models/`, `Navigation/`, `ViewModels/`, `Views/`) that keeps a growing codebase navigable
+- How to build a tab-based `AppRouter` with `@Observable` for type-safe navigation
 
 ## Why This Matters
 
@@ -60,11 +60,11 @@ Do not generate code yet. Give me the plan.
 A good plan from this prompt will include:
 
 1. **Build Settings** — `SWIFT_STRICT_CONCURRENCY = complete` and the Swift language version set to 6 in the Xcode build settings.
-2. **Folder structure** — something close to `App/`, `Core/`, `Features/`, `Data/`, `Tests/`, with clear separation of concerns.
+2. **Folder structure** — something close to `App/`, `Core/`, `Models/`, `Navigation/`, `ViewModels/`, `Views/`, `Tests/`, with clear separation of concerns.
 3. **Entry point** — `BetAwayApp.swift` with a `ModelContainer` configured and injected into the environment.
-4. **Router** — an `AppRouter` class (or struct) using an enum for routes, paired with `NavigationStack(path:)`.
+4. **Router** — an `@Observable` `AppRouter` class with a `Tab` enum for tab navigation, `NavigationPath` for drill-down, and onboarding state management.
 5. **Protocols** — at minimum, a service protocol pattern so the data layer can be swapped for mocks in tests.
-6. **DI strategy** — protocols defined in `Core/`, implementations in `Data/`, injected at the `App` level.
+6. **DI strategy** — config and theme in `Core/`, models in `Models/`, injected at the `App` level via SwiftUI environment.
 
 If the plan is missing any of these, ask a follow-up. The plan is cheap. Rework is expensive.
 
@@ -87,25 +87,31 @@ Create the BetAway project foundation. Generate the following
 files with full Swift 6 strict concurrency compliance:
 
 1. BetAwayApp.swift — @main entry point
-   - Configure a SwiftData ModelContainer (empty schema for now,
-     we will add models next lesson)
+   - Configure a SwiftData ModelContainer with schema for our models
    - Create and inject an AppRouter as an @State property
-   - Inject the router into the environment
-   - Use os.Logger for any error logging
+   - Register custom fonts at runtime via CoreText
+   - Inject router and locale into the environment
+   - Force dark mode with .preferredColorScheme(.dark)
+   - Add ModelContainer error recovery (delete + recreate if corrupted)
 
-2. AppRouter.swift — navigation controller
-   - An @Observable class marked @MainActor
-   - A Route enum with cases: home, settings (more added later)
-   - A NavigationPath property
-   - Methods: navigate(to:), pop(), popToRoot()
-   - Use os.Logger, not print()
+2. AppRouter.swift — navigation + state controller
+   - An @Observable final class
+   - A Tab enum with cases: dashboard, journal, progress, settings
+     (each with a localizedName and SF Symbol icon)
+   - A NavigationPath for drill-down navigation
+   - Onboarding state: showOnboarding Bool driven by UserDefaults
+   - Methods: completeOnboarding(), popToRoot(), lock(), unlock()
+   - Use spring animations from AnimationPresets for transitions
 
-3. Folder structure (create empty placeholder files where needed):
-   App/          → BetAwayApp.swift, AppRouter.swift
-   Core/         → (empty for now — protocols go here)
-   Features/     → (empty for now — feature modules go here)
-   Data/         → (empty for now — services go here)
-   Tests/        → (empty for now)
+3. Folder structure:
+   App/           → BetAwayApp.swift
+   Core/Config/   → AppConfig.swift (constants, feature flags, keys)
+   Core/Theme/    → ColorPalette, Typography, Spacing, AnimationPresets
+   Models/        → (SwiftData models — added next lesson)
+   Navigation/    → AppRouter.swift
+   ViewModels/    → (added in Module 2)
+   Views/         → MainTabView, RootView, feature folders
+   Tests/         → (added in Module 6)
 
 Every type that touches UI must be @MainActor.
 Every Sendable boundary must be explicit.
@@ -119,20 +125,22 @@ When the AI responds, here is what to look for:
 **BetAwayApp.swift:**
 
 - ✅ Uses `@main` and conforms to `App`
-- ✅ Creates `ModelContainer` in an `init()` with proper error handling
-- ✅ Uses `os.Logger` for the catch block, not `print()`
-- ✅ Injects the router via `.environment()`
-- ⚠️ If it uses `fatalError` in the `ModelContainer` catch — that is acceptable for the container (the app cannot function without its database), but watch for `fatalError` anywhere else
+- ✅ Creates `ModelContainer` with a full schema and error recovery
+- ✅ Injects the router via `.environment()` using the iOS 17+ `@Environment(AppRouter.self)` pattern
+- ✅ Registers custom fonts at runtime — no Info.plist entries needed
+- ✅ Forces `.preferredColorScheme(.dark)` for the whole app
+- ⚠️ If it uses `fatalError` in the `ModelContainer` catch — that is acceptable only after a recovery attempt (delete and recreate). Our code tries twice before crashing
 - ❌ If it uses `@StateObject` — reject. We use `@State` with `@Observable` in modern SwiftUI
 - ❌ If it uses `NavigationView` — reject. `NavigationStack` only
 - ❌ If it imports `Combine` — reject. We use `@Observable`, not `ObservableObject`
 
 **AppRouter.swift:**
 
-- ✅ Marked `@MainActor` and `@Observable`
-- ✅ `Route` enum is `Hashable` (required for `NavigationPath`)
-- ✅ Uses `NavigationPath`, not a custom array
-- ⚠️ If `Route` does not conform to `Codable` — not critical now but useful for state restoration later. Note it for a future iteration
+- ✅ Marked `@Observable` as a `final class`
+- ✅ `Tab` enum is `CaseIterable` and `Identifiable` (for `ForEach` in tab bar)
+- ✅ Uses `NavigationPath` for drill-down navigation within tabs
+- ✅ Manages onboarding state via `UserDefaults`
+- ✅ Uses `AnimationPresets` for smooth transitions (not raw `withAnimation`)
 - ❌ If it uses a singleton pattern (`static let shared`) — reject immediately
 - ❌ If it uses `@Published` — reject. `@Observable` handles this
 
@@ -143,14 +151,15 @@ After reviewing the output, send this follow-up to tighten things up:
 ```
 Good start. Make these adjustments:
 
-1. Add an EnvironmentKey + Environment extension for AppRouter
-   so views can access it via @Environment(\.router)
-2. Add a `Sendable` conformance to Route
-3. Add a logger instance to AppRouter using
-   os.Logger(subsystem: "com.nativefirst.betaway", category: "Router")
-4. In BetAwayApp, wrap the ModelContainer creation in a static
-   method `makeModelContainer()` to keep init() clean
-5. Make sure every public method has a brief doc comment
+1. Use @Environment(AppRouter.self) — the iOS 17+ syntax that
+   does not require a custom EnvironmentKey. Simpler and cleaner
+2. Add a lock() / unlock() method pair for biometric lock support
+3. Add a resetForNewUser() method that clears UserDefaults and
+   resets all navigation state (onboarding, tab, path)
+4. Use AnimationPresets.gentle for onboarding transitions and
+   AnimationPresets.smooth for navigation state changes
+5. Make sure the Tab enum has both a localizedName (via
+   LanguageManager) and an SF Symbol icon property
 
 Zero warnings. Swift 6 strict concurrency.
 ```
@@ -168,17 +177,17 @@ Before moving to the next lesson, verify these things:
 4. Run the app in the Simulator — it should launch without crashing (you will see an empty view, which is correct)
 
 **In the code:**
-1. Grep for `print(` — there should be zero matches. Only `os.Logger` calls
-2. Grep for `singleton`, `shared`, `static let shared` — zero matches
-3. Grep for `ObservableObject`, `@Published`, `@StateObject` — zero matches
-4. Confirm `AppRouter` is annotated with `@MainActor`
-5. Confirm `Route` conforms to `Hashable` and `Sendable`
+1. Grep for `print(` — there should be zero matches
+2. Grep for `ObservableObject`, `@Published`, `@StateObject` — zero matches
+3. Confirm `AppRouter` uses `@Observable` and is a `final class`
+4. Confirm `Tab` enum conforms to `CaseIterable` and `Identifiable`
+5. Confirm `ModelContainer` has error recovery logic (delete + recreate)
 
 **Navigation test:**
-1. Temporarily add a button in your root view that calls `router.navigate(to: .settings)`
-2. Confirm the navigation stack pushes a new view
-3. Call `router.popToRoot()` — confirm you return to the root
-4. Remove the temporary test button
+1. Launch the app — `RootView` should check `showOnboarding` and display accordingly
+2. After onboarding, `MainTabView` should show with four tabs
+3. Tap each tab — confirm `selectedTab` updates and the correct view loads
+4. Call `router.popToRoot()` — confirm `NavigationPath` resets
 
 ## Final Code
 
@@ -189,16 +198,39 @@ Here are the complete, compilable files for this lesson.
 ```
 BetAway/
 ├── App/
-│   ├── BetAwayApp.swift
-│   └── AppRouter.swift
+│   └── BetAwayApp.swift
 ├── Core/
-│   └── (empty — protocols added in future lessons)
-├── Features/
-│   └── (empty — feature modules added in future lessons)
-├── Data/
-│   └── (empty — services added in future lessons)
+│   ├── Config/
+│   │   └── AppConfig.swift
+│   └── Theme/
+│       ├── ColorPalette.swift
+│       ├── Typography.swift
+│       ├── Spacing.swift
+│       └── AnimationPresets.swift
+├── Models/
+│   ├── UserProfile.swift
+│   ├── DailyCheckin.swift
+│   ├── UrgeLog.swift
+│   ├── JournalEntry.swift
+│   ├── Enums.swift
+│   └── EmergencyContact.swift
+├── Navigation/
+│   └── AppRouter.swift
+├── ViewModels/
+│   ├── DashboardViewModel.swift
+│   ├── UrgeViewModel.swift
+│   └── SettingsViewModel.swift
+├── Views/
+│   ├── MainTabView.swift
+│   ├── RootView.swift
+│   ├── Dashboard/
+│   ├── Journal/
+│   ├── Progress/
+│   ├── Settings/
+│   ├── Onboarding/
+│   └── Components/
 └── Tests/
-    └── (empty — tests added in Module 6)
+    └── (added in Module 6)
 ```
 
 ### BetAwayApp.swift
@@ -206,163 +238,180 @@ BetAway/
 ```swift
 import SwiftUI
 import SwiftData
-import os
+import CoreText
 
 @main
 struct BetAwayApp: App {
-    private static let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "App"
-    )
-
-    @State private var router = AppRouter()
-    let modelContainer: ModelContainer
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
 
     init() {
-        self.modelContainer = Self.makeModelContainer()
+        UserDefaults.standard.register(defaults: [
+            AppConfig.StorageKeys.hapticFeedbackEnabled: true
+        ])
+        Self.registerCustomFonts()
     }
+
+    /// Register bundled custom fonts at runtime (no Info.plist needed)
+    private static func registerCustomFonts() {
+        let fontNames = ["Nunito-Variable"]
+        for name in fontNames {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else { continue }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            // If the database is corrupted, try deleting and recreating
+            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+
+                // Also remove related files (.store-shm, .store-wal)
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent("default.store\(suffix)")
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
+        }
+    }()
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack(path: $router.path) {
-                HomeView()
-                    .navigationDestination(for: AppRouter.Route.self) { route in
-                        router.destination(for: route)
-                    }
-            }
-            .environment(\.router, router)
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
         }
-        .modelContainer(modelContainer)
-    }
-
-    /// Creates and configures the SwiftData model container.
-    private static func makeModelContainer() -> ModelContainer {
-        do {
-            let configuration = ModelConfiguration(isStoredInMemoryOnly: false)
-            let container = try ModelContainer(
-                for: Schema([]),
-                configurations: [configuration]
-            )
-            logger.info("ModelContainer created successfully.")
-            return container
-        } catch {
-            logger.fault(
-                "Failed to create ModelContainer: \(error.localizedDescription)"
-            )
-            fatalError("Failed to create ModelContainer: \(error)")
-        }
-    }
-}
-
-// MARK: - Placeholder views (replaced in future lessons)
-
-struct HomeView: View {
-    @Environment(\.router) private var router
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("BetAway")
-                .font(.largeTitle.bold())
-            Text("Your foundation is ready.")
-                .foregroundStyle(.secondary)
-        }
-        .navigationTitle("Home")
+        .modelContainer(sharedModelContainer)
     }
 }
 ```
+
+Notice a few production-level details that a simple tutorial would skip:
+
+- **Custom font registration via CoreText** — `CTFontManagerRegisterFontsForURL` lets you register fonts at runtime without touching Info.plist. This is cleaner for variable fonts and avoids build system weirdness with font file references.
+- **ModelContainer error recovery** — if the SQLite database is corrupted (happens more often than you think on real devices), we delete the `.store`, `.store-shm`, and `.store-wal` files and try again. Only if the second attempt fails do we crash.
+- **`LanguageManager` injection** — BetAway supports 12 languages. The `LanguageManager` is injected into the environment and also overrides `\.locale` so all system-provided strings (dates, numbers) match the user's language choice.
+- **Dark mode enforced** — `.preferredColorScheme(.dark)` at the root. The entire design system is built for dark backgrounds. No light mode toggle needed.
 
 ### AppRouter.swift
 
 ```swift
 import SwiftUI
-import os
 
-// MARK: - Router
-
-/// Manages app-wide navigation state using a type-safe Route enum.
-@MainActor
 @Observable
 final class AppRouter {
-    private let logger = Logger(
-        subsystem: "com.nativefirst.betaway",
-        category: "Router"
-    )
+    var showOnboarding: Bool
+    var isLocked: Bool = false
+    var selectedTab: Tab = .dashboard
+    var navigationPath = NavigationPath()
 
-    /// All navigable destinations in the app.
-    enum Route: Hashable, Sendable {
-        case home
-        case settings
+    enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
+        case journal = "Journal"
+        case progress = "Progress"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+        }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return AppConfig.Icons.house
+            case .journal: return AppConfig.Icons.journal
+            case .progress: return AppConfig.Icons.chart
+            case .settings: return AppConfig.Icons.settings
+            }
+        }
     }
 
-    /// The navigation path driving the NavigationStack.
-    var path = NavigationPath()
-
-    /// Pushes a new route onto the navigation stack.
-    func navigate(to route: Route) {
-        logger.debug("Navigating to \(String(describing: route))")
-        path.append(route)
+    init() {
+        self.showOnboarding = !UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
     }
 
-    /// Pops the top view off the navigation stack.
-    func pop() {
-        guard !path.isEmpty else { return }
-        logger.debug("Popping top route.")
-        path.removeLast()
+    func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = false
+        }
     }
 
-    /// Pops all views and returns to the root.
     func popToRoot() {
-        logger.debug("Popping to root.")
-        path = NavigationPath()
+        navigationPath = NavigationPath()
     }
 
-    /// Resolves a route to its destination view.
-    @ViewBuilder
-    func destination(for route: Route) -> some View {
-        switch route {
-        case .home:
-            HomeView()
-        case .settings:
-            SettingsPlaceholderView()
+    func lock() {
+        withAnimation(AnimationPresets.fade) {
+            isLocked = true
+        }
+    }
+
+    func unlock() {
+        withAnimation(AnimationPresets.smooth) {
+            isLocked = false
+        }
+    }
+
+    func resetForNewUser() {
+        UserDefaults.standard.set(false, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = true
+            selectedTab = .dashboard
+            navigationPath = NavigationPath()
         }
     }
 }
-
-// MARK: - Environment Key
-
-private struct RouterKey: EnvironmentKey {
-    @MainActor static let defaultValue = AppRouter()
-}
-
-extension EnvironmentValues {
-    /// The shared app router, available via `@Environment(\.router)`.
-    var router: AppRouter {
-        get { self[RouterKey.self] }
-        set { self[RouterKey.self] = newValue }
-    }
-}
-
-// MARK: - Placeholder (removed in Module 2)
-
-struct SettingsPlaceholderView: View {
-    var body: some View {
-        Text("Settings — coming soon")
-            .navigationTitle("Settings")
-    }
-}
 ```
+
+Compare this to a textbook router and you will notice several real-world additions:
+
+- **`showOnboarding`** — driven by `UserDefaults`, not hardcoded. When the user completes onboarding, one `Bool` flip hides it forever.
+- **`isLocked`** — supports biometric lock (Face ID / Touch ID). The `lock()` and `unlock()` methods wrap state changes in animations so the transition feels native.
+- **`Tab` enum** — uses `CaseIterable` so the custom tab bar can `ForEach` over all cases. Each tab knows its own `localizedName` and SF Symbol `icon`. No string mapping tables.
+- **`AnimationPresets`** — instead of raw `withAnimation(.spring(...))` calls scattered everywhere, we centralize animation curves in an `AnimationPresets` enum (built in the Design System lesson). Every transition in the app uses the same timing.
+- **`resetForNewUser()`** — wipes UserDefaults and resets all navigation state. Used in Settings when the user wants to start over. This is the kind of method you never think about until a real user asks "how do I reset the app?"
+
+Note that we do **not** use `@MainActor` annotation on the class itself. With `@Observable` in Swift 6, the compiler already enforces that property mutations happen on the main actor when the type is used in SwiftUI views. The `withAnimation` calls implicitly run on `@MainActor`. If you get concurrency warnings later, adding `@MainActor` is always safe — but start without it and let the compiler tell you if it is needed.
+
+Also note we use `@Environment(AppRouter.self)` (iOS 17+) instead of a custom `EnvironmentKey`. This is simpler — you inject with `.environment(appRouter)` and read with `@Environment(AppRouter.self) private var router`. No boilerplate `EnvironmentKey` struct needed.
 
 ### Key Design Decisions
 
 **Why `@Observable` instead of `ObservableObject`?** The `@Observable` macro (iOS 17+) gives you granular property tracking without `@Published` wrappers. SwiftUI only re-renders views that read specific properties that changed, rather than any view that observes the object. Less boilerplate, better performance.
 
-**Why `@MainActor` on the router?** The router drives UI state (`NavigationPath`). Under Swift 6 strict concurrency, any type that mutates UI state must be isolated to the main actor. Without this annotation, you get compiler errors the moment you bind it to a `NavigationStack`.
+**Why a `Tab` enum instead of a `Route` enum?** BetAway uses a `TabView` as its primary navigation. Each tab has its own `NavigationStack`. The `Tab` enum drives the tab bar, while `NavigationPath` handles drill-down within each tab. This is the standard pattern for any app with a tab bar — which is most production iOS apps.
 
-**Why `NavigationPath` instead of `[Route]`?** `NavigationPath` is Apple's type-erased container for heterogeneous navigation stacks. It integrates directly with `NavigationStack(path:)` and supports `Codable` state restoration. A plain array works for simple cases, but `NavigationPath` scales when you later have routes with associated values of different types.
+**Why `NavigationPath` alongside tabs?** `NavigationPath` handles pushing detail views within a tab (e.g., tapping a journal entry to see its detail). The tab bar handles top-level navigation. Separating these two concerns means switching tabs does not destroy the navigation state within each tab.
 
-**Why an `EnvironmentKey`?** Passing the router through `@Environment(\.router)` means any view in the hierarchy can navigate without prop drilling. This is the standard SwiftUI pattern for shared dependencies.
+**Why `UserDefaults` for onboarding state?** It is a single boolean. SwiftData would be overkill. `UserDefaults` persists across launches, is synchronous, and costs nothing. The key is defined in `AppConfig.StorageKeys` so you never have a string typo.
 
-**Why protocols in `Core/` and implementations in `Data/`?** This is dependency inversion. Your features depend on abstractions (protocols), not concrete types. In tests, you swap in mock implementations. In production, you use real ones. The separation happens at the folder level so it is impossible to accidentally import a concrete type where you meant to use a protocol.
+**Why `AnimationPresets` instead of inline animations?** Consistency. When every screen uses `AnimationPresets.smooth` or `AnimationPresets.bouncy`, the app feels cohesive. When each developer writes their own `withAnimation(.spring(response: 0.3, dampingFraction: 0.7))`, you get inconsistent timing across screens. Centralize your animation curves like you centralize your colors.
 
 ## Checkpoint
 
@@ -371,49 +420,72 @@ Before moving to Lesson 1.2, confirm every item:
 - [ ] Xcode project builds with zero errors and zero warnings
 - [ ] Swift Language Version is set to 6 in Build Settings
 - [ ] Strict Concurrency Checking is set to Complete
-- [ ] `BetAwayApp.swift` compiles with `ModelContainer` and router injection
-- [ ] `AppRouter.swift` compiles with `@MainActor`, `@Observable`, and `NavigationPath`
-- [ ] `@Environment(\.router)` resolves correctly in `HomeView`
-- [ ] App launches in the Simulator without crashing
-- [ ] No `print()` statements in the codebase — only `os.Logger`
-- [ ] No singletons (`static let shared`) anywhere
-- [ ] Folder structure matches: `App/`, `Core/`, `Features/`, `Data/`, `Tests/`
+- [ ] `BetAwayApp.swift` compiles with `ModelContainer`, router injection, and font registration
+- [ ] `AppRouter.swift` compiles with `@Observable`, `Tab` enum, and `NavigationPath`
+- [ ] `@Environment(AppRouter.self)` resolves correctly in views
+- [ ] App launches in the Simulator without crashing (dark mode, empty dashboard)
+- [ ] No `print()` statements in the codebase
+- [ ] `AppConfig` centralizes all constants (storage keys, icons, feature flags)
+- [ ] Folder structure matches: `App/`, `Core/`, `Models/`, `Navigation/`, `ViewModels/`, `Views/`
 
 ## Challenge
 
-**Add a third route with associated data.**
+**Build the `MainTabView` that consumes the `AppRouter`.**
 
-Extend `AppRouter.Route` with a new case:
+Using the `AppRouter` you just built, create a `MainTabView` that:
 
-```swift
-case checkInDetail(id: UUID)
-```
-
-Then:
-1. Update the `destination(for:)` method to return a placeholder view that displays the UUID
-2. Add a button in `HomeView` that navigates to `checkInDetail(id: UUID())` on tap
-3. Verify it compiles under strict concurrency with zero warnings
-4. Verify `pop()` and `popToRoot()` still work correctly
+1. Reads the router from the environment with `@Environment(AppRouter.self)`
+2. Creates a `TabView(selection:)` bound to `router.selectedTab`
+3. Wraps each tab's content in its own `NavigationStack`
+4. Hides the system tab bar (`.toolbar(.hidden, for: .tabBar)`) and adds a custom animated tab bar at the bottom
 
 <details>
 <summary>Hint</summary>
 
-`UUID` already conforms to `Hashable`, `Sendable`, and `Codable`, so adding it as an associated value requires zero extra conformances. The `Route` enum keeps its `Hashable` and `Sendable` conformance automatically because all associated values satisfy those protocols.
-
-Your placeholder view just needs to accept a `UUID` parameter:
+The key pattern is `@Bindable var router = router` inside the `body` to get a binding from `@Environment`:
 
 ```swift
-struct CheckInDetailPlaceholder: View {
-    let checkInID: UUID
+struct MainTabView: View {
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
-        Text("Check-In: \(checkInID.uuidString)")
-            .navigationTitle("Detail")
+        @Bindable var router = router
+
+        VStack(spacing: 0) {
+            TabView(selection: $router.selectedTab) {
+                NavigationStack(path: $router.navigationPath) {
+                    DashboardView()
+                }
+                .tag(AppRouter.Tab.dashboard)
+
+                NavigationStack {
+                    JournalView()
+                }
+                .tag(AppRouter.Tab.journal)
+
+                NavigationStack {
+                    ProgressAnalyticsView()
+                }
+                .tag(AppRouter.Tab.progress)
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tag(AppRouter.Tab.settings)
+            }
+            .toolbar(.hidden, for: .tabBar)
+
+            CustomTabBar(selectedTab: $router.selectedTab)
+        }
     }
 }
 ```
+
+The `@Bindable` pattern is required because `@Environment` gives you a read-only value. `@Bindable` creates a binding to the `@Observable` object's properties. This is the standard way to get two-way bindings from environment-injected observable objects in iOS 17+.
 </details>
+
+> **Pro tip:** Before starting any project, search the App Store for your app name. We originally built this project as "BetFree" — and only discovered the name was taken when we submitted to the App Store. We had to rename to "BetAway" at the last minute. Research your name early so you do not have to rename your Xcode project, bundle ID, and marketing materials after months of development.
 
 ---
 
-Next up: **Lesson 1.2 — Data Modeling with SwiftData**, where we define the `CheckIn` model, set up relationships, and build the service protocol that the entire app depends on.
+Next up: **Lesson 1.2 — Data Modeling with SwiftData**, where we define the `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` models, set up relationships with delete rules, and build the enum-based domain types that the entire app depends on.
