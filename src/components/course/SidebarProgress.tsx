@@ -30,35 +30,35 @@ export default function SidebarProgress({ totalLessons, currentModule, currentLe
     : 0;
 
   return (
-    <div className="mb-6 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+    <div className="mb-6 p-4 rounded-xl bg-surface border border-border">
       {loggedIn ? (
         <>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+            <span className="text-xs font-medium text-text-muted">
               {completedCount} of {totalLessons} completed
             </span>
-            <span className="text-xs font-semibold text-purple-600 dark:text-purple-400">
+            <span className="text-xs font-semibold text-accent">
               {progress}%
             </span>
           </div>
-          <div className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+          <div className="w-full h-2 bg-surface-2 rounded-full overflow-hidden">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-purple-500 to-blue-500 transition-all duration-500"
+              className="h-full rounded-full bg-gradient-to-r from-accent to-accent-yellow transition-all duration-500"
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-xs text-slate-500 dark:text-slate-500 mt-2">
+          <p className="text-xs text-text-muted mt-2">
             Module {currentModule} &middot; Lesson {currentLesson}
           </p>
         </>
       ) : (
         <>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+            <span className="text-xs font-medium text-text-muted">
               Module {currentModule} &middot; Lesson {currentLesson}
             </span>
           </div>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className="text-xs text-text-muted">
             Log in to track your progress
           </p>
         </>

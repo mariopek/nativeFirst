@@ -18,7 +18,7 @@ interface Props {
 }
 
 const AVATAR_COLORS = [
-  'from-purple-500 to-indigo-600',
+  'from-accent to-accent-yellow',
   'from-cyan-500 to-blue-600',
   'from-emerald-500 to-teal-600',
   'from-amber-500 to-orange-600',
@@ -186,14 +186,14 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
   }
 
   return (
-    <div className="border-t border-slate-200 dark:border-slate-800 pt-10 mt-10">
+    <div className="border-t border-border pt-10 mt-10">
       {/* Header */}
       <div className="flex items-center gap-3 mb-8">
-        <h2 className="font-display font-bold text-2xl text-slate-900 dark:text-white">
+        <h2 className="font-display font-bold text-2xl text-white">
           Comments
         </h2>
         {comments.length > 0 && (
-          <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+          <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-accent/10 text-accent">
             {comments.length}
           </span>
         )}
@@ -205,7 +205,7 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
           {comments.map((comment, i) => (
             <div
               key={`${comment.author}-${i}`}
-              className="flex gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800/50"
+              className="flex gap-4 p-4 rounded-xl bg-surface border border-border"
             >
               <div
                 className={`w-10 h-10 rounded-full bg-gradient-to-br ${getAvatarColor(comment.author)} flex items-center justify-center flex-shrink-0`}
@@ -216,14 +216,14 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1.5">
-                  <span className="font-medium text-sm text-slate-900 dark:text-white">
+                  <span className="font-medium text-sm text-white">
                     {comment.author}
                   </span>
-                  <span className="text-xs text-slate-400 dark:text-slate-500">
+                  <span className="text-xs text-text-muted">
                     {formatDate(comment.date)}
                   </span>
                 </div>
-                <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                <p className="text-sm text-text-muted leading-relaxed">
                   {comment.text}
                 </p>
               </div>
@@ -233,15 +233,15 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
       )}
 
       {/* Comment form */}
-      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-6">
-        <h3 className="font-display font-semibold text-lg text-slate-900 dark:text-white mb-4">
+      <div className="rounded-xl border border-border bg-surface p-6">
+        <h3 className="font-display font-semibold text-lg text-white mb-4">
           Leave a comment
         </h3>
 
         {status === 'success' ? (
-          <div className="flex items-center gap-3 p-4 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/50">
+          <div className="flex items-center gap-3 p-4 rounded-lg bg-accent-green/10 border border-accent-green/30">
             <svg
-              className="w-5 h-5 text-emerald-600 dark:text-emerald-400 flex-shrink-0"
+              className="w-5 h-5 text-accent-green flex-shrink-0"
               fill="none"
               stroke="currentColor"
               strokeWidth="2"
@@ -253,7 +253,7 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
                 d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
               />
             </svg>
-            <p className="text-sm text-emerald-700 dark:text-emerald-300">
+            <p className="text-sm text-accent-green">
               Thank you! Your comment has been submitted and will appear after
               review.
             </p>
@@ -277,7 +277,7 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
             <div>
               <label
                 htmlFor="comment-name"
-                className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5"
+                className="block text-sm font-medium text-text-muted mb-1.5"
               >
                 Name
               </label>
@@ -290,14 +290,14 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
                 placeholder="Your name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors"
+                className="w-full px-4 py-2.5 rounded-lg bg-surface border border-border text-white text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors"
               />
             </div>
 
             <div>
               <label
                 htmlFor="comment-text"
-                className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5"
+                className="block text-sm font-medium text-text-muted mb-1.5"
               >
                 Comment
               </label>
@@ -310,21 +310,21 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
                 placeholder="Share your thoughts..."
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors resize-none"
+                className="w-full px-4 py-2.5 rounded-lg bg-surface border border-border text-white text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors resize-none"
               />
-              <p className="text-xs text-slate-400 mt-1 text-right">
+              <p className="text-xs text-text-muted mt-1 text-right">
                 {text.length}/1000
               </p>
             </div>
 
             {status === 'error' && (
-              <p className="text-sm text-red-600 dark:text-red-400">
+              <p className="text-sm text-accent-pink">
                 Something went wrong. Please try again.
               </p>
             )}
 
             {status === 'rate-limited' && (
-              <p className="text-sm text-amber-600 dark:text-amber-400">
+              <p className="text-sm text-accent-yellow">
                 Please wait a moment before posting another comment.
               </p>
             )}
@@ -332,7 +332,7 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
             <button
               type="submit"
               disabled={status === 'submitting'}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-accent hover:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
             >
               {status === 'submitting' ? (
                 <>

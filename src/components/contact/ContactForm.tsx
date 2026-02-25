@@ -72,9 +72,9 @@ export default function ContactForm() {
   if (status === 'success') {
     return (
       <div className="text-center py-16">
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 dark:bg-green-900/30 mb-6">
+        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-accent-green/10 mb-6">
           <svg
-            className="w-8 h-8 text-green-600 dark:text-green-400"
+            className="w-8 h-8 text-accent-green"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -87,15 +87,15 @@ export default function ContactForm() {
             />
           </svg>
         </div>
-        <h3 className="font-display font-bold text-2xl text-slate-900 dark:text-white mb-2">
+        <h3 className="font-display font-bold text-2xl text-white mb-2">
           Thank you!
         </h3>
-        <p className="text-slate-600 dark:text-slate-400 mb-8">
+        <p className="text-text-muted mb-8">
           Your message has been sent. We'll get back to you as soon as possible.
         </p>
         <button
           onClick={() => setStatus('idle')}
-          className="inline-flex items-center gap-2 px-6 py-3 rounded-full border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+          className="inline-flex items-center gap-2 px-6 py-3 rounded-full border border-border text-text-muted font-medium hover:bg-surface transition-colors"
         >
           Send another message
         </button>
@@ -109,7 +109,7 @@ export default function ContactForm() {
       <div>
         <label
           htmlFor="name"
-          className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2"
+          className="block text-sm font-medium text-text-muted mb-2"
         >
           Name
         </label>
@@ -121,7 +121,7 @@ export default function ContactForm() {
           value={formData.name}
           onChange={handleChange}
           placeholder="Your name"
-          className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors"
+          className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-white placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors"
         />
       </div>
 
@@ -129,7 +129,7 @@ export default function ContactForm() {
       <div>
         <label
           htmlFor="email"
-          className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2"
+          className="block text-sm font-medium text-text-muted mb-2"
         >
           Email
         </label>
@@ -141,7 +141,7 @@ export default function ContactForm() {
           value={formData.email}
           onChange={handleChange}
           placeholder="you@example.com"
-          className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors"
+          className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-white placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors"
         />
       </div>
 
@@ -149,7 +149,7 @@ export default function ContactForm() {
       <div>
         <label
           htmlFor="subject"
-          className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2"
+          className="block text-sm font-medium text-text-muted mb-2"
         >
           Subject
         </label>
@@ -159,7 +159,7 @@ export default function ContactForm() {
           required
           value={formData.subject}
           onChange={handleChange}
-          className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors appearance-none"
+          className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-white focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors appearance-none"
         >
           {SUBJECT_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value} disabled={opt.value === ''}>
@@ -173,7 +173,7 @@ export default function ContactForm() {
       <div>
         <label
           htmlFor="message"
-          className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2"
+          className="block text-sm font-medium text-text-muted mb-2"
         >
           Message
         </label>
@@ -185,15 +185,15 @@ export default function ContactForm() {
           value={formData.message}
           onChange={handleChange}
           placeholder="How can we help?"
-          className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-colors resize-vertical"
+          className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-white placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition-colors resize-vertical"
         />
       </div>
 
       {/* Error message */}
       {status === 'error' && errorMessage && (
-        <div className="flex items-center gap-2 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+        <div className="flex items-center gap-2 p-4 rounded-xl bg-accent-pink/10 border border-accent-pink/30">
           <svg
-            className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0"
+            className="w-5 h-5 text-accent-pink flex-shrink-0"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -205,7 +205,7 @@ export default function ContactForm() {
               d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          <p className="text-sm text-red-700 dark:text-red-300">{errorMessage}</p>
+          <p className="text-sm text-accent-pink">{errorMessage}</p>
         </div>
       )}
 
@@ -213,7 +213,7 @@ export default function ContactForm() {
       <button
         type="submit"
         disabled={status === 'loading'}
-        className="w-full inline-flex items-center justify-center gap-2 px-8 py-4 rounded-full gradient-brand text-white font-semibold text-base hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-500/25 transition-all duration-300 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
+        className="w-full inline-flex items-center justify-center gap-2 px-8 py-4 rounded-full gradient-brand text-white font-semibold text-base hover:scale-[1.02] hover:shadow-lg hover:shadow-accent/25 transition-all duration-300 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
       >
         {status === 'loading' ? (
           <>

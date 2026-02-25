@@ -63,13 +63,13 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
 
       {/* Modal */}
       <div
-        className="relative w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 sm:p-8 shadow-2xl"
+        className="relative w-full max-w-md rounded-2xl border border-border bg-bg p-6 sm:p-8 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Close button */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+          className="absolute top-4 right-4 p-1 rounded-lg text-text-muted hover:text-white transition-colors"
           aria-label="Close"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -78,10 +78,10 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
         </button>
 
         {/* Header */}
-        <h2 className="font-bold text-xl text-slate-900 dark:text-white mb-1">
+        <h2 className="font-bold text-xl text-white mb-1">
           {mode === 'login' ? 'Welcome back' : 'Create account'}
         </h2>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
+        <p className="text-sm text-text-muted mb-6">
           {mode === 'login'
             ? 'Log in to access your courses and track progress.'
             : 'Sign up with the same email you used on Gumroad.'}
@@ -89,7 +89,7 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label htmlFor="auth-email" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+            <label htmlFor="auth-email" className="block text-sm font-medium text-text-muted mb-1">
               Email
             </label>
             <input
@@ -99,12 +99,12 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
               required
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all"
+              className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-white placeholder-text-muted focus:ring-2 focus:ring-accent focus:border-transparent outline-none transition-all"
             />
           </div>
 
           <div>
-            <label htmlFor="auth-password" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+            <label htmlFor="auth-password" className="block text-sm font-medium text-text-muted mb-1">
               Password
             </label>
             <input
@@ -115,18 +115,18 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
               placeholder={mode === 'signup' ? 'Min 6 characters' : '••••••••'}
               required
               minLength={6}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all"
+              className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-white placeholder-text-muted focus:ring-2 focus:ring-accent focus:border-transparent outline-none transition-all"
             />
           </div>
 
           {status === 'error' && (
-            <p className="text-sm text-red-600 dark:text-red-400">{errorMessage}</p>
+            <p className="text-sm text-accent-pink">{errorMessage}</p>
           )}
 
           <button
             type="submit"
             disabled={status === 'loading'}
-            className="w-full px-6 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 text-white font-semibold hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            className="w-full px-6 py-2.5 rounded-xl bg-gradient-to-r from-accent to-accent-yellow text-white font-semibold hover:from-accent/80 hover:to-accent-yellow/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
             {status === 'loading'
               ? 'Please wait...'
@@ -137,13 +137,13 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
         </form>
 
         {/* Toggle mode */}
-        <p className="mt-6 text-center text-sm text-slate-500 dark:text-slate-400">
+        <p className="mt-6 text-center text-sm text-text-muted">
           {mode === 'login' ? (
             <>
               Don't have an account?{' '}
               <button
                 onClick={() => { setMode('signup'); setStatus('idle'); setErrorMessage(''); }}
-                className="font-medium text-purple-600 dark:text-purple-400 hover:underline"
+                className="font-medium text-accent hover:underline"
               >
                 Sign Up
               </button>
@@ -153,7 +153,7 @@ export default function AuthModal({ initialMode = 'login', onClose, onSuccess }:
               Already have an account?{' '}
               <button
                 onClick={() => { setMode('login'); setStatus('idle'); setErrorMessage(''); }}
-                className="font-medium text-purple-600 dark:text-purple-400 hover:underline"
+                className="font-medium text-accent hover:underline"
               >
                 Log In
               </button>

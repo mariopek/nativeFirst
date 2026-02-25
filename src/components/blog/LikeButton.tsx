@@ -83,8 +83,8 @@ export default function LikeButton({ slug, seedLikes = 0 }: Props) {
       disabled={hasLiked}
       className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all duration-200 ${
         hasLiked
-          ? 'bg-pink-100 text-pink-600 dark:bg-pink-900/30 dark:text-pink-400 cursor-default'
-          : 'bg-slate-100 text-slate-600 hover:bg-pink-50 hover:text-pink-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-pink-900/20 dark:hover:text-pink-400 cursor-pointer'
+          ? 'bg-accent-pink/10 text-accent-pink cursor-default'
+          : 'bg-surface-2 text-text-muted hover:bg-pink-50 hover:text-pink-600 hover:bg-accent-pink/10 hover:text-accent-pink cursor-pointer'
       }`}
       aria-label={hasLiked ? 'Already liked' : 'Like this post'}
     >

@@ -44,13 +44,13 @@ export default function MarkComplete({ lessonSlug, courseSlug, nextLessonHref }:
   };
 
   return (
-    <div className="mt-10 pt-8 border-t border-slate-200 dark:border-slate-800">
-      <div className="flex items-center justify-between gap-4 p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
+    <div className="mt-10 pt-8 border-t border-border">
+      <div className="flex items-center justify-between gap-4 p-5 rounded-2xl bg-surface border border-border">
         <div>
-          <p className="font-semibold text-slate-900 dark:text-white text-sm">
+          <p className="font-semibold text-white text-sm">
             {completed ? 'Lesson completed!' : 'Finished this lesson?'}
           </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+          <p className="text-xs text-text-muted mt-0.5">
             {completed ? 'Great job! Keep going.' : 'Mark it complete to track your progress.'}
           </p>
         </div>
@@ -60,8 +60,8 @@ export default function MarkComplete({ lessonSlug, courseSlug, nextLessonHref }:
             disabled={loading}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 ${
               completed
-                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50'
-                : 'bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-700 hover:to-blue-700'
+                ? 'bg-accent-green/10 text-accent-green hover:bg-accent-green/20'
+                : 'bg-gradient-to-r from-accent to-accent-yellow text-white hover:from-accent/80 hover:to-accent-yellow/80'
             }`}
           >
             {completed ? (
@@ -78,7 +78,7 @@ export default function MarkComplete({ lessonSlug, courseSlug, nextLessonHref }:
           {completed && nextLessonHref && (
             <a
               href={nextLessonHref}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-700 hover:to-blue-700 transition-all"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-accent to-accent-yellow text-white hover:from-accent/80 hover:to-accent-yellow/80 transition-all"
             >
               Next Lesson
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
