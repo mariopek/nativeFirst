@@ -1,0 +1,305 @@
+---
+export const prerender = true;
+
+import BaseLayout from '../../../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+import { formatDate } from '../../../lib/utils';
+import { BLOG_TAGS, SITE, BLOG_ENGAGEMENT } from '../../../lib/constants';
+import readingTime from 'reading-time';
+
+const allPosts = await getCollection('blog', ({ data }) => !data.draft);
+const posts = allPosts.sort(
+  (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf()
+);
+---
+
+<BaseLayout title={`Blog — ${SITE.name} (Fireship Style)`}>
+  <style>
+    :root {
+      --fs-bg: #0a0a0a;
+      --fs-surface: #111111;
+      --fs-surface-2: #1a1a1a;
+      --fs-border: #222222;
+      --fs-text: #e0e0e0;
+      --fs-text-muted: #888888;
+      --fs-neon-orange: #ff6e00;
+      --fs-neon-yellow: #ffd600;
+      --fs-neon-green: #00e676;
+      --fs-neon-blue: #00b0ff;
+      --fs-neon-pink: #ff4081;
+    }
+
+    .fs-body {
+      background: var(--fs-bg) !important;
+      color: var(--fs-text);
+    }
+
+    .fs-card {
+      background: var(--fs-surface);
+      border: 1px solid var(--fs-border);
+      border-radius: 12px;
+      transition: all 0.2s ease;
+    }
+
+    .fs-card:hover {
+      border-color: var(--fs-neon-orange);
+      box-shadow: 0 0 30px rgba(255, 110, 0, 0.1);
+      transform: translateY(-2px);
+    }
+
+    .fs-badge {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .fs-gradient-text {
+      background: linear-gradient(135deg, var(--fs-neon-orange), var(--fs-neon-yellow));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .fs-tag {
+      background: var(--fs-surface-2);
+      color: var(--fs-neon-orange);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .fs-tag-filter {
+      font-size: 13px;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--fs-border);
+      background: transparent;
+      color: #888;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .fs-tag-filter:hover {
+      border-color: var(--fs-neon-orange);
+      color: var(--fs-neon-orange);
+    }
+
+    .fs-tag-filter.active {
+      background: var(--fs-neon-orange);
+      border-color: var(--fs-neon-orange);
+      color: #000;
+    }
+
+    .fs-grid-bg {
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+    }
+
+    .fs-hero-bg {
+      background:
+        radial-gradient(ellipse 60% 40% at 50% 0%, rgba(255, 64, 129, 0.12), transparent),
+        var(--fs-bg);
+    }
+
+    .fs-section-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--fs-border), transparent);
+    }
+
+    .fs-post-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+      border-bottom: 1px solid var(--fs-border);
+      padding: 20px 0;
+      transition: all 0.15s ease;
+    }
+
+    .fs-post-row:hover {
+      background: var(--fs-surface);
+      padding-left: 16px;
+      padding-right: 16px;
+      margin-left: -16px;
+      margin-right: -16px;
+      border-radius: 8px;
+    }
+
+    @media (min-width: 768px) {
+      .fs-post-row {
+        grid-template-columns: 140px 1fr auto;
+        align-items: center;
+        gap: 24px;
+      }
+    }
+  </style>
+
+  <div class="fs-body min-h-screen">
+    <!-- Nav -->
+    <nav class="fixed top-0 left-0 right-0 z-50 border-b border-[#222]" style="background: rgba(10,10,10,0.85); backdrop-filter: blur(12px);">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between h-14">
+        <a href="/experiment/fireship/" class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: var(--fs-neon-orange);">
+            <span class="text-black font-black text-sm">N</span>
+          </div>
+          <span class="font-bold text-white text-base">nativefirst</span>
+        </a>
+        <div class="hidden md:flex items-center gap-6">
+          <a href="/experiment/fireship/" class="text-sm text-[#888] hover:text-white transition-colors">home</a>
+          <a href="#" class="text-sm text-[#888] hover:text-white transition-colors">apps</a>
+          <a href="/experiment/fireship/blog" class="text-sm text-white font-semibold transition-colors">blog</a>
+          <a href="/learn" class="text-sm text-[#888] hover:text-white transition-colors">learn</a>
+        </div>
+        <a href="/" class="text-xs text-[#555] hover:text-[#888] transition-colors">back to main</a>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="fs-hero-bg pt-14">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 py-16 sm:py-20">
+        <div class="flex items-center gap-3 mb-2">
+          <span class="text-[#ff4081] font-mono text-sm font-bold">//</span>
+          <span class="text-[#888] font-mono text-sm">blog</span>
+        </div>
+        <h1 class="text-4xl sm:text-5xl md:text-6xl font-black text-white tracking-tight mb-4">
+          <span class="fs-gradient-text">Dispatches</span> from<br/>the code editor
+        </h1>
+        <p class="text-lg text-[#888] max-w-xl">
+          Deep dives on Swift, SwiftUI, AI-powered development, and building native apps that don't suck.
+        </p>
+      </div>
+    </section>
+
+    <div class="fs-section-divider"></div>
+
+    <!-- Tag Filters -->
+    <section class="sticky top-14 z-30 border-b border-[#222]" style="background: rgba(10,10,10,0.9); backdrop-filter: blur(12px);">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6">
+        <div class="flex items-center gap-2 py-3 overflow-x-auto" style="scrollbar-width: none; -ms-overflow-style: none;">
+          {BLOG_TAGS.map((tag, i) => (
+            <a
+              href={tag === 'All' ? '/experiment/fireship/blog' : `/blog/tag/${tag.toLowerCase().replace(/\s+/g, '-')}`}
+              class:list={['fs-tag-filter', i === 0 && 'active']}
+            >
+              {tag}
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- Posts - Card Grid View -->
+    <section class="py-12 sm:py-16" style="background: var(--fs-bg);">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6">
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {posts.map((post) => {
+            const rt = readingTime(post.body || '');
+            const engagement = BLOG_ENGAGEMENT[post.id] || { likes: 0, comments: [] };
+            return (
+              <a href={`/blog/${post.id}`} class="fs-card overflow-hidden group block">
+                <!-- Cover -->
+                <div class="aspect-video bg-[#1a1a1a] relative overflow-hidden">
+                  {post.data.coverImage ? (
+                    <img
+                      src={post.data.coverImage}
+                      alt={post.data.coverImageAlt || post.data.title}
+                      class="w-full h-full object-cover opacity-75 group-hover:opacity-100 group-hover:scale-105 transition-all duration-300"
+                    />
+                  ) : (
+                    <div class="absolute inset-0 flex items-center justify-center fs-grid-bg">
+                      <span class="text-3xl font-black text-[#222]">{'{...}'}</span>
+                    </div>
+                  )}
+                  {/* Reading time badge */}
+                  <div class="absolute top-3 right-3">
+                    <span class="fs-badge text-[#ccc] bg-black/70 backdrop-blur-sm">{rt.text}</span>
+                  </div>
+                </div>
+
+                <!-- Content -->
+                <div class="p-5">
+                  <div class="flex items-center gap-2 mb-3">
+                    {post.data.tags.slice(0, 2).map((tag) => (
+                      <span class="fs-tag">{tag}</span>
+                    ))}
+                  </div>
+
+                  <h2 class="font-bold text-white text-base mb-2 group-hover:text-[#ff6e00] transition-colors line-clamp-2">
+                    {post.data.title}
+                  </h2>
+
+                  <p class="text-sm text-[#666] line-clamp-2 mb-4">
+                    {post.data.description}
+                  </p>
+
+                  <!-- Meta row -->
+                  <div class="flex items-center justify-between text-xs">
+                    <div class="flex items-center gap-2">
+                      <div class="w-5 h-5 rounded-full flex items-center justify-center" style="background: var(--fs-neon-orange);">
+                        <span class="text-black text-[8px] font-black">{post.data.author.charAt(0)}</span>
+                      </div>
+                      <span class="text-[#888] font-medium">{post.data.author}</span>
+                    </div>
+                    <time class="text-[#555] font-mono">
+                      {new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: '2-digit' }).format(post.data.pubDate)}
+                    </time>
+                  </div>
+
+                  {/* Engagement */}
+                  {(engagement.likes > 0 || engagement.comments.length > 0) && (
+                    <div class="flex items-center gap-3 mt-3 pt-3 border-t border-[#222] text-xs text-[#555]">
+                      {engagement.likes > 0 && (
+                        <span class="flex items-center gap-1">
+                          <svg class="w-3.5 h-3.5 text-[#ff4081]" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
+                          </svg>
+                          {engagement.likes}
+                        </span>
+                      )}
+                      {engagement.comments.length > 0 && (
+                        <span class="flex items-center gap-1">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                          </svg>
+                          {engagement.comments.length}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="border-t border-[#222] py-8" style="background: var(--fs-bg);">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6">
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div class="flex items-center gap-2">
+            <div class="w-6 h-6 rounded flex items-center justify-center" style="background: var(--fs-neon-orange);">
+              <span class="text-black font-black text-xs">N</span>
+            </div>
+            <span class="text-sm text-[#888]">&copy; {new Date().getFullYear()} NativeFirst</span>
+          </div>
+          <div class="flex items-center gap-6">
+            <a href="/experiment/fireship/" class="text-xs text-[#666] hover:text-white transition-colors">home</a>
+            <a href="/experiment/fireship/blog" class="text-xs text-[#666] hover:text-white transition-colors">blog</a>
+            <a href="/privacy" class="text-xs text-[#666] hover:text-white transition-colors">privacy</a>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+</BaseLayout>
