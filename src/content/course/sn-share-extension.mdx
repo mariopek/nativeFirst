@@ -1,6 +1,6 @@
 ---
 title: "Share Extension & Beyond"
-description: "Build a Share Extension for quick check-in logging from any app, use App Groups to bridge data between the extension and BetAway, and map out your next steps as an AI-augmented iOS developer."
+description: "Build a Share Extension that lets users log a DailyCheckin from any app's share sheet, bridge data to BetAway via the existing App Groups and SharedDataManager pattern, and map out your next steps as an AI-augmented iOS developer."
 courseSlug: "ship-native"
 module: 9
 moduleTitle: "Bonus: Advanced Topics"
@@ -15,49 +15,58 @@ pubDate: 2026-02-22
 
 You are reading an article about burnout and you think "that is exactly how I feel today." You want to log that moment — the thought, the check-in, the context — but switching apps, waiting for BetAway to load, and navigating to the entry screen takes long enough that the impulse fades. The moment is lost.
 
-A Share Extension solves this. The user taps the share button in any app — Safari, Notes, Messages — selects BetAway, and logs a check-in right there in the share sheet. No app switch, no loading time, no lost context. This is the final lesson. We will build the Share Extension, wire it to the same SwiftData store as the main app through App Groups, and then step back to talk about where you go from here.
+A Share Extension solves this. The user taps the share button in any app — Safari, Notes, Messages — selects BetAway, and logs a check-in right there in the share sheet. No app switch, no loading time, no lost context. This is the final lesson. We will build the Share Extension, wire it to the same data store as the main app through App Groups, and then step back to talk about where you go from here.
+
+BetAway does not ship a Share Extension in its MVP. This lesson walks through building one using BetAway's existing architecture — the same `SharedDataManager` and App Group (`group.com.pekmario.betfreeapp`) that already powers the widget, and the real SwiftData models (`UserProfile`, `DailyCheckin`, `MoodRating`, `CheckinType`) from the production codebase.
 
 ## What You'll Learn
 
 - How to create a Share Extension target that presents a quick check-in logging interface inside the system share sheet
-- How to use App Groups and a shared `ModelContainer` so the extension writes to the same SwiftData database as the main app
-- How to validate and extract shared content (text, URLs) from the extension context and attach it to a check-in
+- How to use the existing App Group (`group.com.pekmario.betfreeapp`) and extend `SharedDataManager` so the extension writes to the same data store the main app and widget already share
+- How to validate and extract shared content (text, URLs) from the extension context and attach it to a `DailyCheckin`
 - Where to take BetAway next — Watch complications, TestFlight beta programs, marketing, and building your first user base
 
 ## Why This Matters
 
-Extensions are how your app escapes its own sandbox. A Share Extension puts BetAway inside every app on the device — Safari, Twitter, Messages, Mail. Users who can log a check-in without context-switching log more consistently. More consistent data means better AI insights, which means more value, which means higher retention. It is a virtuous loop, and it starts with a share button.
+Extensions are how your app escapes its own sandbox. A Share Extension puts BetAway inside every app on the device — Safari, Twitter, Messages, Mail. Users who can log a check-in without context-switching log more consistently. More consistent data means better insights on the Progress screen, which means more value, which means higher retention. It is a virtuous loop, and it starts with a share button.
 
-But extensions are also where most developers hit the "it compiles but nothing happens" wall. Extensions run in a separate process with their own sandbox. If you do not set up App Groups correctly, the extension writes to its own private database and the main app never sees the data. This is the exact same problem we solved with WidgetKit in Module 5, and the solution is the same: a shared container.
+But extensions are also where most developers hit the "it compiles but nothing happens" wall. Extensions run in a separate process with their own sandbox. If you do not set up App Groups correctly, the extension writes to its own private database and the main app never sees the data. This is the exact same problem we solved with WidgetKit in Module 5, and the solution is the same: a shared container via the `group.com.pekmario.betfreeapp` App Group.
 
 ## Plan Phase: Designing the Share Extension
 
 Start in plan mode. Extensions have a surprising number of moving parts:
 
 ```
-I want to add a Share Extension to BetAway so users can log a check-in
-from any app's share sheet.
+I want to add a Share Extension to BetAway so users can log a
+check-in from any app's share sheet.
 
 Current setup:
-- SwiftData with CheckIn model (id, recoveryStatus, note, date, lastModified,
-  aiInsight)
-- App Groups already configured (group.com.nativefirst.betaway.shared) from the
-  WidgetKit lesson
-- SharedModelContainer.swift creates a container using the App Group
-  URL
-- CloudKit sync enabled (from Bonus Lesson 9.1)
+- SwiftData with these models:
+  - UserProfile (@Relationship checkins, urgeLogs, journalEntries)
+  - DailyCheckin (checkinTypeRaw, mood, gamblingFree, pledgeReason,
+    notes, triggersRaw, riskLevelRaw)
+  - UrgeLog (intensity, triggerRaw, copingStrategyRaw, didResist)
+  - JournalEntry (title, content, mood, promptUsed)
+- Enums: MoodRating (1-5 with emoji/label), CheckinType
+  (morningPledge, eveningCheckin)
+- App Groups already configured (group.com.pekmario.betfreeapp)
+  from the WidgetKit lesson
+- SharedDataManager uses UserDefaults(suiteName:) for widget data
+- Widget refresh via WidgetCenter.shared.reloadAllTimelines()
 - Swift 6 strict concurrency, iOS 17+
 
 Plan the Share Extension:
-1. What kind of extension point do I use? (Share Extension vs. Action
-   Extension — and why?)
-2. What does the extension's UI look like? Can I use SwiftUI or am I
-   stuck with UIKit?
+1. What kind of extension point do I use? (Share Extension vs.
+   Action Extension — and why?)
+2. What does the extension's UI look like? Can I use SwiftUI or
+   am I stuck with UIKit?
 3. How does the extension receive shared content (text, URLs)?
-4. How do I write the check-in to the shared SwiftData store?
+4. How do I write the DailyCheckin to the shared data store?
+   Should I use SwiftData directly or extend SharedDataManager?
 5. What are the memory and time limits for Share Extensions?
-6. What entitlements and capabilities does the extension target need?
-7. How do I tell the main app that new data was added?
+6. What entitlements and capabilities does the extension target
+   need?
+7. How do I tell the main app and widget that new data was added?
 8. What happens if the user cancels the share sheet?
 
 Do not generate code yet. Plan first.
@@ -67,14 +76,15 @@ Do not generate code yet. Plan first.
 
 Review the plan for these critical items:
 
-- ✅ **Extension type** — Share Extension (not Action Extension). Share Extensions appear in the system share sheet and are designed for sending content to your app. Action Extensions transform content in place. We want to receive content and create a check-in, so Share Extension is correct.
-- ✅ **UI approach** — on iOS 17+, you can use a SwiftUI view hosted inside a `UIViewController` subclass. The extension's principal class must still inherit from `UIViewController` (typically `SLComposeServiceViewController` or a custom `UIViewController`), but you can embed SwiftUI via `UIHostingController`. If the plan says "SwiftUI only, no UIKit needed" — that is wrong. The extension entry point requires UIKit.
-- ✅ **Content extraction** — the extension receives content through `NSExtensionContext.inputItems`, which contains `NSItemProvider` objects. The plan should describe extracting text (`UTType.plainText`) and URLs (`UTType.url`) from these providers.
-- ✅ **App Groups** — the extension target must have the same App Group identifier (`group.com.nativefirst.betaway.shared`) as the main app. The `SharedModelContainer` file must have target membership in both the main app and the extension.
-- ⚠️ **Resource limits** — Share Extensions have approximately 120MB of memory and a few seconds to complete their work. If the plan does not mention these constraints, flag it. Long-running operations (like calling the OpenAI API for insights) must not happen in the extension.
-- ⚠️ **Notifying the main app** — after the extension saves a check-in, it should call `WidgetCenter.shared.reloadAllTimelines()` to update widgets. There is no direct way to "poke" the main app, but SwiftData will pick up the new entry the next time the main app's `ModelContext` is accessed.
-- ❌ If the plan suggests using `UserDefaults(suiteName:)` to pass recovery check-ins — reject. We have a shared SwiftData container. UserDefaults is for small preferences, not structured data.
-- ❌ If the plan says the extension can use `@main` App struct — reject. Extensions use a `UIViewController` entry point defined in `Info.plist`, not a SwiftUI `App` lifecycle.
+- **Extension type** — Share Extension (not Action Extension). Share Extensions appear in the system share sheet and are designed for sending content to your app. Action Extensions transform content in place. We want to receive content and create a check-in, so Share Extension is correct.
+- **UI approach** — on iOS 17+, you can use a SwiftUI view hosted inside a `UIViewController` subclass. The extension's principal class must still inherit from `UIViewController` (typically `SLComposeServiceViewController` or a custom `UIViewController`), but you can embed SwiftUI via `UIHostingController`. If the plan says "SwiftUI only, no UIKit needed" — that is wrong. The extension entry point requires UIKit.
+- **Content extraction** — the extension receives content through `NSExtensionContext.inputItems`, which contains `NSItemProvider` objects. The plan should describe extracting text (`UTType.plainText`) and URLs (`UTType.url`) from these providers.
+- **Data storage strategy** — two viable approaches: (1) extend `SharedDataManager` to write a new `DailyCheckin` directly via SwiftData using the App Group's shared container URL, or (2) write to `UserDefaults` and let the main app pick it up. Option 1 is better because `DailyCheckin` is a complex model with relationships, and serializing it through `UserDefaults` is fragile.
+- **App Groups** — the extension target must have the same App Group identifier (`group.com.pekmario.betfreeapp`) as the main app. The `SharedDataManager` file and model files must have target membership in both the main app and the extension.
+- **Resource limits** — Share Extensions have approximately 120MB of memory and a few seconds to complete their work. If the plan does not mention these constraints, flag it. Long-running operations (like network requests) must not happen in the extension.
+- **Notifying the main app and widget** — after the extension saves a check-in, it should call `WidgetCenter.shared.reloadAllTimelines()` to update widgets. There is no direct way to "poke" the main app, but SwiftData will pick up the new entry the next time the main app's `ModelContext` is accessed.
+- If the plan suggests using `UserDefaults(suiteName:)` to pass full `DailyCheckin` data — push back. `UserDefaults` is appropriate for the scalar widget values (streak count, savings, flags) but not for structured model data with relationships. Use a shared SwiftData container for the extension.
+- If the plan says the extension can use `@main` App struct — reject. Extensions use a `UIViewController` entry point defined in `Info.plist`, not a SwiftUI `App` lifecycle.
 
 ### Anti-Pattern: Extensions That Do Not Share Data
 
@@ -98,23 +108,26 @@ BetAway. Include:
 2. Product name: BetAwayShare
 3. Language: Swift, no storyboard (we will use SwiftUI)
 4. What files Xcode generates and which ones to keep
-5. Enabling the App Group (group.com.nativefirst.betaway.shared) on the new target
-6. Adding CheckIn.swift and SharedModelContainer.swift to the
-   extension target's membership
-7. Configuring Info.plist: activation rules that accept text and URLs
-8. Matching iCloud/CloudKit entitlements between both targets
+5. Enabling the App Group (group.com.pekmario.betfreeapp) on
+   the new target
+6. Adding DailyCheckin.swift, UserProfile.swift, Enums.swift,
+   and SharedDataManager.swift to the extension target's
+   membership
+7. Configuring Info.plist: activation rules that accept text
+   and URLs
+8. Signing the extension with the same team as the main app
 
 Be specific about each step. I want to follow along without guessing.
 ```
 
 ### Code Review
 
-- ✅ Extension target created with correct bundle identifier (e.g., `com.yourname.betaway.share`)
-- ✅ App Groups entitlement added to the extension target with `group.com.nativefirst.betaway.shared`
-- ✅ `CheckIn.swift` and `SharedModelContainer.swift` have target membership in both the main app and the extension
-- ✅ `NSExtensionActivationRule` configured to accept text and URLs with specific type rules
-- ⚠️ If Info.plist still uses `TRUEPREDICATE` for the activation rule — this works for development but Apple will reject it during App Review. Replace it with specific type identifiers before submitting
-- ❌ If the extension has its own `@Model` class separate from the main app's `CheckIn` — reject. Both targets must share the exact same model file. Two separate model definitions means two separate database schemas
+- Extension target created with correct bundle identifier (e.g., `com.pekmario.betfreeapp.share`)
+- App Groups entitlement added to the extension target with `group.com.pekmario.betfreeapp`
+- `DailyCheckin.swift`, `UserProfile.swift`, `Enums.swift`, and `SharedDataManager.swift` have target membership in both the main app and the extension
+- `NSExtensionActivationRule` configured to accept text and URLs with specific type rules
+- If Info.plist still uses `TRUEPREDICATE` for the activation rule — this works for development but Apple will reject it during App Review. Replace it with specific type identifiers before submitting
+- If the extension has its own `@Model` class separate from the main app's models — reject. Both targets must share the exact same model files. Two separate model definitions means two separate database schemas
 
 ### Step 2: Share View Controller and Check-In Logging UI
 
@@ -126,42 +139,47 @@ Files needed:
    Subclass UIViewController (not SLComposeServiceViewController).
    Host a SwiftUI view using UIHostingController.
    Extract shared text and URL from NSExtensionContext.
-   Delegate saving to SharedDataManager.
+   Delegate saving to an extended SharedDataManager.
 
-2. ShareCheckInView.swift — the SwiftUI view shown in the share sheet.
-   UI: a compact vertical layout with:
-   - A row of 5 status buttons (emoji: awful through great)
+2. ShareCheckInView.swift — the SwiftUI view shown in the share
+   sheet. UI: a compact vertical layout with:
+   - A row of 5 mood buttons using MoodRating.allCases
+     (showing each rating's emoji and label)
    - A TextField pre-filled with shared text (if any)
    - A "Save" button and a "Cancel" button
-   - A subtle display of the shared URL domain if one was provided
+   - A subtle display of the shared URL domain if one was
+     provided
 
-3. SharedDataManager.swift — a helper that creates a CheckIn in
-   the shared container and saves it. Return a Result type so callers
-   can handle failure gracefully. Separate from the view for
-   testability.
+3. Extend SharedDataManager with a saveCheckin() method that:
+   - Creates a ModelContainer using the App Group container URL
+   - Creates a new DailyCheckin with checkinType = .eveningCheckin
+   - Sets the mood from the user's selection (MoodRating)
+   - Sets the notes from the text field
+   - Saves to the shared SwiftData store
+   - Calls WidgetCenter.shared.reloadAllTimelines()
+   - Returns a Result type so callers can handle failure
 
 Requirements:
-- Use the shared App Group container (group.com.nativefirst.betaway.shared)
-- Call WidgetCenter.shared.reloadAllTimelines() after saving
+- Use the shared App Group container (group.com.pekmario.betfreeapp)
 - Call extensionContext.completeRequest after save or cancel
 - Handle the case where no text or URL is shared (the user just
   wants to log a check-in from any app)
 - Swift 6 strict concurrency, @MainActor where needed
-- Keep the extension lightweight — no AI calls, no network requests
+- Keep the extension lightweight — no network requests
 ```
 
 ### Code Review
 
-- ✅ `ShareViewController` inherits from `UIViewController`, not `SLComposeServiceViewController`
-- ✅ SwiftUI view hosted via `UIHostingController` added as a child view controller
-- ✅ `NSItemProvider.loadItem` used with `UTType.plainText` and `UTType.url`
-- ✅ `SharedDataManager` creates the `ModelContainer` from the shared App Group URL
-- ✅ `SharedDataManager.saveCheckIn` returns a `Result<Void, Error>` for graceful failure handling
-- ✅ `extensionContext?.completeRequest(returningItems: nil)` called on both save and cancel
-- ✅ `WidgetCenter.shared.reloadAllTimelines()` called after saving
-- ⚠️ If the view does not call `completeRequest` on cancel — the share sheet will hang. The user will have to force-quit the host app. Always complete the request on every exit path
-- ❌ If the extension makes a network request to the OpenAI API — reject. Extensions have strict time limits. Defer AI analysis to the next time the main app opens
-- ❌ If `SharedDataManager` creates a `ModelContainer` without the App Group URL — data will not be visible in the main app
+- `ShareViewController` inherits from `UIViewController`, not `SLComposeServiceViewController`
+- SwiftUI view hosted via `UIHostingController` added as a child view controller
+- `NSItemProvider.loadItem` used with `UTType.plainText` and `UTType.url`
+- `SharedDataManager` creates the `ModelContainer` from the shared App Group URL
+- `SharedDataManager.saveCheckin` returns a `Result<Void, Error>` for graceful failure handling
+- `extensionContext?.completeRequest(returningItems: nil)` called on both save and cancel
+- `WidgetCenter.shared.reloadAllTimelines()` called after saving
+- If the view does not call `completeRequest` on cancel — the share sheet will hang. The user will have to force-quit the host app. Always complete the request on every exit path
+- If the extension makes a network request — reject. Extensions have strict time limits. Defer any analysis to the next time the main app opens
+- If `SharedDataManager` creates a `ModelContainer` without the App Group URL — data will not be visible in the main app
 
 ## Iteration: Polish and Edge Cases
 
@@ -171,17 +189,20 @@ After reviewing the generated code, tighten the implementation:
 Good foundation. Now improve these areas:
 
 1. Add haptic feedback (UIImpactFeedbackGenerator) when the user
-   taps a status button
-2. Handle the edge case where SharedModelContainer.create() throws —
-   show an error alert in the share sheet instead of crashing
+   taps a mood button
+2. Handle the edge case where the shared ModelContainer cannot be
+   created — show an error alert in the share sheet instead of
+   crashing
 3. Add a character counter on the note field (max 500 characters)
    that matches the main app's limit
 4. If the shared content is a URL, format it nicely: show the
    domain name as a chip/tag below the note field
-5. Animate the status button selection with a scale effect
+5. Animate the mood button selection with a scale effect
 6. After saving, show a brief checkmark confirmation before
    dismissing (use a 0.6 second delay)
 7. Set the preferred content size of the share sheet to be compact
+8. Use BetAway's real MoodRating enum for the mood selector
+   (MoodRating.allCases provides emoji and label for each rating)
 
 Keep Swift 6 strict concurrency compliance.
 ```
@@ -212,10 +233,10 @@ Share Extension testing requires specific steps because you cannot just "Run" th
 **Data flow verification:**
 1. Share a webpage URL from Safari — does the URL domain appear in the share sheet?
 2. Select text in Notes and share it — does the text pre-fill the note field?
-3. Select a check-in, optionally edit the note, tap Save
-4. Open the main BetAway app — does the new entry appear in the timeline?
-5. Verify the check-in value, note text, and date are all correct
-6. If the entry does not appear: check that both targets use the same App Group identifier and that `SharedModelContainer.swift` is in both target memberships
+3. Select a mood rating, optionally edit the note, tap Save
+4. Open the main BetAway app — does the new `DailyCheckin` appear on the dashboard?
+5. Verify the mood value, note text, and date are all correct
+6. If the entry does not appear: check that both targets use the same App Group identifier and that model files are in both target memberships
 
 **Edge cases:**
 1. Share with no text selected (just a URL) — does the extension handle it gracefully?
@@ -224,10 +245,10 @@ Share Extension testing requires specific steps because you cannot just "Run" th
 4. Share very long text (1000+ characters) — is it truncated to the note limit?
 5. Rapid double-tap the Save button — does it create only one entry?
 6. Kill the main app, log a check-in via the extension, then open the main app — is the entry present?
-7. Log via extension while offline — does the entry save locally and sync when online?
+7. Log via extension while offline — does the entry save locally and sync when online (if CloudKit is enabled)?
 
 **Widget update:**
-1. After saving from the share sheet, check the home screen widget — does it update to reflect the new check-in?
+1. After saving from the share sheet, check the home screen widget — does it update to reflect the new check-in status?
 
 **Memory and performance:**
 1. Open Instruments and profile the extension. Memory should stay under 50MB
@@ -251,7 +272,7 @@ import os
 /// the result to the shared SwiftData container via SharedDataManager.
 final class ShareViewController: UIViewController {
     private let logger = Logger(
-        subsystem: "com.nativefirst.betaway.share",
+        subsystem: "com.pekmario.betfreeapp.share",
         category: "ShareExtension"
     )
 
@@ -343,8 +364,8 @@ final class ShareViewController: UIViewController {
         let shareCheckInView = ShareCheckInView(
             sharedText: text,
             sharedURL: url,
-            onSave: { [weak self] recoveryStatus, note in
-                self?.saveCheckIn(recoveryStatus: recoveryStatus, note: note)
+            onSave: { [weak self] mood, note in
+                self?.saveCheckIn(mood: mood, note: note)
             },
             onCancel: { [weak self] in
                 self?.cancelExtension()
@@ -377,10 +398,10 @@ final class ShareViewController: UIViewController {
     // MARK: - Actions
 
     /// Saves the check-in via SharedDataManager and dismisses.
-    private func saveCheckIn(recoveryStatus: Int, note: String) {
-        let result = SharedDataManager.saveCheckIn(
-            recoveryStatus: recoveryStatus,
-            note: note
+    private func saveCheckIn(mood: MoodRating, note: String) {
+        let result = SharedDataManager.saveCheckin(
+            mood: mood,
+            notes: note
         )
 
         switch result {
@@ -407,33 +428,28 @@ final class ShareViewController: UIViewController {
 
 ### ShareCheckInView.swift
 
+This view uses BetAway's real `MoodRating` enum to display the mood selector. The `MoodRating` cases (`veryBad`, `bad`, `neutral`, `good`, `veryGood`) each have an `emoji` and `label` property, so the UI stays consistent with the main app's `EveningCheckinView`.
+
 ```swift
 import SwiftUI
 
 /// The SwiftUI interface shown inside the share sheet.
 ///
-/// Displays a compact status selector and note field. The user picks
-/// a check-in, optionally edits the note, and taps Save. The entire
+/// Displays a compact mood selector and note field. The user picks
+/// a mood, optionally edits the note, and taps Save. The entire
 /// interaction should take under 5 seconds.
 struct ShareCheckInView: View {
     let sharedText: String?
     let sharedURL: URL?
-    let onSave: (Int, String) -> Void
+    let onSave: (MoodRating, String) -> Void
     let onCancel: () -> Void
 
-    @State private var selectedStatus: Int = 3
+    @State private var selectedMood: MoodRating = .neutral
     @State private var noteText: String = ""
     @State private var isSaved = false
     @State private var showError = false
 
     private let maxNoteLength = 500
-    private let statusOptions: [(emoji: String, label: String, value: Int)] = [
-        ("😣", "Awful", 1),
-        ("😕", "Bad", 2),
-        ("😐", "Okay", 3),
-        ("🙂", "Good", 4),
-        ("😄", "Great", 5)
-    ]
 
     var body: some View {
         NavigationStack {
@@ -441,7 +457,7 @@ struct ShareCheckInView: View {
                 if isSaved {
                     savedConfirmation
                 } else {
-                    statusPicker
+                    moodPicker
                     noteField
                     urlTag
                     Spacer()
@@ -480,18 +496,20 @@ struct ShareCheckInView: View {
         }
     }
 
-    // MARK: - Status Picker
+    // MARK: - Mood Picker
 
-    private var statusPicker: some View {
+    /// Uses MoodRating.allCases to display the same mood options
+    /// as the main app's EveningCheckinView.
+    private var moodPicker: some View {
         HStack(spacing: 12) {
-            ForEach(statusOptions, id: \.value) { option in
-                StatusOptionButton(
-                    emoji: option.emoji,
-                    label: option.label,
-                    isSelected: selectedStatus == option.value
+            ForEach(MoodRating.allCases) { rating in
+                MoodOptionButton(
+                    emoji: rating.emoji,
+                    label: rating.label,
+                    isSelected: selectedMood == rating
                 ) {
                     withAnimation(.spring(duration: 0.3)) {
-                        selectedStatus = option.value
+                        selectedMood = rating
                     }
                     let generator = UIImpactFeedbackGenerator(style: .light)
                     generator.impactOccurred()
@@ -575,16 +593,16 @@ struct ShareCheckInView: View {
             isSaved = true
         }
 
-        onSave(selectedStatus, finalNote)
+        onSave(selectedMood, finalNote)
     }
 }
 
-// MARK: - Status Option Button
+// MARK: - Mood Option Button
 
-/// An individual status button with emoji and label.
+/// An individual mood button with emoji and label.
 ///
 /// Minimum tap target is 44x44 points per Apple's HIG.
-struct StatusOptionButton: View {
+struct MoodOptionButton: View {
     let emoji: String
     let label: String
     let isSelected: Bool
@@ -604,13 +622,15 @@ struct StatusOptionButton: View {
             .opacity(isSelected ? 1.0 : 0.6)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("(label) recovery status")
+        .accessibilityLabel("\(label) mood rating")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 ```
 
-### SharedDataManager.swift
+### SharedDataManager Extension for Check-In Saving
+
+The existing `SharedDataManager` handles `UserDefaults`-based widget data. For the Share Extension, we extend it with a method that writes directly to a shared SwiftData container. This uses the App Group container URL — the same pattern the widget lesson discussed, but here we need write access to the full database, not just `UserDefaults`.
 
 ```swift
 import Foundation
@@ -618,105 +638,111 @@ import SwiftData
 import WidgetKit
 import os
 
-/// Handles creating and saving recovery check-ins from any target
-/// (main app, Share Extension, Widget Extension).
-///
-/// Uses the shared App Group container so all targets read from
-/// and write to the same SwiftData store. Returns Result types
-/// so callers can handle failure gracefully — especially important
-/// in extensions where crashing produces a blank share sheet with
-/// no error message.
-enum SharedDataManager {
-    private static let logger = Logger(
-        subsystem: "com.nativefirst.betaway.shared",
+extension SharedDataManager {
+    private static let shareLogger = Logger(
+        subsystem: "com.pekmario.betfreeapp.share",
         category: "DataManager"
     )
 
-    /// Saves a check-in to the shared SwiftData store.
+    /// Creates a ModelContainer using the App Group container URL.
+    ///
+    /// This is separate from the main app's ModelContainer because
+    /// the Share Extension runs in its own process and cannot access
+    /// the main app's container directly.
+    private static func makeSharedContainer() throws -> ModelContainer {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupID
+        ) else {
+            throw NSError(
+                domain: "SharedDataManager",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "App Group container not found."]
+            )
+        }
+
+        let storeURL = containerURL.appendingPathComponent("BetAway.store")
+        let schema = Schema([UserProfile.self, DailyCheckin.self, UrgeLog.self, JournalEntry.self])
+        let configuration = ModelConfiguration(
+            "BetAway",
+            schema: schema,
+            url: storeURL
+        )
+
+        return try ModelContainer(for: schema, configurations: [configuration])
+    }
+
+    /// Saves a DailyCheckin from the Share Extension.
     ///
     /// - Parameters:
-    ///   - recoveryStatus: The recovery status rating from 1 (awful) to 5 (great).
-    ///   - note: Optional text note accompanying the check-in.
-    ///   - date: When the check-in was logged. Defaults to now.
+    ///   - mood: The user's selected MoodRating.
+    ///   - notes: Optional text note accompanying the check-in.
     /// - Returns: `.success` if saved, `.failure` with the error if not.
     @discardableResult
-    static func saveCheckIn(
-        recoveryStatus: Int,
-        note: String,
-        date: Date = .now
+    static func saveCheckin(
+        mood: MoodRating,
+        notes: String
     ) -> Result<Void, Error> {
         do {
-            let container = try SharedModelContainer.create()
+            let container = try makeSharedContainer()
             let context = ModelContext(container)
 
-            let entry = CheckIn(
-                recoveryStatus: recoveryStatus,
-                note: note,
-                date: date
+            let checkin = DailyCheckin(
+                checkinType: .eveningCheckin,
+                mood: mood,
+                gamblingFree: true,
+                notes: notes
             )
 
-            context.insert(entry)
+            // Attach to existing UserProfile if one exists.
+            let descriptor = FetchDescriptor<UserProfile>()
+            if let profile = try? context.fetch(descriptor).first {
+                checkin.userProfile = profile
+            }
+
+            context.insert(checkin)
             try context.save()
 
-            logger.info("Check-in saved: recoveryStatus=\(recoveryStatus)")
+            shareLogger.info("Check-in saved: mood=\(mood.rawValue)")
 
-            // Notify widgets that new data is available.
+            // Update widget data and notify widgets.
             WidgetCenter.shared.reloadAllTimelines()
 
             return .success(())
         } catch {
-            logger.error(
+            shareLogger.error(
                 "Failed to save check-in: \(error.localizedDescription)"
             )
             return .failure(error)
         }
     }
 
-    /// Fetches the most recent check-in for today.
+    /// Fetches recent mood values for the quick-select feature.
     ///
-    /// Used by both the main app and extensions to check whether
-    /// a check-in has already been logged today.
-    static func todaysCheckIn() -> CheckIn? {
-        guard let container = try? SharedModelContainer.create() else {
-            return nil
-        }
-
-        let context = ModelContext(container)
-        let todayStart = Calendar.current.startOfDay(for: .now)
-
-        let predicate = #Predicate<CheckIn> { entry in
-            entry.date >= todayStart
-        }
-
-        var descriptor = FetchDescriptor<CheckIn>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        descriptor.fetchLimit = 1
-
-        return try? context.fetch(descriptor).first
-    }
-
-    /// Fetches the N most recent recovery status values.
-    ///
-    /// Useful for showing "recent statuses" as quick-select options
-    /// in the Share Extension.
-    static func recentStatusValues(limit: Int = 3) -> [Int] {
-        guard let container = try? SharedModelContainer.create() else {
+    /// Used by the Share Extension to show the user's most
+    /// frequent mood ratings as quick-select chips.
+    static func recentMoodValues(limit: Int = 5) -> [MoodRating] {
+        guard let container = try? makeSharedContainer() else {
             return []
         }
 
         let context = ModelContext(container)
-        var descriptor = FetchDescriptor<CheckIn>(
+        var descriptor = FetchDescriptor<DailyCheckin>(
             sortBy: [SortDescriptor(\.date, order: .reverse)]
         )
         descriptor.fetchLimit = limit
 
-        let entries = (try? context.fetch(descriptor)) ?? []
-        return entries.map(\.recoveryStatus)
+        let checkins = (try? context.fetch(descriptor)) ?? []
+        return checkins.compactMap { MoodRating(rawValue: $0.mood) }
     }
 }
 ```
+
+Key design choices:
+
+- **`makeSharedContainer()` uses the App Group container URL.** This is different from the main app's default `ModelContainer`, which stores in the app's sandbox. By pointing to `containerURL.appendingPathComponent("BetAway.store")`, the extension writes to a database that both the main app and the extension can access.
+- **The check-in is attached to the existing `UserProfile` if one exists.** The extension fetches the first `UserProfile` from the shared store and sets the `@Relationship` so the check-in appears in the user's dashboard. If no profile exists (edge case: extension used before completing onboarding), the check-in is saved as an orphan.
+- **`saveCheckin` returns `Result<Void, Error>`.** Extensions cannot crash gracefully. If the shared container is unavailable, a `fatalError` kills the extension silently and the user sees a blank share sheet. Returning a `Result` lets the caller show a meaningful error alert and dismiss cleanly.
+- **No network requests.** The extension saves locally and triggers a widget refresh. Any further processing (insights, analytics) happens when the main app opens.
 
 ### Info.plist (Share Extension Activation Rules)
 
@@ -746,7 +772,7 @@ Configure the extension's `NSExtension` dictionary in `Info.plist`. Replace the 
 
 ### Entitlements (Both Targets Must Match)
 
-Both the main app and the Share Extension need identical group and CloudKit entitlements:
+Both the main app and the Share Extension need the same App Group entitlement. If you added CloudKit sync (from Lesson 9.1), include those entitlements too:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -756,15 +782,7 @@ Both the main app and the Share Extension need identical group and CloudKit enti
 <dict>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>group.com.nativefirst.betaway.shared</string>
-    </array>
-    <key>com.apple.developer.icloud-container-identifiers</key>
-    <array>
-        <string>iCloud.com.yourname.betaway</string>
-    </array>
-    <key>com.apple.developer.icloud-services</key>
-    <array>
-        <string>CloudKit</string>
+        <string>group.com.pekmario.betfreeapp</string>
     </array>
 </dict>
 </plist>
@@ -774,20 +792,22 @@ Both the main app and the Share Extension need identical group and CloudKit enti
 
 **Why UIViewController instead of SLComposeServiceViewController?** `SLComposeServiceViewController` provides a built-in compose UI similar to the old Twitter share sheet. It is convenient but inflexible — you get a text field and an image preview, and customizing beyond that is fighting the framework. A plain `UIViewController` with an embedded SwiftUI view gives us complete control over the layout while keeping the code modern and consistent with the rest of BetAway.
 
-**Why no AI calls in the extension?** Share Extensions have strict memory limits (approximately 120MB) and time limits. Calling the OpenAI API introduces network latency, potential failures, and memory overhead. Instead, we save the raw check-in and let the main app generate the AI insight the next time it opens. The user gets instant feedback in the share sheet and the insight appears later — a better UX than making the share sheet hang while waiting for a network response.
+**Why no network requests in the extension?** Share Extensions have strict memory limits (approximately 120MB) and time limits. Making API calls introduces network latency, potential failures, and memory overhead. Instead, we save the raw `DailyCheckin` and let the main app handle any follow-up processing the next time it opens. The user gets instant feedback in the share sheet.
 
-**Why Result type for saveCheckIn?** Extensions cannot crash gracefully. If the shared container is unavailable (misconfigured App Group, corrupted store), a `fatalError` kills the extension silently and the user sees a blank share sheet with no explanation. Returning a `Result` lets the caller show a meaningful error alert and dismiss cleanly.
+**Why Result type for saveCheckin?** Extensions cannot crash gracefully. If the shared container is unavailable (misconfigured App Group, corrupted store), a `fatalError` kills the extension silently and the user sees a blank share sheet with no explanation. Returning a `Result` lets the caller show a meaningful error alert and dismiss cleanly.
 
-**Why append the URL to the note instead of a separate property?** Adding a `sourceURL` property to `CheckIn` would require a SwiftData schema migration for existing users. For a v1 feature, appending "via domain.com" to the note text is pragmatic. If URL tracking becomes a core feature later, add the property with a proper migration in the next release.
+**Why use MoodRating.allCases for the mood selector?** BetAway already defines `MoodRating` as an `enum` with `CaseIterable` conformance and `emoji`/`label` computed properties. Reusing this enum in the Share Extension ensures the mood selector matches the main app's evening check-in screen exactly — same emojis, same labels, same integer values stored in the `DailyCheckin.mood` field.
+
+**Why attach the check-in to an existing UserProfile?** BetAway's data model uses `@Relationship` to link all `DailyCheckin` records to a `UserProfile`. The `DashboardView` queries `profile.checkins` to show the user's history. If the Share Extension creates a `DailyCheckin` without linking it to the profile, it exists in the database but never appears on the dashboard. Fetching the existing profile from the shared container and setting `checkin.userProfile = profile` ensures the relationship is maintained.
 
 ## Checkpoint
 
-1. Share Extension target created with bundle identifier `com.yourname.betaway.share`
-2. App Group `group.com.nativefirst.betaway.shared` enabled on the extension target (matching the main app)
-3. `CheckIn.swift` and `SharedModelContainer.swift` have target membership in both the main app and the extension
+1. Share Extension target created with bundle identifier `com.pekmario.betfreeapp.share`
+2. App Group `group.com.pekmario.betfreeapp` enabled on the extension target (matching the main app and widget)
+3. `DailyCheckin.swift`, `UserProfile.swift`, `Enums.swift`, and `SharedDataManager.swift` have target membership in both the main app and the extension
 4. `NSExtensionActivationRule` uses specific type rules, not `TRUEPREDICATE`
 5. Extension appears in the system share sheet when sharing text or a URL from Safari
-6. Selecting a check-in and tapping Save creates an entry visible in the main app
+6. Selecting a mood and tapping Save creates a `DailyCheckin` visible in the main app's dashboard
 7. Shared text pre-fills the note field; shared URL domain appears as a tag
 8. Canceling the share sheet does not create an entry and returns to the host app
 9. Home screen widget updates after saving from the share sheet
@@ -797,33 +817,32 @@ Both the main app and the Share Extension need identical group and CloudKit enti
 
 ## Challenge
 
-**Add a "Recent Statuses" quick picker to the Share Extension.**
+**Add a "Recent Moods" quick picker to the Share Extension.**
 
-When the share sheet opens, show the user's three most recent recovery status values as quick-select chips above the full status picker. If the user logged "Good" three times this week, they can tap the "Good" chip instead of scrolling through the emoji row. This requires reading from the shared SwiftData store in the extension.
+When the share sheet opens, show the user's three most recent mood ratings as quick-select chips above the full mood picker. If the user has been logging "Good" three times this week, they can tap the "Good" chip instead of scanning the emoji row. This requires reading from the shared SwiftData store in the extension.
 
 <details>
 <summary>Hint</summary>
 
-`SharedDataManager` already has a `recentStatusValues(limit:)` method. Call it on appear and show unique values:
+`SharedDataManager` already has a `recentMoodValues(limit:)` method. Call it on appear and show unique values:
 
 ```swift
-@State private var recentStatuses: [Int] = []
+@State private var recentMoods: [MoodRating] = []
 
 // In .onAppear, after pre-filling the note:
-let recent = SharedDataManager.recentStatusValues(limit: 5)
-recentStatuses = Array(Set(recent)).sorted()
+let recent = SharedDataManager.recentMoodValues(limit: 5)
+recentMoods = Array(Set(recent)).sorted { $0.rawValue < $1.rawValue }
 
-// In the view body, above the full status row:
-if !recentStatuses.isEmpty {
+// In the view body, above the full mood row:
+if !recentMoods.isEmpty {
     HStack(spacing: 8) {
         Text("Recent:")
             .font(.caption)
             .foregroundStyle(.secondary)
-        ForEach(recentStatuses, id: \.self) { status in
-            let option = statusOptions.first { $0.value == status }
-            Button(option?.emoji ?? "") {
+        ForEach(recentMoods) { mood in
+            Button(mood.emoji) {
                 withAnimation(.spring(duration: 0.3)) {
-                    selectedStatus = status
+                    selectedMood = mood
                 }
             }
             .buttonStyle(.bordered)
@@ -833,14 +852,14 @@ if !recentStatuses.isEmpty {
 }
 ```
 
-Keep the fetch lightweight — `fetchLimit: 5` ensures you never load more than five entries into memory, which is important in the extension's constrained 120MB environment. The `Set` deduplication and `.sorted()` ensure you show at most 5 unique recovery statuses in order.
+Keep the fetch lightweight — `fetchLimit: 5` ensures you never load more than five entries into memory, which is important in the extension's constrained 120MB environment. The `Set` deduplication and `.sorted()` ensure you show at most 5 unique mood ratings in order.
 </details>
 
 ---
 
 ## What's Next
 
-You have built a complete app. BetAway has a design system, a SwiftData persistence layer, Charts, AI insights, widgets, notifications, Siri Shortcuts, CloudKit sync, and now a Share Extension. That is not a tutorial project — that is a real product.
+You have built a complete app. BetAway has a design system, a SwiftData persistence layer with `UserProfile`, `DailyCheckin`, `UrgeLog`, and `JournalEntry` models, Charts on the Progress screen, a widget with `SharedDataManager` bridging data through App Groups, notifications, and now a Share Extension. That is not a tutorial project — that is a real product.
 
 Here is what to do with it.
 
@@ -850,19 +869,19 @@ Here is what to do with it.
 
 **Read your crash reports daily.** Xcode Organizer shows crashes from TestFlight users. For the first two weeks, check it every morning. The first crash you fix before a user reports it is the moment you stop being a student and start being a developer who ships.
 
-**Collect user feedback systematically.** Add a simple feedback mechanism in the app — a "Send Feedback" button in Settings that opens a pre-filled email. Track every piece of feedback in a spreadsheet or GitHub Issues. Patterns will emerge fast: if three out of five testers ask for the same thing, that is your next feature.
+**Collect user feedback systematically.** BetAway already has a `FeedbackView` in Settings that opens a pre-filled email to `info@nativefirstapp.com`. Track every piece of feedback in a spreadsheet or GitHub Issues. Patterns will emerge fast: if three out of five testers ask for the same thing, that is your next feature.
 
-**Marketing starts before launch.** Write three tweets or posts showing off BetAway — the widget on a home screen, the AI insight for a check-in, the share sheet in action. Screenshots sell apps. Build an audience before you have something to sell them.
+**Marketing starts before launch.** Write three tweets or posts showing off BetAway — the widget on a home screen, the streak card on the dashboard, the share sheet in action. Screenshots sell apps. Build an audience before you have something to sell them.
 
 **Submit to the App Store.** You already have the privacy policy, the screenshots, and the description from Module 8. The only thing between you and the App Store is clicking "Submit for Review." If it gets rejected, read the rejection reason carefully, fix it, and resubmit. Most rejections are metadata issues, not code issues. The average time from submission to approval is 24-48 hours.
 
 **Ideas for v2.0:**
 
 - **Apple Watch complication** — a glanceable recovery tracker on the watch face. Use `WKApplicationDelegate` and the same shared container pattern from WidgetKit. The jump from "Share Extension that writes to a shared container" to "Watch app that writes to a shared container" is smaller than you think.
-- **Recovery streaks** — gamify consistency. Show the user how many consecutive days they have logged a check-in. Streaks drive retention more effectively than features.
-- **Export to PDF** — let users export a week or month of recovery data as a formatted PDF report. Use Apple's `UIGraphicsPDFRenderer` and the Charts framework data you already have.
-- **Therapist sharing** — generate a summary report that users can share with their therapist. This is the feature that turns BetAway from a personal tool into a health tool.
-- **StoreKit 2 tip jar** — BetAway is completely free, but a voluntary tip jar lets grateful users support development. StoreKit 2 makes this straightforward. Apple handles billing and refunds.
+- **Recovery streaks with gamification** — BetAway already tracks `currentStreak` and `longestStreak` on `UserProfile`, and has a `Milestone` system with progress badges. Extend this with streak-based achievements and daily goals that keep users engaged.
+- **Export to PDF** — let users export a week or month of `DailyCheckin` and `JournalEntry` data as a formatted PDF report. BetAway already has a `DataExportManager` — extend it with `UIGraphicsPDFRenderer`.
+- **Therapist sharing** — generate a summary report from `DailyCheckin` mood trends, `UrgeLog` patterns, and `JournalEntry` reflections that users can share with their therapist. This is the feature that turns BetAway from a personal tool into a health tool.
+- **StoreKit 2 tip jar** — BetAway already has a `TipJarManager` and `TipJarView` with two tip products (`com.pekmario.BetFree.tip.small` and `com.pekmario.BetFree.tip.large`). The foundation is already in place.
 
 **Keep building with AI.** The workflow you learned in this course — plan, execute, iterate, verify — works for every feature you will ever build. The AI does not replace your judgment. It amplifies your speed. You still decide what to build, how the architecture fits together, and when the code is good enough to ship. The AI writes the boilerplate, catches the syntax errors, and generates the first draft. You refine it into something worth shipping.
 

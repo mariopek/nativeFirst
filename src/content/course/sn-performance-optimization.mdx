@@ -1,1092 +1,657 @@
 ---
 title: "Performance Optimization"
-description: "Optimize BetAway for production — lazy loading, SwiftData query tuning, image caching, launch time reduction, and background processing patterns that keep your app fast."
+description: "Optimize BetAway for production — staggered card animations with AnimationPresets, DashboardView's ScrollView layout, BFProgressRing animation performance, and UserProfile computed property costs."
 courseSlug: "ship-native"
 module: 7
 moduleTitle: "Production Polish"
 lesson: 3
 duration: "20 min read"
 difficulty: "advanced"
-topics: ["Performance", "LazyVStack", "SwiftData Optimization", "Image Caching", "Launch Time", "Background Processing", "Pagination", "BetAway"]
+topics: ["Performance", "Staggered Animations", "AnimationPresets", "BFProgressRing", "UserProfile Computed Properties", "DashboardView", "ScrollView", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-BetAway works. The error handling is solid. The accessibility is polished. A user with twelve entries opens the app and everything feels instant. That same user logs check-ins for a year, accumulates 800 entries, opens the app on a cold morning, and the launch takes three seconds. They scroll through their recovery history and every swipe hitches. They tap the Insights tab and the chart takes a full second to appear.
+BetAway works. The error handling is solid. The accessibility is polished. A user with a 7-day streak opens the app and everything feels instant. That same user hits their 365-day milestone, accumulates hundreds of check-ins and urge logs, opens the app on a cold morning, and the dashboard takes a visible moment to render. They scroll through their weekly summary and every card hitch-loads. They check their streak and the number flickers because the computed property recalculates.
 
 They do not file a bug. They do not leave a review. They delete your app and try another one.
 
-Performance is the feature nobody sees until it is missing. In this lesson, we measure what is actually slow, fix it with targeted optimizations, and verify that every change made things faster — not just different. No guessing. No premature optimization. Instruments first, code changes second.
+Performance is the feature nobody sees until it is missing. In this lesson, we examine BetFree's real performance patterns — staggered card animations, animation presets, progress ring rendering, and computed property costs. No guessing. No premature optimization. Real code first, analysis second.
 
 ## What You'll Learn
 
-- Replace `VStack` with `LazyVStack` and paginate recovery history with `FetchDescriptor` so only 50 entries load at a time instead of the entire database
-- Optimize SwiftData queries with `#Predicate`, `fetchLimit`, `fetchOffset`, and `SortDescriptor` to eliminate unnecessary memory allocations at scale
-- Build an image cache for check-in photos so the same thumbnail never decodes from disk twice during a scroll session
-- Reduce launch time by deferring non-critical work and moving AI insight generation to background tasks with Swift concurrency
+- Study `AnimationPresets` — how BetFree defines spring animations, eased animations, and stagger intervals in a single centralized enum
+- Examine `DashboardView`'s staggered animation pattern — how eight cards animate in sequence using `staggeredAppear(index:isVisible:)` without blocking the main thread
+- Understand `BFProgressRing`'s animation approach — how it uses `@State` to defer animation until `onAppear` and responds to `onChange` for updates
+- Analyze `UserProfile`'s computed properties — `currentStreak`, `totalSaved`, `daysSinceQuit` — and their cost when called from multiple views on every body evaluation
 
 ## Why This Matters
 
 Apple measures your app's launch time. If a cold start exceeds 4 seconds, the watchdog kills the process — the user sees a crash. The App Store review team tests on older hardware. A sluggish iPhone SE experience is a rejection risk.
 
-Beyond Apple's threshold: every 100ms of delay reduces user engagement measurably. BetAway talks to an external AI service, reads from a local database, renders charts, and — if users attach photos — decodes images. Each of those is a potential bottleneck. Let us find out which ones actually are, and fix only what matters.
+Beyond Apple's threshold: every 100ms of delay reduces user engagement measurably. BetAway's dashboard renders eight cards with staggered animations, a progress ring, and computed streak data on every appearance. Each of those is a potential bottleneck on older devices. Let us understand how the real code handles these concerns.
 
-## Plan Phase: Profiling Before Optimizing
+## Plan Phase: Understanding the Real Performance Patterns
 
-The single most important rule of performance work: measure first. Send this prompt:
+Before optimizing anything, we need to understand what BetFree already does well and where the costs are. Send this prompt:
 
 ```
-I need to optimize BetAway's performance before shipping.
-Do NOT write code yet — create a profiling and optimization plan.
+I need to analyze BetAway's performance before shipping.
+Do NOT write code yet — create a performance analysis plan.
 
 Current architecture:
-- SwiftData for persistence (CheckIn model with score, note,
-  emoji, insight, date, insightSource, optional photoData)
-- OpenAI API for insight generation (network call per entry)
-- Charts framework for recovery history visualization
-- ~10 views, TabView navigation
-- Some entries have attached photos stored as Data
+- DashboardView with 8 staggered card animations
+- AnimationPresets enum defining spring/eased animations
+- BFProgressRing with animated Circle trim
+- UserProfile with computed properties (currentStreak, totalSaved,
+  daysSinceQuit) that query relationships on every access
+- MainTabView with custom animated tab bar
+- ScrollView (not LazyVStack) on DashboardView
 
-Potential user scale:
-- 1-3 entries per day
-- After 1 year: ~500-1000 entries
-- Power users: up to 2000+ entries
-- ~30% of entries have a photo attachment
+What I want to understand:
+1. Are the staggered animations efficient? Do 8 concurrent
+   spring animations cause frame drops?
+2. Does BFProgressRing animate efficiently, or does it
+   re-trigger on every body evaluation?
+3. How expensive are UserProfile's computed properties when
+   called from multiple cards in the same dashboard?
+4. Is ScrollView + VStack appropriate here, or should this
+   be a LazyVStack?
 
-I suspect these bottlenecks but have NOT measured:
-1. Loading all entries on app launch
-2. The recovery history list might be using VStack instead of LazyVStack
-3. AI insight generation blocks the main thread
-4. Chart rendering with 365+ data points
-5. Photo thumbnails are decoded every scroll pass
-
-Plan:
-1. What should I measure first, and how?
-2. What are the likely bottlenecks at 1000+ entries?
-3. What optimizations should I apply in what order?
-4. How do I verify each optimization actually helped?
+Plan what to measure and how.
 ```
 
 ### AI Plan Review
 
-The AI should produce an ordered list of measurements before optimizations. That order is critical — you need a baseline before changing anything.
+The AI should return an analysis focused on the specific patterns in the codebase.
 
-**Keep** — "Measure launch time with Instruments Time Profiler before changing anything." Correct. Without a baseline number, you cannot prove an optimization helped. You are just guessing.
+**Keep** — "Measure the stagger animation frame rate with Instruments." The stagger pattern uses `AnimationPresets.cardEntry.delay(AnimationPresets.staggerDelay(for: index))`. Eight cards means 8 concurrent spring animations. This is worth measuring.
 
-**Keep** — "Profile scroll performance at 1000+ entries with test data." The AI should suggest generating test data first, then profiling. Performance testing with 5 entries tells you nothing about production behavior.
+**Keep** — "Profile UserProfile.currentStreak cost." This computed property iterates all check-ins, filters for relapses, and sorts — on every access. If the dashboard calls it from multiple card views, it runs multiple times per body evaluation.
 
-**Keep** — "Use os_signpost markers for each critical path." Signposts show up in Instruments as named intervals, so you can see exactly how long each operation takes. This is how you get hard numbers, not estimates.
+**Question** — If the AI suggests replacing `ScrollView` with `LazyVStack` on the dashboard, push back. The dashboard has only 8 cards. `LazyVStack` adds complexity (deferred creation, potential layout measurement issues) that is not justified for 8 items. `LazyVStack` is for hundreds of items, not a fixed dashboard layout.
 
-**Question** — If the AI jumps straight to "replace VStack with LazyVStack" without suggesting measurement first, push back. That is probably the right fix, but confirm with data. Premature optimization creates complexity without evidence it was needed.
+**Question** — If the AI suggests caching `currentStreak` in a stored property, consider the trade-off. Caching eliminates redundant computation but introduces cache invalidation complexity. For 8 cards on a dashboard, the recalculation cost is likely negligible.
 
 ### Anti-Pattern: Optimizing Without Measuring
 
 ```swift
-// The developer "optimizes" by adding caching everywhere
-// without knowing if caching is even the problem.
+// The developer "optimizes" by caching every computed property
+// without knowing if computation is even the problem.
 
-// They add a manual cache for recovery check-ins:
-private var cachedEntries: [CheckIn]?
+// They cache the streak:
+private var cachedStreak: Int?
 
-// They add a cache for formatted dates:
+// They cache the savings:
+private var cachedSavings: Double?
+
+// They cache the formatted dates:
 private var dateCache: [Date: String] = [:]
 
-// They add a cache for chart data:
-private var chartDataCache: [ChartDataPoint]?
-
 // Result: more memory usage, stale data bugs, cache invalidation
-// headaches, and the actual bottleneck (VStack with 1000 items
-// rendering all at once) is completely untouched.
+// headaches, and the actual performance concern (if any) is
+// completely untouched.
 ```
 
 The worst performance bugs come from fixing the wrong problem. Measure. Identify. Then fix.
 
-## Execute Phase: Targeted Optimizations
+## Execute Phase: Analyzing the Real Code
 
-First, generate test data so we can profile realistically:
+### Pattern 1 — AnimationPresets: Centralized Animation Configuration
 
-```
-Create a TestDataGenerator that populates SwiftData with realistic
-recovery check-ins for performance testing.
-
-- Generate entries spanning 365 days
-- 1-3 entries per day (random)
-- Random recovery scores weighted toward 5-8 (realistic distribution)
-- Random emoji selection from the app's emoji set
-- ~30% of entries have a photoData field with a small placeholder
-  Data blob (simulate photo storage)
-- Some entries have AI insights, some have on-device insights
-- Total: roughly 700 entries
-
-Put it in Debug/TestDataGenerator.swift. Only include it in
-Debug builds using #if DEBUG.
-```
+BetFree defines all animations in a single enum. This is a performance-conscious pattern — instead of creating new `Animation` values inline on every body evaluation, the app uses static constants:
 
 ```swift
-#if DEBUG
-import SwiftData
-import Foundation
+import SwiftUI
 
-struct TestDataGenerator {
-    static func populate(context: ModelContext) throws {
-        let calendar = Calendar.current
-        let today = Date.now
-        let emojis = ["😄", "🙂", "😐", "😕", "😢", "😡", "😰", "😴", "🤩", "😌"]
-        let notes: [String?] = [
-            "Good day at work today",
-            "Feeling stressed about the deadline",
-            "Had a great workout this morning",
-            "Could not sleep well last night",
-            nil, nil, nil  // Weight toward no note
-        ]
-        // Small placeholder to simulate photo data (~10 KB)
-        let placeholderPhoto = Data(repeating: 0xFF, count: 10_240)
+enum AnimationPresets {
+    // MARK: - Spring Animations
 
-        for dayOffset in 0..<365 {
-            guard let date = calendar.date(
-                byAdding: .day, value: -dayOffset, to: today
-            ) else { continue }
+    /// Snappy interaction feedback — buttons, toggles, chip selection
+    static let snappy = Animation.spring(response: 0.3, dampingFraction: 0.7, blendDuration: 0)
 
-            let entriesForDay = Int.random(in: 1...3)
+    /// Standard transitions — cards appearing, navigation
+    static let smooth = Animation.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)
 
-            for i in 0..<entriesForDay {
-                let hour = 8 + (i * 5) + Int.random(in: 0...3)
-                let entryDate = calendar.date(
-                    bySettingHour: hour,
-                    minute: Int.random(in: 0...59),
-                    second: 0, of: date
-                ) ?? date
+    /// Gentle, slow animations — onboarding transitions, celebrations
+    static let gentle = Animation.spring(response: 0.7, dampingFraction: 0.85, blendDuration: 0)
 
-                let score = weightedRandomScore()
-                let hasPhoto = Double.random(in: 0...1) < 0.3
+    /// Bouncy feedback — streak counter update, milestone reached
+    static let bouncy = Animation.spring(response: 0.4, dampingFraction: 0.5, blendDuration: 0)
 
-                let entry = CheckIn(
-                    score: score,
-                    note: notes.randomElement() ?? nil,
-                    emoji: emojis.randomElement() ?? "😐",
-                    insight: "Sample insight for testing purposes.",
-                    insightSource: Bool.random() ? .ai : .onDevice
-                )
-                entry.date = entryDate
-                entry.photoData = hasPhoto ? placeholderPhoto : nil
+    /// Entry animation for cards/elements appearing on screen
+    static let cardEntry = Animation.spring(response: 0.6, dampingFraction: 0.75, blendDuration: 0)
 
-                context.insert(entry)
-            }
-        }
+    // MARK: - Eased Animations
 
-        try context.save()
-    }
+    /// Fade in/out for overlays, modals
+    static let fade = Animation.easeInOut(duration: 0.25)
 
-    private static func weightedRandomScore() -> Int {
-        let weights = [1, 2, 3, 5, 8, 12, 14, 12, 8, 5]
-        let total = weights.reduce(0, +)
-        var random = Int.random(in: 0..<total)
-        for (index, weight) in weights.enumerated() {
-            random -= weight
-            if random < 0 { return index + 1 }
-        }
-        return 5
+    /// Slow fade for background transitions
+    static let slowFade = Animation.easeInOut(duration: 0.5)
+
+    // MARK: - Durations
+    static let shortDuration: Double = 0.2
+    static let standardDuration: Double = 0.35
+    static let longDuration: Double = 0.5
+    static let celebrationDuration: Double = 1.5
+
+    // MARK: - Stagger
+    static let staggerInterval: Double = 0.08
+
+    static func staggerDelay(for index: Int) -> Double {
+        Double(index) * staggerInterval
     }
 }
-#endif
 ```
 
-Now, with 700+ test entries in the database, apply the optimizations. Send this prompt:
+Key performance observations:
 
-```
-Optimize BetAway for performance at scale (1000+ entries).
-Apply these optimizations in order:
+- **Static constants.** `Animation.spring(response:dampingFraction:blendDuration:)` creates a value type. Storing it as a `static let` means it is created once and reused. No allocation on each use.
+- **Stagger interval of 0.08 seconds.** The `staggerDelay(for:)` function returns `0.0`, `0.08`, `0.16`, `0.24`... up to `0.56` for index 7. The total animation cascade is just over half a second. This is fast enough to feel responsive but slow enough that each card's entrance is visually distinct.
+- **Named presets prevent drift.** Without this enum, developers would write `Animation.spring(response: 0.5, dampingFraction: 0.8)` in one place and `Animation.spring(response: 0.45, dampingFraction: 0.75)` in another. The app would feel inconsistent. Centralizing prevents this and makes it easy to tune animations globally.
+- **`blendDuration: 0` on every spring.** This means animations do not blend with each other when interrupted. If the user navigates away and back during the stagger sequence, each animation restarts cleanly rather than blending into a mushy transition.
 
-1. LAZY LOADING: Replace VStack with LazyVStack in
-   RecoveryHistoryView. Use FetchDescriptor with fetchLimit and
-   fetchOffset for true database-level pagination — 50 entries
-   per page, load more on scroll.
+### Pattern 2 — DashboardView: Staggered Card Layout
 
-2. SWIFTDATA QUERY TUNING: Optimize the InsightsView @Query
-   to fetch only the last 30 days with #Predicate. For the
-   home screen entry count, use fetchCount() instead of
-   fetching full objects.
-
-3. IMAGE CACHING: Build an ImageCache actor that decodes
-   thumbnail images once and holds them in an NSCache. The
-   recovery history row should check the cache before decoding.
-
-4. BACKGROUND AI PROCESSING: Move the OpenAI API call off
-   the main thread. Save the check-in immediately with a
-   placeholder insight, then update when the AI responds.
-
-5. LAUNCH TIME: Defer non-critical initialization. Chart data
-   and AI service setup should not happen until the user
-   navigates to those screens. Add os_signpost markers to
-   measure each phase.
-
-Use Swift 6, strict concurrency, @Observable pattern.
-```
-
-### Code Review
-
-**Optimization 1 — LazyVStack with True Pagination:**
-
-The before and after tells the whole story.
+The `DashboardView` uses the `staggeredAppear` view modifier to animate eight cards in sequence:
 
 ```swift
-// BEFORE — loads ALL entries into memory, renders ALL rows at once
-struct RecoveryHistoryView: View {
-    @Query(sort: \CheckIn.date, order: .reverse)
-    private var entries: [CheckIn]
+import SwiftUI
+import SwiftData
+
+struct DashboardView: View {
+    @Environment(AppRouter.self) private var router
+    @Query private var profiles: [UserProfile]
+    @State private var viewModel = DashboardViewModel()
+    @State private var isVisible = false
+    @State private var showUrgeFlow = false
+
+    private var profile: UserProfile? { profiles.first }
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 0) {                 // Every row created
-                ForEach(entries) { entry in       // All 1000 entries
-                    CheckInRow(entry: entry)    // in memory
-                }
-            }
-        }
-    }
-}
-```
+            VStack(spacing: Spacing.lg) {
+                // Greeting
+                if let profile {
+                    HStack {
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            HStack(spacing: Spacing.xs) {
+                                Image(systemName: viewModel.greetingIcon)
+                                    .foregroundStyle(ColorPalette.warning)
+                                Text(viewModel.greeting)
+                                    .font(Typography.title3())
+                                    .foregroundStyle(ColorPalette.textPrimary)
+                            }
 
-The `@Query` fetches every `CheckIn` from the database the moment this view appears. `VStack` creates all 1000 row views immediately. On a large dataset, this is an 800ms stall before the first frame renders.
-
-```swift
-// AFTER — fetches 50 at a time, only visible rows exist
-import SwiftUI
-import SwiftData
-import os
-
-@Observable
-final class RecoveryHistoryViewModel {
-    private(set) var entries: [CheckIn] = []
-    private(set) var hasMore = true
-    private(set) var isLoadingPage = false
-
-    private var currentOffset = 0
-    private let pageSize = 50
-    private let context: ModelContext
-    private let signposter = OSSignposter(
-        subsystem: "com.nativefirst.betaway", category: "Performance"
-    )
-
-    init(context: ModelContext) {
-        self.context = context
-    }
-
-    func loadInitialPage() {
-        let state = signposter.beginInterval("LoadInitialPage")
-        defer { signposter.endInterval("LoadInitialPage", state) }
-
-        currentOffset = 0
-        entries = fetchPage(offset: 0)
-        hasMore = entries.count == pageSize
-    }
-
-    func loadNextPage() {
-        guard hasMore, !isLoadingPage else { return }
-        isLoadingPage = true
-
-        let state = signposter.beginInterval("LoadNextPage")
-        defer {
-            signposter.endInterval("LoadNextPage", state)
-            isLoadingPage = false
-        }
-
-        currentOffset += pageSize
-        let newEntries = fetchPage(offset: currentOffset)
-        entries.append(contentsOf: newEntries)
-        hasMore = newEntries.count == pageSize
-    }
-
-    private func fetchPage(offset: Int) -> [CheckIn] {
-        var descriptor = FetchDescriptor<CheckIn>(
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        descriptor.fetchLimit = pageSize
-        descriptor.fetchOffset = offset
-
-        do {
-            return try context.fetch(descriptor)
-        } catch {
-            return []
-        }
-    }
-}
-```
-
-Review checklist:
-
-- ✅ `FetchDescriptor` with `fetchLimit` and `fetchOffset` — the database returns only 50 rows per page, not all 1000
-- ✅ `os_signpost` on each page load — measurable in Instruments Time Profiler
-- ✅ `hasMore` flag prevents unnecessary queries once all data is loaded
-- ✅ `isLoadingPage` guard prevents duplicate fetches from rapid scroll events
-- ⚠️ The ViewModel holds `ModelContext`, which is not `Sendable`. This is fine as long as the ViewModel stays on the main actor. If the AI marks it `@Sendable`, question it — `ModelContext` must be used on a single thread
-
-The performance difference at 1000 entries:
-
-| Metric | VStack + @Query (all) | LazyVStack + Pagination |
-|--------|----------------------|------------------------|
-| Initial render | ~800ms | ~45ms |
-| Memory (entries) | ~12 MB | ~1.5 MB |
-| Scroll to row 100 | Immediate (already loaded) | ~20ms (loads page 3) |
-| First visible frame | ~800ms | ~45ms |
-
-The trade-off: pagination adds a slight delay when crossing page boundaries. But 20ms is imperceptible. 800ms is not.
-
-**Optimization 2 — SwiftData Query Tuning:**
-
-Two fixes here. First, the Insights chart should only fetch the last 30 days:
-
-```swift
-// BEFORE — fetches ALL entries, filters in Swift
-struct InsightsView: View {
-    @Query(sort: \CheckIn.date)
-    private var allEntries: [CheckIn]
-
-    var body: some View {
-        let recent = allEntries.filter {
-            $0.date > Date.now.addingTimeInterval(-30 * 86400)
-        }
-        // Chart renders 'recent' but 'allEntries' holds 1000
-        // objects in memory for no reason
-        Chart(recent) { entry in
-            LineMark(
-                x: .value("Date", entry.date, unit: .day),
-                y: .value("Recovery Score", entry.score)
-            )
-        }
-    }
-}
-```
-
-```swift
-// AFTER — filter at the database level with #Predicate
-struct InsightsView: View {
-    @Query(
-        filter: #Predicate<CheckIn> {
-            $0.date > Date.now.addingTimeInterval(-30 * 24 * 60 * 60)
-        },
-        sort: \CheckIn.date
-    )
-    private var recentEntries: [CheckIn]
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    if recentEntries.isEmpty {
-                        ContentUnavailableView(
-                            "No Data Yet",
-                            systemImage: "chart.line.uptrend.xyaxis",
-                            description: Text("Log check-ins for a few days to see trends.")
-                        )
-                    } else {
-                        recoveryChart
-                        statsSection
+                            Text("Day \(profile.currentStreak) of your journey")
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+                        Spacer()
                     }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+
+                    // Streak Card
+                    StreakCardView(profile: profile, viewModel: viewModel)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 1, isVisible: isVisible)
+
+                    // Daily Quote
+                    QuoteCardView(quote: MotivationalQuotes.quoteForToday())
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 2, isVisible: isVisible)
+
+                    // Savings & Stats Row
+                    HStack(spacing: Spacing.sm) {
+                        SavingsCardView(profile: profile)
+                        StatsCardView(profile: profile)
+                    }
+                    .padding(.horizontal, Spacing.lg)
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+
+                    // Daily Check-in (Pledge + Evening Check-in)
+                    DashboardPledgeCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 4, isVisible: isVisible)
+
+                    // Weekly Summary
+                    WeeklySummaryCard(profile: profile)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 5, isVisible: isVisible)
+
+                    // Milestones
+                    MilestoneCardView(currentStreak: profile.currentStreak)
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 6, isVisible: isVisible)
+
+                    // Emergency Urge Button
+                    EmergencyUrgeButton { showUrgeFlow = true }
+                        .padding(.horizontal, Spacing.lg)
+                        .staggeredAppear(index: 7, isVisible: isVisible)
+                } else {
+                    // No profile — shouldn't happen after onboarding
+                    Text("Setting up your profile...")
+                        .font(Typography.body())
+                        .foregroundStyle(ColorPalette.textSecondary)
                 }
-                .padding()
             }
-            .navigationTitle("Insights")
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
         }
-    }
-
-    private var recoveryChart: some View {
-        Chart(recentEntries) { entry in
-            LineMark(
-                x: .value("Date", entry.date, unit: .day),
-                y: .value("Recovery Score", entry.score)
-            )
-            .interpolationMethod(.catmullRom)
-
-            AreaMark(
-                x: .value("Date", entry.date, unit: .day),
-                y: .value("Recovery Score", entry.score)
-            )
-            .foregroundStyle(.blue.opacity(0.1))
-            .interpolationMethod(.catmullRom)
-        }
-        .chartYScale(domain: 1...10)
-        .frame(height: 200)
-    }
-
-    private var statsSection: some View {
-        let scores = recentEntries.map(\.score)
-        let average = Double(scores.reduce(0, +)) / max(Double(scores.count), 1)
-
-        return VStack(spacing: 12) {
-            HStack {
-                StatCard(title: "Average", value: String(format: "%.1f", average), systemImage: "number")
-                StatCard(title: "Entries", value: "\(recentEntries.count)", systemImage: "list.bullet")
-            }
-            HStack {
-                StatCard(title: "Highest", value: "\(scores.max() ?? 0)", systemImage: "arrow.up")
-                StatCard(title: "Lowest", value: "\(scores.min() ?? 0)", systemImage: "arrow.down")
-            }
-        }
-    }
-}
-```
-
-- ✅ `#Predicate` filters at the database level — SQLite returns only matching rows, not all 1000
-- ✅ The chart renders at most ~90 data points (3/day for 30 days), which the Charts framework handles without issue
-- ❌ If the AI filters in Swift after a full fetch, reject it. That defeats the purpose of a database query
-
-Second, for the home screen where we just need a count:
-
-```swift
-// BEFORE — loads all entries just to count them
-@Query private var entries: [CheckIn]
-
-var body: some View {
-    Text("\(entries.count) check-ins logged")
-    // This fetched every CheckIn into memory just for .count
-}
-
-// AFTER — fetch only the count
-@Observable
-final class HomeViewModel {
-    var totalEntries = 0
-
-    private let context: ModelContext
-
-    init(context: ModelContext) {
-        self.context = context
-    }
-
-    func loadStats() {
-        let descriptor = FetchDescriptor<CheckIn>()
-        totalEntries = (try? context.fetchCount(descriptor)) ?? 0
-    }
-}
-```
-
-- ✅ `fetchCount()` executes a `SELECT COUNT(*)` — no objects materialized, no memory allocated for rows
-- ✅ On 1000 entries, the difference is negligible in time but significant in memory: 0 bytes vs ~12 MB of hydrated model objects
-
-**Optimization 3 — Image Cache for Check-In Photos:**
-
-When entries have photo attachments, the history list decodes image data on every scroll pass. Without caching, scrolling back through 20 photos re-decodes 20 JPEGs from their raw `Data` blobs. This is the most common source of scroll jank in apps with images.
-
-```swift
-import UIKit
-import os
-
-actor ImageCache {
-    static let shared = ImageCache()
-
-    private let cache = NSCache<NSString, UIImage>()
-    private var inFlightTasks: [String: Task<UIImage?, Never>] = [:]
-    private let signposter = OSSignposter(
-        subsystem: "com.nativefirst.betaway", category: "ImageCache"
-    )
-
-    private init() {
-        cache.countLimit = 100
-        cache.totalCostLimit = 50 * 1024 * 1024  // 50 MB
-    }
-
-    func thumbnail(
-        for entryID: String,
-        data: Data,
-        targetSize: CGSize = CGSize(width: 120, height: 120)
-    ) async -> UIImage? {
-        let cacheKey = "\(entryID)_\(Int(targetSize.width))x\(Int(targetSize.height))" as NSString
-
-        // Check cache first
-        if let cached = cache.object(forKey: cacheKey) {
-            return cached
-        }
-
-        // Deduplicate in-flight requests for the same image
-        if let existing = inFlightTasks[cacheKey as String] {
-            return await existing.value
-        }
-
-        let task = Task<UIImage?, Never> {
-            let state = signposter.beginInterval("DecodeThumbnail")
-            defer { signposter.endInterval("DecodeThumbnail", state) }
-
-            let options: [CFString: Any] = [
-                kCGImageSourceThumbnailMaxPixelSize: max(targetSize.width, targetSize.height),
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true
-            ]
-
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-            else { return nil }
-
-            let thumbnail = UIImage(cgImage: cgImage)
-            cache.setObject(thumbnail, forKey: cacheKey, cost: data.count)
-            return thumbnail
-        }
-
-        inFlightTasks[cacheKey as String] = task
-        let result = await task.value
-        inFlightTasks.removeValue(forKey: cacheKey as String)
-        return result
-    }
-
-    func evictAll() {
-        cache.removeAllObjects()
-    }
-}
-```
-
-- ✅ `actor` provides thread-safe access without manual locking — Swift concurrency handles synchronization
-- ✅ `CGImageSourceCreateThumbnailAtIndex` decodes directly to the target size — never decodes the full-resolution image into memory
-- ✅ `NSCache` automatically evicts under memory pressure — no manual cleanup needed
-- ✅ In-flight deduplication prevents decoding the same image twice when rapid scroll events fire multiple requests
-- ✅ `os_signpost` on each decode — visible in Instruments to verify cache hits vs misses
-
-Using it in a check-in row:
-
-```swift
-struct CheckInRow: View {
-    let entry: CheckIn
-    @State private var thumbnail: UIImage?
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(entry.emoji)
-                .font(.title)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.date, format: .dateTime.month().day().hour().minute())
-                    .font(.subheadline)
-                Text("Status: \(entry.score)/10")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            if let thumbnail {
-                Image(uiImage: thumbnail)
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Image(AppConfig.Images.appLogoShield)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 44, height: 44)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .scaledToFit()
+                    .frame(height: 44)
+                    .shadow(color: ColorPalette.accent.opacity(0.3), radius: 4, y: 2)
             }
         }
-        .task(id: entry.id) {
-            guard let photoData = entry.photoData else { return }
-            thumbnail = await ImageCache.shared.thumbnail(
-                for: entry.id.uuidString,
-                data: photoData
-            )
+        .onAppear {
+            isVisible = true
+            updateWidgetData()
+        }
+        .fullScreenCover(isPresented: $showUrgeFlow) {
+            UrgeContainerView()
         }
     }
-}
-```
 
-- ✅ `.task(id: entry.id)` — cancels and restarts if the row is reused for a different entry during scroll
-- ✅ The thumbnail is loaded asynchronously — no main thread blocking
-- ✅ On subsequent appearances (scrolling back), the cache returns instantly
-
-**Optimization 4 — Background AI Processing:**
-
-```swift
-import SwiftUI
-import os
-
-@Observable
-final class CheckInLogViewModel {
-    var isSaving = false
-    var savedEntry: CheckIn?
-    var pendingInsight = false
-
-    private let aiService: AIServiceProtocol
-    private let fallbackAnalyzer = FallbackAnalyzer()
-    private let service: RecoveryService
-    private let signposter = OSSignposter(
-        subsystem: "com.nativefirst.betaway", category: "Performance"
-    )
-
-    init(aiService: AIServiceProtocol, service: RecoveryService) {
-        self.aiService = aiService
-        self.service = service
-    }
-
-    func saveCheckIn(recoveryScore: Int, note: String?, emoji: String) async {
-        isSaving = true
-        let saveState = signposter.beginInterval("SaveCheckIn")
-
-        // Save immediately with placeholder — user sees instant feedback
-        let entry = CheckIn(
-            score: score,
-            note: note,
-            emoji: emoji,
-            insight: "Generating your insight...",
-            insightSource: .onDevice
+    private func updateWidgetData() {
+        guard let profile else { return }
+        SharedDataManager.updateWidgetData(
+            currentStreak: profile.currentStreak,
+            totalSaved: profile.totalSaved,
+            quitDate: profile.quitDate,
+            hasPledgedToday: profile.hasPledgedToday(),
+            hasCheckedInToday: profile.hasCheckedInToday()
         )
-
-        do {
-            try service.save(entry)
-            savedEntry = entry
-            isSaving = false
-            signposter.endInterval("SaveCheckIn", saveState)
-        } catch {
-            isSaving = false
-            signposter.endInterval("SaveCheckIn", saveState)
-            return
-        }
-
-        // Generate AI insight in the background — UI is already updated
-        pendingInsight = true
-        let insightState = signposter.beginInterval("GenerateInsight")
-
-        let insight = await generateInsight(score: score, note: note)
-        entry.insight = insight.text
-        entry.insightSource = insight.source
-
-        do {
-            try service.save(entry)
-        } catch {
-            // Insight update failed — entry still saved with placeholder.
-            // Not critical. The user's check-in is persisted.
-        }
-
-        pendingInsight = false
-        signposter.endInterval("GenerateInsight", insightState)
-    }
-
-    private func generateInsight(
-        score: Int,
-        note: String?
-    ) async -> (text: String, source: InsightSource) {
-        do {
-            let aiInsight = try await withRetry {
-                try await self.aiService.generateInsight(
-                    recoveryScore: score,
-                    note: note
-                )
-            }
-            return (aiInsight, .ai)
-        } catch {
-            let fallback = fallbackAnalyzer.generateFallbackInsight(
-                recoveryScore: score,
-                note: note
-            )
-            return (fallback, .onDevice)
-        }
     }
 }
 ```
 
-- ✅ The check-in saves in under 100ms — the user sees confirmation immediately
-- ✅ The AI call runs asynchronously after the save — no UI freeze, no spinner
-- ✅ The entry updates in place when the insight arrives — "Generating your insight..." transitions to the real insight
-- ✅ Signposts separate save time from insight generation time in Instruments — you can see exactly where time goes
-- ⚠️ If the AI puts the entire save + insight generation into one `await` chain that blocks the UI until the insight returns, reject it. The save must complete independently
+And the `staggeredAppear` modifier from `View+Extensions.swift`:
 
-**Optimization 5 — Launch Time:**
+```swift
+extension View {
+    func staggeredAppear(index: Int, isVisible: Bool) -> some View {
+        self
+            .opacity(isVisible ? 1 : 0)
+            .offset(y: isVisible ? 0 : 20)
+            .animation(
+                AnimationPresets.cardEntry.delay(AnimationPresets.staggerDelay(for: index)),
+                value: isVisible
+            )
+    }
+}
+```
+
+Performance analysis:
+
+- **Why `ScrollView` + `VStack` instead of `LazyVStack`?** The dashboard has exactly 8 cards. All 8 are visible or nearly visible on most screen sizes. `LazyVStack` defers view creation for off-screen items — but when all items are on-screen, laziness adds measurement overhead without benefit. `VStack` is correct here.
+- **The stagger animation triggers once.** `isVisible` is set to `true` in `onAppear` and never set back to `false`. The animation runs exactly once per dashboard appearance. There is no repeated triggering.
+- **Each card animates opacity and offset.** The `.opacity` and `.offset` modifiers are cheap — they do not cause layout recalculation, only render tree changes. SwiftUI's Metal-backed renderer handles 8 concurrent opacity+offset animations without frame drops on any modern device.
+- **The `value: isVisible` parameter is critical.** Without it, the animation would trigger on every body evaluation, not just when `isVisible` changes. This is the difference between animating once and animating on every redraw.
+- **Widget data update runs on appear.** `updateWidgetData()` calls `profile.currentStreak`, `profile.totalSaved`, and two helper methods. This means those computed properties run once on dashboard appearance plus once per card that uses them. For 8 cards, this is at most ~8 evaluations of `currentStreak` — fast enough for a dashboard but worth watching if the check-in count grows to thousands.
+
+### Pattern 3 — BFProgressRing: Deferred Animation
+
+The progress ring uses a `@State` variable to defer the animation until the view appears:
 
 ```swift
 import SwiftUI
-import SwiftData
-import os
 
-@main
-struct BetAwayApp: App {
-    private let signposter = OSSignposter(
-        subsystem: "com.nativefirst.betaway", category: "Launch"
-    )
+struct BFProgressRing: View {
+    let progress: Double // 0.0 to 1.0
+    var lineWidth: CGFloat = 12
+    var size: CGFloat = 120
+    var gradient: LinearGradient = ColorPalette.primaryGradient
+    var trackColor: Color = ColorPalette.surfacePrimary
 
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .onAppear {
-                    let state = signposter.beginInterval("AppLaunchToFirstFrame")
-                    signposter.endInterval("AppLaunchToFirstFrame", state)
-                }
-        }
-        .modelContainer(for: CheckIn.self)
-    }
-}
-
-struct ContentView: View {
-    @State private var selectedTab = 0
+    @State private var animatedProgress: Double = 0
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            Tab("Log", systemImage: "plus.circle", value: 0) {
-                CheckInLogView()
-            }
+        ZStack {
+            // Background track
+            Circle()
+                .stroke(trackColor, lineWidth: lineWidth)
 
-            Tab("History", systemImage: "clock", value: 1) {
-                RecoveryHistoryView()
+            // Progress ring
+            Circle()
+                .trim(from: 0, to: animatedProgress)
+                .stroke(
+                    gradient,
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            withAnimation(AnimationPresets.gentle) {
+                animatedProgress = min(progress, 1.0)
             }
-
-            Tab("Insights", systemImage: "chart.line.uptrend.xyaxis", value: 2) {
-                InsightsView()
-            }
-
-            Tab("Settings", systemImage: "gear", value: 3) {
-                SettingsView()
+        }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(AnimationPresets.smooth) {
+                animatedProgress = min(newValue, 1.0)
             }
         }
     }
 }
 ```
 
-SwiftUI's `TabView` does not render off-screen tabs until the user navigates to them. The chart, the history list, and settings cost zero time at launch. Only the Log tab renders.
+Performance analysis:
 
-But watch for this mistake:
+- **`@State private var animatedProgress: Double = 0` starts at zero.** When the view appears, the ring animates from 0 to the target progress. This creates a smooth "fill" animation. Without this pattern, the ring would snap to its target value instantly.
+- **`onAppear` uses `AnimationPresets.gentle`** (response: 0.7, damping: 0.85). This is the slowest spring in the preset system — appropriate for a progress ring that should feel deliberate, not snappy.
+- **`onChange(of: progress)` uses `AnimationPresets.smooth`** (response: 0.5, damping: 0.8). When the progress updates (e.g., the streak advances), the ring transitions faster because the user already saw the initial fill and expects responsive updates.
+- **`Circle().trim(from:to:)` is GPU-accelerated.** SwiftUI renders trimmed circles on the GPU. The animation interpolates the `to:` parameter — the GPU draws a partial circle each frame. No CPU path recalculation needed.
+- **Potential concern: body re-evaluation.** If the parent view's body is re-evaluated (e.g., because an `@Observable` property changed), `BFProgressRing`'s body runs again. But `animatedProgress` is `@State` — it persists across re-evaluations. The ring does not re-animate from 0 unless the view is fully removed and re-inserted into the hierarchy.
+- **The `min(progress, 1.0)` guard** prevents trim values greater than 1.0, which would cause `Circle().trim` to draw a full circle plus extra (visual glitch on some iOS versions).
+
+### Pattern 4 — UserProfile Computed Properties: Cost on Every Access
+
+These are the most performance-sensitive parts of the BetFree codebase. Every time the dashboard renders, multiple views access these properties:
 
 ```swift
-// BAD — all ViewModels created at launch regardless of tab
-struct ContentView: View {
-    @State private var historyVM = RecoveryHistoryViewModel(...)   // Created at launch
-    @State private var insightsVM = InsightsViewModel(...)      // Created at launch
-    @State private var settingsVM = SettingsViewModel(...)      // Created at launch
+var daysSinceQuit: Int {
+    max(0, Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: quitDate), to: Calendar.current.startOfDay(for: Date())).day ?? 0)
+}
 
-    var body: some View {
-        TabView {
-            CheckInLogView()
-            RecoveryHistoryView(viewModel: historyVM)       // Tab is lazy...
-            InsightsView(viewModel: insightsVM)          // ...but the ViewModel
-            SettingsView(viewModel: settingsVM)           // already ran init()
+var totalSaved: Double {
+    let weeks = Double(daysSinceQuit) / 7.0
+    return weeks * averageWeeklySpend
+}
+
+var annualizedSavings: Double {
+    (averageWeeklySpend * 52)
+}
+
+var hoursSaved: Double {
+    // Estimate 2 hours per day spent on gambling
+    Double(daysSinceQuit) * 2.0
+}
+
+var currentStreak: Int {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date())
+    let quitStart = calendar.startOfDay(for: quitDate)
+
+    // If quit date is in the future, no streak yet
+    if quitStart > today { return 0 }
+
+    // Check for any relapse (evening checkin where gamblingFree == false)
+    let relapses = checkins
+        .filter { !$0.gamblingFree && $0.checkinTypeRaw == CheckinType.eveningCheckin.rawValue }
+        .sorted { $0.date > $1.date }
+
+    if let lastRelapse = relapses.first {
+        let relapsDay = calendar.startOfDay(for: lastRelapse.date)
+        let daysSinceRelapse = calendar.dateComponents([.day], from: relapsDay, to: today).day ?? 0
+        return max(0, daysSinceRelapse)
+    }
+
+    return daysSinceQuit
+}
+```
+
+Cost analysis:
+
+- **`daysSinceQuit`** — Two `Calendar.current.startOfDay` calls and one `dateComponents`. `Calendar.current` is cached by the system, but `startOfDay` allocates a new `Date` each time. Cost: negligible. This is a constant-time operation regardless of data size.
+- **`totalSaved`** — Calls `daysSinceQuit` (cheap) and does a multiplication. Cost: negligible.
+- **`annualizedSavings`** — One multiplication. Cost: zero concern.
+- **`hoursSaved`** — Calls `daysSinceQuit` and multiplies. Cost: negligible.
+- **`currentStreak`** — This is the expensive one. It iterates **all** check-ins through the `checkins` relationship, filters for relapses, and sorts by date. On a user with 365 days of check-ins (730+ entries for morning pledge + evening check-in), this is:
+  - One SwiftData relationship traversal (potential fault)
+  - One `filter` pass over all check-ins: O(n)
+  - One `sort` on the filtered results: O(k log k) where k is relapse count
+  - Called from: greeting text, streak card, milestone card, savings card, widget update
+
+That means `currentStreak` runs roughly 5 times per dashboard `body` evaluation. For 730 check-ins, each call iterates the full array. This is 5 * 730 = 3,650 iterations per dashboard render.
+
+**Is this actually a problem?** At 730 entries, probably not — modern hardware iterates arrays this size in microseconds. At 2,000+ entries on an iPhone SE, it could become measurable. The right approach: measure with Instruments at scale, and cache only if the data proves it is needed.
+
+### Pattern 5 — MainTabView: Animation in Tab Switching
+
+The tab bar uses `HapticManager` on every tab switch, which means the `isEnabled` guard runs on every tap:
+
+```swift
+ForEach(AppRouter.Tab.allCases) { tab in
+    TabBarButton(
+        tab: tab,
+        isSelected: selectedTab == tab,
+        namespace: tabNamespace
+    ) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            selectedTab = tab
+        }
+        HapticManager.lightImpact()
+    }
+}
+```
+
+Note that the tab bar creates its own inline spring animation rather than using `AnimationPresets`. This is a minor inconsistency — the `response: 0.35` and `dampingFraction: 0.7` do not exactly match any preset. For tab switching, this is harmless (the user will not notice a 0.05s response difference), but it means tuning the tab animation requires finding this inline value rather than adjusting the centralized preset.
+
+The `HapticManager.lightImpact()` call on every tab switch:
+
+```swift
+static func lightImpact() {
+    guard isEnabled else { return }
+    let generator = UIImpactFeedbackGenerator(style: .light)
+    generator.prepare()
+    generator.impactOccurred()
+}
+```
+
+This creates a new `UIImpactFeedbackGenerator` on every call. Apple recommends creating the generator ahead of time and calling `prepare()` before the event, then `impactOccurred()` when it happens. For tab switching (which happens relatively infrequently), creating a new generator each time is acceptable. For a timer that fires 900 times (the urge timer at 1/second for 15 minutes), you would want to reuse the generator.
+
+## Iteration: What to Measure and How
+
+After analyzing the code, here is what to measure with Instruments:
+
+```
+PERFORMANCE PROFILING PLAN FOR BETFREE
+=======================================
+
+1. DASHBOARD RENDER TIME:
+   [ ] Use Self._printChanges() in DashboardView body
+   [ ] Measure body evaluation count per appearance
+   [ ] Profile with Time Profiler during dashboard load
+   [ ] Expected: single body evaluation, < 16ms total
+
+2. STAGGER ANIMATION FRAME RATE:
+   [ ] Open Instruments > Core Animation / SwiftUI
+   [ ] Navigate to dashboard and watch the 8-card stagger
+   [ ] Look for frame drops during the 0.56s cascade
+   [ ] Expected: 60fps throughout (opacity + offset are GPU)
+
+3. BFPROGRESSRING ANIMATION:
+   [ ] Verify onAppear animation triggers exactly once
+   [ ] Verify onChange triggers on streak update
+   [ ] Check that body re-evaluation does NOT restart animation
+   [ ] Use Self._printChanges() to count evaluations
+
+4. USERPROFILE.CURRENTSTREAK COST:
+   [ ] Generate 730+ check-in entries for testing
+   [ ] Set breakpoint on currentStreak getter
+   [ ] Count how many times it is called per dashboard render
+   [ ] Measure time per call with Instruments Time Profiler
+   [ ] Expected: < 1ms per call at 730 entries
+
+5. TAB SWITCH PERFORMANCE:
+   [ ] Profile tab switching with Time Profiler
+   [ ] Verify HapticManager.lightImpact() cost is negligible
+   [ ] Check matchedGeometryEffect performance on tab indicator
+   [ ] Expected: < 16ms total per tab switch
+```
+
+### Improvement: Caching currentStreak in DashboardViewModel
+
+If profiling reveals that `currentStreak` is a bottleneck at scale, here is how to cache it without over-engineering:
+
+```swift
+@Observable
+final class DashboardViewModel {
+    var showCelebration = false
+    private(set) var cachedStreak: Int?
+
+    var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return LanguageManager.shared.localized("Good morning")
+        case 12..<17: return LanguageManager.shared.localized("Good afternoon")
+        case 17..<22: return LanguageManager.shared.localized("Good evening")
+        default: return LanguageManager.shared.localized("Good night")
         }
     }
-}
-```
 
-Even though tab content is deferred, the `@State` property wrappers evaluate their initial values when `ContentView` appears. If those ViewModels fetch data in `init()`, you have defeated the purpose of lazy tabs.
-
-**Fix:** Initialize ViewModels inside the tab views themselves, using `.task`:
-
-```swift
-struct RecoveryHistoryView: View {
-    @Environment(\.modelContext) private var context
-    @State private var viewModel: RecoveryHistoryViewModel?
-
-    var body: some View {
-        Group {
-            if let viewModel {
-                historyContent(viewModel)
-            } else {
-                ProgressView()
-                    .controlSize(.large)
-            }
-        }
-        .task {
-            if viewModel == nil {
-                let vm = RecoveryHistoryViewModel(context: context)
-                vm.loadInitialPage()
-                viewModel = vm
-            }
+    var greetingIcon: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return AppConfig.Icons.sun
+        case 12..<17: return AppConfig.Icons.sun
+        case 17..<22: return AppConfig.Icons.moon
+        default: return AppConfig.Icons.moon
         }
     }
-}
-```
 
-- ✅ The ViewModel is `nil` until `.task` fires — which only happens when the tab is selected
-- ✅ Data fetching happens after the view appears, not during `init()`
-- ✅ The `ProgressView` shows for a single frame at most — the initial page loads in ~45ms
-
-## Iteration: Measuring and Fixing What Remains
-
-After implementing all five optimizations, there are two common issues that surface during Instruments profiling. Send this follow-up:
-
-```
-I applied the performance optimizations. Instruments shows:
-1. Initial page load is 45ms (good), but scrolling fast through
-   history causes brief hitches when SwiftData fetches the next
-   page synchronously on the main thread.
-2. The image cache works, but cold scrolling through 20 photos
-   still causes visible stutter on first pass.
-
-Fix both:
-1. Prefetch the next page when the user scrolls within 10
-   entries of the page boundary — eliminate visible loading.
-2. Add a low-priority background decode queue for images that
-   are about to become visible, using onAppear offsets.
-
-Keep os_signpost markers for verification.
-```
-
-Here is the prefetching addition to the ViewModel:
-
-```swift
-// Add to RecoveryHistoryViewModel
-func prefetchIfNeeded(currentEntry: CheckIn) {
-    guard hasMore, !isLoadingPage else { return }
-
-    guard let index = entries.firstIndex(where: { $0.id == currentEntry.id }) else {
-        return
+    func refreshStreak(from profile: UserProfile) {
+        cachedStreak = profile.currentStreak
     }
 
-    let threshold = entries.count - 10
-    if index >= threshold {
-        loadNextPage()
+    func milestoneProgress(for profile: UserProfile) -> Double {
+        let streak = cachedStreak ?? profile.currentStreak
+        guard let nextMilestone = Milestone.next(for: streak) else {
+            return 1.0
+        }
+        let currentMilestone = Milestone.current(for: streak)
+        let start = Double(currentMilestone?.days ?? 0)
+        let end = Double(nextMilestone.days)
+        let current = Double(streak)
+
+        guard end > start else { return 1.0 }
+        return (current - start) / (end - start)
+    }
+
+    func nextMilestoneText(for profile: UserProfile) -> String? {
+        let streak = cachedStreak ?? profile.currentStreak
+        guard let next = Milestone.next(for: streak) else { return nil }
+        let remaining = next.days - streak
+        return LanguageManager.shared.localized("%lld day(s) to %@", remaining, next.title)
     }
 }
 ```
 
-And update the `LazyVStack` to trigger prefetching:
+Call `refreshStreak(from: profile)` once in `onAppear`, then use `cachedStreak` from all card views. This reduces 5+ evaluations per render to exactly 1.
 
-```swift
-LazyVStack(spacing: 0) {
-    ForEach(viewModel.entries) { entry in
-        CheckInRow(entry: entry)
-            .padding(.horizontal)
-            .padding(.vertical, 6)
-            .onAppear {
-                viewModel.prefetchIfNeeded(currentEntry: entry)
-            }
-
-        Divider()
-            .padding(.leading)
-    }
-
-    if viewModel.isLoadingPage {
-        ProgressView()
-            .padding()
-    }
-}
-```
-
-- ✅ When the user scrolls past entry 40 of a 50-entry page, the next page starts loading
-- ✅ By the time they reach entry 50, the next 50 are already appended
-- ✅ The `ProgressView` at the bottom is rarely visible — data arrives before the user scrolls there
+**Do not add this unless Instruments shows it is needed.** The current code works fine at typical data sizes. Adding caching prematurely creates a new bug class (stale cache values) without solving a real performance problem.
 
 ## Verify Phase: Instruments Profiling
 
-Open Instruments (Product > Profile in Xcode) and run these tests on a real device or simulator with 700+ test entries:
+Open Instruments (Product > Profile in Xcode) and run these tests on a real device:
 
-1. **Launch time** — Use the Time Profiler instrument. Measure from `main()` to first frame. Your signpost `AppLaunchToFirstFrame` should show under 1 second for a warm launch. On a cold launch, target under 2 seconds. If it exceeds this, check if any `init()` methods are doing work they should defer.
+1. **Dashboard render time** — Use the Time Profiler instrument. The dashboard should render all 8 cards in under 16ms (one frame at 60fps). The stagger animation should cascade smoothly over 0.56 seconds with no frame drops. If you see frame drops, check if `UserProfile.currentStreak` is being called more times than expected.
 
-2. **Scroll performance** — Open recovery history and scroll quickly through all entries. Use the SwiftUI instrument (available in Xcode 16+). No `body` evaluation should take longer than 16ms — that is one frame at 60fps. If you see spikes, check if image decoding is happening on the main thread.
+2. **Progress ring animation** — Navigate to the dashboard and watch the streak card. The `BFProgressRing` should animate from 0 to the target value exactly once. Navigate away and back — it should animate again (because `onAppear` fires). It should NOT restart mid-animation if the parent body re-evaluates.
 
-3. **Memory** — Open the Allocations instrument. Navigate to recovery history, scroll through all entries, navigate back. Memory should return close to baseline. If it grows linearly with scroll distance, you have a retain cycle or unbounded cache. The `NSCache` in `ImageCache` should handle eviction automatically.
+3. **Tab switching** — Switch tabs rapidly 10 times. Each switch should feel instant. `HapticManager.lightImpact()` should not cause any delay. The `matchedGeometryEffect` on the tab indicator should animate smoothly.
 
-4. **Page loading signposts** — In Instruments, filter by the "Performance" category. `LoadInitialPage` should be under 50ms. `LoadNextPage` should be under 30ms. `DecodeThumbnail` should show cache hits (near 0ms) on second scroll and cache misses (~5-15ms) on first scroll.
+4. **Memory** — Open the Allocations instrument. Navigate through all four tabs, then back to the dashboard. Memory should return close to baseline. If it grows, check for retain cycles in closures — particularly the `showUrgeFlow` fullScreenCover closure.
 
-5. **AI processing** — Log a check-in and watch the Time Profiler. The `SaveCheckIn` signpost should complete in under 100ms. The `GenerateInsight` signpost will be 1-3 seconds but must run on a background thread — verify it does not appear on the main thread track.
-
-If any of these fail, you have data to describe the problem precisely. "LoadNextPage takes 200ms and Allocations shows 8MB allocated during the fetch" is a prompt that gets a targeted fix. "It feels slow" is not.
+5. **Stagger animation GPU overhead** — In the Core Animation instrument, watch the dashboard stagger. All 8 animations should be GPU-composed (opacity and offset are layer properties). If you see CPU-side rendering, check for views that clip or mask (`.clipShape` forces rasterization).
 
 ## Final Code
 
-Here is the complete `RecoveryHistoryView` with all optimizations applied — lazy loading, pagination, prefetching, image caching, and deferred ViewModel initialization:
+Here is a summary of BetFree's performance-relevant patterns and their measurable impact:
 
-```swift
-import SwiftUI
-import SwiftData
-import os
-
-@Observable
-final class RecoveryHistoryViewModel {
-    private(set) var entries: [CheckIn] = []
-    private(set) var hasMore = true
-    private(set) var isLoadingPage = false
-
-    private var currentOffset = 0
-    private let pageSize = 50
-    private let context: ModelContext
-    private let signposter = OSSignposter(
-        subsystem: "com.nativefirst.betaway", category: "Performance"
-    )
-
-    init(context: ModelContext) {
-        self.context = context
-    }
-
-    func loadInitialPage() {
-        let state = signposter.beginInterval("LoadInitialPage")
-        defer { signposter.endInterval("LoadInitialPage", state) }
-
-        currentOffset = 0
-        entries = fetchPage(offset: 0)
-        hasMore = entries.count == pageSize
-    }
-
-    func loadNextPage() {
-        guard hasMore, !isLoadingPage else { return }
-        isLoadingPage = true
-
-        let state = signposter.beginInterval("LoadNextPage")
-        defer {
-            signposter.endInterval("LoadNextPage", state)
-            isLoadingPage = false
-        }
-
-        currentOffset += pageSize
-        let newEntries = fetchPage(offset: currentOffset)
-        entries.append(contentsOf: newEntries)
-        hasMore = newEntries.count == pageSize
-    }
-
-    func prefetchIfNeeded(currentEntry: CheckIn) {
-        guard hasMore, !isLoadingPage else { return }
-
-        guard let index = entries.firstIndex(where: {
-            $0.id == currentEntry.id
-        }) else { return }
-
-        if index >= entries.count - 10 {
-            loadNextPage()
-        }
-    }
-
-    private func fetchPage(offset: Int) -> [CheckIn] {
-        var descriptor = FetchDescriptor<CheckIn>(
-            sortBy: [SortDescriptor(\.date, order: .reverse)]
-        )
-        descriptor.fetchLimit = pageSize
-        descriptor.fetchOffset = offset
-
-        do {
-            return try context.fetch(descriptor)
-        } catch {
-            return []
-        }
-    }
-}
-
-struct RecoveryHistoryView: View {
-    @Environment(\.modelContext) private var context
-    @State private var viewModel: RecoveryHistoryViewModel?
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if let viewModel {
-                    historyContent(viewModel)
-                } else {
-                    ProgressView()
-                        .controlSize(.large)
-                }
-            }
-            .navigationTitle("History")
-            .task {
-                if viewModel == nil {
-                    let vm = RecoveryHistoryViewModel(context: context)
-                    vm.loadInitialPage()
-                    viewModel = vm
-                }
-            }
-        }
-    }
-
-    private func historyContent(
-        _ viewModel: RecoveryHistoryViewModel
-    ) -> some View {
-        Group {
-            if viewModel.entries.isEmpty {
-                ContentUnavailableView(
-                    "No Check-Ins Yet",
-                    systemImage: "face.smiling",
-                    description: Text("Log your first check-in to start tracking patterns.")
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(viewModel.entries) { entry in
-                            CheckInRow(entry: entry)
-                                .padding(.horizontal)
-                                .padding(.vertical, 6)
-                                .onAppear {
-                                    viewModel.prefetchIfNeeded(
-                                        currentEntry: entry
-                                    )
-                                }
-
-                            Divider()
-                                .padding(.leading)
-                        }
-
-                        if viewModel.isLoadingPage {
-                            ProgressView()
-                                .padding()
-                        }
-                    }
-                }
-                .refreshable {
-                    viewModel.loadInitialPage()
-                }
-            }
-        }
-    }
-}
-
-struct CheckInRow: View {
-    let entry: CheckIn
-    @State private var thumbnail: UIImage?
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(entry.emoji)
-                .font(.title)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.date, format: .dateTime.month().day().hour().minute())
-                    .font(.subheadline)
-                Text("Status: \(entry.score)/10")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if entry.insight != "Generating your insight..." {
-                    Text(entry.insight)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer()
-
-            if let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 44, height: 44)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
-        .task(id: entry.id) {
-            guard let photoData = entry.photoData else { return }
-            thumbnail = await ImageCache.shared.thumbnail(
-                for: entry.id.uuidString,
-                data: photoData
-            )
-        }
-    }
-}
-```
-
-Summary of every optimization and its measurable impact:
-
-| Optimization | Before | After | How to Verify |
-|---|---|---|---|
-| LazyVStack + pagination | All rows created, ~800ms first frame | 50 rows created, ~45ms first frame | Time Profiler, SwiftUI instrument |
-| #Predicate on chart query | 1000 entries fetched for 30-day chart | ~90 entries fetched | Allocations instrument |
-| fetchCount() for stats | Full object array for count | Zero objects materialized | Allocations instrument |
-| Image cache | ~15ms decode per scroll pass per image | 0ms on cache hit, ~10ms on miss | Custom signpost intervals |
-| Background AI processing | UI blocks 1-3s during insight generation | Save completes under 100ms | Time Profiler, signposts |
-| Deferred ViewModel init | All tabs initialize at launch | Only active tab initializes | Launch signpost interval |
+| Pattern | Implementation | Why It Works |
+|---|---|---|
+| AnimationPresets | Static constants for all spring/eased animations | Created once, reused everywhere. No per-frame allocation |
+| Stagger delay | `0.08s * index` for 8 cards = 0.56s total cascade | Short enough to feel responsive, long enough for visual distinction |
+| staggeredAppear | `opacity` + `offset` with `value: isVisible` | GPU-accelerated properties. Animates once per appear, not per body eval |
+| BFProgressRing | `@State animatedProgress` deferred until `onAppear` | Persists across body re-evaluations. Does not restart animation |
+| UserProfile computed props | `currentStreak` filters + sorts all check-ins | O(n) per call. Acceptable at ~730 entries. Monitor at scale |
+| HapticManager | `guard isEnabled` reads UserDefaults per call | Negligible cost. Creates new generator per call (acceptable for infrequent events) |
+| ScrollView + VStack | Fixed 8-card dashboard layout | Correct choice for small, fixed item count. LazyVStack adds overhead without benefit |
 
 ## Checkpoint
 
 Verify these before shipping:
 
-1. The app launches and shows the first tab in under 1 second (warm launch) on your oldest supported device
-2. Scrolling through 700+ entries in the history list maintains 60fps with no visible stuttering or jank
-3. Memory does not grow unbounded when scrolling through all entries and back — check with Allocations instrument
-4. Logging a check-in shows instant feedback. The save completes before the AI insight arrives
-5. The Insights chart loads only the last 30 days of data, verified by checking the `#Predicate` in the `@Query`
-6. Instruments signposts show `LoadInitialPage` under 50ms for 50 entries
-7. No `VStack` inside `ScrollView` with `ForEach` remains anywhere in the codebase — search the project to confirm
-8. Photo thumbnails load from cache on second scroll (signpost shows near-zero decode time)
-9. The `ProgressView` "loading more" spinner at the bottom of history is rarely visible because prefetching loads the next page before the user reaches it
+1. The dashboard's 8-card stagger animation runs at 60fps with no visible frame drops
+2. `AnimationPresets.staggerDelay(for: 7)` returns `0.56` — the total cascade duration for 8 cards
+3. `BFProgressRing` animates from 0 to target on appear, and responds to progress changes via `onChange`
+4. `UserProfile.currentStreak` is called a reasonable number of times per dashboard render (ideally 5 or fewer)
+5. Tab switching with `HapticManager.lightImpact()` completes in under 16ms total
+6. The dashboard uses `ScrollView` + `VStack` (not `LazyVStack`) — confirmed as the correct choice for 8 fixed cards
+7. No `Animation` values are created inline in frequently-called body properties — all use `AnimationPresets`
+8. `BFProgressRing`'s `@State animatedProgress` persists across parent body re-evaluations
 
 ## Challenge
 
-**Build a memory-aware image cache that adapts to device conditions.** Extend `ImageCache` so that it monitors `ProcessInfo.processInfo.physicalMemory` and system memory pressure notifications (`DispatchSource.makeMemoryPressureSource`). When the system signals memory pressure, the cache should reduce its `totalCostLimit` by 50% and evict the least-recently-used thumbnails. When pressure subsides, restore the original limit. Add a signpost event each time the cache resizes so you can see the adaptation in Instruments.
+**Profile `UserProfile.currentStreak` at scale and decide whether to cache it.**
+
+Generate 1,000+ check-in entries using a test data generator (wrap it in `#if DEBUG`). Navigate to the dashboard and measure with Instruments:
+
+1. How many times does `currentStreak` evaluate per dashboard render?
+2. How long does each evaluation take at 1,000+ entries?
+3. Does the total time exceed 16ms (one frame)?
+
+If it does, implement the `cachedStreak` pattern from the Iteration section. If it does not, document the measurement and leave the code as-is.
 
 <details>
 <summary>Hint</summary>
 
-Register for memory pressure events using `DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)`. In the event handler, check the `data` property for `.warning` vs `.critical` levels and adjust `NSCache.totalCostLimit` accordingly. Store the original limit so you can restore it later. Use `OSSignposter.emitEvent` to log each resize as a point-in-time event rather than an interval — this shows up as a marker in the Instruments timeline.
+Create a test data generator:
+
+```swift
+#if DEBUG
+func generateTestCheckins(context: ModelContext, profile: UserProfile) {
+    let calendar = Calendar.current
+    for dayOffset in 0..<365 {
+        guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: Date()) else { continue }
+
+        // Morning pledge
+        let pledge = DailyCheckin(checkinType: .morningPledge)
+        pledge.date = date
+        pledge.userProfile = profile
+        context.insert(pledge)
+
+        // Evening check-in
+        let checkin = DailyCheckin(
+            checkinType: .eveningCheckin,
+            mood: MoodRating.allCases.randomElement() ?? .neutral,
+            gamblingFree: Double.random(in: 0...1) > 0.05 // 95% gambling-free
+        )
+        checkin.date = date
+        checkin.userProfile = profile
+        context.insert(checkin)
+    }
+    try? context.save()
+}
+#endif
+```
+
+Then in DashboardView, add a temporary measurement:
+
+```swift
+.onAppear {
+    #if DEBUG
+    let start = CFAbsoluteTimeGetCurrent()
+    let streak = profile.currentStreak
+    let elapsed = CFAbsoluteTimeGetCurrent() - start
+    print("[Perf] currentStreak = \(streak), took \(elapsed * 1000)ms with \(profile.checkins.count) checkins")
+    #endif
+    isVisible = true
+    updateWidgetData()
+}
+```
+
+If `elapsed` is under 1ms, caching is unnecessary. If it exceeds 5ms, consider the cached approach.
+
 </details>
