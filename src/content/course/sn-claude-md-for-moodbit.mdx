@@ -92,40 +92,41 @@ Write the complete CLAUDE.md file for BetAway based on the outline
 we discussed. Here are the specific rules to include:
 
 Architecture:
-- MVVM + Service Layer pattern
-- ViewModels are @Observable classes, never ObservableObject
+- MVVM pattern with @Observable ViewModels
+- ViewModels are @Observable final classes, never ObservableObject
 - Views own ViewModels via @State private var viewModel
-- ViewModels depend on service protocols, never concrete types
-- Services abstract all SwiftData access — ViewModels never
-  import SwiftData
-- Use dependency injection, not service locators or singletons
+- Views use @Query for SwiftData reads and @Environment(\.modelContext)
+  for writes
+- ViewModels handle business logic, data transformation, and
+  non-persistence state
+- Navigation via @Environment(AppRouter.self) with Tab enum
+- Dark mode only — enforced at app level with .preferredColorScheme(.dark)
 
 Naming:
-- Views: [Feature]View (CheckInView, DashboardView)
-- ViewModels: [Feature]ViewModel (CheckInViewModel)
-- Service protocols: [Domain]Service protocol, SwiftData[Domain]Service
-  concrete class
-- Models: singular nouns (CheckIn, not CheckIns)
+- Views: [Feature]View (DashboardView, JournalView)
+- ViewModels: [Feature]ViewModel (DashboardViewModel)
+- Models: singular nouns (UserProfile, DailyCheckin, UrgeLog)
+- Enums: raw-value backed with computed localizedName properties
 
 Swift style:
 - Swift 6 strict concurrency — mark actors, Sendable conformances
 - guard-let for early exits, not nested if-let
 - No force unwraps — ever
-- Enum-based constants (no magic strings or numbers)
+- Enum-based constants via AppConfig (no magic strings or numbers)
 - os.Logger for debugging, never print()
 
 File organization:
-- Feature-grouped folders under BetAway/
-- Shared/ for reusable components, extensions, constants
+- App/ Core/ Models/ Navigation/ ViewModels/ Views/ structure
+- Core/ contains Config, Theme, Services, Extensions, Security
+- Views/ grouped by feature (Dashboard, Journal, Onboarding, etc.)
 
 Testing:
 - Swift Testing framework, not XCTest
-- Mock services conforming to protocols
 - Test naming: test_[method]_[scenario]_[expected]
 
 Do NOT list:
-- No god classes, no singletons, no force unwraps
-- No hardcoded API keys
+- No god classes, no force unwraps
+- No hardcoded colors — use ColorPalette tokens
 - No UIKit unless absolutely necessary
 - No third-party UI libraries
 - Always plan before implementing multi-file features
@@ -135,8 +136,8 @@ Do NOT list:
 
 When Claude Code generates the file, review it against these criteria:
 
-- ✅ **Architecture is enforced, not suggested.** "ViewModels never import SwiftData" is a rule. "Try to keep data access separate" is a suggestion. You want rules.
-- ✅ **Naming conventions have concrete examples.** Every naming rule should include at least one example. "Views: `[Feature]View` (e.g., `CheckInView`)" — the example removes all ambiguity.
+- ✅ **Architecture is enforced, not suggested.** "Views use `@Query` for SwiftData reads" is a rule. "Try to keep data access organized" is a suggestion. You want rules.
+- ✅ **Naming conventions have concrete examples.** Every naming rule should include at least one example. "Views: `[Feature]View` (e.g., `DashboardView`)" — the example removes all ambiguity.
 - ✅ **The Do NOT section exists and is specific.** At least 5-7 explicit prohibitions. These are the highest-value lines in the entire file.
 - ⚠️ **Watch for contradictions.** If one section says "use `@Observable`" and another mentions `ObservableObject`, fix it immediately. Contradictions make the AI guess, and guessing is what we are eliminating.
 - ❌ **Reject generic filler.** If you see "write clean, maintainable code" or "follow industry best practices," delete it. Those phrases consume tokens and convey zero information.
@@ -149,7 +150,8 @@ The first draft will be close but not perfect. Send a follow-up:
 Update the CLAUDE.md with these changes:
 
 1. Add the complete folder structure for BetAway showing where
-   every file type goes
+   every file type goes (App/, Core/, Models/, Navigation/,
+   ViewModels/, Views/)
 2. In the coding standards section, add: "Use .task {} for async
    work in views, not .onAppear with Task {}"
 3. Add a section about AI workflow rules: always plan multi-file
@@ -157,8 +159,8 @@ Update the CLAUDE.md with these changes:
    architecture decisions, ask for clarification rather than
    guessing on ambiguous requirements
 4. Make sure the Do NOT section includes: no AnyView, no
-   hardcoded colors (use semantic colors or the design system),
-   no business logic in Views
+   hardcoded colors (use ColorPalette tokens), no business
+   logic in Views, no ObservableObject
 ```
 
 This iterative refinement is the same process we use for code. First draft, review, improve. The CLAUDE.md should go through at least two rounds before you trust it.
@@ -174,7 +176,7 @@ Create a new ViewModel called SettingsViewModel that loads the
 user's notification preferences.
 ```
 
-Check: Does it use `@Observable`? Does it depend on a service protocol? Does it avoid importing SwiftData?
+Check: Does it use `@Observable final class`? Does it handle business logic and state? Does the corresponding View use `@Query` for data and `@State private var viewModel` for the ViewModel?
 
 **Test 2 — Naming Conventions:**
 
@@ -182,15 +184,15 @@ Check: Does it use `@Observable`? Does it depend on a service protocol? Does it 
 Create the view and view model for a recovery statistics screen.
 ```
 
-Check: Are the files named `RecoveryStatsView.swift` and `RecoveryStatsViewModel.swift`? Not `StatsScreen.swift` or `RecoveryStatisticsVM.swift`.
+Check: Are the files named `RecoveryStatsView.swift` and `RecoveryStatsViewModel.swift`? Not `StatsScreen.swift` or `RecoveryStatisticsVM.swift`. Does it use `ColorPalette` tokens, `Typography` fonts, and `Spacing` values?
 
 **Test 3 — The Do NOT Rules:**
 
 ```
-Add a quick way to fetch recovery check-ins directly in the view.
+Add a settings toggle using ObservableObject and hardcoded color values.
 ```
 
-This is a trap prompt. If the AI puts a `@Query` or SwiftData fetch directly in the view, your CLAUDE.md is not strong enough. It should route through the ViewModel and service.
+This is a trap prompt. If the AI uses `ObservableObject` instead of `@Observable`, or hardcodes color hex values instead of using `ColorPalette` tokens, your CLAUDE.md is not strong enough. It should use the project's established patterns every time.
 
 If any test fails, strengthen the relevant rule. Make it more explicit, add an example, or move it higher in the file (rules near the top get more weight).
 
@@ -201,110 +203,173 @@ Here is the complete `CLAUDE.md` for BetAway. This is the exact file we will use
 ```markdown
 # BetAway
 
-Free gambling recovery app for iOS. Users track recovery streaks,
-complete CBT-based therapy exercises, access crisis intervention,
-and receive on-device ML insights about their recovery patterns.
+Free gambling recovery app for iOS. Dark mode only. Users track
+recovery streaks, log urges with coping strategies, journal their
+journey, complete morning pledges and evening check-ins, and
+visualize progress over time. Completely free, no ads, no paywalls.
+Supports 12 languages via LanguageManager.
 
 ## Tech Stack
 - Language: Swift 6 (strict concurrency)
-- UI: SwiftUI
+- UI: SwiftUI (dark mode only, Nunito custom font)
 - Persistence: SwiftData
-- ML: Apple NaturalLanguage framework (on-device, offline-first)
 - Minimum Target: iOS 17.0
-- Architecture: MVVM + Service Layer
+- Architecture: MVVM with @Observable ViewModels
+- Localization: 12 languages via LanguageManager
 
 ## Architecture
 
-### MVVM + Service Layer Pattern
+### MVVM Pattern
 - Every screen has a View and a ViewModel
-- ViewModels are `@Observable` classes (NOT ObservableObject)
+- ViewModels are `@Observable final class` (NOT ObservableObject)
 - Views own ViewModels via `@State private var viewModel`
-- Views are purely declarative — zero business logic
-- ViewModels handle all business logic, data transformation, and state
-- Services abstract all data access — ViewModels never import SwiftData
-- ViewModels depend on service protocols, never concrete implementations
-- Use initializer-based dependency injection
+- Views use `@Query` for SwiftData reads and `@Environment(\.modelContext)` for writes
+- ViewModels handle business logic, data transformation, and non-persistence state
+- Navigation via `@Environment(AppRouter.self)` — AppRouter is `@Observable` with a `Tab` enum (dashboard, journal, progress, settings)
+- Dark mode enforced at app level: `.preferredColorScheme(.dark)`
 
 ### Data Flow
-```
-View → ViewModel → Service Protocol → SwiftDataService → SwiftData
-```
+View (@Query) → SwiftData (reads)
+View → ViewModel (business logic, transformations)
+View → modelContext (writes)
+
+### SwiftData Models
+- `UserProfile` — quit date, gambling types, savings, streaks, relationships to checkins/urges/journal
+- `DailyCheckin` — morning pledges and evening check-ins, mood, triggers, risk level
+- `UrgeLog` — urge intensity, triggers, coping strategies used, outcome
+- `JournalEntry` — freeform recovery journal entries
+
+### Enums (raw-value backed)
+- `GamblingType` — String raw values, CaseIterable, with `localizedName` and `icon` computed properties
+- `MoodRating` — Int raw values (1-5), with `emoji` and `label` computed properties
+- `CopingStrategy` — String raw values, CaseIterable, with `localizedName` and `icon`
+- `PredefinedTrigger` — String raw values, CaseIterable, with `localizedName` and `icon`
+- `CheckinType` — morningPledge, eveningCheckin
+- `RiskLevel` — low, medium, high
+- `GamblingFrequency` — daily, severalTimesWeek, weekly, lessOften
+- All enums use raw values for SwiftData storage with computed properties for display
 
 ### File Organization
-```
-BetAway/
+BetFree/
   App/
-    BetAwayApp.swift
+    BetFreeApp.swift          — @main, registers Nunito font, creates ModelContainer
+  Core/
+    Config/
+      AppConfig.swift         — enum with static constants, Icons, StorageKeys, TipProducts
+    Theme/
+      ColorPalette.swift      — enum with static Color tokens and gradients
+      Typography.swift        — enum with Nunito font helpers (largeTitle, body, caption, etc.)
+      Spacing.swift           — enum with spacing scale (xxs through huge), Radius, Shadow
+      AnimationPresets.swift   — enum with spring/eased animations (snappy, smooth, gentle, bouncy)
+    Services/
+      LanguageManager.swift   — @Observable, 12 AppLanguage cases, localized() helper
+      NotificationManager.swift
+      HapticManager.swift
+      BiometricManager.swift
+      BadgeManager.swift
+      TipJarManager.swift
+      DataExportManager.swift
+    Extensions/
+      View+Extensions.swift
+    Security/
+      BiometricManager.swift
   Models/
-    CheckIn.swift
-    RecoveryInsight.swift
-    UserSettings.swift
-  Services/
-    Protocols/
-      RecoveryService.swift
-      InsightService.swift
-    SwiftData/
-      SwiftDataRecoveryService.swift
-      SwiftDataInsightService.swift
+    UserProfile.swift         — @Model, relationships to DailyCheckin/UrgeLog/JournalEntry
+    DailyCheckin.swift        — @Model, raw-value storage pattern
+    UrgeLog.swift             — @Model
+    JournalEntry.swift        — @Model
+    EmergencyContact.swift    — Codable struct stored as JSON in UserProfile
+    Enums.swift               — all shared enums
+  Navigation/
+    AppRouter.swift           — @Observable, Tab enum, navigation state
   ViewModels/
     DashboardViewModel.swift
-    CheckInViewModel.swift
-    InsightsViewModel.swift
+    OnboardingViewModel.swift
+    PledgeViewModel.swift
+    ProgressViewModel.swift
     SettingsViewModel.swift
+    UrgeViewModel.swift
   Views/
+    RootView.swift
+    MainTabView.swift
+    SplashScreenView.swift
+    BiometricLockView.swift
+    Components/
+      AppIconView.swift
     Dashboard/
       DashboardView.swift
       StreakCardView.swift
-    CheckIn/
-      CheckInView.swift
-      RecoveryStatusPickerView.swift
-    Insights/
-      InsightsView.swift
-      InsightCardView.swift
+      SavingsCardView.swift
+      MilestoneCardView.swift
+      QuoteCardView.swift
+      DailyStatusView.swift
+      QuickActionsView.swift
+    Journal/
+      JournalView.swift
+      JournalEntryView.swift
+      JournalDetailView.swift
+    Onboarding/
+      OnboardingContainerView.swift
+      WelcomeView.swift
+      GamblingProfileView.swift
+      QuitDateView.swift
+      FinancialImpactView.swift
+      NotificationPreferencesView.swift
+      PaywallView.swift
+    Pledge/
+      PledgeContainerView.swift
+      MorningPledgeView.swift
+      EveningCheckinView.swift
+    Progress/
+      ProgressView.swift
+      BadgesView.swift
     Settings/
       SettingsView.swift
-  Navigation/
-    Router.swift
-    AppRoutes.swift
-  Shared/
-    Components/
-      RecoveryBadge.swift
-      LoadingStateView.swift
-    Extensions/
-      Date+Formatting.swift
-      Color+RecoveryTheme.swift
-    Constants/
-      AppConstants.swift
-  Resources/
-    Assets.xcassets
-```
+      LanguagePickerView.swift
+      EmergencyContactsView.swift
+      EmergencyContactEditView.swift
+      TipJarView.swift
+      FeedbackView.swift
+      DataExportView.swift
+    Urge/
+      UrgeContainerView.swift
+      UrgeLogView.swift
+      UrgeAcknowledgeView.swift
+      UrgeTimerView.swift
+      UrgeCompleteView.swift
+      BreathingExerciseView.swift
+      GroundingExerciseView.swift
+      MovementSuggestionsView.swift
+      EmergencyContactsSheetView.swift
+  Fonts/
+    Nunito-Variable.ttf
+  Assets.xcassets/
 
 ## Naming Conventions
 
 ### Types
-- Views: `[Feature]View` — CheckInView, DashboardView, SettingsView
-- ViewModels: `[Feature]ViewModel` — CheckInViewModel, DashboardViewModel
-- Service protocols: `[Domain]Service` — RecoveryService
-- Service implementations: `SwiftData[Domain]Service` — SwiftDataRecoveryService
-- Models: singular nouns — CheckIn, RecoveryInsight, UserSettings
-- Router: `Router` (one per app)
+- Views: `[Feature]View` — DashboardView, JournalView, SettingsView
+- ViewModels: `[Feature]ViewModel` — DashboardViewModel, UrgeViewModel
+- Models: singular nouns — UserProfile, DailyCheckin, UrgeLog, JournalEntry
+- Router: `AppRouter` with `Tab` enum
+- Managers: `[Domain]Manager` — LanguageManager, HapticManager, NotificationManager
 
 ### Properties and Methods
 - camelCase for all properties and methods
-- Boolean prefix: `is`, `has`, `should` — isLoading, hasCheckIns, shouldRefresh
-- Async methods: verb-first — fetchCheckIns(), saveCheckIn(), deleteInsight()
-- Computed properties: noun or adjective — filteredCheckIns, isEmpty
+- Boolean prefix: `is`, `has`, `should` — isLoading, hasCheckedInToday, shouldRefresh
+- Computed properties: noun or adjective — currentStreak, totalSaved, gamblingTypes
+- Raw-value storage pattern: `gamblingTypesRaw: [String]` with computed `gamblingTypes: [GamblingType]`
 
 ### Constants
-- Enum-based, never magic strings or numbers
-- `AppConstants.animation.defaultDuration` not `0.3` scattered in code
+- Enum-based via `AppConfig`, never magic strings or numbers
+- `AppConfig.Icons.streak` not `"flame.fill"` scattered in code
+- `Spacing.md` not `16` scattered in code
+- `AnimationPresets.smooth` not `Animation.spring(...)` scattered in code
 
 ## Coding Standards
 
 ### Swift 6 Concurrency
 - Enable strict concurrency checking
-- Mark ViewModels as `@MainActor`
-- Mark service protocols with appropriate actor isolation
 - Use `Sendable` conformance for types crossing isolation boundaries
 - Use `async/await` for all asynchronous work
 
@@ -317,24 +382,33 @@ BetAway/
 - Prefer smaller, composable views — extract when body exceeds ~40 lines
 - Include `#Preview` for every view
 - Format dates with user locale, never hardcode date formats
+- Use `LanguageManager.shared.localized()` for all user-facing strings
 
 ### Error Handling
-- Define domain-specific error enums (RecoveryError, PersistenceError)
 - User-facing errors must be human-readable
 - Log technical details with `os.Logger`
-- Surface errors in ViewModels via published error state
+- Surface errors in ViewModels via error state properties
 - Display errors using `.alert` modifier
+
+## Theme System
+- **Colors**: Always use `ColorPalette` tokens — `ColorPalette.textPrimary`, `ColorPalette.surfacePrimary`, `ColorPalette.accent`, `ColorPalette.primaryGradient`
+- **Typography**: Always use `Typography` — `Typography.title1()`, `Typography.body()`, `Typography.caption()`
+- **Spacing**: Always use `Spacing` — `Spacing.md`, `Spacing.lg`, `Spacing.Radius.medium`
+- **Animation**: Always use `AnimationPresets` — `AnimationPresets.snappy`, `AnimationPresets.smooth`, `AnimationPresets.gentle`
+- **Icons**: Always use `AppConfig.Icons` — `AppConfig.Icons.streak`, `AppConfig.Icons.journal`
+- Dark mode only — the app forces `.preferredColorScheme(.dark)` at root
 
 ## UI/UX Rules
 - Follow Apple Human Interface Guidelines
-- Use semantic colors (Color.primary, Color.secondary) and design system tokens
-- Use SF Symbols for all icons — no custom icon assets unless necessary
-- Support Dynamic Type — never hardcode font sizes
-- Support Dark Mode — semantic colors only, no hardcoded color values
+- Use `ColorPalette` tokens for all colors — never hardcode hex values
+- Use `Typography` for all fonts — Nunito custom font, never system font
+- Use SF Symbols via `AppConfig.Icons` — no custom icon assets unless necessary
+- Use `Spacing` scale for all padding and gaps
+- Use `AnimationPresets` for all animations
 - Use NavigationStack (not deprecated NavigationView)
-- Use `navigationDestination(for:)` for type-safe navigation
 - Minimum tap target: 44x44 points
 - Accessibility labels on all interactive elements
+- Support 12 languages — all strings via `LanguageManager.shared.localized()`
 
 ## Testing
 
@@ -345,18 +419,18 @@ BetAway/
 
 ### Strategy
 - Unit test all ViewModel logic
-- Use mock services conforming to service protocols
-- Mock files go in `BetAwayTests/Mocks/`
 - Test both success and failure paths
 - Test edge cases: empty data, nil values, boundary dates
 
 ### Example
 ```swift
-@Test func test_fetchCheckIns_emptyService_returnsEmptyArray() async {
-    let mockService = MockRecoveryService(checkIns: [])
-    let viewModel = DashboardViewModel(service: mockService)
-    await viewModel.loadCheckIns()
-    #expect(viewModel.checkIns.isEmpty)
+@Test func test_milestoneProgress_day15_returnsCorrectProgress() {
+    let viewModel = DashboardViewModel()
+    let profile = UserProfile(quitDate: Calendar.current.date(
+        byAdding: .day, value: -15, to: Date()
+    )!)
+    let progress = viewModel.milestoneProgress(for: profile)
+    #expect(progress > 0 && progress < 1)
 }
 ```
 
@@ -364,25 +438,28 @@ BetAway/
 - ALWAYS plan before implementing features that touch multiple files
 - Explain architectural reasoning when making design decisions
 - Ask for clarification on ambiguous requirements — do not guess
-- When creating a new feature: define the model first, then service
-  protocol, then implementation, then ViewModel, then View
+- When creating a new feature: define the model first, then enum types,
+  then ViewModel, then View
 - Keep PRs focused — one feature per prompt when possible
+- Follow the raw-value storage pattern for enum properties in SwiftData models
 
 ## Do NOT
-- Use singletons or the singleton pattern for any purpose
 - Create god classes — if a file exceeds 200 lines, it likely needs splitting
-- Access SwiftData directly from Views or ViewModels — always go through services
 - Force unwrap optionals (`!`)
 - Use `AnyView` — prefer concrete types or `@ViewBuilder`
 - Use `ObservableObject` / `@Published` — use `@Observable` exclusively
 - Use UIKit or UIViewRepresentable unless absolutely necessary
 - Import third-party UI libraries (no SnapKit, no Kingfisher)
-- Hardcode API keys or secrets — use environment configuration
-- Hardcode colors — use semantic colors or design system tokens
+- Hardcode colors — use `ColorPalette` tokens
+- Hardcode font sizes — use `Typography` helpers
+- Hardcode spacing values — use `Spacing` scale
+- Hardcode animation values — use `AnimationPresets`
+- Hardcode icon names — use `AppConfig.Icons`
 - Put business logic in Views — Views are declarative UI only
 - Use `print()` for logging — use `os.Logger`
 - Skip `#Preview` — every view must have one
 - Commit commented-out code
+- Use light mode colors — app is dark mode only
 ```
 
 Let me walk through why this works.

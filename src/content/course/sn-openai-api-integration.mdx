@@ -1,6 +1,6 @@
 ---
 title: "OpenAI API Integration"
-description: "Build a production networking layer for the OpenAI API with async/await, secure Keychain storage for API keys, structured request/response models, and robust error handling with retry logic."
+description: "Learn production-quality cloud API integration patterns — secure Keychain storage, async/await networking, typed errors, retry logic — and understand why BetAway deliberately rejects cloud AI in favor of privacy-first manual mood tracking."
 courseSlug: "ship-native"
 module: 4
 moduleTitle: "AI Integration"
@@ -13,13 +13,11 @@ draft: false
 pubDate: 2026-02-22
 ---
 
-BetAway has a data layer, a UI, and a persistence strategy. Users can log recovery check-ins and see their entries on a timeline. It works — but it is not smart yet. This is the lesson where BetAway gets a brain.
+BetAway has a data layer, a UI, and a persistence strategy. Users can log recovery check-ins, write journal entries, and track urge patterns on a timeline. It works — but every feature so far relies on the user self-reporting their emotional state. There is no automated analysis.
 
-Most AI-powered apps reach for a cloud API at this point. That is a valid approach for many products, but BetAway takes a different path. As a gambling recovery app, privacy is non-negotiable — users are journaling about deeply personal struggles, financial damage, and emotional triggers. Sending that data to a cloud API is a design decision we reject on principle.
+Most AI-powered apps would reach for a cloud API at this point — send journal text to GPT, get a sentiment score back, display an insight card. That is a valid approach for many products, but BetAway takes a different path. As a gambling recovery app, privacy is non-negotiable. Users are journaling about deeply personal struggles, financial damage, and emotional triggers. The real BetAway app handles mood tracking through a simple, deliberate design: the user picks their own mood rating from a 1-5 scale when they write a journal entry or complete a check-in. No text ever leaves the device. No text is ever analyzed by an algorithm. The user is the authority on their own emotional state.
 
-Instead, BetAway uses Apple's **NaturalLanguage** framework for on-device ML. All sentiment analysis runs locally on the device's Neural Engine. No API key. No network dependency. No data leaving the phone. Zero cost per analysis.
-
-That said, understanding how cloud API integration works is a critical skill for any iOS developer. You will encounter projects that require it. So this lesson teaches both: we will walk through a production-quality OpenAI integration pattern — the networking layer, Keychain storage, retry logic, error handling — and then explain why BetAway deliberately chooses the on-device alternative. Learn the cloud pattern. Understand when to reject it.
+That said, understanding how cloud API integration works is a critical skill for any iOS developer. You will encounter projects that require it. So this lesson teaches both: we walk through a production-quality OpenAI integration pattern — the networking layer, Keychain storage, retry logic, error handling — and then examine why BetAway deliberately chooses a simpler, privacy-first alternative. Learn the cloud pattern. Understand when to reject it.
 
 ## What You'll Learn
 
@@ -27,15 +25,279 @@ That said, understanding how cloud API integration works is a critical skill for
 - Store the API key securely in the iOS Keychain — never in UserDefaults, never hardcoded
 - Define structured Codable request and response models that match the OpenAI API exactly
 - Implement typed error handling with Swift 6 typed throws and automatic retry with exponential backoff
-- Understand why BetAway uses on-device ML instead, and when each approach is appropriate
+- Understand why BetAway uses manual mood tracking instead, and when each approach is appropriate
 
 ## Why This Matters
 
-Every AI-powered feature in a production app depends on one of two foundations: a secure, resilient networking layer for cloud AI, or an efficient on-device ML pipeline. If you hardcode your API key, it gets scraped from your binary within days. If you skip retry logic, users on flaky cellular connections see errors constantly. If your error types are stringly-typed, debugging production issues becomes guesswork.
+Every AI-powered feature in a production app depends on one of two foundations: a secure, resilient networking layer for cloud AI, or a local approach (manual or on-device ML). If you hardcode your API key, it gets scraped from your binary within days. If you skip retry logic, users on flaky cellular connections see errors constantly. If your error types are stringly-typed, debugging production issues becomes guesswork.
 
-The networking patterns in this lesson are not OpenAI-specific. They transfer to any authenticated API — Anthropic, Google Cloud, your own backend. Learn them once, use them everywhere. And then understand that for sensitive domains like recovery apps, the privacy-first approach of on-device ML is often the better choice.
+The networking patterns in this lesson are not OpenAI-specific. They transfer to any authenticated API — Anthropic, Google Cloud, your own backend. Learn them once, use them everywhere. And then understand that for sensitive domains like recovery apps, sometimes the right answer is to skip automated analysis entirely and let the user speak for themselves.
 
-## Plan Phase: Defining What We Build
+## How BetAway Actually Handles Mood Data
+
+Before we build a cloud API reference implementation, let us look at what BetAway actually ships. The app uses a `MoodRating` enum that maps integers 1-5 to human-readable states. This is from the real `Enums.swift`:
+
+```swift
+// BetFree/Models/Enums.swift — what BetAway actually ships
+
+enum MoodRating: Int, Codable, CaseIterable, Identifiable {
+    case veryBad = 1
+    case bad = 2
+    case neutral = 3
+    case good = 4
+    case veryGood = 5
+
+    var id: Int { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .veryBad: return "😣"
+        case .bad: return "😔"
+        case .neutral: return "😐"
+        case .good: return "🙂"
+        case .veryGood: return "😊"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .veryBad: return LanguageManager.shared.localized("Very Bad")
+        case .bad: return LanguageManager.shared.localized("Bad")
+        case .neutral: return LanguageManager.shared.localized("Okay")
+        case .good: return LanguageManager.shared.localized("Good")
+        case .veryGood: return LanguageManager.shared.localized("Great")
+        }
+    }
+}
+```
+
+And here is the `JournalEntry` model — the SwiftData model where mood is stored as a plain integer, selected by the user:
+
+```swift
+// BetFree/Models/JournalEntry.swift — what BetAway actually ships
+
+@Model
+final class JournalEntry {
+    var id: UUID = UUID()
+    var createdAt: Date = Date()
+    var title: String = ""
+    var content: String = ""
+    var mood: Int = 3
+    var promptUsed: String = ""
+
+    @Relationship(inverse: \UserProfile.journalEntries) var userProfile: UserProfile?
+
+    var moodRating: MoodRating? {
+        get { MoodRating(rawValue: mood) }
+        set { mood = newValue?.rawValue ?? 3 }
+    }
+
+    init(
+        title: String = "",
+        content: String = "",
+        mood: MoodRating = .neutral,
+        promptUsed: String = ""
+    ) {
+        self.id = UUID()
+        self.createdAt = Date()
+        self.title = title
+        self.content = content
+        self.mood = mood.rawValue
+        self.promptUsed = promptUsed
+    }
+}
+```
+
+Notice what is **not** here: no sentiment score, no confidence value, no AI-generated themes, no API call. The `mood` is an `Int` that the user selects through a mood picker. The `content` is stored locally via SwiftData and never sent anywhere. The `promptUsed` is one of several optional writing prompts (like "What am I grateful for?") — not an AI prompt, but a journaling prompt for the user.
+
+Here is how the journal entry view collects mood — the user taps an emoji to select their state. This is from the real `JournalEntryView.swift`:
+
+```swift
+// BetFree/Views/Journal/JournalEntryView.swift — what BetAway actually ships
+
+struct JournalEntryView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    let profile: UserProfile?
+    var editingEntry: JournalEntry?
+
+    @State private var title = ""
+    @State private var content = ""
+    @State private var selectedMood: MoodRating = .neutral
+    @State private var selectedPrompt: JournalPrompt?
+    @State private var isVisible = false
+
+    private var isEditing: Bool { editingEntry != nil }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.xl) {
+                // Mood selector
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("How are you feeling?")
+                        .font(Typography.headline())
+                        .foregroundStyle(ColorPalette.textPrimary)
+
+                    HStack(spacing: Spacing.md) {
+                        ForEach(MoodRating.allCases) { mood in
+                            Button {
+                                withAnimation(AnimationPresets.snappy) {
+                                    selectedMood = mood
+                                }
+                            } label: {
+                                VStack(spacing: Spacing.xxs) {
+                                    Text(mood.emoji)
+                                        .font(.system(size: selectedMood == mood ? 36 : 28))
+
+                                    Text(mood.label)
+                                        .font(Typography.caption(weight: .medium))
+                                        .foregroundStyle(
+                                            selectedMood == mood
+                                                ? ColorPalette.accent
+                                                : ColorPalette.textTertiary
+                                        )
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, Spacing.xs)
+                                .background(
+                                    selectedMood == mood
+                                        ? ColorPalette.accent.opacity(0.1)
+                                        : Color.clear
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.small, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .staggeredAppear(index: 0, isVisible: isVisible)
+
+                // ... title field, content field, save button
+            }
+        }
+    }
+
+    private func saveEntry() {
+        if let entry = editingEntry {
+            entry.title = title
+            entry.content = content
+            entry.moodRating = selectedMood
+            entry.promptUsed = selectedPrompt?.rawValue ?? entry.promptUsed
+        } else {
+            let entry = JournalEntry(
+                title: title,
+                content: content,
+                mood: selectedMood,
+                promptUsed: selectedPrompt?.rawValue ?? ""
+            )
+            entry.userProfile = profile
+            modelContext.insert(entry)
+        }
+        dismiss()
+    }
+}
+```
+
+And here is how BetAway tracks mood over time without any AI — the `ProgressViewModel` computes averages directly from the user's self-reported mood integers:
+
+```swift
+// BetFree/ViewModels/ProgressViewModel.swift — what BetAway actually ships
+
+@Observable
+final class ProgressViewModel {
+    var selectedTimeRange: TimeRange = .week
+
+    enum TimeRange: String, CaseIterable, Identifiable {
+        case week = "7D"
+        case month = "30D"
+        case threeMonths = "90D"
+
+        var id: String { rawValue }
+        var days: Int {
+            switch self {
+            case .week: return 7
+            case .month: return 30
+            case .threeMonths: return 90
+            }
+        }
+    }
+
+    // MARK: - Mood Chart Data
+
+    struct MoodDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let value: Double
+        let label: String
+    }
+
+    func moodData(from checkins: [DailyCheckin], days: Int) -> [MoodDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+
+            let dayCheckins = checkins.filter { calendar.isDate($0.date, inSameDayAs: date) }
+            guard !dayCheckins.isEmpty else { return nil }
+
+            let avgMood = Double(dayCheckins.map(\.mood).reduce(0, +)) / Double(dayCheckins.count)
+            let label = MoodRating(rawValue: Int(avgMood.rounded())) ?? .neutral
+
+            return MoodDataPoint(date: date, value: avgMood, label: label.emoji)
+        }
+        .reversed()
+    }
+
+    // MARK: - Summary Stats
+
+    struct SummaryStats {
+        let totalUrges: Int
+        let resistedUrges: Int
+        let resistRate: Double
+        let avgMood: Double
+        let journalEntries: Int
+        let pledgesMade: Int
+    }
+
+    func summaryStats(
+        urgeLogs: [UrgeLog],
+        checkins: [DailyCheckin],
+        journalEntries: [JournalEntry],
+        days: Int
+    ) -> SummaryStats {
+        let calendar = Calendar.current
+        let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? Date()
+
+        let periodUrges = urgeLogs.filter { $0.timestamp >= cutoff }
+        let periodCheckins = checkins.filter { $0.date >= cutoff }
+        let periodJournals = journalEntries.filter { $0.createdAt >= cutoff }
+
+        let resisted = periodUrges.filter(\.didResist).count
+        let resistRate = periodUrges.isEmpty ? 1.0 : Double(resisted) / Double(periodUrges.count)
+
+        let moodCheckins = periodCheckins.filter { $0.mood > 0 }
+        let avgMood = moodCheckins.isEmpty ? 3.0 : Double(moodCheckins.map(\.mood).reduce(0, +)) / Double(moodCheckins.count)
+
+        let pledges = periodCheckins.filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }.count
+
+        return SummaryStats(
+            totalUrges: periodUrges.count,
+            resistedUrges: resisted,
+            resistRate: resistRate,
+            avgMood: avgMood,
+            journalEntries: periodJournals.count,
+            pledgesMade: pledges
+        )
+    }
+}
+```
+
+No sentiment analysis. No NLP. The mood trend chart plots what the user told the app, not what an algorithm inferred. This is a deliberate design choice: the user is the expert on their own emotional state. An ML model guessing "you seem sad" based on text analysis is both less accurate and less empowering than the user saying "I feel sad today."
+
+## Plan Phase: The Cloud Pattern (Reference Implementation)
+
+Now let us build the cloud API integration that BetAway chose not to use. These patterns transfer to any authenticated API.
 
 Open Claude Code in your BetAway project directory and send this planning prompt:
 
@@ -48,12 +310,12 @@ Context:
 - BetAway is a SwiftUI app using MVVM + Service Layer, Swift 6,
   SwiftData, targeting iOS 17+
 - We want to understand how cloud sentiment analysis works, even
-  though BetAway will use on-device ML (NaturalLanguage framework)
+  though BetAway uses manual mood tracking (MoodRating enum, 1-5)
   for privacy reasons
 - The reference implementation should send a recovery journal entry
   (user text) to GPT and receive structured sentiment analysis back
 - The response should include: sentiment (positive/neutral/negative),
-  a confidence score (0.0–1.0), up to 3 key themes, and a short
+  a confidence score (0.0-1.0), up to 3 key themes, and a short
   AI-generated insight (1-2 sentences)
 
 Plan these files:
@@ -72,14 +334,14 @@ Claude Code will produce a structured plan. Review it for a few things.
 
 **Check the error cases.** You need at minimum: invalid API key, rate limited (429), server error (5xx), network unreachable, decoding failure, and empty response. If the plan is missing rate limiting, add it — OpenAI enforces hard limits and you will hit them during development.
 
-**Check the Keychain approach.** If the plan suggests UserDefaults, Environment variables at runtime, or a hardcoded string, reject it immediately.
+**Check the Keychain approach.** If the plan suggests UserDefaults, Environment variables at runtime, or a hardcoded string, reject it immediately. BetAway's real codebase does not store any API keys because it does not call any cloud APIs — but if it did, the Keychain is the only acceptable location.
 
 ### The Anti-Pattern
 
 Here is what bad OpenAI integration looks like — and what AI will generate if you prompt lazily:
 
 ```swift
-// DO NOT DO THIS
+// Reference implementation — DO NOT DO THIS
 let apiKey = "sk-proj-abc123..." // Hardcoded. Scraped in hours.
 
 let json = try JSONSerialization.jsonObject(with: data) as! [String: Any] // Force cast. Crash.
@@ -91,7 +353,7 @@ let content = (json["choices"] as! [[String: Any]])[0]["message"] // Force unwra
 
 Hardcoded keys get extracted from your app binary with trivial tooling. Force-unwrapping JSON crashes the moment OpenAI changes their response format — which they do. No retry logic means every transient network hiccup becomes a user-visible error. We are going to do better.
 
-## Execute Phase: Implementation
+## Execute Phase: Reference Implementation
 
 Now send the execution prompt:
 
@@ -178,13 +440,15 @@ Before moving on, verify these things manually:
 4. **Check retry logic.** Read `OpenAIService.swift` and confirm it only retries on 429 and 5xx. Confirm it reads the `Retry-After` header on 429 responses. Confirm the backoff is exponential (1s, 2s, 4s), not linear.
 5. **Check that the API key is never hardcoded.** Search the entire project for `sk-`. There should be zero results.
 
-## Final Code
+## Final Code (Reference Implementation)
 
-Here is the complete, production-quality implementation. Every file compiles with Swift 6 strict concurrency enabled. Note: BetAway uses on-device ML for its actual sentiment analysis (covered in the next lesson). This OpenAI integration serves as a reference pattern for cloud API work you will encounter in other projects.
+Here is the complete, production-quality reference implementation. Every file compiles with Swift 6 strict concurrency enabled. **BetAway does not ship any of this code.** The real app uses manual mood tracking with `MoodRating` (shown above). This OpenAI integration serves as a reference pattern for cloud API work you will encounter in other projects.
 
 ### APIError.swift
 
 ```swift
+// Reference implementation — not shipped in BetAway
+
 import Foundation
 
 enum APIError: Error, LocalizedError, Sendable {
@@ -234,6 +498,9 @@ enum APIError: Error, LocalizedError, Sendable {
 ### KeychainHelper.swift
 
 ```swift
+// Reference implementation — not shipped in BetAway
+// BetAway has no API keys because it makes no cloud API calls.
+
 import Foundation
 import Security
 
@@ -308,6 +575,8 @@ struct KeychainHelper: Sendable {
 ### ChatMessage.swift
 
 ```swift
+// Reference implementation — not shipped in BetAway
+
 import Foundation
 
 // MARK: - Request Models
@@ -402,6 +671,8 @@ private struct SentimentPayload: Decodable {
 ### OpenAIService.swift
 
 ```swift
+// Reference implementation — not shipped in BetAway
+
 import Foundation
 import os
 
@@ -616,7 +887,7 @@ final class OpenAIService: Sendable {
 }
 ```
 
-A few things worth calling out in this implementation.
+A few things worth calling out in this reference implementation.
 
 **The `SentimentPayload` is private.** The rest of the app never sees it. It exists solely to decode GPT's JSON content string into a `SentimentResult`. If OpenAI changes their response format, you update `ChatCompletionResponse`. If you change how you prompt GPT, you update `SentimentPayload`. Neither change touches your views or view models.
 
@@ -628,37 +899,87 @@ A few things worth calling out in this implementation.
 
 **Retry only fires on 429 and 5xx.** A 401 means your key is wrong — retrying will not fix it. A 400 means your request is malformed — retrying will not fix it. Only transient errors (rate limits, server hiccups) get retried. This is a decision most tutorials get wrong.
 
-### Why BetAway Uses On-Device ML Instead
+### Why BetAway Uses Manual Mood Tracking Instead
 
 Now that you understand how cloud API integration works, here is why BetAway deliberately avoids it:
 
-1. **Privacy** — Recovery journal entries contain deeply sensitive information: gambling amounts, emotional breakdowns, relationship damage, financial details. Sending this to any cloud API — even one with good privacy policies — is a trust violation. BetAway promises that journal text never leaves the device.
+1. **Privacy** — Recovery journal entries contain deeply sensitive information: gambling amounts, emotional breakdowns, relationship damage, financial details. Sending this to any cloud API — even one with good privacy policies — is a trust violation. BetAway's `JournalEntry.content` is stored locally in SwiftData and never leaves the device.
 
-2. **Offline-first** — Users in crisis need the app to work immediately, regardless of network conditions. A cloud dependency means the app fails exactly when the user needs it most.
+2. **User agency** — BetAway's `MoodRating` lets the user declare their own emotional state. An algorithm guessing "you seem negative" based on text analysis can be wrong, patronizing, or triggering. The user tapping a mood emoji is always accurate to their experience.
 
-3. **Zero cost** — No API key management, no billing, no usage caps. The app is completely free and stays that way.
+3. **Offline-first** — Users in crisis need the app to work immediately, regardless of network conditions. The `EveningCheckinView` mood selector works in airplane mode, underground, anywhere. A cloud dependency means the app fails exactly when the user needs it most.
 
-4. **Speed** — On-device sentiment analysis with NLTagger runs in under 10 milliseconds. A cloud round-trip takes 500ms to 2 seconds. For a crisis intervention feature, that latency matters.
+4. **Zero cost** — No API key management, no billing, no usage caps. BetAway is completely free and stays that way. The real `AppConfig.swift` has no API-related configuration at all.
 
-The next lesson builds BetAway's actual sentiment analysis using Apple's NaturalLanguage framework — the approach we ship in production.
+5. **Simplicity** — The `ProgressViewModel.moodData(from:days:)` method computes mood trends by averaging integers. No parsing, no error handling, no retry logic. Simple code has fewer bugs.
+
+The real BetAway check-in flow — from the actual `DailyCheckin` model — stores mood as a raw integer alongside gambling-free status, triggers, and notes:
+
+```swift
+// BetFree/Models/DailyCheckin.swift — what BetAway actually ships
+
+@Model
+final class DailyCheckin {
+    var id: UUID = UUID()
+    var date: Date = Date()
+    var checkinTypeRaw: String = CheckinType.morningPledge.rawValue
+    var mood: Int = MoodRating.neutral.rawValue
+    var gamblingFree: Bool = true
+    var amountGambled: Double?
+    var pledgeReason: String = ""
+    var notes: String = ""
+    var triggersRaw: [String] = []
+    var riskLevelRaw: String = RiskLevel.low.rawValue
+    var createdAt: Date = Date()
+
+    @Relationship(inverse: \UserProfile.checkins) var userProfile: UserProfile?
+
+    var moodRating: MoodRating {
+        get { MoodRating(rawValue: mood) ?? .neutral }
+        set { mood = newValue.rawValue }
+    }
+
+    var triggers: [PredefinedTrigger] {
+        get { triggersRaw.compactMap { PredefinedTrigger(rawValue: $0) } }
+        set { triggersRaw = newValue.map(\.rawValue) }
+    }
+
+    init(
+        checkinType: CheckinType,
+        mood: MoodRating = .neutral,
+        gamblingFree: Bool = true,
+        pledgeReason: String = "",
+        notes: String = ""
+    ) {
+        self.id = UUID()
+        self.date = Date()
+        self.checkinTypeRaw = checkinType.rawValue
+        self.mood = mood.rawValue
+        self.gamblingFree = gamblingFree
+        self.pledgeReason = pledgeReason
+        self.notes = notes
+        self.createdAt = Date()
+    }
+}
+```
+
+This model captures everything BetAway needs for mood trend analysis without any AI: a mood integer, a boolean for gambling-free status, an array of predefined triggers, and optional notes. The `PledgeViewModel` saves check-ins directly to SwiftData with no intermediate processing step.
 
 ## Checkpoint
 
 Before moving to the next lesson, confirm all of the following:
 
-- [ ] Project builds with zero warnings under Swift 6 strict concurrency
-- [ ] `APIError` conforms to both `Error` and `Sendable`
-- [ ] `KeychainHelper` uses `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
-- [ ] `ChatCompletionRequest` has `CodingKeys` mapping `maxTokens` to `max_tokens`
-- [ ] `OpenAIService.analyzeSentiment` uses typed throws (`throws(APIError)`)
-- [ ] Retry logic only retries on 429 and 5xx status codes
+- [ ] You understand the difference between BetAway's real approach (manual `MoodRating` selection) and cloud sentiment analysis
+- [ ] You can identify the `APIError` pattern — `LocalizedError` conformance, typed throws, retryable classification
+- [ ] You know why `KeychainHelper` uses `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (survives backgrounding, excluded from backups)
+- [ ] `ChatCompletionRequest` has `CodingKeys` mapping `maxTokens` to `max_tokens` for OpenAI's snake_case JSON
+- [ ] Retry logic only retries on 429 and 5xx — not 401 or 400
 - [ ] The `Retry-After` header is respected on 429 responses
-- [ ] Searching the project for `sk-` returns zero results
-- [ ] The API key is read from `KeychainHelper`, never passed as a parameter from the UI layer
-- [ ] You understand why BetAway uses on-device ML instead of this cloud approach
+- [ ] You understand why BetAway chose manual mood tracking over cloud or on-device sentiment analysis
+- [ ] Searching BetAway's real codebase for `sk-`, `OpenAI`, `NLTagger`, or `APIKey` returns zero results — the real app has no AI dependencies
 
 ## Challenge
 
-**Add a token budget guard.** Before sending a request, estimate the token count of the user's journal entry (rough heuristic: 1 token per 4 characters in English). If the entry would exceed a configurable maximum (say 1000 tokens), return a new `APIError.inputTooLong(estimatedTokens: Int, limit: Int)` case instead of making the network call. This prevents wasting money on entries that will be truncated by the `max_tokens` limit anyway.
+**Add a token budget guard.** Before sending a request in the reference `OpenAIService`, estimate the token count of the user's journal entry (rough heuristic: 1 token per 4 characters in English). If the entry would exceed a configurable maximum (say 1000 tokens), return a new `APIError.inputTooLong(estimatedTokens: Int, limit: Int)` case instead of making the network call. This prevents wasting money on entries that will be truncated by the `max_tokens` limit anyway.
 
 *Hint:* Add the estimation as a private method on `OpenAIService`. The check goes at the top of `analyzeSentiment(text:)`, before you even read the API key. Add the new case to `APIError` with a user-friendly description like "Your entry is too long for analysis. Try shortening it."

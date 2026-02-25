@@ -1,111 +1,123 @@
 ---
 title: "Charts Framework"
-description: "Visualize recovery progress with Swift Charts — line charts for streaks over time, bar charts for check-in distribution, and weekly comparisons with custom styling that matches your design system."
+description: "Visualize recovery progress with Swift Charts — a mood trend line chart, urge frequency bar chart, stat summary cards, and a custom progress ring, all driven by a ProgressViewModel that keeps computation out of the view body."
 courseSlug: "ship-native"
 module: 5
 moduleTitle: "System Frameworks"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Swift Charts", "Data Visualization", "Line Chart", "Bar Chart", "Custom Styling", "Recovery Progress", "BetAway"]
+topics: ["Swift Charts", "Data Visualization", "Line Chart", "Bar Chart", "Custom Progress Ring", "Recovery Analytics", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Your users have been logging recovery check-ins for weeks. The data is sitting in SwiftData. But raw data is not insight — a list of check-ins is useless unless you can see the patterns. Did the user's recovery streak improve this week compared to last? Are mornings consistently harder than evenings? What is the overall distribution of recovery statuses?
+Your users have been logging daily check-ins, urge events, and journal entries for weeks. The data is sitting in SwiftData. But raw data is not insight — a list of urge logs tells you nothing about whether this week was better than last. Is the user's mood trending up? Are urges becoming less frequent? What are the top triggers?
 
-This is what Swift Charts is for. Apple shipped it in iOS 16, and it is the right way to build data visualizations in SwiftUI. No third-party libraries, no UIKit wrapping, no Core Graphics paths. Declarative chart building that fits naturally into your existing views.
+This is what Swift Charts is for. Apple shipped it in iOS 16, and it is the right way to build data visualizations in SwiftUI. No third-party libraries, no UIKit wrapping, no Core Graphics paths. Declarative chart building that fits naturally into your existing views. For non-chart visuals like progress rings and stat cards, you build custom SwiftUI components that match your design system.
 
 ## What You'll Learn
 
-- Build a `LineMark` chart that shows recovery streaks over time with smooth interpolation
-- Build a `BarMark` chart that shows check-in distribution across recovery status categories
-- Create a `ChartDataProvider` that aggregates raw check-ins into chart-ready data outside the view
-- Apply custom styling — brand colors, axis formatting, animations on data load — so your charts look intentional, not default
+- Build a `ProgressViewModel` that aggregates raw SwiftData records into chart-ready data structures outside the view body
+- Build a `LineMark` + `AreaMark` mood trend chart with emoji Y-axis labels and catmullRom interpolation
+- Build a `BarMark` urge frequency chart with conditional coloring (danger for urges, success for clean days)
+- Create summary stat cards (`StatMiniCard`) and a weekly summary card with computed statistics
+- Build a custom animated `BFProgressRing` component using `Circle().trim()` and `StrokeStyle`
+- Compose everything into a `ProgressAnalyticsView` with a time range picker (7D / 30D / 90D)
 
 ## Why This Matters
 
 Every health, recovery, and wellness app ships with charts. Users expect them. But most AI-generated charts look like developer demos — default colors, no labels, no loading states, raw data dumped into a `Chart{}` block. That is not a feature; that is a prototype.
 
-Production charts need three things AI tends to skip: data aggregation before rendering, custom styling that matches your design system, and graceful handling of edge cases like empty data or single-day ranges. We are going to build all three.
+Production analytics screens need several things AI tends to skip: a view model that pre-computes data for multiple time ranges, custom styling that matches your design system (brand colors, typography, spacing tokens), stat cards that give context alongside charts, and graceful handling of empty states. BetFree builds all of this with a combination of Swift Charts for the actual graphs and custom SwiftUI views for everything else.
 
 ## Plan Phase: Defining What We Build
 
-We need three chart components: a line chart for recovery streaks over time, a bar chart for check-in distribution, and a weekly comparison view. But before any chart renders, we need a data provider that transforms raw `CheckIn` records into chart-friendly structures.
+We need an analytics screen with five sections: a time range picker, summary stat cards, a mood trend line chart, an urge frequency bar chart, and a top triggers list. But before any view renders, we need a view model that transforms raw SwiftData records into chart-friendly structures.
 
 Here is the prompt for the planning phase:
 
 ```
 I'm building a gambling recovery app called BetAway using
-SwiftUI and SwiftData. I need to add data visualization for
-recovery progress.
+SwiftUI and SwiftData. I need to add a progress analytics
+screen.
 
 Here's the context:
-- CheckIn model has: id, status (1-5 scale), date, note
-- Users log 1-3 check-ins per day
+- DailyCheckin model has: date, mood (1-5 Int), checkinTypeRaw
+- UrgeLog model has: timestamp, intensity (Int), didResist (Bool),
+  triggerRaw (String)
+- JournalEntry model has: createdAt
+- UserProfile model has: currentStreak, totalSaved
 - Target iOS 17+, Swift 6, @Observable pattern
+- Design system uses ColorPalette, Typography, Spacing tokens
 
 I need:
-1. A ChartDataProvider that aggregates CheckIn data into
-   chart-ready structures (daily averages, status distribution,
-   weekly summaries)
-2. A RecoveryTrendChart (LineMark) showing daily average
-   recovery status over the last 30 days
-3. A StatusDistributionChart (BarMark) showing count of each
-   recovery status (1-5)
-4. A WeeklyComparisonChart showing this week vs last week
-5. A RecoveryChartView that composes all three with a picker
+1. A ProgressViewModel that computes mood data points, urge data
+   points, trigger stats, and summary stats from raw SwiftData
+   records, filtered by a selectable time range (7D, 30D, 90D)
+2. A mood trend chart (LineMark + AreaMark) showing daily average
+   mood over the selected time range
+3. An urge frequency chart (BarMark) showing daily urge count
+4. Summary stat cards showing resist rate, total urges, journal
+   entries, and pledges made
+5. A top triggers section showing the most common urge triggers
+   with percentage bars
+6. A ProgressAnalyticsView that composes all of these
 
 Requirements:
-- Charts should animate on data load
-- Use brand colors (I'll define them), not defaults
-- Handle empty states — no data yet, single day only
 - Do NOT compute aggregations inside the view body
 - Use Swift Charts framework (import Charts)
+- Handle empty states with a custom empty state view
+- Match the design system (ColorPalette, Typography, Spacing)
+- Mood Y-axis should show emoji labels, not just numbers
 
 What's your implementation plan? List the types you'll create
 and their responsibilities before writing code.
 ```
 
-**What to look for in the plan.** The AI should propose separate data types for chart data (not reusing CheckIn directly), a provider class that does the aggregation, and individual chart views that receive pre-computed data. If the AI proposes doing `.filter()` and `.reduce()` inside the `Chart{}` body, that is wrong — push back immediately.
+**What to look for in the plan.** The AI should propose separate data types for chart data (not reusing DailyCheckin or UrgeLog directly), a view model class that does the aggregation, and individual chart sections that receive pre-computed data. If the AI proposes doing `.filter()` and `.reduce()` inside the `Chart{}` body, that is wrong — push back immediately.
 
-**Anti-pattern: computing chart data in the view.** This is the most common mistake. AI will generate something like `Chart { ForEach(entries.filter { Calendar.current.isDate($0.date, equalTo: ...) }) }` directly in the view body. Every redraw re-filters and re-aggregates. The data provider pattern keeps computation out of the render path.
+**Anti-pattern: computing chart data in the view.** This is the most common mistake. AI will generate something like `Chart { ForEach(urgeLogs.filter { Calendar.current.isDate($0.timestamp, ...) }) }` directly in the view body. Every redraw re-filters and re-aggregates. The view model pattern keeps computation out of the render path.
 
 ## Execute Phase: Implementation
 
 Now we generate the actual code. Send this prompt:
 
 ```
-Generate the ChartDataProvider and all chart views based on
-the plan. Use these specifics:
+Generate the ProgressViewModel and all chart views based on the
+plan. Use these specifics:
 
-- ChartDataProvider is @Observable, takes [CheckIn] in
-  a refresh method
-- DailyStatusAverage struct: date (Date), averageStatus (Double)
-- StatusDistribution struct: level (Int), count (Int),
-  label (String)
-- WeeklySummary struct: dayOfWeek (String), thisWeek (Double?),
-  lastWeek (Double?)
-- Brand colors: status 1 = .red, 2 = .orange, 3 = .yellow,
-  4 = .mint, 5 = .green
-- LineMark with .interpolationMethod(.catmullRom) for smooth
-  curves
-- BarMark with cornerRadius and brand color per bar
-- Animate chart appearance with .opacity transition
-- Handle empty data with ContentUnavailableView
+- ProgressViewModel is @Observable, has a selectedTimeRange
+  property with a TimeRange enum (week/month/threeMonths)
+- MoodDataPoint struct: date (Date), value (Double), label (String)
+- UrgeDataPoint struct: date (Date), count (Int),
+  avgIntensity (Double)
+- TriggerStat struct: trigger (PredefinedTrigger), count (Int),
+  percentage (Double)
+- SummaryStats struct: totalUrges, resistedUrges, resistRate,
+  avgMood, journalEntries, pledgesMade
+- LineMark with .interpolationMethod(.catmullRom) for smooth curves
+- AreaMark with gradient fill below the line
+- BarMark with conditional color: danger for urge days, success
+  for clean days, cornerRadius(4)
+- Y-axis for mood chart shows emoji labels via MoodRating enum
+- Empty state with custom view, not ContentUnavailableView
+- Use ColorPalette, Typography, Spacing tokens throughout
+- Wrap chart sections in BFCard containers
 
-Put ChartDataProvider in Services/ChartDataProvider.swift
-Put chart views in Views/Charts/
+Put ProgressViewModel in ViewModels/ProgressViewModel.swift
+Put the analytics view in Views/Progress/ProgressView.swift
 ```
 
 Review the AI output against this checklist:
 
 - **Data types are value types (structs), not classes.** Chart data is immutable once computed. If the AI made them classes, change to structs.
-- **ChartDataProvider.refresh() does the heavy lifting.** It should loop through check-ins once, compute all three aggregations, and store the results as published properties. Not three separate methods that each iterate the full dataset.
+- **ProgressViewModel methods accept arrays and a day count.** Each method like `moodData(from:days:)` takes the SwiftData arrays and a day count, iterates once, and returns the pre-computed result. Not separate methods that each iterate the full dataset for different ranges.
 - **LineMark uses `.interpolationMethod(.catmullRom)`.** If the AI used `.linear` or omitted interpolation, the line will look jagged. CatmullRom gives smooth curves through data points.
-- **BarMark has `.cornerRadius()`.** Default bars look flat and dated. Even 4 points of corner radius makes a visible difference.
-- **Empty state handling exists.** If `dailyAverages` is empty, the chart should show a `ContentUnavailableView`, not an empty axes frame.
+- **BarMark has `.cornerRadius()` and conditional coloring.** Bars for days with urges should be danger-colored; bars for clean days should be success-colored. Default bars with one flat color are not enough.
+- **Empty state handling exists.** If `moodData` returns an empty array, the chart section should show a custom empty state, not an empty axes frame.
+- **Time range picker uses capsule-style buttons.** The picker should not be a plain segmented control — it should match the design system with `ColorPalette.accent` for the selected state and `ColorPalette.surfaceSecondary` for unselected.
 
 ## Iteration
 
@@ -114,442 +126,822 @@ The first pass usually gets the data flow right but misses styling details. Send
 ```
 The charts work but need polish:
 
-1. The Y axis should show recovery status labels instead of
-   numbers: 1 = "Crisis", 2 = "Struggling", 3 = "Coping",
-   4 = "Strong", 5 = "Thriving"
-2. The X axis on the line chart should show abbreviated dates
-   (e.g., "Feb 3") not full timestamps
-3. Add a .chartYScale(domain: 1...5) so the axis doesn't auto-
-   scale and jump around when data changes
-4. Add an area gradient below the line chart (use
-   .foregroundStyle with a linear gradient from brand color
-   to clear)
-5. The weekly comparison should use grouped bars with a legend
-6. Add .animation(.easeInOut(duration: 0.4), value: data) to
-   each chart so data transitions are smooth
+1. The Y axis on the mood chart should show emoji labels via
+   MoodRating(rawValue:)?.emoji, not numbers
+2. Grid lines should use dashed strokes:
+   StrokeStyle(lineWidth: 0.5, dash: [4])
+3. Grid lines and axis labels should use
+   ColorPalette.textTertiary.opacity(0.3)
+4. Add an area gradient below the line chart using
+   ColorPalette.accent.opacity(0.3) to
+   ColorPalette.accent.opacity(0.05)
+5. The X axis should format dates as day + abbreviated month
+6. Add PointMark dots on each data point with symbolSize(30)
+7. Add .chartYScale(domain: 1...5) so the axis doesn't auto-scale
+8. Summary stats should use StatMiniCard components laid out in
+   a 2x2 grid
+9. Top triggers should show horizontal progress bars with
+   GeometryReader for proportional widths
 ```
 
-This iteration takes the charts from "works" to "ships." The fixed Y-axis domain is especially important — without it, a day where all statuses are 4-5 will auto-scale to fill the chart, making it look like there is huge variation when there is not.
+This iteration takes the analytics screen from "works" to "ships." The fixed Y-axis domain on the mood chart is especially important — without it, a day where all moods are 4-5 will auto-scale to fill the chart, making it look like there is huge variation when there is not.
 
 ## Verify Phase
 
 Build and run. Check these things manually:
 
-1. **Line chart with 30 days of data** — does the curve look smooth? Are the X-axis labels readable and not overlapping?
-2. **Line chart with 1 day of data** — does it show a single dot, not a broken line?
-3. **Line chart with 0 data** — does it show the empty state, not a blank chart frame?
-4. **Bar chart** — are the colors correct for each recovery status level? Does the count label show on or above each bar?
-5. **Weekly comparison** — do "this week" and "last week" bars appear side by side? Is the legend visible?
-6. **Animation** — navigate to the charts tab. Do the charts animate in, or do they pop?
-7. **Performance** — with 90 days of data (roughly 180 check-ins), does the chart view load without lag? If you see a hitch, check that `ChartDataProvider.refresh()` is not being called on every frame.
+1. **Mood chart with 30 days of data** — does the curve look smooth? Are the emoji labels on the Y axis visible? Are X-axis date labels readable and not overlapping?
+2. **Mood chart with 1 day of data** — does it show a single dot, not a broken line?
+3. **Mood chart with 0 data** — does it show the empty state message, not a blank chart frame?
+4. **Urge chart** — are bars colored correctly? Danger red for days with urges, success green for clean days? Does corner radius look right?
+5. **Time range picker** — does switching between 7D, 30D, and 90D update both charts? Does the X-axis stride adjust so labels do not overlap?
+6. **Summary stat cards** — do all four stats compute correctly? Does the resist rate show as a percentage?
+7. **Top triggers** — do the progress bars render proportionally? Does the section show "Triggers will appear as you log urges" when empty?
+8. **Performance** — with 90 days of data, does the view load without lag? If you see a hitch, check that view model methods are not being called on every frame.
 
 ## Final Code
 
-### ChartDataProvider
+### ProgressViewModel
 
 ```swift
-import Foundation
-
-struct DailyStatusAverage: Identifiable {
-    let id = UUID()
-    let date: Date
-    let averageStatus: Double
-}
-
-struct StatusDistribution: Identifiable {
-    let id = UUID()
-    let level: Int
-    let count: Int
-
-    var label: String {
-        switch level {
-        case 1: "Crisis"
-        case 2: "Struggling"
-        case 3: "Coping"
-        case 4: "Strong"
-        case 5: "Thriving"
-        default: "Unknown"
-        }
-    }
-}
-
-struct WeeklySummary: Identifiable {
-    let id = UUID()
-    let dayOfWeek: String
-    let thisWeek: Double?
-    let lastWeek: Double?
-}
+import SwiftUI
+import SwiftData
 
 @Observable
-final class ChartDataProvider {
-    var dailyAverages: [DailyStatusAverage] = []
-    var statusDistribution: [StatusDistribution] = []
-    var weeklySummary: [WeeklySummary] = []
-    var hasData: Bool { !dailyAverages.isEmpty }
+final class ProgressViewModel {
+    var selectedTimeRange: TimeRange = .week
 
-    func refresh(from checkIns: [CheckIn]) {
-        computeDailyAverages(checkIns)
-        computeStatusDistribution(checkIns)
-        computeWeeklySummary(checkIns)
+    enum TimeRange: String, CaseIterable, Identifiable {
+        case week = "7D"
+        case month = "30D"
+        case threeMonths = "90D"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+        }
+
+        var days: Int {
+            switch self {
+            case .week: return 7
+            case .month: return 30
+            case .threeMonths: return 90
+            }
+        }
+
     }
 
-    private func computeDailyAverages(_ checkIns: [CheckIn]) {
+    // MARK: - Mood Chart Data
+
+    struct MoodDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let value: Double
+        let label: String
+    }
+
+    func moodData(from checkins: [DailyCheckin], days: Int) -> [MoodDataPoint] {
         let calendar = Calendar.current
-        let cutoff = calendar.date(byAdding: .day, value: -30, to: .now) ?? .now
+        let today = calendar.startOfDay(for: Date())
 
-        let recent = checkIns.filter { $0.date >= cutoff }
-        let grouped = Dictionary(grouping: recent) { checkIn in
-            calendar.startOfDay(for: checkIn.date)
-        }
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
 
-        dailyAverages = grouped.map { date, dayCheckIns in
-            let average = Double(dayCheckIns.reduce(0) { $0 + $1.status }) / Double(dayCheckIns.count)
-            return DailyStatusAverage(date: date, averageStatus: average)
+            let dayCheckins = checkins.filter { calendar.isDate($0.date, inSameDayAs: date) }
+            guard !dayCheckins.isEmpty else { return nil }
+
+            let avgMood = Double(dayCheckins.map(\.mood).reduce(0, +)) / Double(dayCheckins.count)
+            let label = MoodRating(rawValue: Int(avgMood.rounded())) ?? .neutral
+
+            return MoodDataPoint(date: date, value: avgMood, label: label.emoji)
         }
-        .sorted { $0.date < $1.date }
+        .reversed()
     }
 
-    private func computeStatusDistribution(_ checkIns: [CheckIn]) {
-        let counts = Dictionary(grouping: checkIns) { $0.status }
-        statusDistribution = (1...5).map { level in
-            StatusDistribution(level: level, count: counts[level]?.count ?? 0)
-        }
+    // MARK: - Urge Chart Data
+
+    struct UrgeDataPoint: Identifiable {
+        let id = UUID()
+        let date: Date
+        let count: Int
+        let avgIntensity: Double
     }
 
-    private func computeWeeklySummary(_ checkIns: [CheckIn]) {
+    func urgeData(from urgeLogs: [UrgeLog], days: Int) -> [UrgeDataPoint] {
         let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
-        let weekday = calendar.component(.weekday, from: today)
-        let startOfThisWeek = calendar.date(byAdding: .day, value: -(weekday - 1), to: today) ?? today
-        let startOfLastWeek = calendar.date(byAdding: .day, value: -7, to: startOfThisWeek) ?? today
+        let today = calendar.startOfDay(for: Date())
 
-        let daySymbols = calendar.shortWeekdaySymbols
+        return (0..<days).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
 
-        weeklySummary = (0..<7).map { offset in
-            let thisWeekDay = calendar.date(byAdding: .day, value: offset, to: startOfThisWeek)!
-            let lastWeekDay = calendar.date(byAdding: .day, value: offset, to: startOfLastWeek)!
+            let dayUrges = urgeLogs.filter { calendar.isDate($0.timestamp, inSameDayAs: date) }
+            let avgIntensity = dayUrges.isEmpty ? 0 : Double(dayUrges.map(\.intensity).reduce(0, +)) / Double(dayUrges.count)
 
-            let thisWeekCheckIns = checkIns.filter { calendar.isDate($0.date, inSameDayAs: thisWeekDay) }
-            let lastWeekCheckIns = checkIns.filter { calendar.isDate($0.date, inSameDayAs: lastWeekDay) }
-
-            let thisWeekAvg: Double? = thisWeekCheckIns.isEmpty ? nil :
-                Double(thisWeekCheckIns.reduce(0) { $0 + $1.status }) / Double(thisWeekCheckIns.count)
-            let lastWeekAvg: Double? = lastWeekCheckIns.isEmpty ? nil :
-                Double(lastWeekCheckIns.reduce(0) { $0 + $1.status }) / Double(lastWeekCheckIns.count)
-
-            return WeeklySummary(
-                dayOfWeek: daySymbols[(offset + 1) % 7],
-                thisWeek: thisWeekAvg,
-                lastWeek: lastWeekAvg
-            )
+            return UrgeDataPoint(date: date, count: dayUrges.count, avgIntensity: avgIntensity)
         }
+        .reversed()
+    }
+
+    // MARK: - Trigger Stats
+
+    struct TriggerStat: Identifiable {
+        let id = UUID()
+        let trigger: PredefinedTrigger
+        let count: Int
+        let percentage: Double
+    }
+
+    func topTriggers(from urgeLogs: [UrgeLog], limit: Int = 5) -> [TriggerStat] {
+        let triggeredLogs = urgeLogs.filter { !$0.triggerRaw.isEmpty }
+        guard !triggeredLogs.isEmpty else { return [] }
+
+        var counts: [String: Int] = [:]
+        for log in triggeredLogs {
+            counts[log.triggerRaw, default: 0] += 1
+        }
+
+        let total = Double(triggeredLogs.count)
+
+        return counts
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .compactMap { key, value in
+                guard let trigger = PredefinedTrigger(rawValue: key) else { return nil }
+                return TriggerStat(trigger: trigger, count: value, percentage: Double(value) / total)
+            }
+    }
+
+    // MARK: - Summary Stats
+
+    struct SummaryStats {
+        let totalUrges: Int
+        let resistedUrges: Int
+        let resistRate: Double
+        let avgMood: Double
+        let journalEntries: Int
+        let pledgesMade: Int
+    }
+
+    func summaryStats(
+        urgeLogs: [UrgeLog],
+        checkins: [DailyCheckin],
+        journalEntries: [JournalEntry],
+        days: Int
+    ) -> SummaryStats {
+        let calendar = Calendar.current
+        let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? Date()
+
+        let periodUrges = urgeLogs.filter { $0.timestamp >= cutoff }
+        let periodCheckins = checkins.filter { $0.date >= cutoff }
+        let periodJournals = journalEntries.filter { $0.createdAt >= cutoff }
+
+        let resisted = periodUrges.filter(\.didResist).count
+        let resistRate = periodUrges.isEmpty ? 1.0 : Double(resisted) / Double(periodUrges.count)
+
+        let moodCheckins = periodCheckins.filter { $0.mood > 0 }
+        let avgMood = moodCheckins.isEmpty ? 3.0 : Double(moodCheckins.map(\.mood).reduce(0, +)) / Double(moodCheckins.count)
+
+        let pledges = periodCheckins.filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }.count
+
+        return SummaryStats(
+            totalUrges: periodUrges.count,
+            resistedUrges: resisted,
+            resistRate: resistRate,
+            avgMood: avgMood,
+            journalEntries: periodJournals.count,
+            pledgesMade: pledges
+        )
     }
 }
 ```
 
-### RecoveryTrendChart
+The view model is the backbone. Every computed property is a method that accepts the raw SwiftData arrays and a day count, does one pass through the data, and returns a struct. No `@Query` here — the view owns the queries, the view model owns the math. Notice how `moodData(from:days:)` iterates backward from today, groups check-ins by day, computes the average, and maps the result to a `MoodDataPoint` with an emoji label. The view never touches `Calendar` or `reduce`.
+
+### ProgressAnalyticsView — Time Range Picker
 
 ```swift
-import SwiftUI
-import Charts
-
-struct RecoveryTrendChart: View {
-    let data: [DailyStatusAverage]
-
-    @State private var isVisible = false
-
-    var body: some View {
-        if data.isEmpty {
-            ContentUnavailableView(
-                "No Recovery Data Yet",
-                systemImage: "chart.line.downtrend.xyaxis",
-                description: Text("Log a few check-ins to see your recovery trends over time.")
-            )
-            .frame(height: 240)
-        } else {
-            Chart(data) { entry in
-                LineMark(
-                    x: .value("Date", entry.date, unit: .day),
-                    y: .value("Status", entry.averageStatus)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(Color.green.gradient)
-                .lineStyle(StrokeStyle(lineWidth: 2.5))
-
-                AreaMark(
-                    x: .value("Date", entry.date, unit: .day),
-                    y: .value("Status", entry.averageStatus)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.green.opacity(0.3), .green.opacity(0.0)],
-                        startPoint: .top,
-                        endPoint: .bottom
+private var timeRangePicker: some View {
+    HStack(spacing: Spacing.xs) {
+        ForEach(ProgressViewModel.TimeRange.allCases) { range in
+            Button {
+                withAnimation(AnimationPresets.snappy) {
+                    viewModel.selectedTimeRange = range
+                }
+            } label: {
+                Text(range.localizedName)
+                    .font(Typography.subheadline(weight: .semibold))
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, Spacing.xs)
+                    .foregroundStyle(
+                        viewModel.selectedTimeRange == range
+                            ? ColorPalette.textOnPrimary
+                            : ColorPalette.textSecondary
                     )
-                )
-
-                PointMark(
-                    x: .value("Date", entry.date, unit: .day),
-                    y: .value("Status", entry.averageStatus)
-                )
-                .symbolSize(24)
-                .foregroundStyle(.green)
+                    .background(
+                        viewModel.selectedTimeRange == range
+                            ? ColorPalette.accent
+                            : ColorPalette.surfaceSecondary
+                    )
+                    .clipShape(Capsule())
             }
-            .chartYScale(domain: 1...5)
-            .chartYAxis {
-                AxisMarks(values: [1, 2, 3, 4, 5]) { value in
-                    AxisGridLine()
-                    AxisValueLabel {
-                        if let intValue = value.as(Int.self) {
-                            Text(statusLabel(for: intValue))
-                                .font(.caption2)
-                        }
-                    }
-                }
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .day, count: 7)) { _ in
-                    AxisGridLine()
-                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                }
-            }
-            .frame(height: 240)
-            .opacity(isVisible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.5), value: isVisible)
-            .onAppear { isVisible = true }
+            .buttonStyle(BFButtonPressStyle())
         }
-    }
-
-    private func statusLabel(for value: Int) -> String {
-        switch value {
-        case 1: "Crisis"
-        case 2: "Struggling"
-        case 3: "Coping"
-        case 4: "Strong"
-        case 5: "Thriving"
-        default: ""
-        }
+        Spacer()
     }
 }
 ```
 
-### StatusDistributionChart
+This is not a standard segmented picker. It is a row of capsule-shaped buttons that use the design system's accent color for the active state and surface secondary for inactive. The `BFButtonPressStyle` adds a scale-down press animation. The `AnimationPresets.snappy` drives the selection transition. Every chart section reads `viewModel.selectedTimeRange.days` to filter its data, so switching the range updates everything.
+
+### ProgressAnalyticsView — Summary Stat Cards
 
 ```swift
-import SwiftUI
-import Charts
+private var summaryCards: some View {
+    let stats = viewModel.summaryStats(
+        urgeLogs: urgeLogs,
+        checkins: checkins,
+        journalEntries: journalEntries,
+        days: viewModel.selectedTimeRange.days
+    )
 
-struct StatusDistributionChart: View {
-    let data: [StatusDistribution]
-
-    @State private var isVisible = false
-
-    private func barColor(for level: Int) -> Color {
-        switch level {
-        case 1: .red
-        case 2: .orange
-        case 3: .yellow
-        case 4: .mint
-        case 5: .green
-        default: .gray
-        }
-    }
-
-    var body: some View {
-        if data.allSatisfy({ $0.count == 0 }) {
-            ContentUnavailableView(
-                "No Recovery Data Yet",
-                systemImage: "chart.bar",
-                description: Text("Start logging check-ins to see your distribution.")
+    return VStack(spacing: Spacing.sm) {
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: "shield.checkered",
+                title: "Resist Rate",
+                value: "\(Int(stats.resistRate * 100))%",
+                color: stats.resistRate >= 0.8 ? ColorPalette.success : ColorPalette.warning
             )
-            .frame(height: 240)
-        } else {
-            Chart(data) { item in
-                BarMark(
-                    x: .value("Status", item.label),
-                    y: .value("Count", item.count)
-                )
-                .foregroundStyle(barColor(for: item.level))
-                .cornerRadius(6)
-                .annotation(position: .top) {
-                    if item.count > 0 {
-                        Text("\(item.count)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .chartYAxis {
-                AxisMarks(values: .automatic(desiredCount: 5))
-            }
-            .frame(height: 240)
-            .opacity(isVisible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.5), value: isVisible)
-            .onAppear { isVisible = true }
-        }
-    }
-}
-```
-
-### WeeklyComparisonChart
-
-```swift
-import SwiftUI
-import Charts
-
-struct WeeklyComparisonChart: View {
-    let data: [WeeklySummary]
-
-    @State private var isVisible = false
-
-    var body: some View {
-        let hasAnyData = data.contains { $0.thisWeek != nil || $0.lastWeek != nil }
-
-        if !hasAnyData {
-            ContentUnavailableView(
-                "Not Enough Data",
-                systemImage: "calendar",
-                description: Text("Log check-ins for two weeks to compare trends.")
+            StatMiniCard(
+                icon: "exclamationmark.shield.fill",
+                title: "Urges",
+                value: "\(stats.totalUrges)",
+                color: ColorPalette.danger
             )
-            .frame(height: 240)
-        } else {
-            Chart {
-                ForEach(data) { summary in
-                    if let thisWeek = summary.thisWeek {
-                        BarMark(
-                            x: .value("Day", summary.dayOfWeek),
-                            y: .value("Status", thisWeek)
-                        )
-                        .foregroundStyle(by: .value("Week", "This Week"))
-                        .cornerRadius(4)
-                        .position(by: .value("Week", "This Week"))
-                    }
-
-                    if let lastWeek = summary.lastWeek {
-                        BarMark(
-                            x: .value("Day", summary.dayOfWeek),
-                            y: .value("Status", lastWeek)
-                        )
-                        .foregroundStyle(by: .value("Week", "Last Week"))
-                        .cornerRadius(4)
-                        .position(by: .value("Week", "Last Week"))
-                    }
-                }
-            }
-            .chartYScale(domain: 1...5)
-            .chartForegroundStyleScale([
-                "This Week": Color.green,
-                "Last Week": Color.green.opacity(0.4)
-            ])
-            .chartLegend(position: .top, alignment: .leading)
-            .chartYAxis {
-                AxisMarks(values: [1, 2, 3, 4, 5]) { value in
-                    AxisGridLine()
-                    AxisValueLabel {
-                        if let intValue = value.as(Int.self) {
-                            Text(statusLabel(for: intValue))
-                                .font(.caption2)
-                        }
-                    }
-                }
-            }
-            .frame(height: 240)
-            .opacity(isVisible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.5), value: isVisible)
-            .onAppear { isVisible = true }
         }
-    }
 
-    private func statusLabel(for value: Int) -> String {
-        switch value {
-        case 1: "Crisis"
-        case 2: "Struggling"
-        case 3: "Coping"
-        case 4: "Strong"
-        case 5: "Thriving"
-        default: ""
+        HStack(spacing: Spacing.sm) {
+            StatMiniCard(
+                icon: AppConfig.Icons.journal,
+                title: "Journal",
+                value: "\(stats.journalEntries)",
+                color: ColorPalette.infoBadge
+            )
+            StatMiniCard(
+                icon: AppConfig.Icons.pledge,
+                title: "Pledges",
+                value: "\(stats.pledgesMade)",
+                color: ColorPalette.accent
+            )
         }
     }
 }
 ```
 
-### RecoveryChartView (Composed Container)
+The summary cards sit above the charts and give users the headline numbers at a glance. Notice the conditional color on the resist rate — green when the user resisted 80% or more of urges, warning orange otherwise. The `StatMiniCard` is a reusable component:
+
+```swift
+private struct StatMiniCard: View {
+    let icon: String
+    let title: LocalizedStringKey
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: Spacing.xs) {
+            HStack(spacing: Spacing.xxs) {
+                Image(systemName: icon)
+                    .font(.system(size: 14))
+                    .foregroundStyle(color)
+
+                Text(title)
+                    .font(Typography.caption(weight: .medium))
+                    .foregroundStyle(ColorPalette.textTertiary)
+            }
+
+            Text(value)
+                .font(Typography.title2())
+                .foregroundStyle(ColorPalette.textPrimary)
+                .contentTransition(.numericText())
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+    }
+}
+```
+
+The `.contentTransition(.numericText())` modifier makes numbers animate when the time range changes — the digits roll instead of snapping. This is a small detail that makes the stat cards feel alive.
+
+### Mood Trend Chart (LineMark + AreaMark)
+
+```swift
+private var moodChart: some View {
+    let data = viewModel.moodData(from: checkins, days: viewModel.selectedTimeRange.days)
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "face.smiling")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Mood Trend")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if data.isEmpty {
+                emptyChartState(message: "Check in daily to see your mood trends")
+            } else {
+                Chart(data) { point in
+                    LineMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .interpolationMethod(.catmullRom)
+
+                    AreaMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [ColorPalette.accent.opacity(0.3), ColorPalette.accent.opacity(0.05)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Mood", point.value)
+                    )
+                    .foregroundStyle(ColorPalette.accent)
+                    .symbolSize(30)
+                }
+                .chartYScale(domain: 1...5)
+                .chartYAxis {
+                    AxisMarks(values: [1, 2, 3, 4, 5]) { value in
+                        AxisValueLabel {
+                            if let intVal = value.as(Int.self) {
+                                Text(MoodRating(rawValue: intVal)?.emoji ?? "")
+                                    .font(.system(size: 12))
+                            }
+                        }
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .frame(height: 180)
+            }
+        }
+    }
+}
+```
+
+There are three layers stacked here — `LineMark`, `AreaMark`, and `PointMark` — all using the same data and same axes. The `LineMark` draws the smooth curve with `.catmullRom` interpolation. The `AreaMark` fills the area below the line with a gradient that fades from 30% opacity to 5%, creating a subtle fill without overwhelming the chart. The `PointMark` adds dots at each data point so individual days are identifiable.
+
+The Y-axis uses `MoodRating(rawValue:)?.emoji` to show emoji labels instead of numbers. The fixed domain `1...5` prevents the chart from auto-scaling — without this, if all moods are 4-5 the chart would stretch those two values to fill the entire Y axis, making small variations look dramatic.
+
+The `xAxisStride` computed property adjusts based on the selected time range so labels do not overlap:
+
+```swift
+private var xAxisStride: Int {
+    switch viewModel.selectedTimeRange {
+    case .week: return 1
+    case .month: return 7
+    case .threeMonths: return 14
+    }
+}
+```
+
+Grid lines use a dashed stroke style (`dash: [4]`) at low opacity. This is a deliberate design choice — solid grid lines at full opacity make charts look like graph paper. Dashed lines at 30% opacity provide reference without competing with the data.
+
+### Urge Frequency Chart (BarMark)
+
+```swift
+private var urgeChart: some View {
+    let data = viewModel.urgeData(from: urgeLogs, days: viewModel.selectedTimeRange.days)
+    let hasData = data.contains { $0.count > 0 }
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(ColorPalette.danger)
+                Text("Urge Frequency")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if !hasData {
+                emptyChartState(message: "No urges logged yet — that's great!")
+            } else {
+                Chart(data) { point in
+                    BarMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Count", point.count)
+                    )
+                    .foregroundStyle(
+                        point.count == 0
+                            ? ColorPalette.success.opacity(0.3)
+                            : ColorPalette.danger.opacity(0.7)
+                    )
+                    .cornerRadius(4)
+                }
+                .chartYAxis {
+                    AxisMarks { _ in
+                        AxisValueLabel()
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: xAxisStride)) { _ in
+                        AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
+                            .foregroundStyle(ColorPalette.textTertiary.opacity(0.3))
+                    }
+                }
+                .frame(height: 150)
+            }
+        }
+    }
+}
+```
+
+The urge chart uses conditional coloring per bar. Days where the user logged urges get `ColorPalette.danger.opacity(0.7)` — red, but not screaming red. Days with zero urges get `ColorPalette.success.opacity(0.3)` — a subtle green that quietly communicates "good day." This makes patterns visible at a glance: if the chart is mostly green with occasional red spikes, the user can see their progress without reading any numbers.
+
+The empty state check is intentionally different from the mood chart. It checks `data.contains { $0.count > 0 }` rather than `data.isEmpty`. The urge data always returns entries for every day in the range (with count 0 for clean days), so an empty array check would never trigger. The correct check is whether any day actually had urges logged.
+
+### Top Triggers Section
+
+```swift
+private var triggersSection: some View {
+    let triggers = viewModel.topTriggers(from: urgeLogs)
+
+    return BFCard {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack {
+                Image(systemName: "bolt.fill")
+                    .foregroundStyle(ColorPalette.warning)
+                Text("Top Triggers")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
+            }
+
+            if triggers.isEmpty {
+                emptyChartState(message: "Triggers will appear as you log urges")
+            } else {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(triggers) { stat in
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: stat.trigger.icon)
+                                .font(.system(size: 14))
+                                .foregroundStyle(ColorPalette.warning)
+                                .frame(width: 24)
+
+                            Text(stat.trigger.localizedName)
+                                .font(Typography.subheadline())
+                                .foregroundStyle(ColorPalette.textPrimary)
+                                .lineLimit(1)
+
+                            Spacer()
+
+                            Text("\(stat.count)x")
+                                .font(Typography.subheadline(weight: .semibold))
+                                .foregroundStyle(ColorPalette.textSecondary)
+                        }
+
+                        // Progress bar
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.surfaceSecondary)
+                                    .frame(height: 4)
+
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(ColorPalette.warning)
+                                    .frame(width: geo.size.width * stat.percentage, height: 4)
+                            }
+                        }
+                        .frame(height: 4)
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+This section does not use Swift Charts at all. It uses `GeometryReader` to build proportional horizontal progress bars. Each trigger gets a bar whose width is `geo.size.width * stat.percentage`, where `percentage` is computed by the view model as `count / totalTriggeredLogs`. This is a common pattern in production apps — not everything that looks like a chart needs the Charts framework. Simple horizontal bars with `GeometryReader` are lighter weight and more customizable.
+
+### BFProgressRing (Custom Component)
 
 ```swift
 import SwiftUI
 
-struct RecoveryChartView: View {
-    @State private var chartProvider = ChartDataProvider()
-    @State private var selectedChart: ChartType = .trend
+struct BFProgressRing: View {
+    let progress: Double // 0.0 to 1.0
+    var lineWidth: CGFloat = 12
+    var size: CGFloat = 120
+    var gradient: LinearGradient = ColorPalette.primaryGradient
+    var trackColor: Color = ColorPalette.surfaceSecondary
 
-    let checkIns: [CheckIn]
+    @State private var animatedProgress: Double = 0
 
-    enum ChartType: String, CaseIterable {
-        case trend = "Trend"
-        case distribution = "Distribution"
-        case weekly = "Weekly"
+    var body: some View {
+        ZStack {
+            // Background track
+            Circle()
+                .stroke(trackColor, lineWidth: lineWidth)
+
+            // Progress ring
+            Circle()
+                .trim(from: 0, to: animatedProgress)
+                .stroke(
+                    gradient,
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            withAnimation(AnimationPresets.gentle) {
+                animatedProgress = min(progress, 1.0)
+            }
+        }
+        .onChange(of: progress) { _, newValue in
+            withAnimation(AnimationPresets.smooth) {
+                animatedProgress = min(newValue, 1.0)
+            }
+        }
+    }
+}
+```
+
+The progress ring is a pure custom SwiftUI view — no Charts framework involved. It draws two circles: a background track at full opacity and a progress arc using `Circle().trim(from:to:)`. The `.rotationEffect(.degrees(-90))` makes the arc start from the top (12 o'clock position) instead of the right (3 o'clock position).
+
+The animation uses a `@State` property (`animatedProgress`) that starts at 0 and animates to the target value on appear. When the progress value changes (for example, when the user completes a new day), the ring smoothly animates to the new position. The `StrokeStyle(lineWidth:lineCap: .round)` gives the arc rounded endpoints instead of flat cuts.
+
+This component is used throughout the app — in `BadgesView` for the badge completion percentage, in the dashboard for daily progress, and anywhere else a circular progress indicator is needed.
+
+### WeeklySummaryCard (Dashboard Component)
+
+```swift
+import SwiftUI
+import SwiftData
+
+struct WeeklySummaryCard: View {
+    let profile: UserProfile
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var allUrgeLogs: [UrgeLog]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var allCheckins: [DailyCheckin]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var allJournals: [JournalEntry]
+
+    private var weekStart: Date {
+        let calendar = Calendar.current
+        return calendar.date(byAdding: .day, value: -7, to: calendar.startOfDay(for: Date())) ?? Date()
+    }
+
+    private var weekUrges: [UrgeLog] {
+        allUrgeLogs.filter { $0.timestamp >= weekStart }
+    }
+
+    private var weekCheckins: [DailyCheckin] {
+        allCheckins.filter { $0.date >= weekStart }
+    }
+
+    private var weekJournals: [JournalEntry] {
+        allJournals.filter { $0.createdAt >= weekStart }
+    }
+
+    private var pledgeCount: Int {
+        weekCheckins.filter { $0.checkinTypeRaw == CheckinType.morningPledge.rawValue }.count
+    }
+
+    private var urgeCount: Int {
+        weekUrges.count
+    }
+
+    private var resistedCount: Int {
+        weekUrges.filter(\.didResist).count
+    }
+
+    private var avgMoodEmoji: String {
+        let moodCheckins = weekCheckins.filter { $0.mood > 0 }
+        guard !moodCheckins.isEmpty else { return "emoji-neutral" }
+        let avg = Double(moodCheckins.map(\.mood).reduce(0, +)) / Double(moodCheckins.count)
+        return MoodRating(rawValue: Int(avg.rounded()))?.emoji ?? "emoji-neutral"
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                Picker("Chart", selection: $selectedChart) {
-                    ForEach(ChartType.allCases, id: \.self) { type in
-                        Text(type.rawValue).tag(type)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            // Header
+            HStack {
+                Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 16))
+                    .foregroundStyle(ColorPalette.accent)
 
-                Group {
-                    switch selectedChart {
-                    case .trend:
-                        RecoveryTrendChart(data: chartProvider.dailyAverages)
-                    case .distribution:
-                        StatusDistributionChart(data: chartProvider.statusDistribution)
-                    case .weekly:
-                        WeeklyComparisonChart(data: chartProvider.weeklySummary)
-                    }
-                }
-                .padding(.horizontal)
+                Text("This Week")
+                    .font(Typography.headline())
+                    .foregroundStyle(ColorPalette.textPrimary)
 
                 Spacer()
+
+                Text(avgMoodEmoji)
+                    .font(.system(size: 20))
             }
-            .navigationTitle("Insights")
-            .onAppear {
-                chartProvider.refresh(from: checkIns)
-            }
-            .onChange(of: checkIns.count) {
-                chartProvider.refresh(from: checkIns)
+
+            // Stats row
+            HStack(spacing: 0) {
+                WeeklyStatItem(
+                    value: "\(pledgeCount)/7",
+                    label: "Pledges",
+                    icon: AppConfig.Icons.pledge,
+                    color: ColorPalette.accent
+                )
+
+                WeeklyStatItem(
+                    value: "\(urgeCount)",
+                    label: "Urges",
+                    icon: "exclamationmark.shield.fill",
+                    color: ColorPalette.danger
+                )
+
+                WeeklyStatItem(
+                    value: urgeCount > 0 ? "\(Int(Double(resistedCount) / Double(urgeCount) * 100))%" : "100%",
+                    label: "Resisted",
+                    icon: "shield.checkered",
+                    color: ColorPalette.success
+                )
+
+                WeeklyStatItem(
+                    value: "\(weekJournals.count)",
+                    label: "Journals",
+                    icon: AppConfig.Icons.journal,
+                    color: ColorPalette.infoBadge
+                )
             }
         }
+        .padding(Spacing.md)
+        .background(ColorPalette.surfacePrimary)
+        .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
     }
 }
+```
 
-#Preview {
-    RecoveryChartView(checkIns: [])
+The `WeeklySummaryCard` is a dashboard component, not a chart view. It uses `@Query` directly because it is a standalone card that lives in the dashboard, not inside the analytics screen. It computes weekly stats from the raw SwiftData arrays using computed properties. The stat row uses `WeeklyStatItem` — a small component that shows an icon, a value, and a label in a vertical stack. The header shows the average mood as an emoji in the top-right corner, giving a quick emotional read of the week.
+
+### ProgressAnalyticsView (Full Container)
+
+```swift
+import SwiftUI
+import SwiftData
+import Charts
+
+struct ProgressAnalyticsView: View {
+    @Query private var profiles: [UserProfile]
+    @Query(sort: \DailyCheckin.date, order: .reverse) private var checkins: [DailyCheckin]
+    @Query(sort: \UrgeLog.timestamp, order: .reverse) private var urgeLogs: [UrgeLog]
+    @Query(sort: \JournalEntry.createdAt, order: .reverse) private var journalEntries: [JournalEntry]
+    @State private var viewModel = ProgressViewModel()
+    @State private var isVisible = false
+
+    private var profile: UserProfile? { profiles.first }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Spacing.lg) {
+                // Time Range Picker
+                timeRangePicker
+                    .staggeredAppear(index: 0, isVisible: isVisible)
+
+                // Summary Stats
+                summaryCards
+                    .staggeredAppear(index: 1, isVisible: isVisible)
+
+                // Mood Trend Chart
+                moodChart
+                    .staggeredAppear(index: 2, isVisible: isVisible)
+
+                // Urge Frequency Chart
+                urgeChart
+                    .staggeredAppear(index: 3, isVisible: isVisible)
+
+                // Top Triggers
+                triggersSection
+                    .staggeredAppear(index: 4, isVisible: isVisible)
+
+                // Achievements link
+                NavigationLink(destination: BadgesView()) {
+                    HStack(spacing: Spacing.md) {
+                        ZStack {
+                            Circle()
+                                .fill(ColorPalette.warning.opacity(0.15))
+                                .frame(width: 44, height: 44)
+
+                            Image(systemName: "trophy.fill")
+                                .font(.system(size: 20))
+                                .foregroundStyle(ColorPalette.warning)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Achievements")
+                                .font(Typography.headline())
+                                .foregroundStyle(ColorPalette.textPrimary)
+
+                            Text("Track your badges and milestones")
+                                .font(Typography.caption())
+                                .foregroundStyle(ColorPalette.textTertiary)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: AppConfig.Icons.chevronRight)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(ColorPalette.textTertiary)
+                    }
+                    .padding(Spacing.md)
+                    .background(ColorPalette.surfacePrimary)
+                    .clipShape(RoundedRectangle(cornerRadius: Spacing.Radius.large, style: .continuous))
+                }
+                .buttonStyle(BFButtonPressStyle())
+                .staggeredAppear(index: 5, isVisible: isVisible)
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.huge)
+        }
+        .scrollIndicators(.hidden)
+        .background(ColorPalette.background)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { isVisible = true }
+    }
+
+    // ... time range picker, summary cards, mood chart, urge chart,
+    // triggers section, and helper methods as shown above
 }
 ```
+
+The container view owns all the `@Query` properties and passes the raw arrays into the view model's methods. Each section uses `.staggeredAppear(index:isVisible:)` — a custom view modifier that staggers the entrance animation so sections cascade in one after another instead of all popping at once. The `isVisible` flag flips to `true` on appear, triggering the cascade.
+
+The achievements link at the bottom navigates to `BadgesView` — a separate screen with a badge grid, category filters, and its own progress ring showing badge completion percentage. This connects the analytics screen to the gamification layer of the app.
+
+### Empty Chart State Helper
+
+```swift
+private func emptyChartState(message: LocalizedStringKey) -> some View {
+    VStack(spacing: Spacing.xs) {
+        Image(systemName: AppConfig.Icons.chart)
+            .font(.system(size: 24))
+            .foregroundStyle(ColorPalette.textTertiary)
+
+        Text(message)
+            .font(Typography.caption())
+            .foregroundStyle(ColorPalette.textTertiary)
+            .multilineTextAlignment(.center)
+    }
+    .frame(maxWidth: .infinity)
+    .frame(height: 100)
+}
+```
+
+This is a lightweight custom empty state — not `ContentUnavailableView`. It uses the design system's typography and color tokens, keeps the height fixed at 100 points so the layout does not jump when data arrives, and takes a `LocalizedStringKey` so the message is localizable. Each chart section passes a different message: "Check in daily to see your mood trends" for the mood chart, "No urges logged yet — that's great!" for the urge chart (with an encouraging spin), and "Triggers will appear as you log urges" for the triggers section.
 
 ## Checkpoint
 
 Before moving on, verify each of these:
 
-- [ ] `ChartDataProvider` computes daily averages, distribution, and weekly summaries in its `refresh()` method — not inside any view body
-- [ ] The line chart uses `.chartYScale(domain: 1...5)` so the Y axis does not jump around
-- [ ] Y-axis labels show recovery status words ("Crisis" through "Thriving"), not just numbers
-- [ ] Each chart handles the empty data case with `ContentUnavailableView`
-- [ ] Bar chart colors match the recovery status level: red for 1, orange for 2, yellow for 3, mint for 4, green for 5
-- [ ] Weekly comparison chart shows grouped bars with a visible legend
-- [ ] All three charts animate in with an opacity transition on appear
-- [ ] The `RecoveryChartView` uses a segmented picker to switch between charts
-- [ ] No filtering, grouping, or averaging happens inside a `Chart{}` block or view body
+- [ ] `ProgressViewModel` computes mood data, urge data, trigger stats, and summary stats in dedicated methods — not inside any view body
+- [ ] The mood chart uses `.chartYScale(domain: 1...5)` so the Y axis does not auto-scale
+- [ ] Y-axis labels show emoji via `MoodRating(rawValue:)?.emoji`, not just numbers
+- [ ] Each chart section handles the empty data case with a custom empty state view
+- [ ] Urge bar colors are conditional: `ColorPalette.danger` for urge days, `ColorPalette.success` for clean days
+- [ ] The time range picker uses capsule buttons with `ColorPalette.accent` for the selected state
+- [ ] Summary stat cards use `StatMiniCard` in a 2x2 grid with conditional coloring on the resist rate
+- [ ] Top triggers section uses `GeometryReader` for proportional horizontal progress bars
+- [ ] `BFProgressRing` animates from 0 to the target progress on appear using `Circle().trim()`
+- [ ] The `ProgressAnalyticsView` staggers section entrance animations with `.staggeredAppear()`
+- [ ] `WeeklySummaryCard` computes weekly stats from `@Query` properties and shows an average mood emoji
+- [ ] No filtering, grouping, or averaging happens inside a `Chart{}` block or view body — only in the view model
 
 ## Challenge
 
-**Add an interactive selection to the line chart.**
+**Add an interactive selection to the mood trend chart.**
 
-When the user taps or drags on the line chart, show an overlay that highlights the selected day and displays the exact average recovery status value in a floating label above the data point. Use the `.chartOverlay` modifier with a `DragGesture` to detect the X position, then convert it to a date using `ChartProxy.value(atX:)`.
+When the user taps or drags on the mood trend chart, show an overlay that highlights the selected day and displays the exact mood value and emoji in a floating label above the data point. Use the `.chartOverlay` modifier with a `DragGesture` to detect the X position, then convert it to a date using `ChartProxy.value(atX:)`.
 
-**Hint:** The `chartOverlay` modifier gives you a `ChartProxy` in its closure. Call `proxy.value(atX: location.x, as: Date.self)` to convert the gesture's X coordinate to a date value. Then find the closest `DailyStatusAverage` entry to that date and render a `RuleMark` at that position with an annotation showing the value. Store the selected date in a `@State` property and clear it when the gesture ends.
+**Hint:** The `chartOverlay` modifier gives you a `ChartProxy` in its closure. Call `proxy.value(atX: location.x, as: Date.self)` to convert the gesture's X coordinate to a date value. Then find the closest `MoodDataPoint` entry to that date and render a `RuleMark` at that position with an annotation showing the emoji and value. Store the selected date in a `@State` property and clear it when the gesture ends.

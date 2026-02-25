@@ -1,36 +1,36 @@
 ---
 title: "Error Handling & Edge Cases"
-description: "Implement typed throws for clean error propagation, graceful degradation when the AI service is unavailable, and polished loading, empty, and error states that keep users informed."
+description: "Implement real error recovery patterns from BetFree — ModelContainer corruption recovery, SettingsViewModel.resetAllData error handling, and UrgeViewModel Task cancellation that keep the app running when things go wrong."
 courseSlug: "ship-native"
 module: 7
 moduleTitle: "Production Polish"
 lesson: 1
 duration: "22 min read"
 difficulty: "intermediate"
-topics: ["Error Handling", "Typed Throws", "Loading State", "Empty State", "Graceful Degradation", "Retry Logic", "UX", "BetAway"]
+topics: ["Error Handling", "ModelContainer Recovery", "Task Cancellation", "SwiftData", "Graceful Degradation", "UX", "BetAway"]
 author: "Mario"
 draft: false
 pubDate: 2026-02-22
 ---
 
-Your BetAway app works. The happy path is solid — the user logs a check-in, the AI generates an insight, the chart updates. Ship it, right?
+Your BetAway app works. The happy path is solid — the user makes their morning pledge, the streak counter updates, the dashboard animates in. Ship it, right?
 
-Not yet. Open airplane mode and tap "Log Check-In." What happens? Force quit the app mid-save and reopen it. What happens? Let the OpenAI API key expire. What happens?
+Not yet. Force quit the app mid-save and reopen it. What happens? Let the SwiftData database corrupt after a failed migration. What happens? Start a 15-minute urge timer and navigate away before it finishes. What happens?
 
-If the answer to any of those is "I am not sure," this lesson is going to fix that. Error handling is not cleanup work you do after the features are done. It is architecture. And in Swift 6, we have better tools for it than ever — specifically typed throws, which let the compiler enforce that every error is handled explicitly.
+If the answer to any of those is "I am not sure," this lesson is going to fix that. We are going to look at real error handling patterns from the BetFree codebase — not theoretical examples, but actual production code that handles database corruption, data reset failures, and Task lifecycle management.
 
 ## What You'll Learn
 
-- Build an `AppError` enum with typed throws so the compiler catches unhandled failure modes
-- Create a `LoadingState` enum that eliminates impossible states from your views
-- Implement graceful degradation so BetAway falls back to on-device analysis when OpenAI is unreachable
-- Build reusable `ErrorView` and `EmptyStateView` components with retry logic and exponential backoff
+- Study the real `ModelContainer` error recovery pattern in `BetFreeApp.swift` — how the app deletes and recreates a corrupted database at launch
+- Examine `SettingsViewModel.resetAllData` — a real try/catch pattern that deletes all four SwiftData model types and handles failure gracefully
+- Understand `UrgeViewModel`'s Task cancellation pattern — how the urge timer starts, checks `Task.isCancelled`, and cleans up on `reset()`
+- Build reusable `ErrorView` and `EmptyStateView` components with retry logic
 
 ## Why This Matters
 
 App Store reviewers test edge cases. They turn off Wi-Fi. They deny permissions. They tap buttons rapidly. Users do the same — except they leave one-star reviews when something breaks. The difference between a 3.5-star app and a 4.8-star app is almost never features. It is how the app behaves when things go wrong.
 
-BetAway talks to an external AI service. That service will go down. The network will drop. The device will run out of storage. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
+BetAway stores sensitive recovery data in SwiftData. That database can corrupt. The user can reset all their data. Background tasks like the urge timer need clean cancellation. If you plan for these now, your app feels bulletproof. If you do not, it feels fragile.
 
 ## Plan Phase: Defining What We Build
 
@@ -41,35 +41,33 @@ I need to add production-quality error handling to BetAway.
 Do NOT write code yet — just create a plan.
 
 The app has these failure points:
-1. OpenAI API calls can fail (network, rate limit, invalid key, timeout)
-2. SwiftData persistence can fail (storage full, migration error)
-3. HealthKit queries can fail (permission denied, no data)
+1. SwiftData ModelContainer can fail to initialize (corrupted database, migration error)
+2. Resetting all user data (deleting four SwiftData model types) can partially fail
+3. Background Tasks (urge timer, breath cycle) need clean cancellation when the user navigates away or resets
 
 I want:
-- A typed AppError enum using Swift 6 typed throws
-- A LoadingState<T> enum (idle, loading, loaded, error)
-- Graceful degradation: if OpenAI fails, fall back to on-device
-  sentiment analysis using NLTagger
+- A database corruption recovery pattern that deletes and recreates the store
+- try/catch handling on multi-model deletion with graceful degradation
+- Task cancellation patterns using Task.isCancelled checks
 - Reusable ErrorView with a retry button
 - Reusable EmptyStateView
-- A retry utility with exponential backoff
 
 Think through:
-1. What error cases does each subsystem need?
-2. How should errors propagate from service -> ViewModel -> View?
-3. Where should we catch vs. rethrow?
+1. What happens if ModelContainer init throws?
+2. What happens if deleting one model type succeeds but another fails?
+3. What happens if a Task is cancelled between iterations?
 4. What does the user see for each failure mode?
 ```
 
 ### Plan Analysis
 
-The AI should return something structured around three error domains (network, persistence, health), a propagation strategy, and a fallback plan. Look for these in its response:
+The AI should return something structured around database recovery, multi-model deletion, and Task lifecycle. Look for these in its response:
 
-**Keep** — Separate error cases per subsystem. This is correct. A network timeout and a storage-full error require completely different user messaging and recovery strategies.
+**Keep** — A two-phase ModelContainer recovery: try to create, and if that fails, delete the store files and try again. This is exactly what BetFree does in production.
 
-**Keep** — Typed throws at the service layer, caught and translated at the ViewModel layer. The View should never see raw errors — only user-friendly states.
+**Keep** — Individual try/catch for each SwiftData model deletion. If deleting `UrgeLog` fails, that should not prevent deleting `JournalEntry`.
 
-**Question** — If the AI suggests a single `catch` block that maps every error to a generic message, push back. Each error case should map to a specific, actionable message.
+**Question** — If the AI suggests wrapping all four deletions in a single try block, push back. A failure deleting one model should not abort the entire reset.
 
 ### Anti-Pattern: The Lazy Catch
 
@@ -77,525 +75,470 @@ This is what you will see in most AI-generated code if you do not ask for better
 
 ```swift
 // Do NOT do this
-func loadCheckIns() async {
+func resetAllData(context: ModelContext) {
     do {
-        let entries = try await service.fetchEntries()
-        self.entries = entries
+        try context.delete(model: UserProfile.self)
+        try context.delete(model: DailyCheckin.self)
+        try context.delete(model: UrgeLog.self)
+        try context.delete(model: JournalEntry.self)
     } catch {
-        self.errorMessage = "Something went wrong"  // Useless
+        print("Something went wrong")  // Useless — which model failed? Is the data half-deleted?
     }
 }
 ```
 
-"Something went wrong" tells the user nothing. Is it their internet? Their storage? A bug? They have no idea what to do next. Every error message should answer two questions: what happened, and what can the user do about it.
+This pattern has two problems. First, if `DailyCheckin` deletion throws, `UrgeLog` and `JournalEntry` never get deleted — the user's data is half-reset. Second, "Something went wrong" tells the user nothing. They have no idea if their reset worked.
 
 ## Execute Phase: Implementation
 
 Now we build. Send this prompt:
 
 ```
-Implement the error handling system for BetAway based on our plan.
+Implement error handling for BetAway based on our plan.
 
-1. Create Models/AppError.swift — a typed AppError enum with
-   cases for each failure mode. Group into nested enums:
-   AppError.Network, AppError.Persistence, AppError.Health.
-   Each case should have a userMessage property with a clear,
-   actionable error description. Use Swift 6 typed throws.
+1. Show me the ModelContainer error recovery pattern — try to create the container, and if it fails, delete the .store, .store-shm, and .store-wal files, then try again. If that also fails, fatalError.
 
-2. Create Models/LoadingState.swift — a generic LoadingState<T>
-   enum with cases: idle, loading, loaded(T), error(AppError).
-   Include convenience computed properties.
+2. Show me a SettingsViewModel.resetAllData that deletes UserProfile, DailyCheckin, UrgeLog, and JournalEntry with try/catch, then cancels notifications and resets navigation.
 
-3. Create Services/FallbackAnalyzer.swift — uses NLTagger for
-   on-device sentiment analysis as a fallback when OpenAI is
-   unavailable. Returns a simple sentiment score.
+3. Show me an UrgeViewModel with a timerTask that checks Task.isCancelled on every tick, and a reset() method that cancels it cleanly.
 
-4. Create Views/Components/ErrorView.swift — a reusable error
-   view using ContentUnavailableView with a retry button.
+4. Create a reusable ErrorView and EmptyStateView.
 
-5. Create Views/Components/EmptyStateView.swift — for when the
-   user has no recovery check-ins yet.
-
-6. Create Utilities/RetryUtility.swift — async retry with
-   exponential backoff, max 3 attempts, only retries transient
-   errors.
-
-Use Swift 6, strict concurrency. All types must be Sendable.
+Use Swift 6, strict concurrency, @Observable pattern.
 ```
 
 ### AI Output Review
 
 Here is the code the AI should produce. Review each piece carefully.
 
-**AppError.swift:**
+**BetFreeApp.swift — ModelContainer Error Recovery:**
+
+This is the actual pattern from BetFree's production code. When the database is corrupted, the app deletes the store files and recreates the container:
 
 ```swift
-import Foundation
+import SwiftUI
+import SwiftData
+import CoreText
 
-enum AppError: Error, Sendable, LocalizedError {
-    case network(NetworkError)
-    case persistence(PersistenceError)
-    case health(HealthError)
+@main
+struct BetFreeApp: App {
+    @State private var appRouter = AppRouter()
+    @State private var languageManager = LanguageManager()
 
-    enum NetworkError: Error, Sendable {
-        case noConnection
-        case timeout
-        case rateLimited(retryAfter: TimeInterval)
-        case invalidAPIKey
-        case serverError(statusCode: Int)
-        case decodingFailed(underlying: String)
+    init() {
+        UserDefaults.standard.register(defaults: [
+            AppConfig.StorageKeys.hapticFeedbackEnabled: true
+        ])
+        Self.registerCustomFonts()
     }
 
-    enum PersistenceError: Error, Sendable {
-        case saveFailed(underlying: String)
-        case fetchFailed(underlying: String)
-        case storageFull
-        case migrationFailed
-    }
-
-    enum HealthError: Error, Sendable {
-        case permissionDenied
-        case notAvailable
-        case queryFailed(underlying: String)
-    }
-
-    var userMessage: String {
-        switch self {
-        case .network(.noConnection):
-            "No internet connection. Your check-in will be saved locally and synced when you are back online."
-        case .network(.timeout):
-            "The request timed out. Check your connection and try again."
-        case .network(.rateLimited(let retryAfter)):
-            "Too many requests. Please wait \(Int(retryAfter)) seconds and try again."
-        case .network(.invalidAPIKey):
-            "There is a configuration issue. Please contact support."
-        case .network(.serverError):
-            "The AI service is temporarily unavailable. Using on-device analysis instead."
-        case .network(.decodingFailed):
-            "Received an unexpected response. Please try again."
-        case .persistence(.saveFailed):
-            "Could not save your check-in. Please free up some storage and try again."
-        case .persistence(.fetchFailed):
-            "Could not load your recovery history. Pull down to retry."
-        case .persistence(.storageFull):
-            "Your device storage is full. Free up space to continue logging check-ins."
-        case .persistence(.migrationFailed):
-            "There was a problem updating the app data. Please restart BetAway."
-        case .health(.permissionDenied):
-            "BetAway needs Health access to correlate check-in with activity. Open Settings to grant permission."
-        case .health(.notAvailable):
-            "Health data is not available on this device."
-        case .health(.queryFailed):
-            "Could not read health data. Please try again."
+    /// Register bundled custom fonts at runtime (no Info.plist needed)
+    private static func registerCustomFonts() {
+        let fontNames = ["Nunito-Variable"]
+        for name in fontNames {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else { continue }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
         }
     }
 
-    var isTransient: Bool {
-        switch self {
-        case .network(.noConnection), .network(.timeout), .network(.serverError):
-            true
-        case .network(.rateLimited):
-            true
-        default:
-            false
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([
+            UserProfile.self,
+            DailyCheckin.self,
+            UrgeLog.self,
+            JournalEntry.self,
+        ])
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+        } catch {
+            // If the database is corrupted, try deleting and recreating
+            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            if let appSupportURL = urls.first {
+                let storeURL = appSupportURL.appendingPathComponent("default.store")
+                try? FileManager.default.removeItem(at: storeURL)
+
+                // Also remove related files (.store-shm, .store-wal)
+                for suffix in ["-shm", "-wal"] {
+                    let relatedURL = appSupportURL.appendingPathComponent("default.store\(suffix)")
+                    try? FileManager.default.removeItem(at: relatedURL)
+                }
+            }
+
+            do {
+                return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            } catch {
+                fatalError("Could not create ModelContainer after reset: \(error)")
+            }
         }
+    }()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(appRouter)
+                .environment(languageManager)
+                .environment(\.locale, languageManager.locale)
+                .preferredColorScheme(.dark)
+        }
+        .modelContainer(sharedModelContainer)
     }
 }
 ```
 
 Review checklist:
 
-- ✅ Every case has a specific, actionable user message — not generic "Something went wrong"
-- ✅ `isTransient` property separates retryable errors from permanent failures
-- ✅ All types are `Sendable` for Swift 6 concurrency safety
-- ✅ Nested enums keep the namespace clean — `AppError.network(.timeout)` reads naturally
-- ⚠️ Check that `underlying: String` captures enough debug info. In production you might want to log the original error separately while keeping user messages clean
-- ❌ Watch for AI adding `case unknown` as a catch-all. Reject it. Every error should be explicitly modeled. An `unknown` case is a code smell that says "I did not think about what could go wrong here"
+- The `sharedModelContainer` is a computed closure that runs once at launch. The first `do/catch` attempts normal initialization
+- If that fails, it finds the Application Support directory, deletes `default.store`, `default.store-shm`, and `default.store-wal` — all three SQLite-related files
+- The `try?` on `removeItem` is intentional — if the file does not exist, we do not care. The point is to ensure a clean slate
+- The second `do/catch` tries again with a fresh database. If this also fails, something is fundamentally wrong with the device (disk full, permissions), and `fatalError` is appropriate
+- The user loses all their data in this scenario, but the app does not crash on launch. A fresh start is better than an infinite crash loop
+- Watch for AI adding retry logic here. There is no point retrying a database creation — it either works or the environment is broken
 
-**LoadingState.swift:**
+**SettingsViewModel.swift — Multi-Model Deletion:**
 
-```swift
-import Foundation
-
-enum LoadingState<T: Sendable>: Sendable {
-    case idle
-    case loading
-    case loaded(T)
-    case error(AppError)
-
-    var isLoading: Bool {
-        if case .loading = self { return true }
-        return false
-    }
-
-    var data: T? {
-        if case .loaded(let value) = self { return value }
-        return nil
-    }
-
-    var appError: AppError? {
-        if case .error(let error) = self { return error }
-        return nil
-    }
-
-    var isIdle: Bool {
-        if case .idle = self { return true }
-        return false
-    }
-}
-```
-
-- ✅ Generic with `Sendable` constraint — works with Swift 6 strict concurrency
-- ✅ Uses `AppError` instead of raw `String` for the error case — preserves error semantics all the way to the View layer
-- ✅ Convenience properties eliminate `if case let` boilerplate in views
-
-**FallbackAnalyzer.swift:**
+This is the real `resetAllData` from BetFree. Notice how it handles the deletion and then unconditionally cancels notifications and resets the router:
 
 ```swift
-import NaturalLanguage
-import Foundation
+import SwiftUI
+import SwiftData
 
-struct FallbackAnalyzer: Sendable {
-    func analyzeSentiment(for text: String) -> Double {
-        let tagger = NLTagger(tagSchemes: [.sentimentScore])
-        tagger.string = text
+@Observable
+final class SettingsViewModel {
+    var showResetConfirmation = false
+    var showQuitDatePicker = false
+    var showTipJar = false
+    var showFeedback = false
+    var showDataExport = false
+    let notificationManager = NotificationManager()
 
-        let (sentiment, _) = tagger.tag(
-            at: text.startIndex,
-            unit: .paragraph,
-            scheme: .sentimentScore
-        )
-
-        guard let sentiment,
-              let score = Double(sentiment.rawValue) else {
-            return 0.0
-        }
-
-        return score  // -1.0 (negative) to 1.0 (positive)
-    }
-
-    func generateFallbackInsight(recoveryScore: Int, note: String?) -> String {
-        guard let note, !note.isEmpty else {
-            return recoveryStatusInsight(for: recoveryScore)
-        }
-
-        let sentiment = analyzeSentiment(for: note)
-
-        if sentiment > 0.3 && recoveryScore >= 7 {
-            return "Your note reflects a positive mindset. Keep building on what is working well today."
-        } else if sentiment < -0.3 && recoveryScore <= 4 {
-            return "It sounds like a tough moment. Remember that difficult feelings are temporary — consider a short walk or breathing exercise."
+    func toggleNotifications(enabled: Bool, profile: UserProfile) {
+        if enabled {
+            Task {
+                let granted = await notificationManager.requestAuthorization()
+                if granted {
+                    notificationManager.updateSchedule(
+                        morningHour: profile.morningReminderHour,
+                        morningMinute: profile.morningReminderMinute,
+                        eveningHour: profile.eveningReminderHour,
+                        eveningMinute: profile.eveningReminderMinute,
+                        enabled: true
+                    )
+                } else {
+                    await MainActor.run {
+                        profile.notificationsEnabled = false
+                    }
+                }
+            }
         } else {
-            return recoveryStatusInsight(for: recoveryScore)
+            notificationManager.cancelAll()
         }
     }
 
-    private func recoveryStatusInsight(for score: Int) -> String {
-        switch score {
-        case 1...3:
-            "Low recovery score is a signal, not a verdict. What is one small thing that usually helps you feel a bit better?"
-        case 4...6:
-            "A neutral score is perfectly normal. Notice what is present in your day — sometimes calm is underrated."
-        case 7...10:
-            "Great energy today. Take a moment to appreciate what is contributing to this feeling."
-        default:
-            "Check-in logged. Check back later for insights on your patterns."
+    func resetAllData(context: ModelContext, router: AppRouter) {
+        do {
+            try context.delete(model: UserProfile.self)
+            try context.delete(model: DailyCheckin.self)
+            try context.delete(model: UrgeLog.self)
+            try context.delete(model: JournalEntry.self)
+        } catch {
+            // SwiftData delete errors are non-fatal for MVP
         }
+
+        notificationManager.cancelAll()
+        router.resetForNewUser()
     }
 }
 ```
 
-- ✅ Uses `NLTagger` — ships with iOS, no API call needed, works offline
-- ✅ `Sendable` conformance since it holds no mutable state
-- ⚠️ The fallback insights are simple. That is intentional. On-device analysis is a safety net, not a replacement for the AI service. Do not over-engineer it
+Review checklist:
 
-**RetryUtility.swift:**
+- The four `try` calls are inside a single `do` block. If `UserProfile` deletion fails, the remaining three models are skipped. For an MVP, the comment acknowledges this trade-off — "non-fatal for MVP"
+- Critically, `notificationManager.cancelAll()` and `router.resetForNewUser()` run **outside** the `do/catch`. Even if the database deletion fails completely, the app still cancels notifications and resets to the onboarding screen. The user gets a clean navigation state regardless
+- `router.resetForNewUser()` sets `hasCompletedOnboarding` to `false` in UserDefaults and animates back to onboarding — giving the user a fresh start
+- The empty `catch` block is a deliberate choice here, not laziness. For a reset operation, partial failure is acceptable — the user is wiping everything anyway, and the next launch will create fresh data
+- If you want to improve this, you could make each deletion independent with separate try/catch blocks
+
+**UrgeViewModel.swift — Task Cancellation Pattern:**
+
+This is the most instructive error handling pattern in BetFree. The urge timer runs for up to 15 minutes, ticking every second. It must handle cancellation cleanly when the user skips the timer or resets the flow:
 
 ```swift
-import Foundation
-import os
+import SwiftUI
+import SwiftData
 
-func withRetry<T: Sendable>(
-    maxAttempts: Int = 3,
-    initialDelay: TimeInterval = 1.0,
-    operation: @Sendable () async throws(AppError) -> T
-) async throws(AppError) -> T {
-    let logger = Logger(subsystem: "com.nativefirst.betaway", category: "Retry")
-    var lastError: AppError?
+@Observable
+final class UrgeViewModel {
+    // MARK: - State
+    var phase: UrgePhase = .acknowledge
+    var timerSeconds: Int = 0
+    var isTimerRunning: Bool = false
+    var breathPhase: BreathPhase = .inhale
+    var selectedIntensity: Int = 5
+    var selectedTrigger: PredefinedTrigger?
+    var selectedStrategy: CopingStrategy?
+    var notes: String = ""
+    var didResist: Bool = true
+    var showCompletionCelebration: Bool = false
 
-    for attempt in 1...maxAttempts {
-        do {
-            return try await operation()
-        } catch let error as AppError {
-            lastError = error
+    // Distraction toolkit
+    var showBreathingExercise: Bool = false
+    var showGroundingExercise: Bool = false
+    var showMovementSuggestions: Bool = false
+    var showCallHelpline: Bool = false
+    var showEmergencyContacts: Bool = false
 
-            guard error.isTransient else {
-                logger.warning("Non-transient error on attempt \(attempt): \(error.userMessage)")
-                throw error
-            }
+    private var timerTask: Task<Void, Never>?
 
-            if attempt < maxAttempts {
-                let delay = initialDelay * pow(2.0, Double(attempt - 1))
-                let jitter = Double.random(in: 0...0.5)
-                let totalDelay = delay + jitter
-                logger.info("Attempt \(attempt) failed. Retrying in \(totalDelay, format: .fixed(precision: 1))s...")
-                try await Task.sleep(for: .seconds(totalDelay))
-            }
+    // MARK: - Constants
+    static let urgeTimerDuration: Int = 15 * 60 // 15 minutes
+    static let breathCycleDuration: Double = 8.0 // 4s in, 4s out
+
+    enum UrgePhase: CaseIterable {
+        case acknowledge
+        case timer
+        case log
+        case complete
+    }
+
+    enum BreathPhase {
+        case inhale
+        case exhale
+    }
+
+    // MARK: - Computed
+
+    var timerProgress: Double {
+        Double(timerSeconds) / Double(Self.urgeTimerDuration)
+    }
+
+    var timerDisplay: String {
+        let remaining = max(0, Self.urgeTimerDuration - timerSeconds)
+        let minutes = remaining / 60
+        let seconds = remaining % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var timerMinutesElapsed: Int {
+        timerSeconds / 60
+    }
+
+    var encouragementText: String {
+        switch timerSeconds {
+        case 0..<60: return LanguageManager.shared.localized("You're doing great. Stay with it.")
+        case 60..<180: return LanguageManager.shared.localized("The first minutes are the hardest. Keep breathing.")
+        case 180..<300: return LanguageManager.shared.localized("Almost halfway through the peak. Stay strong.")
+        case 300..<600: return LanguageManager.shared.localized("The peak is passing. You've got this.")
+        case 600..<900: return LanguageManager.shared.localized("You're nearly there. The urge is fading.")
+        default: return LanguageManager.shared.localized("Incredible strength. The urge has passed.")
         }
     }
 
-    throw lastError ?? .network(.timeout)
+    // MARK: - Actions
+
+    func startTimer() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .timer
+            isTimerRunning = true
+        }
+
+        timerTask = Task { @MainActor in
+            while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+                try? await Task.sleep(for: .seconds(1))
+                if !Task.isCancelled {
+                    timerSeconds += 1
+                }
+            }
+            if !Task.isCancelled {
+                isTimerRunning = false
+                HapticManager.timerComplete()
+                moveToLog()
+            }
+        }
+
+        // Start breathing animation cycle
+        startBreathCycle()
+    }
+
+    func skipTimer() {
+        timerTask?.cancel()
+        isTimerRunning = false
+        moveToLog()
+    }
+
+    func moveToLog() {
+        withAnimation(AnimationPresets.smooth) {
+            phase = .log
+        }
+    }
+
+    func submitUrge(profile: UserProfile, context: ModelContext) {
+        let urge = UrgeLog(
+            intensity: selectedIntensity,
+            trigger: selectedTrigger,
+            copingStrategy: selectedStrategy,
+            didResist: didResist,
+            notes: notes
+        )
+        urge.durationSeconds = TimeInterval(timerSeconds)
+        urge.userProfile = profile
+        context.insert(urge)
+
+        withAnimation(AnimationPresets.bouncy) {
+            phase = .complete
+            showCompletionCelebration = true
+        }
+
+        if didResist {
+            HapticManager.mediumImpact()
+        }
+    }
+
+    func reset() {
+        timerTask?.cancel()
+        phase = .acknowledge
+        timerSeconds = 0
+        isTimerRunning = false
+        breathPhase = .inhale
+        selectedIntensity = 5
+        selectedTrigger = nil
+        selectedStrategy = nil
+        notes = ""
+        didResist = true
+        showCompletionCelebration = false
+        showBreathingExercise = false
+        showGroundingExercise = false
+        showMovementSuggestions = false
+        showCallHelpline = false
+        showEmergencyContacts = false
+    }
+
+    // MARK: - Breath Cycle
+
+    private func startBreathCycle() {
+        Task { @MainActor in
+            while isTimerRunning && !Task.isCancelled {
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .inhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+
+                withAnimation(.easeInOut(duration: Self.breathCycleDuration / 2)) {
+                    breathPhase = .exhale
+                }
+                try? await Task.sleep(for: .seconds(Self.breathCycleDuration / 2))
+            }
+        }
+    }
 }
 ```
 
-- ✅ Uses `throws(AppError)` — Swift 6 typed throws. The compiler knows exactly what this function can throw
-- ✅ Jitter added to backoff — prevents thundering herd when multiple retries fire simultaneously
-- ✅ Bails immediately on non-transient errors — no point retrying an invalid API key three times
-- ⚠️ If the AI omits jitter, add it yourself. Without jitter, every client retries at the exact same second, slamming the server again in unison
+This is the richest error handling example in the codebase. Let us break down the three cancellation patterns:
+
+**Pattern 1 — The timer loop with double-check:**
+
+```swift
+timerTask = Task { @MainActor in
+    while !Task.isCancelled && timerSeconds < Self.urgeTimerDuration {
+        try? await Task.sleep(for: .seconds(1))
+        if !Task.isCancelled {
+            timerSeconds += 1
+        }
+    }
+    if !Task.isCancelled {
+        isTimerRunning = false
+        HapticManager.timerComplete()
+        moveToLog()
+    }
+}
+```
+
+Notice the **three** cancellation checks:
+1. `while !Task.isCancelled` — checked before each sleep. If cancelled while awake, the loop exits immediately
+2. `if !Task.isCancelled` after the sleep — `Task.sleep` throws `CancellationError` when cancelled, but the `try?` swallows it. This second check catches the case where the task was cancelled during the sleep
+3. `if !Task.isCancelled` after the loop — prevents the completion haptic and navigation from firing if the timer was cancelled (e.g., user tapped "Skip")
+
+Without that third check, cancelling the timer would still trigger `HapticManager.timerComplete()` and `moveToLog()` — the user would get a vibration and a screen transition they did not expect.
+
+**Pattern 2 — The breath cycle with dual exit conditions:**
+
+```swift
+while isTimerRunning && !Task.isCancelled {
+```
+
+The breath cycle checks both `isTimerRunning` (set to `false` by `skipTimer()`) and `Task.isCancelled`. Either condition stops the animation loop. This prevents orphaned breath animations that continue after the timer screen disappears.
+
+**Pattern 3 — The reset() method as cleanup:**
+
+```swift
+func reset() {
+    timerTask?.cancel()
+    phase = .acknowledge
+    timerSeconds = 0
+    isTimerRunning = false
+    // ... reset all state
+}
+```
+
+`timerTask?.cancel()` is the first line. The optional chain (`?.`) handles the case where the timer was never started — `reset()` is safe to call regardless of the current phase. After cancellation, every piece of state is explicitly set back to its initial value. No state is left dangling.
 
 ## Iteration
 
-The initial implementation covers individual error handling. Now we need to wire it into the ViewModel with graceful degradation. Send this follow-up:
+The initial implementation covers the core patterns. Now let us build the reusable view components. Send this follow-up:
 
 ```
-Now update CheckInViewModel to use the error handling system.
+Now create reusable ErrorView and EmptyStateView components
+for BetAway. Use ContentUnavailableView (iOS 17+).
 
-When the user logs a check-in:
-1. Try to get an AI insight from OpenAI using withRetry
-2. If that fails with a transient network error, fall back to
-   FallbackAnalyzer for an on-device insight — do NOT show an
-   error to the user. Log the fallback silently.
-3. Save the check-in with whatever insight we got
-4. If saving fails, THEN show the error
+ErrorView should:
+- Accept a title, message, and optional retry closure
+- Show a system image based on error type
+- Only show "Try Again" for transient errors
 
-For loading the recovery history:
-1. Use LoadingState<[CheckIn]> — handle all four states
-2. On error, show ErrorView with retry
-
-Add a StateHandlingModifier ViewModifier that takes a
-LoadingState and renders the appropriate view for each state,
-so we do not repeat switch statements in every screen.
+EmptyStateView should:
+- Accept a title, system image, description, and optional action
+- Work for empty states across the app (no pledges yet, no journal entries, no urge logs)
 ```
 
-Here is the key piece — the ViewModel with graceful degradation:
-
-```swift
-import SwiftUI
-import os
-
-@Observable
-final class CheckInViewModel: @unchecked Sendable {
-    var historyState: LoadingState<[CheckIn]> = .idle
-    var isSaving = false
-    var saveError: AppError?
-
-    private let aiService: AIServiceProtocol
-    private let fallbackAnalyzer = FallbackAnalyzer()
-    private let service: RecoveryService
-    private let logger = Logger(subsystem: "com.nativefirst.betaway", category: "CheckIn")
-
-    init(aiService: AIServiceProtocol, service: RecoveryService) {
-        self.aiService = aiService
-        self.service = service
-    }
-
-    func saveCheckIn(recoveryScore: Int, note: String?, emoji: String) async {
-        isSaving = true
-        defer { isSaving = false }
-
-        let insight = await generateInsight(score: score, note: note)
-
-        let entry = CheckIn(
-            score: score,
-            note: note,
-            emoji: emoji,
-            insight: insight.text,
-            insightSource: insight.source
-        )
-
-        do {
-            try service.save(entry)
-            logger.info("Check-in saved. Insight source: \(insight.source.rawValue)")
-            await loadHistory()
-        } catch {
-            saveError = .persistence(.saveFailed(underlying: error.localizedDescription))
-            logger.error("Save failed: \(error.localizedDescription)")
-        }
-    }
-
-    func loadHistory() async {
-        historyState = .loading
-
-        do {
-            let entries = try service.fetchAll()
-            historyState = .loaded(entries)
-        } catch {
-            historyState = .error(
-                .persistence(.fetchFailed(underlying: error.localizedDescription))
-            )
-        }
-    }
-
-    // MARK: - Private
-
-    private func generateInsight(
-        score: Int,
-        note: String?
-    ) async -> (text: String, source: InsightSource) {
-        do {
-            let aiInsight = try await withRetry {
-                try await self.aiService.generateInsight(
-                    recoveryScore: score,
-                    note: note
-                )
-            }
-            return (aiInsight, .ai)
-        } catch {
-            logger.info("AI unavailable, using on-device fallback: \(error.userMessage)")
-            let fallback = fallbackAnalyzer.generateFallbackInsight(
-                recoveryScore: score,
-                note: note
-            )
-            return (fallback, .onDevice)
-        }
-    }
-}
-
-enum InsightSource: String, Codable, Sendable {
-    case ai
-    case onDevice
-}
-```
-
-Notice the degradation strategy: the user taps "Save," the app tries OpenAI with retries, and if all attempts fail, it silently falls back to `NLTagger`. The user still gets an insight. They still get their check-in saved. They never see an error for the AI failure because it is not their problem to solve.
-
-This is the difference between "error handling" and "graceful degradation." Error handling shows the user a message. Graceful degradation makes the problem invisible.
-
-Now the `ViewModifier` for consistent state handling across screens:
-
-```swift
-import SwiftUI
-
-struct StateHandlingModifier<T: Sendable, LoadedContent: View>: ViewModifier {
-    let state: LoadingState<T>
-    let emptyTitle: String
-    let emptySystemImage: String
-    let emptyDescription: String
-    let onRetry: (() async -> Void)?
-    @ViewBuilder let loadedContent: (T) -> LoadedContent
-
-    func body(content: Content) -> some View {
-        switch state {
-        case .idle:
-            content
-
-        case .loading:
-            ProgressView()
-                .controlSize(.large)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-        case .loaded(let data):
-            if isEmpty(data) {
-                ContentUnavailableView(
-                    emptyTitle,
-                    systemImage: emptySystemImage,
-                    description: Text(emptyDescription)
-                )
-            } else {
-                loadedContent(data)
-            }
-
-        case .error(let error):
-            ContentUnavailableView {
-                Label("Something Went Wrong", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(error.userMessage)
-            } actions: {
-                if let onRetry {
-                    Button("Try Again") {
-                        Task { await onRetry() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-        }
-    }
-
-    private func isEmpty(_ data: T) -> Bool {
-        if let array = data as? (any Collection) {
-            return array.isEmpty
-        }
-        return false
-    }
-}
-```
-
-## Verify Phase
-
-Before moving on, verify each of these scenarios manually:
-
-1. **Airplane mode** — Log a check-in. The app should fall back to on-device analysis, save successfully, and show no error
-2. **Invalid API key** — The retry utility should bail immediately (non-transient), fall back to on-device analysis
-3. **Empty state** — Delete all recovery check-ins. The EmptyStateView should appear with a prompt to log the first check-in
-4. **Storage full** (simulate by throwing in the service) — The user should see a specific "free up space" message, not "Something went wrong"
-5. **Rapid taps** — Tap "Save" five times quickly. The `isSaving` flag should prevent duplicate entries
-6. **Kill and reopen** — Force quit during a save. On reopen, `loadHistory` should recover cleanly with no corrupt state
-
-## Final Code
-
-Here is the complete `ErrorView` component:
+Here is the `ErrorView`:
 
 ```swift
 import SwiftUI
 
 struct ErrorView: View {
-    let error: AppError
-    let onRetry: (() async -> Void)?
+    let title: String
+    let message: String
+    let systemImage: String
+    let onRetry: (() -> Void)?
 
-    init(_ error: AppError, onRetry: (() async -> Void)? = nil) {
-        self.error = error
+    init(
+        _ title: String,
+        message: String,
+        systemImage: String = "exclamationmark.triangle",
+        onRetry: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.message = message
+        self.systemImage = systemImage
         self.onRetry = onRetry
     }
 
     var body: some View {
         ContentUnavailableView {
-            Label(error.title, systemImage: error.systemImage)
+            Label(title, systemImage: systemImage)
         } description: {
-            Text(error.userMessage)
+            Text(message)
         } actions: {
-            if error.isTransient, let onRetry {
+            if let onRetry {
                 Button("Try Again") {
-                    Task { await onRetry() }
+                    onRetry()
                 }
                 .buttonStyle(.borderedProminent)
             }
-
-            if case .health(.permissionDenied) = error {
-                Button("Open Settings") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-}
-
-private extension AppError {
-    var title: String {
-        switch self {
-        case .network: "Connection Issue"
-        case .persistence: "Storage Issue"
-        case .health: "Health Data Issue"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .network: "wifi.slash"
-        case .persistence: "externaldrive.badge.exclamationmark"
-        case .health: "heart.slash"
         }
     }
 }
@@ -641,31 +584,141 @@ struct EmptyStateView: View {
     }
 }
 
-#Preview("No Entries") {
+#Preview("No Pledges") {
     EmptyStateView(
-        "No Check-Ins Yet",
-        systemImage: "face.smiling",
-        description: "Log your first check-in to start tracking patterns.",
-        actionTitle: "Log Check-In"
+        "No Pledges Yet",
+        systemImage: "hand.raised.fill",
+        description: "Make your first morning pledge to start your recovery streak.",
+        actionTitle: "Make Pledge"
     ) {
         print("Tapped")
     }
 }
 ```
 
+## Verify Phase
+
+Before moving on, verify each of these scenarios manually:
+
+1. **Database corruption** — Delete the app, modify the store file to be invalid, and relaunch. The `sharedModelContainer` closure should delete the corrupt files and create a fresh database. The user sees onboarding, not a crash
+2. **Reset all data** — Go to Settings and tap "Reset All Data." All four model types should be deleted. Notifications should be cancelled. The app should navigate back to onboarding. If one model deletion fails, notifications and navigation reset still happen
+3. **Timer cancellation — skip** — Start the urge timer, wait a few seconds, then tap "Skip." The timer should stop immediately. No completion haptic should fire. The log screen should appear
+4. **Timer cancellation — reset** — Start the urge timer, then dismiss the urge flow entirely. Call `reset()`. The timer should stop. All state should return to defaults. No orphaned breath cycle animation should continue
+5. **Timer completion** — Let the 15-minute timer run to completion (or reduce the constant for testing). `HapticManager.timerComplete()` should fire and the log screen should appear automatically
+6. **Rapid taps** — Tap "Start Timer" multiple times quickly. Only one `timerTask` should be active — each call to `startTimer()` overwrites the previous `timerTask` reference
+
+## Final Code
+
+Here is the `AppRouter.resetForNewUser()` method that `SettingsViewModel` calls after the data reset. This completes the picture — even if the data deletion partially fails, the user gets a clean navigation state:
+
+```swift
+import SwiftUI
+
+@Observable
+final class AppRouter {
+    var showOnboarding: Bool
+    var isLocked: Bool = false
+    var selectedTab: Tab = .dashboard
+    var navigationPath = NavigationPath()
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
+        case journal = "Journal"
+        case progress = "Progress"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+
+        var localizedName: String {
+            LanguageManager.shared.bundle.localizedString(forKey: rawValue, value: nil, table: nil)
+        }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return AppConfig.Icons.house
+            case .journal: return AppConfig.Icons.journal
+            case .progress: return AppConfig.Icons.chart
+            case .settings: return AppConfig.Icons.settings
+            }
+        }
+    }
+
+    init() {
+        self.showOnboarding = !UserDefaults.standard.bool(forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+    }
+
+    func completeOnboarding() {
+        UserDefaults.standard.set(true, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = false
+        }
+    }
+
+    func popToRoot() {
+        navigationPath = NavigationPath()
+    }
+
+    func lock() {
+        withAnimation(AnimationPresets.fade) {
+            isLocked = true
+        }
+    }
+
+    func unlock() {
+        withAnimation(AnimationPresets.smooth) {
+            isLocked = false
+        }
+    }
+
+    func resetForNewUser() {
+        UserDefaults.standard.set(false, forKey: AppConfig.StorageKeys.hasCompletedOnboarding)
+        withAnimation(AnimationPresets.gentle) {
+            showOnboarding = true
+            selectedTab = .dashboard
+            navigationPath = NavigationPath()
+        }
+    }
+}
+```
+
+Notice that `resetForNewUser()` does three things inside a single `withAnimation` block:
+1. Sets `showOnboarding = true` — the `RootView` switches from the main tab view to the onboarding flow
+2. Resets `selectedTab = .dashboard` — so when the user completes onboarding again, they land on the dashboard
+3. Clears `navigationPath` — so there are no leftover navigation states from the previous session
+
+This is graceful degradation in practice. The data deletion might fail, but the user's experience is always clean.
+
 ## Checkpoint
 
 Test these before continuing to the next lesson:
 
-- [ ] `AppError` compiles with typed throws — calling a function that `throws(AppError)` and catching with `catch let error as AppError` works correctly
-- [ ] `LoadingState` handles all four states and the View never shows a blank screen
-- [ ] Turning off Wi-Fi and logging a check-in produces an on-device insight silently — no error shown to the user
-- [ ] Every error message answers "what happened" and "what to do next"
-- [ ] The retry utility backs off exponentially and does not retry non-transient errors
-- [ ] `EmptyStateView` appears when the recovery history is empty
+- [ ] `BetFreeApp.sharedModelContainer` recovers from a corrupted database by deleting all three store files (`.store`, `.store-shm`, `.store-wal`) and recreating the container
+- [ ] `SettingsViewModel.resetAllData` deletes all four model types and resets navigation even if the database deletion fails
+- [ ] `UrgeViewModel.startTimer()` checks `Task.isCancelled` three times — before sleep, after sleep, and after the loop
+- [ ] `UrgeViewModel.skipTimer()` cancels the task and navigates to the log screen without triggering the completion haptic
+- [ ] `UrgeViewModel.reset()` cancels the timer task and resets every piece of state to its initial value
+- [ ] The breath cycle exits when either `isTimerRunning` becomes false or the Task is cancelled
+- [ ] `AppRouter.resetForNewUser()` provides a clean slate even if the data reset partially failed
 
 ## Challenge
 
-**Add offline queueing:** When a check-in is saved with an on-device fallback insight, queue it for AI re-analysis. When the network comes back (use `NWPathMonitor`), automatically re-analyze queued entries with OpenAI and update the insights in the background. The user should never need to do anything — the upgrade from on-device to AI insight happens silently.
+**Improve the multi-model deletion in `SettingsViewModel.resetAllData`.** Currently, if `UserProfile` deletion fails, the remaining three models are skipped. Refactor to use independent try/catch blocks for each model type so that a failure on one does not prevent the others from being deleted. Log which models failed and which succeeded. Keep the current behavior where `notificationManager.cancelAll()` and `router.resetForNewUser()` always run regardless of deletion outcomes.
 
-*Hint:* Add an `InsightSource` field to `CheckIn`. Query for entries where `insightSource == .onDevice`. Use a background `Task` that monitors `NWPathMonitor` and triggers re-analysis when the path becomes `.satisfied`.
+*Hint:* Create an array of model types and iterate over them, wrapping each deletion in its own do/catch:
+
+```swift
+let modelTypes: [any PersistentModel.Type] = [
+    UserProfile.self,
+    DailyCheckin.self,
+    UrgeLog.self,
+    JournalEntry.self,
+]
+
+for type in modelTypes {
+    do {
+        try context.delete(model: type)
+    } catch {
+        // Log which model failed, continue with the rest
+    }
+}
+```
