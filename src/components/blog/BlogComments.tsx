@@ -193,7 +193,7 @@ export default function BlogComments({ slug, seedComments = [], supabaseUrl, sup
           Comments
         </h2>
         {comments.length > 0 && (
-          <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-accent/10 text-accent">
+          <span className="badge bg-accent/20 text-accent">
             {comments.length}
           </span>
         )}
