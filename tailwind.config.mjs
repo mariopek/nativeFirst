@@ -4,9 +4,9 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter Variable', 'system-ui', 'sans-serif'],
-        display: ['Inter Variable', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['Geist Variable', 'system-ui', 'sans-serif'],
+        display: ['Space Grotesk Variable', 'system-ui', 'sans-serif'],
+        mono: ['Geist Mono Variable', 'JetBrains Mono', 'Fira Code', 'monospace'],
       },
       typography: () => ({
         DEFAULT: {
