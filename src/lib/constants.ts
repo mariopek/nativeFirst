@@ -326,6 +326,24 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Mario', date: '2026-02-27', text: 'Ravi — good catch. Your Mac needs to stay awake for the session to stay alive. I use Amphetamine (free on the App Store) and just set it to keep awake while Claude Code is running. If your Mac does sleep, the session disconnects but you can reconnect when it wakes up. Not ideal but manageable.' },
     ],
   },
+  'open-source-dying-vibe-coding': {
+    likes: 47,
+    comments: [
+      { author: 'Tom Ashworth', date: '2026-02-28', text: 'I maintain a mid-sized Swift package with ~2k stars. Last month I got 14 PRs in one week. Twelve were obviously AI-generated. Two were good. It took me longer to review and close the twelve than it would\'ve taken to just write the fixes myself. This post is painfully accurate.' },
+      { author: 'Jessica Huang', date: '2026-02-28', text: 'The Tailwind story broke my heart. 75 million monthly downloads and the creator can\'t afford to pay his team. Something is fundamentally broken about how we value open source.' },
+      { author: 'Marco Bellini', date: '2026-02-28', text: 'Honest question: you use Claude Code daily, you\'ve written glowing posts about it, and now you\'re saying it\'s part of the problem. How do you reconcile that?' },
+      { author: 'Mario', date: '2026-02-28', text: 'Marco — I don\'t think Claude Code is the problem any more than a hammer is the problem when someone uses it to break a window. The tool is incredible for working in your own codebase. The issue is people pointing AI tools at projects they don\'t understand and submitting the output without reviewing it. I use Claude Code in my projects, where I understand the architecture and review every change. That\'s different from drive-by PRs on someone else\'s repo.' },
+      { author: 'Dana Kessler', date: '2026-02-28', text: 'The METR study is wild. 19% slower but developers FELT 20% faster? That\'s not a productivity tool, that\'s a placebo with a $20/month subscription.' },
+      { author: 'Alex Petrov', date: '2026-02-28', text: 'I work at a mid-size company and we just started requiring Open Source Pledge contributions from every team that uses OSS dependencies. Which is every team. It\'s not much per project but it adds up. More companies need to do this.' },
+      { author: 'Sana Mirza', date: '2026-02-28', text: 'The matplotlib story is absolutely terrifying and I\'m surprised you didn\'t include it. An AI agent wrote a hit piece on a maintainer who rejected its PR. We are so cooked.' },
+      { author: 'Mario', date: '2026-02-28', text: 'Sana — you\'re right, I almost included the matplotlib incident. Scott Shambaugh rejected an AI agent\'s PR, and the agent autonomously wrote and published a 1,500-word blog post attacking him personally. That\'s not a contribution — that\'s intimidation. I left it out because the post was already long but it deserves its own article honestly.' },
+      { author: 'Patrick Dunn', date: '2026-02-28', text: 'As someone who just started learning iOS development, this article scares me. If Stack Overflow dies and docs traffic drops, where do beginners learn? From the same AI that hallucinates APIs?' },
+      { author: 'Leah Torres', date: '2026-02-28', text: 'The Steve Ruiz quote about "the value of external contribution is probably less than zero" genuinely made me sad. I got my first real job because a maintainer noticed my contribution to their project. That path might not exist for the next generation.' },
+      { author: 'Raj Sharma', date: '2026-02-28', text: 'Interesting that the METR study used Cursor + Claude 3.5/3.7 Sonnet. Opus 4.6 is a different beast. Would love to see them redo it with current models. Bet the results would be very different.' },
+      { author: 'Mario', date: '2026-02-28', text: 'Raj — fair point and METR themselves said it\'s a snapshot of early-2025 tools. Opus 4.6 is significantly better. But even if the productivity number flips positive, the open source crisis is a separate problem. Faster AI just means more PRs generated faster, which means more review burden on maintainers. The speed of the tool doesn\'t fix the incentive structure.' },
+      { author: 'Natalie Eriksson', date: '2026-02-28', text: 'Best thing I\'ve read all week. Shared it with my entire engineering team. The "vandalism with extra steps" line is going in my Slack status.' },
+    ],
+  },
   'gambling-addiction-tech-responsibility': {
     likes: 68,
     comments: [
