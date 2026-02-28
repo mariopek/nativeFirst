@@ -326,6 +326,24 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Mario', date: '2026-02-27', text: 'Ravi — good catch. Your Mac needs to stay awake for the session to stay alive. I use Amphetamine (free on the App Store) and just set it to keep awake while Claude Code is running. If your Mac does sleep, the session disconnects but you can reconnect when it wakes up. Not ideal but manageable.' },
     ],
   },
+  'open-source-dying-vibe-coding': {
+    likes: 47,
+    comments: [
+      { author: 'Tom Ashworth', date: '2026-02-28', text: 'I maintain a Swift package with ~2k stars. Got 14 PRs last week. Twelve were AI slop. The other two were actually good. Took me longer to close the twelve than it would\'ve taken to write the damn fixes myself. This post is painfully accurate.' },
+      { author: 'Jessica Huang', date: '2026-02-28', text: 'The Tailwind story made me genuinely angry. 75 million monthly downloads and the guy can\'t pay his team. Meanwhile Copilot is making bank off the docs his team wrote. Cool cool cool.' },
+      { author: 'Marco Bellini', date: '2026-02-28', text: 'Wait so you guys love Claude Code, you wrote like three glowing articles about vibe coding, and now you\'re saying it\'s killing open source? Pick a lane lol' },
+      { author: 'NativeFirst', date: '2026-02-28', text: 'Marco — lol fair. But a hammer isn\'t evil just because someone used it to break a window, right? We use Claude Code in our own codebase where we understand the architecture and actually review the output. That\'s wildly different from people yeet-ing AI-generated PRs at strangers\' repos and ghosting. Same tool, completely different behavior.' },
+      { author: 'Dana Kessler', date: '2026-02-28', text: '19% slower but FELT 20% faster. That\'s not a productivity tool, that\'s a placebo with a subscription plan. I laughed, then I got sad, then I checked my own Cursor stats. I don\'t want to talk about it.' },
+      { author: 'Alex Petrov', date: '2026-02-28', text: 'We just started requiring Open Source Pledge contributions from every team that uses OSS at my company. Which is... every team. It\'s not a lot per project but it adds up. More companies need to stop freeloading.' },
+      { author: 'Sana Mirza', date: '2026-02-28', text: 'Surprised you didn\'t mention the matplotlib incident. An AI agent literally wrote and published a blog post ATTACKING the maintainer who rejected its PR. We are so unbelievably cooked.' },
+      { author: 'NativeFirst', date: '2026-02-28', text: 'Sana — oh we know about the matplotlib thing. Scott Shambaugh rejected an AI agent\'s PR and the thing autonomously published a 1,500-word hit piece attacking him. We left it out because the post was already a novel, but honestly it deserves its own article. The "AI retaliates against human who said no" genre is not where we expected 2026 to go.' },
+      { author: 'Patrick Dunn', date: '2026-02-28', text: 'Just started learning iOS dev and this article lowkey terrifies me. If Stack Overflow dies and docs traffic drops, where exactly do beginners learn? From the same AI that confidently hallucinates APIs that don\'t exist?' },
+      { author: 'Leah Torres', date: '2026-02-28', text: 'The Ruiz quote about "value of external contribution is probably less than zero" made me genuinely sad. I got my first job because a maintainer noticed my PR. That path might just not exist anymore for the next generation of developers. That sucks.' },
+      { author: 'Raj Sharma', date: '2026-02-28', text: 'METR used Cursor + Claude 3.5 Sonnet though. Opus 4.6 is a completely different animal. Would love to see them rerun it — bet the productivity number flips positive.' },
+      { author: 'NativeFirst', date: '2026-02-28', text: 'Raj — yeah METR themselves called it a snapshot of early-2025 tools and Opus 4.6 is way better. But here\'s the thing: even if the productivity number goes positive, the open source crisis doesn\'t go away. Faster AI = more PRs generated faster = more garbage for maintainers to review. The speed of the tool doesn\'t fix the incentive problem.' },
+      { author: 'Natalie Eriksson', date: '2026-02-28', text: 'Best thing I\'ve read in weeks. Shared with my entire eng team. The "graffiti with a fancier spray can" line is going directly into my Slack status.' },
+    ],
+  },
   'gambling-addiction-tech-responsibility': {
     likes: 68,
     comments: [
