@@ -344,7 +344,7 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Natalie Eriksson', date: '2026-02-28', text: 'Best thing I\'ve read in weeks. Shared with my entire eng team. The "graffiti with a fancier spray can" line is going directly into my Slack status.' },
     ],
   },
-  'reddit-renovation-post-renovise': {
+  'home-renovation-costs-2026-what-to-expect': {
     likes: 72,
     comments: [
       { author: 'Jake Holloway', date: '2026-03-02', text: 'I was one of those 130 comments on the Reddit thread. My story: quoted $35k for a kitchen remodel in Denver, another guy said $18k for the same scope. Ended up going with the $18k guy. He did a great job. The $35k quote was just... greed? I still don\'t understand the pricing in this industry.' },
