@@ -56,8 +56,16 @@ export default function RenovationEstimator() {
   return (
     <div className="w-full max-w-3xl mx-auto">
       <div className="rounded-2xl border border-[#222] bg-[#111] overflow-hidden">
-        {/* Progress Bar */}
+        {/* US Market Badge + Progress Bar */}
         <div className="px-6 pt-6 pb-4">
+          <div className="flex justify-end mb-3">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#1a1a1a] border border-[#222] text-[10px] font-semibold text-[#888] uppercase tracking-wider">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              US Market Only
+            </span>
+          </div>
           <div className="flex items-center justify-between mb-2">
             {STEPS.map((s, i) => (
               <div key={s} className="flex items-center flex-1">
