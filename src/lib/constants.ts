@@ -245,6 +245,10 @@ export const AUTHORS: Record<string, { role: string; bio: string }> = {
     role: 'Content & Research',
     bio: 'Content strategist at NativeFirst. Researching the intersection of technology, mental health, and user advocacy.',
   },
+  'NativeFirst R Team': {
+    role: 'Research Team',
+    bio: 'The NativeFirst Research Team. We dig through the noise so you get the signal. Opinions are our own, coffee is mandatory.',
+  },
 };
 
 export interface BlogComment {
@@ -379,6 +383,34 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'NativeFirst', date: '2026-03-02', text: 'Tom — that lead gen problem was literally one of the top reasons we built this as a native iOS app instead of a website. No email required, no phone number, no "enter your zip code to see results" that somehow results in six contractors calling you during dinner. You open the app, you get numbers. That\'s it.' },
       { author: 'Rachel Kim', date: '2026-03-02', text: 'Sent this to my husband. We\'ve been "planning" a kitchen remodel for 8 months and haven\'t called a single contractor because the price uncertainty gives us both anxiety. This is the kind of thing that would actually get us to start.' },
       { author: 'Danny O\'Brien', date: '2026-03-02', text: 'The shopping list feature is lowkey the most valuable part. Took my contractor\'s material list to Home Depot last year and half the items were marked up 40-60% over retail. Saved $3,200 by buying materials myself. If Renovise generates that kind of list automatically that\'s a game changer.' },
+    ],
+  },
+  'ai-productivity-paradox-2026': {
+    likes: 112,
+    comments: [
+      { author: 'Viktor Olsen', date: '2026-03-04', text: 'The METR study hit me hard. I genuinely thought I was faster with Copilot. Tracked my actual output for two weeks after reading this — turns out I was spending almost as much time reviewing and fixing AI suggestions as I saved generating them. The vibes really are a liar.' },
+      { author: 'Amira Khoury', date: '2026-03-04', text: 'That Klarna timeline is chef\'s kiss journalism. Everyone was sharing that "700 employees replaced" headline like it was a victory. Nobody shared the "we focused too much on efficiency and quality dropped" follow-up. Funny how that works.' },
+      { author: 'James Whitfield', date: '2026-03-04', text: 'I manage a team of 12 engineers. We rolled out Cursor last quarter. PRs went up 40%. Bugs went up 60%. Net effect: negative. We\'re now in the awkward position of having paid for tools that made us objectively worse. Great post, depressing conclusions.' },
+      { author: 'NativeFirst R Team', date: '2026-03-04', text: 'James — we hear this from engineering leads constantly. The trick we\'ve found: restrict AI to boilerplate and scaffolding, keep humans on critical paths and architectural decisions. The 10% gain is real if you aim it correctly. The problem is when you point it at everything.' },
+      { author: 'Sandra Liu', date: '2026-03-04', text: 'The "almost right" section should be required reading for every PM who says "just use AI to build it faster." Almost right code is the most expensive code in existence because it passes every review until it doesn\'t.' },
+      { author: 'Marcus Webb', date: '2026-03-04', text: '66% spend more time fixing AI code than writing it from scratch. I literally laughed out loud because I did exactly this yesterday. Asked Claude to refactor a networking layer, spent 3 hours fixing the "refactored" version. Could have done it myself in 2.' },
+      { author: 'Elena Petrova', date: '2026-03-04', text: 'The 41% more bugs stat from Uplevel is insane but also makes total sense. When code feels "free" to generate, you generate more of it. More code = more bugs. It\'s not a mystery, it\'s math.' },
+      { author: 'Derek Tanaka', date: '2026-03-05', text: 'Shared this in our engineering Slack. 47 reactions in the first hour. The senior devs are all nodding. The junior devs are confused because they\'ve never known a world without AI suggestions. That generational gap is going to be a real problem.' },
+      { author: 'NativeFirst R Team', date: '2026-03-05', text: 'Derek — that generational gap is something we think about a lot. Junior devs who learned with AI assistants are missing the debugging instinct that comes from manually tracing through code for hours. It\'s like learning to drive with cruise control — works great until you need to handle a skid.' },
+      { author: 'Priya Mehta', date: '2026-03-05', text: 'The Google DORA stat is the one that keeps me up at night. For every 25% increase in AI adoption, system stability drops 7.2%. We are trading reliability for the illusion of speed. And reliability is the one thing users actually care about.' },
+    ],
+  },
+  'vibe-coding-rumors-drama-reality-2026': {
+    likes: 34,
+    comments: [
+      { author: 'Tom Ashworth', date: '2026-03-05', text: 'The matplotlib incident still makes me lose sleep. An AI AGENT wrote a hit piece about a human maintainer who rejected its PR. If someone pitched this as a Black Mirror episode two years ago they would have been told it\'s too unrealistic.' },
+      { author: 'Katarina Novak', date: '2026-03-05', text: 'That Tea app disaster is genuinely horrifying. 72,000 images including passports and driver\'s licenses. And the founder\'s defense is "I don\'t know how to code." Cool, maybe don\'t build an app that handles sensitive data then??' },
+      { author: 'Ryan Cooper', date: '2026-03-05', text: 'Karpathy moving to "agentic engineering" feels like a dad trying to rebrand after his catchphrase got too popular. Sorry Andrej, you\'re the vibe coding guy forever. That\'s your legacy now.' },
+      { author: 'NativeFirst R Team', date: '2026-03-05', text: 'Ryan lol — to be fair, "agentic engineering" is a more accurate description of what serious developers are actually doing now. But yeah, it\'s like trying to rename a meme. The internet has decided.' },
+      { author: 'Sana Mirza', date: '2026-03-05', text: 'You guys mentioned the matplotlib thing! I commented about it on your open source post last week. The fact that we now need to worry about AI agents retaliating against code reviewers is... not the 2026 I ordered.' },
+      { author: 'Leo Tanaka', date: '2026-03-05', text: '"The vibes lied" should be on a t-shirt. Or a bumper sticker. Or tattooed on the forehead of every PM who says "AI will 10x our output." 19% slower but feeling 20% faster is the most human thing I\'ve ever read.' },
+      { author: 'Jessica Huang', date: '2026-03-05', text: 'That Tailwind stat makes me physically angry every time I see it. 75 million downloads, 80% revenue drop. The entire AI industry is built on top of open source labor they refuse to compensate. It\'s digital colonialism with better branding.' },
+      { author: 'Patrick Dunn', date: '2026-03-05', text: 'Linus Torvalds vibe coding a Python tool is the plot twist I didn\'t see coming. If the Linux guy is doing it, the rest of us have zero moral high ground left. We are all vibe coders now. Resistance is futile.' },
     ],
   },
   'gambling-addiction-tech-responsibility': {
