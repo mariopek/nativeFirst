@@ -108,6 +108,9 @@ export const APPS = {
       { title: 'Workflow Builder', description: 'Chain prompts into multi-step workflows. Research → Draft → Polish — run them step by step with the right AI for each stage.', icon: 'workflow' },
       { title: 'Community Feed', description: 'Browse trending prompts from other users. Save the best ones to your library, share yours with the world, and discover workflows you never thought of.', icon: 'community' },
       { title: 'Cloud Sync', description: 'Your prompts everywhere. Real-time sync across iPhone and Mac with offline-first design — works without internet, syncs when connected.', icon: 'sync' },
+      { title: 'Keyboard Extension', description: 'Access your entire prompt library from any app on iPhone and iPad. No switching apps — your prompts are always one tap away on the keyboard.', icon: 'keyboard' },
+      { title: 'Quick Actions & Menu Bar', description: 'Long-press the app icon for instant actions — New Prompt, Search, Workflows. On Mac, the menu bar gives you lightning-fast access without opening the full app.', icon: 'quickaction' },
+      { title: 'Face ID Protection', description: 'Lock PromptKit behind Face ID for an extra layer of privacy. Your prompts may contain sensitive business data — keep them secure.', icon: 'faceid' },
     ],
   },
 };
