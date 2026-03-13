@@ -111,6 +111,7 @@ export const APPS = {
       { title: 'Keyboard Extension', description: 'Access your entire prompt library from any app on iPhone and iPad. No switching apps — your prompts are always one tap away on the keyboard.', icon: 'keyboard' },
       { title: 'Quick Actions & Menu Bar', description: 'Long-press the app icon for instant actions — New Prompt, Search, Workflows. On Mac, the menu bar gives you lightning-fast access without opening the full app.', icon: 'quickaction' },
       { title: 'Face ID Protection', description: 'Lock PromptKit behind Face ID for an extra layer of privacy. Your prompts may contain sensitive business data — keep them secure.', icon: 'faceid' },
+      { title: 'Built for Everyone', description: 'Full VoiceOver support, Dynamic Type, high-contrast mode, and reduced motion. PromptKit is designed to be usable by everyone, not just some people.', icon: 'accessibility' },
     ],
   },
 };
