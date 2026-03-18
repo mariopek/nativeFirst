@@ -271,6 +271,10 @@ export const AUTHORS: Record<string, { role: string; bio: string }> = {
     role: 'Research Team',
     bio: 'The NativeFirst Research Team. We dig through the noise so you get the signal. Opinions are our own, coffee is mandatory.',
   },
+  'NativeFirst Team': {
+    role: 'The Team',
+    bio: 'The whole NativeFirst crew. We build native Apple apps, argue about tabs vs spaces, and occasionally write things that aren\'t code.',
+  },
 };
 
 export interface BlogComment {
@@ -505,6 +509,23 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Aisha Okonkwo', date: '2026-03-13', text: 'The "What I\'d Tell My Past Self" section is the most practical advice in any AI coding article I\'ve read. For the vibes build: just read the auth code. 5 minutes. For the code build: write the schema, security policies, and test specs. Let AI do the rest. That\'s not "learn to code." That\'s "learn the 8% that matters." Totally different proposition and way less intimidating.' },
       { author: 'Rachel Kim', date: '2026-03-13', text: 'This post completes the trilogy perfectly. Post 1 was the thesis (knowing code matters). Post 2 was the tools (here\'s how to use Claude Code properly). Post 3 is the proof (here\'s what happens when you do vs don\'t). Bookmark all three. Share all three. Make your PM read all three.' },
       { author: 'Dylan Park', date: '2026-03-13', text: 'Debug console.logs in production code leaking user objects with password hashes. That\'s not a security vulnerability, that\'s a confession written in JavaScript. The AI basically left a signed note saying "here\'s all your users\' data, you\'re welcome." And nobody would have caught it without reading the code.' },
+    ],
+  },
+  'programming-in-2031-our-predictions': {
+    likes: 203,
+    comments: [
+      { author: 'Kevin Zhao', date: '2026-03-18', text: '"Human-in-the-Loop Specialist" just triggered my fight-or-flight response. I can already see the LinkedIn posts: "Thrilled to announce I\'ve been promoted to Senior Human-in-the-Loop Specialist at [company that just fired 40% of engineering]." The worst part? This will absolutely happen.' },
+      { author: 'Samira Hassan', date: '2026-03-18', text: 'The legacy code prediction is the sleeper hit of this whole post. I work in financial services. We have COBOL that\'s been running since the 80s. Last month someone used Claude to document a module that three retired engineers couldn\'t explain. Management nearly fell out of their chairs. The "legacy modernization specialist" job title is already being discussed in our org. You\'re not predicting the future, you\'re describing our present.' },
+      { author: 'Dylan Park', date: '2026-03-18', text: 'Prediction 2 is already happening and nobody wants to admit it. Our team went from 8 to 5 developers this year. Same output. Same quality. The three people who left weren\'t replaced — their work was absorbed by the remaining five using AI tools. My company called it "natural attrition." I call it exactly what you described: slowly, then all at once.' },
+      { author: 'NativeFirst Team', date: '2026-03-18', text: 'Dylan — we debated whether to include Prediction 2 because it\'s genuinely uncomfortable. But uncomfortable truths are still truths. The nuance we want to emphasize: the five remaining developers aren\'t "cheaper replacements." They\'re the ones who understand the domain deeply enough to use AI effectively. That\'s the skill that survives.' },
+      { author: 'Rachel Kim', date: '2026-03-18', text: 'The hot dog tangent is the most realistic part of this entire post. Every engineering team meeting I\'ve ever attended has devolved into an unrelated food debate at least once. The fact that you disclosed your hot-dog-sandwich position publicly is brave and I respect it even though you\'re wrong.' },
+      { author: 'Tomás Herrera', date: '2026-03-18', text: 'The Great Prompt Collapse is the prediction I didn\'t expect to agree with so strongly. I\'m a prompt engineer right now. My literal job title. And I can feel it happening — every month, more of my prompts get embedded into tools and buttons and workflows. I\'m not writing prompts anymore, I\'m building the infrastructure that hides them. Which is great for job security in 2026 but terrifying for 2031.' },
+      { author: 'Chris Müller', date: '2026-03-18', text: '"npm somehow gets worse" is the funniest line in any tech blog I\'ve read this year. The open source prediction is sadly the most realistic one. I maintain a mid-size OSS library and I already see it — people fork, modify with AI, never contribute back. My issue tracker has fewer human bug reports and more AI-generated "fix this" PRs that don\'t actually fix anything. The future is chaos and it\'s already here.' },
+      { author: 'Priya Sharma', date: '2026-03-18', text: 'Prediction 5 (testing) resonates deeply. I\'m a QA lead and the amount of AI-generated code I see that "works" but has subtle logical errors is alarming. Last week a PR passed all automated tests but had a race condition that would only manifest under load. The AI wrote the code AND the tests — and the tests were designed around the same flawed assumptions as the code. Humans testing AI code is not optional. It\'s the whole game.' },
+      { author: 'Jake Morrison', date: '2026-03-18', text: 'Revisiting this post in 2031 is a great idea. I\'m setting a literal calendar reminder. My prediction for what you\'ll get wrong: Prediction 3. Legacy code modernization won\'t be a "niche." It\'ll be the default. Every company over 20 years old will have an AI modernization initiative by 2029. It\'s too obvious not to.' },
+      { author: 'Elise Johansson', date: '2026-03-18', text: '"AI doesn\'t replace understanding. It replaces typing." This is the most quotable line in the entire post and I\'m putting it on my team\'s Slack channel immediately. Simple, true, and it cuts through 90% of the panic. Understanding problems is the skill. Everything else is implementation detail — and implementation details are exactly what AI is good at.' },
+      { author: 'Marcus Webb', date: '2026-03-18', text: 'The self-driving car comparison at the end is perfect. We\'ve been "5 years away" from AGI for 15 years now. Maybe AI plateaus. Maybe it doesn\'t. The safe bet is exactly what you said: be curious, be adaptable, understand problems. That advice would\'ve been good in 2016, it\'s good in 2026, and it\'ll be good in 2031 regardless of what the models do.' },
+      { author: 'Aisha Okonkwo', date: '2026-03-18', text: 'This post has a vibe I wish more tech blogs had — honest without being doomer, funny without being dismissive, specific without being preachy. The pizza framing device works perfectly. More team roundtable posts please. Maybe invite some of us next time. I\'ll bring better pizza.' },
     ],
   },
   'your-prompts-are-not-skills-yet': {
