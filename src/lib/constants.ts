@@ -98,9 +98,9 @@ export const APPS = {
     tagline: 'Your prompts. Organized. Shared. Launched.',
     description: 'Save, organize, and launch AI prompts directly to ChatGPT, Claude, Gemini, and more. Build workflows, share with the community, and never lose a prompt again.',
     platform: 'iOS' as const,
-    status: 'coming-soon' as const,
+    status: 'available' as const,
     icon: '/images/apps/promptkit-icon.svg',
-    appStoreUrl: '#',
+    appStoreUrl: 'https://apps.apple.com/rs/app/promptkit-ai-prompt-manager/id6760126321',
     features: [
       { title: 'Prompt Library', description: 'Save all your best prompts in one place. Search, tag, categorize, and find any prompt instantly — no more digging through chat histories.', icon: 'library' },
       { title: 'Variable System', description: 'Add {{placeholders}} to any prompt. Fill in the blanks before launch — turn one prompt into a reusable template for any context.', icon: 'variable' },
