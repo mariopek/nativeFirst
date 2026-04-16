@@ -1,5 +1,14 @@
 import type { APIRoute } from 'astro';
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 export const POST: APIRoute = async ({ request, locals }) => {
   try {
     const body = await request.json();
@@ -26,30 +35,43 @@ export const POST: APIRoute = async ({ request, locals }) => {
     const runtime = (locals as any).runtime;
     const resendApiKey = runtime?.env?.RESEND_API_KEY || import.meta.env.RESEND_API_KEY;
 
-    if (resendApiKey) {
-      // Send email via Resend
-      const { Resend } = await import('resend');
-      const resend = new Resend(resendApiKey);
-
-      await resend.emails.send({
-        from: 'NativeFirst Contact <support@nativefirstapp.com>',
-        to: 'support@nativefirstapp.com',
-        replyTo: email,
-        subject: `[Contact] ${subject} — ${name}`,
-        html: `
-          <h2>New Contact Form Submission</h2>
-          <p><strong>Name:</strong> ${name}</p>
-          <p><strong>Email:</strong> ${email}</p>
-          <p><strong>Subject:</strong> ${subject}</p>
-          <hr />
-          <p><strong>Message:</strong></p>
-          <p>${message.replace(/\n/g, '<br />')}</p>
-        `,
-      });
-    } else {
-      console.error('RESEND_API_KEY is not configured.');
+    if (!resendApiKey) {
+      console.error('RESEND_API_KEY is not configured. Check Cloudflare Pages environment variables.');
       return new Response(
-        JSON.stringify({ success: false, message: 'Email service is not configured.' }),
+        JSON.stringify({ success: false, message: 'Email service is temporarily unavailable. Please email us directly at support@nativefirstapp.com.' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Send email via Resend
+    const { Resend } = await import('resend');
+    const resend = new Resend(resendApiKey);
+
+    const safeName = escapeHtml(name);
+    const safeEmail = escapeHtml(email);
+    const safeSubject = escapeHtml(subject);
+    const safeMessage = escapeHtml(message);
+
+    const { error } = await resend.emails.send({
+      from: 'NativeFirst Contact <support@nativefirstapp.com>',
+      to: 'support@nativefirstapp.com',
+      replyTo: email,
+      subject: `[Contact] ${subject} — ${name}`,
+      html: `
+        <h2>New Contact Form Submission</h2>
+        <p><strong>Name:</strong> ${safeName}</p>
+        <p><strong>Email:</strong> ${safeEmail}</p>
+        <p><strong>Subject:</strong> ${safeSubject}</p>
+        <hr />
+        <p><strong>Message:</strong></p>
+        <p>${safeMessage.replace(/\n/g, '<br />')}</p>
+      `,
+    });
+
+    if (error) {
+      console.error('Resend API error:', JSON.stringify(error));
+      return new Response(
+        JSON.stringify({ success: false, message: 'Failed to send message. Please try emailing us directly at support@nativefirstapp.com.' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -61,7 +83,7 @@ export const POST: APIRoute = async ({ request, locals }) => {
   } catch (error) {
     console.error('Contact form error:', error);
     return new Response(
-      JSON.stringify({ success: false, message: 'Failed to send message. Please try again later.' }),
+      JSON.stringify({ success: false, message: 'Failed to send message. Please try emailing us directly at support@nativefirstapp.com.' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
