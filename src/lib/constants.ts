@@ -12,11 +12,10 @@ export const NAV_LINKS = [
     label: 'Apps',
     href: '/apps/invoize',
     children: [
-      { label: 'Invoize', href: '/apps/invoize', description: 'Professional invoices for Mac' },
       { label: 'ThinkBud', href: '/apps/thinkbud', description: 'AI learning companion for iOS' },
       { label: 'ApplyIQ', href: '/apps/applyiq', description: 'AI CV generator & interview prep for iOS & Mac' },
-      { label: 'Renovise', href: '/tools/renovation-estimator', description: 'Home renovation cost estimator' },
       { label: 'PromptKit', href: '/apps/promptkit', description: 'AI prompt manager & community' },
+      { label: 'Renovise', href: '/tools/renovation-estimator', description: 'Home renovation cost estimator' },
     ],
   },
   { label: 'Blog', href: '/blog' },
@@ -101,7 +100,7 @@ export const APPS = {
     description: 'Save, organize, and launch AI prompts directly to ChatGPT, Claude, Gemini, and more. Build workflows, share with the community, and never lose a prompt again.',
     platform: 'iOS' as const,
     status: 'available' as const,
-    icon: '/images/apps/promptkit-icon.svg',
+    icon: '/images/apps/promptkit-icon.png',
     appStoreUrl: 'https://apps.apple.com/rs/app/promptkit-ai-prompt-manager/id6760126321',
     features: [
       { title: 'Prompt Library', description: 'Save all your best prompts in one place. Search, tag, categorize, and find any prompt instantly — no more digging through chat histories.', icon: 'library' },

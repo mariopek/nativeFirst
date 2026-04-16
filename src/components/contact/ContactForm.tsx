@@ -12,9 +12,9 @@ interface FormData {
 const SUBJECT_OPTIONS = [
   { value: '', label: 'Select a subject' },
   { value: 'General Inquiry', label: 'General Inquiry' },
-  { value: 'Invoize Support', label: 'Invoize Support' },
   { value: 'ThinkBud Support', label: 'ThinkBud Support' },
   { value: 'ApplyIQ Support', label: 'ApplyIQ Support' },
+  { value: 'PromptKit Support', label: 'PromptKit Support' },
   { value: 'Bug Report', label: 'Bug Report' },
   { value: 'Feature Request', label: 'Feature Request' },
 ];
