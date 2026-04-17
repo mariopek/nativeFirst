@@ -614,4 +614,14 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Laura Bennett', date: '2026-02-21', text: 'Shared this with my counseling practice. The research here is solid and the message is powerful.' },
     ],
   },
+  'claude-opus-47-mythos-ai-too-dangerous-to-release': {
+    likes: 47,
+    comments: [
+      { author: 'Kevin Zhao', date: '2026-04-17', text: 'The Jurassic Park framing is perfect. The CMS leak irony — building the most powerful security AI and getting exposed by a default public toggle — is genuinely the funniest thing in AI this year. You cannot make this stuff up.' },
+      { author: 'Daniela Furst', date: '2026-04-17', text: 'Been testing Opus 4.7 in Claude Code since yesterday. The xhigh effort level is legit — noticeably better on complex refactors without the "wait 90 seconds for max to think" problem. Memory across sessions is the real upgrade though. It remembered my project structure from two days ago.' },
+      { author: 'Marcus Webb', date: '2026-04-17', text: 'The FreeBSD NFS exploit story is terrifying. 17 years. A 20-gadget ROP chain split across multiple packets. No human involvement after the initial prompt. I work in infosec and I am simultaneously impressed and deeply uncomfortable.' },
+      { author: 'Tomás Herrera', date: '2026-04-17', text: '"Too powerful to release" skepticism is fair but the CVEs are real. You can actually look them up. This is not vaporware marketing — Anthropic published the receipts. Whether restricting it to 12 companies is the RIGHT call is debatable, but the capabilities clearly are not fabricated.' },
+      { author: 'Rachel Kim', date: '2026-04-17', text: 'The $100M in credits for Glasswing is wild. That is not a press release budget. That is a "we are genuinely worried about what happens if this gets loose" budget. Whether you trust Anthropic or not, the money talks.' },
+    ],
+  },
 };
