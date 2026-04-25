@@ -297,47 +297,85 @@ const difficultyColors: Record<string, string> = {
   initCopyButtons();
   document.addEventListener('astro:page-load', initCopyButtons);
 
-  // Code-snap behavior: copy snippet from header button + lightbox on image click
+  // Robust clipboard copy with execCommand fallback (older browsers / restricted contexts)
+  async function copyTextToClipboard(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (err) {
+      console.warn('[code-snap] clipboard.writeText failed, falling back', err);
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (err) {
+      console.error('[code-snap] execCommand fallback failed', err);
+      return false;
+    }
+  }
+
+  // Code-snap behavior: copy snippet from header button + lightbox on image click.
+  // Pre-fetches the snippet text on idle so the button click can paste synchronously.
   function initCodeSnaps() {
     document.querySelectorAll<HTMLElement>('[data-code-snap]').forEach((snap) => {
       if (snap.hasAttribute('data-snap-init')) return;
       snap.setAttribute('data-snap-init', '');
 
-      // Image → lightbox
       const img = snap.querySelector<HTMLImageElement>('img');
       if (img) {
         img.style.cursor = 'zoom-in';
         img.addEventListener('click', () => openLightbox(img.src, img.alt));
       }
 
-      // Copy button — pulls snippet URL from data-copy-snippet, or infers
-      // from the sibling image (./snapshots/foo.png → ./snippets/foo.swift).
       const btn = snap.querySelector<HTMLButtonElement>('[data-copy-snippet]');
-      if (btn) {
-        btn.addEventListener('click', async (e) => {
-          e.preventDefault();
-          let url = btn.getAttribute('data-copy-snippet');
-          if (!url && img) {
-            url = img.src.replace('/snapshots/', '/snippets/').replace(/\.png$/, '.swift');
-          }
-          if (!url) return;
-          const original = btn.textContent;
-          try {
-            const res = await fetch(url);
-            if (!res.ok) throw new Error(String(res.status));
-            const text = await res.text();
-            await navigator.clipboard.writeText(text);
-            btn.textContent = 'Copied';
-            btn.classList.add('text-accent');
-          } catch {
-            btn.textContent = 'Failed';
-          }
-          setTimeout(() => {
-            btn.textContent = original;
-            btn.classList.remove('text-accent');
-          }, 1800);
-        });
+      if (!btn) return;
+
+      // Resolve snippet URL: explicit attribute value wins, else infer from image src
+      let url = btn.getAttribute('data-copy-snippet') || '';
+      if (!url && img) {
+        url = img.src.replace('/snapshots/', '/snippets/').replace(/\.png$/, '.swift');
       }
+      if (!url) return;
+
+      // Pre-fetch in the background so click is fast (and no async chain to lose user gesture)
+      let cached: string | null = null;
+      let fetchError: unknown = null;
+      const prefetch = fetch(url)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          cached = await res.text();
+        })
+        .catch((err) => { fetchError = err; console.error('[code-snap] prefetch failed', url, err); });
+
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const original = btn.textContent;
+        try {
+          if (!cached && !fetchError) await prefetch;
+          if (!cached) throw fetchError ?? new Error('snippet not available');
+          const ok = await copyTextToClipboard(cached);
+          if (!ok) throw new Error('clipboard rejected');
+          btn.textContent = 'Copied';
+          btn.classList.add('text-accent');
+        } catch (err) {
+          console.error('[code-snap] copy failed', err);
+          btn.textContent = 'Failed';
+        }
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove('text-accent');
+        }, 1800);
+      });
     });
   }
 
