@@ -347,13 +347,23 @@ const difficultyColors: Record<string, string> = {
       }
       if (!url) return;
 
-      // Pre-fetch in the background so click is fast (and no async chain to lose user gesture)
+      // Pre-fetch in the background so click is fast (and no async chain to lose user gesture).
+      // Defensive: Cloudflare's SSR fallback can return a 200 HTML 404 page for missing
+      // static assets, so we explicitly reject text/html bodies and refuse redirects.
       let cached: string | null = null;
       let fetchError: unknown = null;
-      const prefetch = fetch(url)
+      const prefetch = fetch(url, { redirect: 'error' })
         .then(async (res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          cached = await res.text();
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+          if (ct.includes('text/html')) {
+            throw new Error(`unexpected content-type ${ct} for ${url}`);
+          }
+          const text = await res.text();
+          if (/^\s*<!doctype/i.test(text)) {
+            throw new Error(`got HTML body for ${url}`);
+          }
+          cached = text;
         })
         .catch((err) => { fetchError = err; console.error('[code-snap] prefetch failed', url, err); });
 
