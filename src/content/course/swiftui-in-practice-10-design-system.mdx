@@ -1,0 +1,141 @@
+---
+title: "Design System Primitives — ViewModifier, ButtonStyle, Color Tokens"
+description: "Extract Pulse's repeated visual patterns into ViewModifier extensions and a custom ButtonStyle. The system that prevents drift across 50 screens — built in three small files."
+courseSlug: "swiftui-in-practice"
+module: 4
+moduleTitle: "UX Polish"
+lesson: 10
+duration: "8 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "ViewModifier", "ButtonStyle", "Design System", "Tokens", "Reuse"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+By the end of lesson 9, Pulse had `.padding(20).background(.thinMaterial, in: .rect(cornerRadius: 16))` typed out across six different views. That's the smell — same six modifiers, six places, one design decision spread out.
+
+The fix is a **design system**: extract repeated styling into named primitives. ViewModifier extensions for visual treatments. ButtonStyle conformances for interactive components. Color tokens for the palette. Everything else uses the primitives by name. Tomorrow's redesign touches three files, not thirty.
+
+This lesson ships three files: `pulseCard()` modifier, `pulseSoft` ButtonStyle, and a `Color` extension exposing semantic tokens. Pulse's existing screens migrate to them in a one-line search-and-replace.
+
+---
+
+## ViewModifier — the reusable visual treatment
+
+`pulseCard()` is six lines that replace twenty across the codebase.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">DesignSystem/PulseCard.swift</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/10-design-system/snapshots/01-pulse-card-modifier.png" alt="PulseCardModifier with View extension" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The pattern in three rules:
+
+- **`struct ConcreteModifier: ViewModifier`** — a struct with a `body(content:)` method. Inside, you apply the wrapper modifiers to `content` and return the result. Pure SwiftUI; no inheritance, no escape hatches.
+- **`extension View { func name() -> some View { modifier(...) } }`** — the call-site sugar. Without this you'd write `.modifier(PulseCardModifier())` everywhere; with it, `.pulseCard()`. Same code, much better ergonomics.
+- **Default values for parameters.** `radius: CGFloat = 16, padding: CGFloat = 16` covers 90% of cases. The 10% that need different values pass overrides explicitly. **Defaults that match the design language matter** — they're what new screens get for free.
+
+The win: change one ViewModifier, every card in the app updates. Add a subtle border, bump shadow opacity, tweak corner radius — three lines of change, zero search-and-replace.
+
+---
+
+## ButtonStyle — interactive components, native API
+
+ButtonStyle is the same idea, scoped to buttons. The `Configuration` struct gives you `label` and `isPressed` — that's all you need to build a complete interactive component.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">DesignSystem/PulseSoftButtonStyle.swift</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/10-design-system/snapshots/02-button-style.png" alt="PulseSoftButtonStyle conforming to ButtonStyle with isPressed animation" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three details that make a ButtonStyle good:
+
+1. **The `isPressed` state changes more than one property.** In our soft button: opacity + scale + animation. That's the difference between a button that *feels* pressed and one that visually toggles. Real components animate.
+2. **The `static var pulseSoft` extension on `ButtonStyle where Self == PulseSoftButtonStyle`.** This is the line that makes the call site read like Apple's APIs: `.buttonStyle(.pulseSoft)`. Without it you'd write `.buttonStyle(PulseSoftButtonStyle())`. Worth the four extra lines.
+3. **`.snappy(duration: 0.15)` animation.** Snappy is the iOS 17+ animation curve that's springy without being bouncy — perfect for tap feedback. **Don't roll your own animation curves**; use the system's named ones.
+
+`buttonStyle` propagates through child Buttons. Set it on a container and every Button inside picks it up — useful for "all primary actions in this card use the prominent style."
+
+---
+
+## Color tokens — semantic names, asset catalog reality
+
+The third primitive is the cheapest. A `Color` extension exposes named tokens that map to asset-catalog colors with light + dark variants.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Color · semantic tokens</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/10-design-system/snapshots/03-color-tokens.png" alt="Color extension exposing pulseAccent, pulseDanger, etc" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three things this buys you:
+
+- **Decoupling from the brand.** `.pulseSuccess` could be green today, teal tomorrow. The screens don't know.
+- **Compile-time naming.** Asset-catalog typos (`Color("PulsAccent")`) explode at runtime. Token names (`.pulseAccent`) explode at compile time — much cheaper.
+- **Dark mode for free.** Each asset has a light and dark variant. SwiftUI swaps on appearance change. Once the asset is set up, no code knows or cares.
+
+Combine all three primitives — `.pulseCard()`, `.pulseSoft`, `.pulseAccent` — and a typical screen reads like a design spec instead of CSS-in-Swift. **The naming is the documentation.**
+
+---
+
+## A trap I see weekly: over-abstracting
+
+Don't do this:
+
+```swift
+extension View {
+    func pulsePrimaryHeading() -> some View { font(.title) }
+    func pulseSecondaryHeading() -> some View { font(.title2) }
+    func pulseBodyText() -> some View { font(.body) }
+    // ... 30 more
+}
+```
+
+This wraps every native SwiftUI primitive in a custom name. Looks "systemic." Is in fact a tax — every reader has to learn your vocabulary on top of SwiftUI's. **Extract patterns that are repeated and have semantic meaning. Don't extract single-purpose wrappers around `.font(.title)`.**
+
+The threshold: **3+ usages with the same set of modifiers.** Two usages, leave inline. Three usages, extract. The math is empirical, not philosophical.
+
+[ThinkBud](https://apps.apple.com/app/thinkbud/id6743296798) ships with about 12 design-system primitives across 14 screens. Not 60. The discipline is what makes the system feel coherent — every primitive earns its place by being repeated, named, and stable.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-in-practice/10-design-system/videos/screen.png" alt="Pulse using design-system primitives" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-in-practice/10-design-system/videos/demo.mp4" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">Pulse · same UI, half the modifier soup</figcaption>
+  </figure>
+</div>
+
+The screen looks the same. **The point is what's in the code** — six places that repeated the same six modifiers now just say `.pulseCard()`. Add a fifteenth screen tomorrow, you don't write the modifiers; you call `.pulseCard()`.
+
+---
+
+## Takeaway
+
+**ViewModifier for visual treatments. ButtonStyle for interactive components. Color extensions for semantic tokens.** Extract patterns repeated 3+ times. Don't wrap SwiftUI primitives that are already named well. The system pays you back the moment you add a tenth screen.
+
+Next lesson: animations. We add a real spring to the favorite-star toggle and a `matchedGeometryEffect` for the price-detail transition — the polish modifiers that make Pulse feel alive instead of static.
