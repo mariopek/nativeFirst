@@ -1,0 +1,153 @@
+---
+title: "UI State Modeling — One Enum, Five States, Zero Bugs"
+description: "Replace the loose isLoading + errorMessage pair with an explicit LoadState enum. Force every screen to handle every state — loading, loaded, empty, error — at the type level. Pulse's UI now has a clean retry button and a real empty state."
+courseSlug: "swiftui-in-practice"
+module: 2
+moduleTitle: "Networking"
+lesson: 7
+duration: "9 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "State", "LoadState", "Error Handling", "SOLID", "Type Safety"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+In lesson 4 we used two booleans to track network state: `isLoading: Bool` and `errorMessage: String?`. It worked. It's also the pattern that creates roughly half the "stuck spinner" and "no data, no error" bugs you'll ever debug.
+
+The fix is one of the most-cited patterns in modern app architecture: **model UI state as an explicit enum**. Every state the screen can be in is a case. Every transition is an assignment. The compiler stops you from forgetting an empty state because the switch-statement won't compile without it.
+
+Pulse's `WatchlistViewState` gets a `LoadState` enum with five cases — `idle`, `loading`, `loaded`, `empty`, `failed(String)` — and the view becomes a switch over it. This pays off three ways: (1) impossible states become unrepresentable, (2) the empty state gets a real treatment instead of "looks like loaded but no rows," and (3) Xcode previews can render every state with a four-line `MockMarketsRepository` setup.
+
+---
+
+## The five-case enum
+
+It's a sealed type — every possible UI state, named.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">WatchlistViewState · with LoadState enum</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/07-ui-state-modeling/snapshots/01-loadstate-enum.png" alt="LoadState enum with idle, loading, loaded, empty, failed cases" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The five cases, what each one means:
+
+- **`.idle`** — before the first load fired. View shows nothing yet (or a placeholder). Almost invisible because `.task { await load() }` flips it to `.loading` immediately on appear.
+- **`.loading`** — load in progress. The view shows a spinner if `entries` is empty (first-time load), or keeps showing the existing list if we have prior data (refresh).
+- **`.loaded`** — request succeeded with data. View renders the list.
+- **`.empty`** — request succeeded with zero items. **Different from `.loaded`** because the UX is completely different: empty state explanation, maybe a "create your first" CTA, not a blank list.
+- **`.failed(let message)`** — anything threw. The associated value carries the user-readable message; the view shows it next to a retry button.
+
+Two important *design* decisions:
+
+1. **`entries` lives outside the enum.** When loading or refreshing, the previous entries stay around so we can show them while the spinner runs. Putting `entries` *inside* `.loaded([MarketEntry])` would erase them on every state transition — UX regression for the common "pull to refresh" case.
+2. **`Equatable` and `Sendable`.** Equatable lets the view compare states cheaply (e.g., `state.loadState == .loading`). Sendable makes the enum safe to ship across actors under Swift 6 strict concurrency.
+
+This is the **Open/Closed Principle** at the type level: add a new state case (e.g. `.unauthorized` to surface a "log in to continue" UI) and the compiler walks you through every switch in the codebase. No silent missed branches.
+
+---
+
+## The view switches on the state
+
+The view becomes a single `@ViewBuilder` switch. Every state has its own branch. The compiler enforces that every branch is handled.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">ContentView · @ViewBuilder switch</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/07-ui-state-modeling/snapshots/02-state-driven-view.png" alt="@ViewBuilder content switching on state.loadState with five branches" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three patterns embedded in that switch:
+
+- **`case .loading where state.entries.isEmpty:`** — the *first-time loading* branch. Full-screen spinner, no list visible because there's nothing to show. The `where` clause distinguishes "we have nothing yet" from "we have stale data and are refreshing."
+- **`case .loaded, .loading:`** — combined. Once we have entries, both "fully loaded" and "refreshing" render the same list. The toolbar's spinner is what signals "refresh in progress" — we don't need to dim the list or show an overlay.
+- **`case .failed(let message):`** — pulls the message out, renders it inside `ContentUnavailableView`, and adds a Try Again button right below. This is the *only* place in the codebase that knows what to do with the failure state. **One source of truth per state.**
+
+This pattern looks slightly wordy compared to the lesson 4 version, but it's also impossible to break. There's no way to be in `.loaded` with empty entries (the assignment in `load()` enforces this). There's no way to render a spinner when we should be showing an error (the switch can't fall through).
+
+---
+
+## Previewing every state without the simulator
+
+This is the leverage. Combine the protocol-based mock from lesson 5 with the state enum from this lesson and you get every UI state visible in Xcode's preview canvas.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">#Preview matrix · all five states</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/07-ui-state-modeling/snapshots/03-mock-states.png" alt="Four #Preview blocks demonstrating loading, loaded, empty, failed" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Four `#Preview` blocks. Every screen state visible without launching the simulator. The patterns:
+
+- **`MockMarketsRepository(delay: .seconds(60))`** — the mock blocks for a long time, so the preview stays in `.loading`. Pin this state in the canvas, see the spinner, fix the layout if it's off.
+- **`MockMarketsRepository(fixtures: [])`** — load succeeds with zero items → `.empty`. Designers can review the empty-state copy, screenshot it, hand back feedback.
+- **`MockMarketsRepository(failure: APIError.server(status: 503))`** — load throws → `.failed(...)`. The error message and retry button are visible, copyable, screenshot-able.
+
+This was the missed opportunity in lesson 4's `isLoading: Bool` model: previewing the error state required actually breaking the network. Now it's four characters in a struct initializer. **Every state, every render, at edit time.**
+
+The [ThinkBud](https://apps.apple.com/app/thinkbud/id6743296798) team uses this exact pattern across all 14 of its screens. The four mandatory previews per screen — Loaded, Loading, Empty, Failed — caught a class of "we forgot to handle the empty case" bugs that previously showed up only in TestFlight after a friendly user pointed them out.
+
+---
+
+## A trap I see weekly: showing data while in a failure state
+
+The vibe-coded version of "handle errors":
+
+```swift
+@State var isLoading = false
+@State var entries: [MarketEntry] = []
+@State var errorMessage: String?
+
+var body: some View {
+    List(entries) { ... }                                  // always shown
+        .overlay { if isLoading { ProgressView() } }       // sometimes shown
+        .alert(errorMessage ?? "", isPresented: ...)        // sometimes shown
+}
+```
+
+What goes wrong: the user pulls to refresh, the network fails, the alert pops up — and behind the alert, the **stale list is still there**, looking like the new data. They dismiss the alert, see the list, assume the refresh succeeded. Five minutes later they're trading on yesterday's prices.
+
+The **enum-switch pattern** prevents this entirely. Either you're in `.loaded` (showing fresh data) or `.failed` (showing the error UI). You can't be both. The user can't *misinterpret* a stale list as fresh because the screen literally renders the error state when in `.failed`.
+
+This is **Make Illegal States Unrepresentable** — the rule from Yaron Minsky's classic OCaml essay, lifted into Swift via algebraic data types. Eight characters of `enum LoadState` carry more correctness than fifty lines of "validate that all the fields agree" code.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-in-practice/07-ui-state-modeling/videos/screen.png" alt="Pulse with LoadState-driven UI — same screen, much cleaner code path" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-in-practice/07-ui-state-modeling/videos/demo.mp4" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">Pulse · loading → loaded with proper state transitions</figcaption>
+  </figure>
+</div>
+
+The screen looks the same as lesson 4's. **The point isn't visual** — it's the four other screens (loading, empty, failed, retry) you'd be writing manually otherwise. With the enum, they're four cases of one switch. Add a fifth case (`.unauthorized`?) and the compiler reminds you to handle it everywhere.
+
+---
+
+## Takeaway
+
+**Model UI state as an explicit enum. Every state the screen can be in gets a case. The view switches on it. Impossible states become unrepresentable; previews exercise every case in four lines each.** This is the highest-leverage refactor you'll do on any networked screen — half the bugs in this category disappear at the type level.
+
+Next lesson: SwiftData with relationships. We add favorites and search to Pulse, persisting them locally with proper migrations and a real one-to-many relationship.
