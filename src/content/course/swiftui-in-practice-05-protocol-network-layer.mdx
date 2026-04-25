@@ -1,90 +1,149 @@
 ---
-title: "Protocol Network Layer"
-description: "__ONE_SENTENCE_OUTCOME__"
+title: "Protocol-Based Network Layer — Real DIP, Free Tests"
+description: "Wrap MarketsAPI in a MarketsRepository protocol. The view-state depends on the abstraction, not the concretion. Production swaps in the live API; tests and previews swap in a mock that returns fixtures or throws on demand."
 courseSlug: "swiftui-in-practice"
-module: 1
-moduleTitle: "In Practice"
+module: 2
+moduleTitle: "Networking"
 lesson: 5
-duration: "8 min read"
-difficulty: "beginner"
-topics: ["SwiftUI"]
+duration: "9 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "Protocol", "DIP", "Repository", "Testing", "Mocking", "SOLID"]
 author: "NativeFirst Team"
 draft: false
 pubDate: 2026-04-25
 ---
 
-<!--
-  Writing reminders (delete before publishing):
-  - First two sentences are the hook. No "In this lesson..." throat-clearing.
-  - At least one real-life analogy.
-  - At least one of: SOLID flag · anti-pattern callout · "what changes at scale" beat.
-  - One measured joke per section, max.
-  - End each section with a punchy takeaway, not a recap.
-  - Code card width: max-w-lg. Phone preview: max-w-[260px].
--->
+Lesson 4 wired Pulse to a real API. The view-state called `MarketsAPI` directly. That works — until you want to:
 
-__HOOK_PARAGRAPH__
+- Render the failure UI in a SwiftUI Preview without unplugging the WiFi.
+- Write a unit test for `WatchlistViewState` that doesn't hit the network.
+- Swap CoinGecko for a different upstream (CoinMarketCap, your own backend) without touching the view-state.
+- Run a thousand-iteration test against the loading state without DDoS-ing the API.
+
+All four are the same problem: the view-state depends on a concrete type. Fix it by making it depend on a **protocol** instead, and inject the implementation. **SOLID's Dependency Inversion Principle is what this is — high-level code depends on abstractions, low-level code provides them.**
+
+Today's refactor: introduce `MarketsRepository`, a 1-method protocol. `LiveMarketsRepository` wraps the network. `MockMarketsRepository` returns fixtures with configurable delay and an optional `failure`. The view-state takes either via `init`. **One refactor, four problems disappear.**
 
 ---
 
-## __SECTION_1_HEADING__
+## The protocol
 
-__INTRO_TO_FIRST_CONCEPT__
+A repository in this codebase means "an object that fetches a thing." Here, the thing is `[MarketEntry]`. The protocol surface is one method.
 
 <figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
   <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
     <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
     <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
     <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
-    <span class="ml-2 text-[11px] font-mono text-text-muted">ContentView.swift</span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Networking/MarketsRepository.swift</span>
     <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
   </div>
-  <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/snapshots/01-name.png" alt="__ALT__" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+  <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/snapshots/01-repository-protocol.png" alt="MarketsRepository protocol with one async method, plus LiveMarketsRepository implementation" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
 </figure>
 
-__OBSERVATION_OR_REAL_LIFE_ANALOGY__
+Three small but deliberate choices:
+
+- **`Sendable` conformance.** Without it, Swift 6's strict concurrency complains the moment you cross actor boundaries. We're going to call this from `@MainActor` view-states; the implementation runs on whichever actor it likes. `Sendable` documents that the value is safe to ship across actors.
+- **The protocol takes simple inputs (`Int`) and returns the *domain* type (`[MarketEntry]`).** The protocol doesn't leak that the implementation hits HTTP — that's a detail of the live concretion. **ISP applied** — the smallest interface the view-state needs.
+- **`LiveMarketsRepository` wraps `MarketsAPI`** instead of `MarketsAPI` itself conforming to the protocol directly. This indirection is cheap and gives you a place to add caching, logging, or analytics that's specific to "live calls" without touching the raw network code.
+
+The view-state will only ever see `MarketsRepository`. The fact that production fetches over HTTP, that previews use fixtures, that tests use a fake — it doesn't know and doesn't care. **That's the win.**
 
 ---
 
-## __SECTION_2_HEADING__
+## The mock
 
-__ADD_ONE_NEW_CONCEPT__
+Mock implementations are easy to write *badly* — usually as a class with a bunch of "if it's the test we expect" hardcoded behavior. Don't do that. The mock should be **configurable as a value**.
 
 <figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
   <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
     <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
     <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
     <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
-    <span class="ml-2 text-[11px] font-mono text-text-muted">ContentView.swift</span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">MockMarketsRepository · configurable mock</span>
     <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
   </div>
-  <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/snapshots/02-name.png" alt="__ALT__" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+  <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/snapshots/02-mock-repository.png" alt="MockMarketsRepository struct with fixtures, delay, optional failure" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
 </figure>
 
-__WAIT_BUT_WHY_PARAGRAPH__
+Three things make this mock *useful*:
+
+1. **Three knobs: fixtures, delay, failure.** The tester writes `MockMarketsRepository()` and gets a sensible default (small fixture set, 400ms delay, no error). They override what they need: `MockMarketsRepository(delay: .seconds(3))` to test the spinner; `MockMarketsRepository(failure: APIError.server(status: 503))` to test the error UI; `MockMarketsRepository(fixtures: [])` to test the empty state.
+2. **It's a `struct`.** Mocks should be values, not classes. No shared state surprises across tests, no need for `setUp/tearDown` rituals.
+3. **`MarketEntry.previewSet` is a static fixture exposed on the model.** Both the mock and Xcode `#Preview` blocks consume it. **One source of truth for "what does sample data look like"** — change it once, every preview and test reflects it.
+
+This is the kind of mock that becomes a building block. We'll reuse it in lesson 7 (UI state modeling), lesson 9 (cache strategy), and lesson 15 (testing). The investment compounds.
+
+---
+
+## The view-state takes the protocol
+
+The `init` is the one line that matters. Default to `LiveMarketsRepository` so production code compiles unchanged; let tests and previews override.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">WatchlistViewState · injectable + previews</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/snapshots/03-injected-vm.png" alt="WatchlistViewState with init taking MarketsRepository, plus loaded/failure preview blocks" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The pattern in three lines:
+
+- **`private let repository: any MarketsRepository`** — the view-state holds an existential. `any` lets us store a value of *any* type that conforms to the protocol. Swift's type system tracks the abstraction, not the concretion.
+- **`init(repository: any MarketsRepository = LiveMarketsRepository())`** — default arg means existing call sites (`WatchlistViewState()`) still work. Previews and tests pass an explicit mock.
+- **Two `#Preview` blocks** demonstrate the success path and the failure path side-by-side. Open the file in Xcode preview canvas, see both states without touching the simulator. **This is the leverage** — every UI state, every render path, visible at edit time.
+
+A pure-Swift unit test (lesson 15) can construct `WatchlistViewState(repository: MockMarketsRepository(fixtures: ...))` and assert on the resulting `entries`. No XCUITest, no simulator boot, no flake.
+
+---
+
+## A trap I see weekly: the singleton repository
+
+The vibe-coded version of "share the API across screens":
+
+```swift
+class MarketsAPI {
+    static let shared = MarketsAPI()  // singleton
+}
+
+@Observable @MainActor
+final class WatchlistViewState {
+    private let api = MarketsAPI.shared
+    func load() async { /* ... */ }
+}
+```
+
+Compiles. Runs. Cannot be tested without globally mutating the singleton. Cannot have two view-states with different configurations (e.g., one for live data, one for "demo mode"). Every preview shares the same instance, so previewing the failure state means actually breaking the network.
+
+**The protocol-with-init pattern eliminates the trap.** No singleton anywhere. Production wires up the real repo at the App level (or accepts the default). Tests and previews wire up mocks. **Three lines of code, infinite testability**.
+
+If you really need a single shared instance for legitimate reasons (e.g., a session-scoped auth token), wire it as an environment value — same pattern as Foundations lesson 8. Singletons are almost never the right tool in 2026 SwiftUI.
 
 ---
 
 ## What it looks like running
 
-<!--
-  Default: screenshot only. Swap in the phone+video pair from SKILL.md if the
-  lesson involves interaction, animation, state change, or network activity
-  worth filming.
--->
-<div class="not-prose my-8 flex justify-center">
-  <figure class="m-0">
-    <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/videos/screen.png" alt="Running on iPhone simulator" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-in-practice/05-protocol-network-layer/videos/screen.png" alt="Pulse running with LiveMarketsRepository — same UI, swappable internals" class="block max-w-[260px] rounded-2xl border border-border m-0" />
     <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-in-practice/05-protocol-network-layer/videos/demo.mp4" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">Pulse · prod path unchanged after the abstraction</figcaption>
   </figure>
 </div>
 
-__WHAT_THEY_SHOULD_SEE__
+Same screen as lesson 4. The user sees zero difference. **That's the point of the refactor** — the abstraction is invisible at runtime, valuable everywhere else (previews, tests, future swaps). The ones who win from this work aren't users; they're future-you and the next dev who joins the project.
 
 ---
 
 ## Takeaway
 
-__ONE_OR_TWO_SENTENCES__
+**Protocol on top, swap implementations underneath.** `LiveMarketsRepository` for prod, `MockMarketsRepository` for previews and tests, view-state takes either via `init`. No singletons. **DIP applied; ISP respected; LSP because both implementations satisfy the same contract.** Three of five SOLID principles, one refactor.
 
-Next lesson: __ONE_SENTENCE_BRIDGE__
+Next lesson: ABNetworking. The open-source production networking layer we built for our banking apps — and why for production-scale apps you use it (or something like it) instead of rolling URLSession yourself.
