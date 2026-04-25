@@ -1,0 +1,144 @@
+---
+title: "Apple Charts — LineMark, AreaMark, and the Sparkline Pattern"
+description: "Pulse's market detail screen gets a real price chart — line + area gradient using Apple's Charts framework. Plus axis customization and the interactive-selection pattern for tap-to-inspect."
+courseSlug: "swiftui-in-practice"
+module: 4
+moduleTitle: "UX Polish"
+lesson: 12
+duration: "9 min read"
+difficulty: "intermediate"
+topics: ["SwiftUI", "Charts", "LineMark", "AreaMark", "Visualization", "iOS"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+Apple's Charts framework (introduced WWDC 2022, mature in 2026) is the right answer to "draw a chart in SwiftUI" for 95% of cases. Declarative, composable, accessible, supports almost every chart type from `LineMark` to `BarMark` to `RuleMark` to `SectorMark`. Doesn't require the framework's name to be capitalized, which is more than I can say for some Apple frameworks.
+
+This lesson adds a **price-history chart** to Pulse's market detail screen — `LineMark` for the line, `AreaMark` underneath for the gradient fill, axes hidden where they'd add noise, customized where they earn their place. Snippets cover three patterns: the basic line+area sparkline, custom axis formatting, and the tap-and-drag interactive selection added in iOS 17.
+
+---
+
+## Line + area sparkline — the everyday chart
+
+Compose `AreaMark` and `LineMark` for the same dataset. The area gives you the gradient fill that makes a chart look "alive"; the line on top gives you precision.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">PriceChart.swift</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/12-charts/snapshots/01-line-area-chart.png" alt="Chart with LineMark and AreaMark — sparkline pattern" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three details that make it look pro:
+
+- **Marks compose.** `Chart { AreaMark + LineMark }` renders both, layered in declaration order. AreaMark first (background), LineMark on top.
+- **`.foregroundStyle(LinearGradient(...))`** on the AreaMark is the visual that makes a chart go from "Excel" to "Apple Music." Strong tint at the top, transparent at the bottom — emphasizes the line, fades into the canvas.
+- **`.interpolationMethod(.catmullRom)`** smooths the line through the points instead of jagged segment-by-segment. Use `.linear` (the default) when you want raw data; `.catmullRom` when the line should *look* like a price.
+
+For Pulse today we generate synthetic 24h points from `entry.price` + `entry.changePercent24h` because CoinGecko's free tier doesn't include historical data. The day we wire a real history endpoint, **only the data source changes — the chart code stays.** That's the pattern.
+
+---
+
+## Axis customization — when to override defaults
+
+Charts' default axes are sensible. Customize when the defaults waste space or confuse the reader.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">DailyVolumeChart · custom axes</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/12-charts/snapshots/02-axis-customization.png" alt="BarMark with custom axis formatting" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three customizations you'll do all the time:
+
+- **`.chartXAxis(.hidden)`** — hide the time axis for sparklines where the trend matters more than the timestamps. Pulse's price chart uses this; you don't need to know "10:32:14" to read "the line is going up."
+- **Custom value formatting** — `Text(dbl, format: .currency(code: "USD").notation(.compactName))` renders 1_200_000 as "$1.2M" instead of "$1,200,000.00." Compact notation is essential for axes; don't make the user count zeros.
+- **`.chartYScale(domain: 0...max * 1.1)`** — pin the Y axis with 10% headroom above the max value. Keeps the chart from squishing the bars to the top edge.
+
+The default `AxisMarks { value in ... }` builder gives you full control over each axis tick — gridline, tick mark, and label. Override what you need; let the rest stay default.
+
+---
+
+## Interactive selection — tap and drag (iOS 17+)
+
+`.chartXSelection(value:)` binds a `Date?` to the chart's drag-to-select gesture. Combine with a `RuleMark` and a `PointMark.annotation(...)` for the tap-to-inspect interaction every modern markets app has.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">InteractivePriceChart</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/12-charts/snapshots/03-interactive-selection.png" alt="Chart with chartXSelection and annotated PointMark" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The pattern in three pieces:
+
+1. **`@State private var selectedDate: Date?`** — bound to the chart's selection. Drag → SwiftUI updates the binding to whatever date is closest to the drag location.
+2. **`RuleMark(x: .value(...))` + `PointMark`** — drawn conditionally only when `selectedPoint != nil`. The vertical rule shows where the selection is; the point + annotation shows the value.
+3. **Snap to nearest point** — `points.min(by: { abs($0.date.diff) < abs($1.date.diff) })`. The drag gives you continuous Dates; you snap to whichever data point is closest. Otherwise the annotation jitters between data points.
+
+Pulse doesn't ship interactive selection today (the chart is decorative — full scrubbing would need real per-minute data). When that lands, the pattern's already in place.
+
+---
+
+## A trap I see weekly: building a chart from scratch
+
+The vibe-coded version of "show a price line" before someone learns Charts:
+
+```swift
+GeometryReader { proxy in
+    Path { path in
+        for (i, point) in points.enumerated() {
+            let x = CGFloat(i) / CGFloat(points.count - 1) * proxy.size.width
+            let y = (1 - normalized(point.price)) * proxy.size.height
+            if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
+            else { path.addLine(to: CGPoint(x: x, y: y)) }
+        }
+    }
+    .stroke(Color.green, lineWidth: 2)
+}
+```
+
+This works for one chart. By chart #3, you're recreating axes, gridlines, accessibility, animation, and tap interactions. By chart #5, you've half-rebuilt Charts framework, badly.
+
+**Use the framework.** The `Chart { ... }` block is no harder to write than the `Path` version, and you get axes, accessibility, animations, and the iOS-17 interactive selection for free. Custom drawing is a tool for when the framework genuinely can't handle the visualization (radar charts pre-iOS 17, force-directed graphs, complex 3D), not for "I have data and I want a line."
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-in-practice/12-charts/videos/screen.png" alt="Pulse market detail with price chart" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-in-practice/12-charts/videos/demo.mp4" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">Pulse · BTC detail with sparkline</figcaption>
+  </figure>
+</div>
+
+Tap a market on the home screen, swipe into the detail. The chart sits between the price block and the metrics grid — green line + soft green gradient for an up day, red for down. The line follows the implied 24h trajectory (synthetic, until we wire real history).
+
+---
+
+## Takeaway
+
+**`Chart { AreaMark + LineMark }` is the sparkline pattern. Hide axes when context is implicit; customize formatting when the defaults waste space. `.chartXSelection` for tap-to-inspect (iOS 17+). Use the framework — don't draw charts with `Path`.**
+
+Charts is one of the highest-leverage frameworks Apple shipped in the last five years. The investment to learn it is one afternoon; it pays back forever.
+
+Next lesson: Swift 6 strict concurrency. We dig into the `@MainActor`, `Sendable`, and `actor` annotations Pulse has been quietly using and learn to read the diagnostic errors that are coming for everyone in this codebase.
