@@ -298,10 +298,59 @@ export const SWIFTUI_FOUNDATIONS_COURSE = {
   ],
 };
 
-export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE | typeof SWIFTUI_FOUNDATIONS_COURSE> = {
+export const SWIFTUI_IN_PRACTICE_COURSE = {
+  slug: 'swiftui-in-practice',
+  title: 'SwiftUI in Practice',
+  subtitle: 'Build Pulse — A Real Markets Watchlist App',
+  description: 'The follow-up to SwiftUI Foundations. We build Pulse, a markets watchlist with real networking (powered by ABNetworking), proper architecture, SwiftData caching, animations, and Charts. Every architectural decision explained, every load state modeled, every shortcut left out.',
+  author: 'NativeFirst Team',
+  isPremium: false,
+  totalLessons: 16,
+  modules: [
+    {
+      number: 1,
+      title: 'Architecture',
+      description: 'MVVM with @Observable, small composable views, navigation patterns at scale — the architectural foundation Pulse is built on.',
+      lessonCount: 3,
+    },
+    {
+      number: 2,
+      title: 'Networking',
+      description: 'URLSession + async/await, protocol-based network layer, ABNetworking (the open-source production layer), and modeling UI state as an explicit enum.',
+      lessonCount: 4,
+    },
+    {
+      number: 3,
+      title: 'Persistence + Caching',
+      description: 'SwiftData with relationships and migrations, plus a stale-while-revalidate caching strategy that defines how the app feels.',
+      lessonCount: 2,
+    },
+    {
+      number: 4,
+      title: 'UX Polish',
+      description: 'Design system primitives, matchedGeometryEffect animations, and Apple Charts done right.',
+      lessonCount: 3,
+    },
+    {
+      number: 5,
+      title: 'Concurrency',
+      description: 'Swift 6 strict concurrency essentials and the task cancellation patterns that prevent leaked spinners.',
+      lessonCount: 2,
+    },
+    {
+      number: 6,
+      title: 'Testing & Capstone',
+      description: 'Swift Testing for view models, snapshot testing for views, and Pulse v1 ships with an Instruments performance pass.',
+      lessonCount: 2,
+    },
+  ],
+};
+
+export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE | typeof SWIFTUI_FOUNDATIONS_COURSE | typeof SWIFTUI_IN_PRACTICE_COURSE> = {
   'vibe-code-native': COURSE,
   'ship-native': PREMIUM_COURSE,
   'swiftui-foundations': SWIFTUI_FOUNDATIONS_COURSE,
+  'swiftui-in-practice': SWIFTUI_IN_PRACTICE_COURSE,
 };
 
 export function getCourseBySlug(slug: string) {
