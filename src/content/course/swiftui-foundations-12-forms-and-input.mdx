@@ -1,0 +1,151 @@
+---
+title: "Forms, TextField, and @FocusState — Real Input"
+description: "Form as the canonical settings container, TextField configured properly (autocapitalization, content type, keyboard type), TextEditor for long text, and @FocusState for keyboard control. BrewLog gets a real compose card with notes."
+courseSlug: "swiftui-foundations"
+module: 5
+moduleTitle: "Collections & Forms"
+lesson: 12
+duration: "11 min read"
+difficulty: "beginner"
+topics: ["SwiftUI", "Form", "TextField", "TextEditor", "@FocusState", "submitLabel", "textContentType"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+Every iOS app eventually needs the user to type something. SwiftUI's input toolkit is small but precise: **`Form`** for grouped settings, **`TextField`** and **`SecureField`** for single-line input, **`TextEditor`** for long text, and **`@FocusState`** to control which field has the keyboard.
+
+The fields look right by default. The interesting part is configuring them — keyboard type, content type, autocapitalization, submit label — so the user gets the exact keyboard they expect. Skip these and your sign-up screen reuses the keyboard from the previous app, complete with autocorrect on email addresses. (Yes, every iOS user has been burned by this. Be the dev who isn't.)
+
+This lesson adds a real **compose card** to BrewLog: pick a method, set rating, type free-form notes, hit Save. That replaces the placeholder "Log a brew" button.
+
+---
+
+## `Form` — the system-styled settings container
+
+`Form` is the rounded-section, system-styled container you see in every Apple settings screen. Use it as the **root** of any "settings" or "create / edit" view.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Form · sections · conditional rows</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/12-forms-and-input/snapshots/01-form-with-sections.png" alt="Form with three sections, conditional row, destructive button" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+What `Form` does for you:
+
+- **Section grouping with rounded cards** — looks identical to system Settings.
+- **Picker style adaptation** — a `Picker` inside a `Form` automatically uses `.menu` style (compact dropdown) without you specifying. Same Picker outside a Form would look different.
+- **Conditional rows** — wrap a row in `if isEnabled { Toggle(...) }` and the row appears/disappears with the right animation.
+- **Inline destructive sections** — a single `Button(role: .destructive)` in its own Section is the standard "Sign out" / "Delete account" pattern.
+
+A note on placement: `Form` brings its own scrolling. **Don't put it inside a `ScrollView`** — same trap as `List`. For BrewLog, where the home screen is already a `ScrollView`, our compose card uses `VStack` styled to look form-like instead of `Form` itself. We'd reach for `Form` when we add a dedicated Settings screen later.
+
+---
+
+## `TextField` — type the user a real keyboard
+
+`TextField` looks innocent — string in, binding out. The difference between a sloppy field and a polished one is the modifiers around it.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">TextField + @FocusState</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/12-forms-and-input/snapshots/02-textfield-and-focus.png" alt="TextField + SecureField + FocusState login form" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The modifiers that actually matter, ordered by impact:
+
+- **`.textContentType(.emailAddress)`** — tells iOS what's being typed. Enables autofill (saved emails, password manager). The single highest-leverage modifier on a TextField.
+- **`.keyboardType(.emailAddress)`** — picks the right keyboard layout. `.numberPad`, `.phonePad`, `.URL`, `.emailAddress` cover most cases.
+- **`.textInputAutocapitalization(.never)`** — disables auto-capitalization. Critical for emails, passwords, usernames. The user does not want their email to start with a capital letter.
+- **`.submitLabel(.next)`** — changes the keyboard's "return" key to "Next" (or "Go", "Done", "Send"). Use with `.onSubmit` to advance focus through fields.
+- **`SecureField`** instead of `TextField` for passwords. Looks identical with bullets. Pair with `.textContentType(.password)` for password manager autofill.
+
+The `@FocusState` pattern in the snippet is the canonical "tab through fields" form: bind every field to a different case of an enum, then advance with `onSubmit`. Apple's own apps work exactly this way.
+
+A real-life moment: if you've ever typed an email into a sign-up form on iOS and watched it get autocapitalized to "Mario@Gmail.Com," that's a missing `.textInputAutocapitalization(.never)`. **Be the dev who fixes that for users.**
+
+---
+
+## The new BrewLog compose card
+
+Here's the actual compose card we wired into BrewLog this lesson. It's not a `Form` — it's a styled `VStack` because we live inside a `ScrollView`. But every input idea applies.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">NewBrewCard.swift</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/12-forms-and-input/snapshots/03-new-brew-card.png" alt="NewBrewCard with method picker, rating stepper, notes TextField" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three input choices worth calling out:
+
+1. **`TextField("Notes (optional)", text: $notes, axis: .vertical)`** — the `axis: .vertical` parameter turns a single-line TextField into a multi-line one. The keyboard's return key now adds a newline (it would dismiss in the horizontal default). For longer-form input, `TextEditor` is the alternative — but TextField with vertical axis covers 90% of "few sentences of notes" cases without TextEditor's quirks.
+2. **`.lineLimit(2...4)`** — minimum 2 lines visible, max 4 before scrolling kicks in. Lets the field grow naturally with content.
+3. **`.focused($notesFocused)` + `.submitLabel(.done)`** — when the user taps Done on the keyboard, the field loses focus and the keyboard dismisses. Without `@FocusState` you can't programmatically dismiss the keyboard from a non-system event (e.g., the Save button). That's the pattern we use to dismiss the keyboard when Save is pressed.
+
+The Save button creates a new `Brew` from the current form state and pushes it onto `prefs.recentBrews`, then resets. **All wired through environment** — no parameters, no callbacks. The card just trusts that `UserPreferences` is reachable.
+
+---
+
+## A trap I see weekly: missing content types
+
+The classic vibe-coded sign-up form:
+
+```swift
+TextField("Email", text: $email)
+    .textFieldStyle(.roundedBorder)
+
+SecureField("Password", text: $password)
+    .textFieldStyle(.roundedBorder)
+```
+
+This compiles. Looks fine. Will frustrate a real user within 5 seconds. What's missing:
+
+- No `.textContentType(.emailAddress)` — autofill can't suggest saved emails. The user types it manually every time.
+- No `.textInputAutocapitalization(.never)` on email — first character gets capitalized.
+- No `.keyboardType(.emailAddress)` — user gets full alphabet keyboard with no `@` shortcut.
+- No `.textContentType(.password)` on password field — password manager doesn't offer to autofill or save.
+- No `@FocusState` — tapping Return on the keyboard does nothing instead of advancing to password.
+
+The fix is six lines of modifiers. The before-and-after is the difference between "I'll put up with this" and "I love this app." **Inputs are where polish compounds the fastest.** It's also where SOLID's Open/Closed has nothing to say — the modifiers are linear. Just learn them and reach for them every time.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-foundations/12-forms-and-input/videos/screen.png" alt="BrewLog with NewBrewCard and a logged brew" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-foundations/12-forms-and-input/videos/demo.mov" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">BrewLog · composing a brew with notes</figcaption>
+  </figure>
+</div>
+
+The video walks through one compose: switch method to Filter via the Picker, type a notes string into the TextField (system keyboard appears, multi-line layout grows), dismiss the keyboard, tap Save. The brew appears at the top of the recent list with method, relative date, and 4-star rating.
+
+This is also the moment BrewLog crosses from "demo" into "small but actually useful." From here on, every lesson polishes what we've already built rather than introducing new structural pieces.
+
+---
+
+## Takeaway
+
+**`Form` is your settings container. `TextField` is most input. `SecureField` for passwords. `TextEditor` for very long text. `@FocusState` for keyboard control.** The modifier stack — `textContentType`, `keyboardType`, `textInputAutocapitalization`, `submitLabel` — is what separates polished apps from rough ones. Configure every field, every time.
+
+Next lesson: `NavigationStack`. We split BrewLog's home into a real navigated app — push from a brew row to a detail screen, programmatic deep links, and the sheet-vs-push decision tree.

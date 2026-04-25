@@ -13,7 +13,7 @@ export const NAV_LINKS = [
     href: '/apps/invoize',
     children: [
       { label: 'ThinkBud', href: '/apps/thinkbud', description: 'AI learning companion for iOS' },
-      { label: 'ApplyIQ', href: '/apps/applyiq', description: 'AI CV generator & interview prep for iOS & Mac' },
+      { label: 'RoleBud', href: '/apps/rolebud', description: 'AI CV generator & interview prep for iOS & Mac' },
       { label: 'PromptKit', href: '/apps/promptkit', description: 'AI prompt manager & community' },
       { label: 'Renovise', href: '/tools/renovation-estimator', description: 'Home renovation cost estimator' },
     ],
@@ -60,13 +60,13 @@ export const APPS = {
       { title: 'Export Presentations', description: 'Turn your learning into shareable interactive HTML presentations or PowerPoint decks with one tap.', icon: 'export' },
     ],
   },
-  applyiq: {
-    name: 'ApplyIQ',
+  rolebud: {
+    name: 'RoleBud',
     tagline: 'Land your dream job. Smarter.',
     description: 'AI-powered CV generator with 3 ATS optimization tiers — from realistic to maximum 100% match. Generate tailored CVs, export as Word or PDF, then use the Interview Coach with 35 role-specific questions across STAR, technical, and common categories plus timed mock interviews with voice practice.',
     platform: 'iOS & macOS' as const,
     status: 'available' as const,
-    icon: '/images/apps/applyiq-icon.png',
+    icon: '/images/apps/rolebud-icon.png',
     appStoreUrl: 'https://apps.apple.com/app/applyiq/id6759157564',
     features: [
       { title: 'Base CV Builder', description: 'Enter your CV manually or paste and upload it. Add personal info, professional summary, and experience — your starting point for every application.', icon: 'clipboard' },
@@ -232,9 +232,76 @@ export const PREMIUM_COURSE = {
   ],
 };
 
-export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE> = {
+export const SWIFTUI_FOUNDATIONS_COURSE = {
+  slug: 'swiftui-foundations',
+  title: 'SwiftUI Foundations',
+  subtitle: 'Build Brew Log — Your First Real SwiftUI App',
+  description: 'A free, anti-vibe-coding SwiftUI course. 18 lessons, every component you need, and a real coffee-tracking app called Brew Log that ends the course persistent, accessible, and ready for the App Store. Built without AI shortcuts — just the right way to write SwiftUI.',
+  author: 'NativeFirst Team',
+  isPremium: false,
+  totalLessons: 18,
+  modules: [
+    {
+      number: 1,
+      title: 'Setting the Stage',
+      description: 'The mental model that makes SwiftUI click — views as values, body as a function — and a clean Brew Log project structure with the first model in place.',
+      lessonCount: 2,
+    },
+    {
+      number: 2,
+      title: 'Views, Modifiers, Layouts',
+      description: 'Text, Image, Color, modifier order, stacks and spacers, the layout protocol, ScrollView, ignoresSafeArea — everything that turns three primitives into a real screen.',
+      lessonCount: 3,
+    },
+    {
+      number: 3,
+      title: 'Data Flow',
+      description: '@State for owned mutable, @Binding for borrowed, @Observable for structured, @Environment for shared. The 2026 SwiftUI data architecture from one screen to many.',
+      lessonCount: 3,
+    },
+    {
+      number: 4,
+      title: 'Controls',
+      description: 'Buttons, Menus, Pickers, plus the form-control toolbox — Toggle, Slider, Stepper, DatePicker, ColorPicker, ProgressView.',
+      lessonCount: 2,
+    },
+    {
+      number: 5,
+      title: 'Collections & Forms',
+      description: 'List, Section, ContentUnavailableView, AsyncImage, and the input toolkit — Form, TextField, TextEditor, @FocusState — to compose a real brew with notes.',
+      lessonCount: 2,
+    },
+    {
+      number: 6,
+      title: 'Navigation & Overlays',
+      description: 'NavigationStack with value-based links, sheet/alert/confirmationDialog/popover, and the decision tree of which to use when.',
+      lessonCount: 2,
+    },
+    {
+      number: 7,
+      title: 'Visual Toolbox',
+      description: 'Shapes, gradients, materials, the everyday effect modifiers, plus TabView, .toolbar, and LazyVGrid — the structural visual pieces.',
+      lessonCount: 2,
+    },
+    {
+      number: 8,
+      title: 'Persistence',
+      description: 'SwiftData — @Model, @Query, ModelContainer — so brews actually survive app restarts.',
+      lessonCount: 1,
+    },
+    {
+      number: 9,
+      title: 'Polish & Capstone',
+      description: 'Accessibility, Dynamic Type, dark mode, app icon, and the App Store ship checklist. Brew Log v1 is ready.',
+      lessonCount: 1,
+    },
+  ],
+};
+
+export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE | typeof SWIFTUI_FOUNDATIONS_COURSE> = {
   'vibe-code-native': COURSE,
   'ship-native': PREMIUM_COURSE,
+  'swiftui-foundations': SWIFTUI_FOUNDATIONS_COURSE,
 };
 
 export function getCourseBySlug(slug: string) {
@@ -252,6 +319,10 @@ export const BLOG_TAGS = [
 ] as const;
 
 export const AUTHORS: Record<string, { role: string; bio: string }> = {
+  'NativeFirst Team': {
+    role: 'Editorial',
+    bio: 'The NativeFirst team — engineers and designers building native Apple apps and writing the courses we wish we had when we started.',
+  },
   'Mario': {
     role: 'Founder & CEO',
     bio: 'Founder of NativeFirst. Building native Apple apps with SwiftUI and a passion for great user experiences.',
@@ -337,7 +408,7 @@ export const BLOG_ENGAGEMENT: Record<string, BlogEngagement> = {
       { author: 'Lisa Wang', date: '2025-03-14', text: 'Implemented ABSecureScreen in our fintech app last week. Works flawlessly.' },
     ],
   },
-  'how-ats-systems-work-applyiq': {
+  'how-ats-systems-work-rolebud': {
     likes: 57,
     comments: [
       { author: 'Jordan Ellis', date: '2026-02-16', text: 'I had no idea ATS systems rejected 75% of applications automatically. This explains so much about my job search.' },

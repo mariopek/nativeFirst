@@ -1,0 +1,159 @@
+---
+title: "Sheets, Alerts, Popovers, and Confirmation Dialogs"
+description: "Modal presentations done right. Sheet with detents, confirmationDialog for destructive actions, alert with message, popover for inline help. BrewLog's compose flow becomes a real sheet."
+courseSlug: "swiftui-foundations"
+module: 6
+moduleTitle: "Navigation & Overlays"
+lesson: 14
+duration: "11 min read"
+difficulty: "beginner"
+topics: ["SwiftUI", "Sheet", "FullScreenCover", "Alert", "ConfirmationDialog", "Popover", "Modal"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+Push isn't always the right answer. Some things need to interrupt — confirm a destructive action, capture a focused task, show inline context that doesn't deserve a whole screen. SwiftUI ships four overlay modifiers for exactly these cases: **`.sheet`**, **`.fullScreenCover`**, **`.alert`**, **`.confirmationDialog`**, plus **`.popover`** for iPad/Mac.
+
+Picking the right one is mostly about reading the situation. We covered the "sheet vs push" question last lesson; this one extends it to the rest of the family.
+
+By the end of this lesson, BrewLog has a proper **compose sheet** (with medium/large detents and a Save toolbar button), a **confirmation dialog** when deleting a brew, and an **alert** when resetting preferences.
+
+---
+
+## Sheet — the modal task container
+
+Sheets slide up from the bottom, dim the underlying view, and offer a swipe-down to dismiss. Use them for **modal tasks**: composing, editing, configuring something specific.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">.sheet · detents · drag indicator</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/14-sheets-alerts-popovers/snapshots/01-sheet-with-detents.png" alt="Sheet with presentationDetents and drag indicator" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The four modifiers that turn "boring sheet" into "Apple-tier polish":
+
+- **`.presentationDetents([.medium, .large])`** — the sheet snaps to half-height first, full-height when dragged. Use `.medium` for quick tasks, `.large` for forms with many fields, `.fraction(0.4)` or `.height(300)` for custom heights.
+- **`.presentationDragIndicator(.visible)`** — shows the small grabber bar at the top. Signals "you can drag me." Hidden by default; turn it on when you have multiple detents.
+- **The sheet's content is its own NavigationStack** — gives you a toolbar with Cancel/Save buttons. The placement names are semantic: `.cancellationAction`, `.confirmationAction`. Don't hardcode left/right — Apple may swap based on locale.
+- **`@Environment(\.dismiss)`** — the sheet's own dismiss action. Call it from Save and Cancel, not directly via the parent's `isPresented` binding. The sheet shouldn't know who's presenting it. **DIP again** — every modal flow benefits from this decoupling.
+
+`.fullScreenCover` is the same thing but covers the entire screen with no swipe-down dismiss. Use it for:
+- Onboarding (you don't want users to peek-dismiss it accidentally)
+- Video / camera takeover
+- Anything where the user must complete or explicitly cancel
+
+For BrewLog, compose is a `.sheet` — a swipe-down dismiss is fine; not everything needs a forced flow.
+
+---
+
+## ConfirmationDialog — destructive actions, the Apple way
+
+When a tap deletes data, **don't delete on tap**. Confirm. SwiftUI's `confirmationDialog` is the system-styled "are you sure?" with proper destructive role and an automatic Cancel button.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">confirmationDialog with item</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/14-sheets-alerts-popovers/snapshots/02-confirmation-dialog.png" alt="confirmationDialog presenting an item-bound delete flow" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The pattern with `presenting:` is the one to memorize. Two pieces of state work together:
+
+1. **`@State var brewToDelete: Brew?`** — `nil` means "no dialog showing"; non-nil means "showing a dialog about *this* brew."
+2. **`presenting:`** — passes the value into the actions and message closures. The button label can interpolate fields from the actual brew (`"Delete \(brew.method.label) brew"`), making the prompt specific.
+
+The `Binding(get:set:)` adapter is needed because `confirmationDialog` wants a `Binding<Bool>` for `isPresented:`. We derive the bool from "is the optional non-nil" and clear the optional when the bool flips to false. Apple has been promising a cleaner overload that takes `Binding<Item?>` directly for years; until then, this 4-line adapter is the idiom.
+
+On iPhone, `confirmationDialog` renders as an action sheet from the bottom. On iPad, it renders as a popover anchored to the source. Same code, two locations — accessibility-correct on both.
+
+---
+
+## Alert — the simpler "are you sure" + message
+
+`.alert` is the classic centered prompt with title, message, and 1–3 buttons. Use it for:
+- Yes/no questions where the answer changes app state ("Reset preferences?")
+- One-shot info ("Failed to load: try again later")
+- Confirmation of background actions
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">.alert · .popover · system overlays</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-foundations/14-sheets-alerts-popovers/snapshots/03-alert-and-popover.png" alt="Alert and popover overlays" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+`.alert` wants two things: a title (the question) and a `message:` closure (the explanation). Buttons go in the trailing closure. Roles matter — `.destructive` makes the action red, `.cancel` aligns it as the default Cancel button.
+
+`.popover` is the lightweight inline overlay. On iPad and Mac it renders as a true arrow-pointing popover; on iPhone it falls back to a sheet by default. Use `.presentationCompactAdaptation(.popover)` to force popover behavior on iPhone too — useful for tooltips that should never be a full sheet.
+
+**Decision tree for the whole overlay family:**
+
+- Single yes/no with **info text** → `.alert`
+- Single destructive confirmation that needs **specifics** ("delete this *thing*") → `.confirmationDialog` with `presenting:`
+- A **task with form** → `.sheet` with detents
+- A **forced flow** that can't be peek-dismissed → `.fullScreenCover`
+- A **tooltip / inline context** → `.popover` with compact adaptation
+
+Stop reaching for `.sheet` for everything. Each of these has its place.
+
+---
+
+## A trap I see weekly: deleting on tap, no confirmation
+
+The vibe-coded delete flow:
+
+```swift
+ForEach(brews) { brew in
+    BrewRow(brew: brew)
+        .contextMenu {
+            Button("Delete", role: .destructive) {
+                prefs.deleteBrew(brew)   // ← gone, no confirmation
+            }
+        }
+}
+```
+
+Two clicks (long-press, then tap) and the user's data is gone. Worse, the LLM-generated version sometimes attaches the destructive action to the *primary* tap, so a stray finger deletes a row.
+
+The fix is the pattern in this lesson: collect the value into `brewToDelete`, present `confirmationDialog`, do the work only when the destructive button is tapped. Apple's own apps universally do this for any user-data deletion. **Confirm any action that destroys user-visible state.**
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-foundations/14-sheets-alerts-popovers/videos/screen.png" alt="BrewLog with toolbar plus button and reset alert" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-foundations/14-sheets-alerts-popovers/videos/demo.mov" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">BrewLog · sheet, save, reset alert, cancel</figcaption>
+  </figure>
+</div>
+
+The video taps the new "+" toolbar button (top-right of the nav bar), the sheet slides up to medium height with the compose form. Type notes, tap Save → sheet dismisses, brew appears at the top of the recent list. Then we scroll down to Preferences, tap "Reset" → alert appears with destructive Reset and Cancel buttons → tap Cancel → alert dismisses.
+
+Three different overlays, each fitting the situation. Replace any of them with the wrong one (a sheet for the reset alert, a push for the compose flow) and the app immediately feels off.
+
+---
+
+## Takeaway
+
+**Sheets for tasks, alerts for yes/no with explanation, confirmationDialog for destructive item-specific confirmations, popovers for inline context, fullScreenCover for forced flows.** Use `presentationDetents` and the drag indicator to make sheets feel like 2026 iOS, not 2018 iOS. Always confirm destructive actions before doing them.
+
+Next lesson: shapes, gradients, materials, and the everyday visual-effect modifiers — `.blur`, `.shadow`, `.opacity`. We add the small visual touches that take BrewLog from "shipped on Saturday" to "looks like a real app."

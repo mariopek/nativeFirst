@@ -296,4 +296,90 @@ const difficultyColors: Record<string, string> = {
 
   initCopyButtons();
   document.addEventListener('astro:page-load', initCopyButtons);
+
+  // Code-snap behavior: copy snippet from header button + lightbox on image click
+  function initCodeSnaps() {
+    document.querySelectorAll<HTMLElement>('[data-code-snap]').forEach((snap) => {
+      if (snap.hasAttribute('data-snap-init')) return;
+      snap.setAttribute('data-snap-init', '');
+
+      // Image → lightbox
+      const img = snap.querySelector<HTMLImageElement>('img');
+      if (img) {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', () => openLightbox(img.src, img.alt));
+      }
+
+      // Copy button — pulls snippet URL from data-copy-snippet, or infers
+      // from the sibling image (./snapshots/foo.png → ./snippets/foo.swift).
+      const btn = snap.querySelector<HTMLButtonElement>('[data-copy-snippet]');
+      if (btn) {
+        btn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          let url = btn.getAttribute('data-copy-snippet');
+          if (!url && img) {
+            url = img.src.replace('/snapshots/', '/snippets/').replace(/\.png$/, '.swift');
+          }
+          if (!url) return;
+          const original = btn.textContent;
+          try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(String(res.status));
+            const text = await res.text();
+            await navigator.clipboard.writeText(text);
+            btn.textContent = 'Copied';
+            btn.classList.add('text-accent');
+          } catch {
+            btn.textContent = 'Failed';
+          }
+          setTimeout(() => {
+            btn.textContent = original;
+            btn.classList.remove('text-accent');
+          }, 1800);
+        });
+      }
+    });
+  }
+
+  function openLightbox(src: string, alt: string) {
+    const existing = document.getElementById('code-snap-lightbox');
+    existing?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'code-snap-lightbox';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.style.cssText = [
+      'position:fixed','inset:0','z-index:9999',
+      'background:rgba(0,0,0,0.85)','backdrop-filter:blur(8px)',
+      'display:flex','align-items:center','justify-content:center',
+      'padding:32px','cursor:zoom-out','animation:codeSnapFadeIn 150ms ease-out'
+    ].join(';');
+
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = alt || '';
+    img.style.cssText = 'max-width:100%;max-height:100%;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.5)';
+    overlay.appendChild(img);
+
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') close(); };
+
+    overlay.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+  }
+
+  initCodeSnaps();
+  document.addEventListener('astro:page-load', initCodeSnaps);
 </script>
+
+<style is:global>
+  @keyframes codeSnapFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+</style>
