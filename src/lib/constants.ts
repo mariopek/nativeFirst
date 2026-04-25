@@ -392,10 +392,6 @@ export const AUTHORS: Record<string, { role: string; bio: string }> = {
     role: 'Research Team',
     bio: 'The NativeFirst Research Team. We dig through the noise so you get the signal. Opinions are our own, coffee is mandatory.',
   },
-  'NativeFirst Team': {
-    role: 'The Team',
-    bio: 'The whole NativeFirst crew. We build native Apple apps, argue about tabs vs spaces, and occasionally write things that aren\'t code.',
-  },
 };
 
 export interface BlogComment {
