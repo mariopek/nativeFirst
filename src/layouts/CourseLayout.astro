@@ -340,10 +340,17 @@ const difficultyColors: Record<string, string> = {
       const btn = snap.querySelector<HTMLButtonElement>('[data-copy-snippet]');
       if (!btn) return;
 
-      // Resolve snippet URL: explicit attribute value wins, else infer from image src
-      let url = btn.getAttribute('data-copy-snippet') || '';
-      if (!url && img) {
+      // Resolve snippet URL. Always infer from image src first — MDX compilation
+      // serializes a bare `data-copy-snippet` attribute as `data-copy-snippet="true"`,
+      // which is not a URL. Only treat the attribute as an override if it actually
+      // looks like a path or absolute URL.
+      let url = '';
+      if (img) {
         url = img.src.replace('/snapshots/', '/snippets/').replace(/\.png$/, '.swift');
+      }
+      const explicit = btn.getAttribute('data-copy-snippet');
+      if (explicit && (explicit.startsWith('/') || explicit.startsWith('http'))) {
+        url = explicit;
       }
       if (!url) return;
 
