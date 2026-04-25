@@ -1,0 +1,155 @@
+---
+title: "We Gave Claude Mythos Full Access to Our Codebase. It Shipped Three Features Before Lunch."
+description: "After a week of security testing, we let Anthropic's most restricted AI model loose on real development work. It refactored our state management, found a memory leak we'd chased for months, and rewrote our networking layer across four apps. Week two was a different beast."
+pubDate: 2026-04-25
+tags: ["AI", "Claude", "Anthropic", "Claude Mythos", "iOS Development", "Swift", "SwiftUI", "Code Refactoring", "Software Development", "AI Pair Programming"]
+author: "NativeFirst Team"
+coverImage: "/images/blog/claude-mythos-week-two-cover.jpg"
+coverImageAlt: "Close-up of colorful programming code on a dark screen representing intensive AI-powered code refactoring session"
+---
+
+{/*
+  SEO target keywords:
+  - Claude Mythos code refactoring
+  - Claude Mythos iOS development 2026
+  - Claude Mythos real world results
+  - Claude Mythos vs Opus 4.7 productivity
+  - AI pair programming 2026
+  - Claude Mythos codebase review
+  - AI code refactoring SwiftUI
+  - Claude Mythos developer workflow
+  - Claude Mythos week two testing
+
+  Internal linking strategy:
+  - Links to /blog/we-tested-claude-mythos-preview-heres-what-happened (Week 1)
+  - Links to /blog/claude-mythos-escaped-sandbox-271-firefox-bugs (sandbox escape)
+  - Links to /blog/claude-opus-47-mythos-ai-too-dangerous-to-release (Mythos overview)
+
+  External reference strategy:
+  - Anthropic red team Mythos Preview report (red.anthropic.com)
+  - SWE-bench benchmark results
+  - Project Glasswing announcement
+*/}
+
+You know that moment when you hire a contractor to fix a leaky faucet, and they crawl out from under the sink with a face that says "buddy, we need to talk about your entire plumbing system"?
+
+That's what happened when we stopped using Claude Mythos for [security testing](/blog/we-tested-claude-mythos-preview-heres-what-happened) and started using it for actual development work.
+
+Last week, we shared how Mythos found a two-year-old race condition in ThinkBud and rewrote our security scanning pipeline. Impressive stuff. But week two — when we pointed it at our codebase and said "make this better" — is where things got genuinely surreal.
+
+---
+
+## Monday Morning: The State Management Roast
+
+We fed Mythos the entire **ThinkBud** project. Not a specific file. Not a module. The whole thing. 847 Swift files.
+
+We asked one question: "What would you change if you joined this team today?"
+
+It came back with a 23-page analysis in under four minutes. It hurt to read.
+
+First thing it flagged was our state management. We had `@State`, `@StateObject`, `@ObservedObject`, and `@EnvironmentObject` scattered across the app with the consistency of a toddler organizing Legos. Some views were observing objects they never modified. Others were creating new instances of shared state instead of injecting them. Classic SwiftUI spaghetti that happens when four people work on the same project for two years without a style guide.
+
+Mythos didn't just point out the mess. It proposed a complete migration to `@Observable` macro patterns, including a step-by-step refactoring plan that wouldn't break a single test. We followed it. **412 lines of boilerplate disappeared.** Cold launch time dropped by 180ms.
+
+That was before lunch on Monday.
+
+---
+
+## The Memory Leak That Made Us Feel Stupid
+
+For three months, we'd been chasing a memory leak in **PromptKit**. Every time a user previewed a prompt template, memory crept up by about 2MB. Not dramatic. Not crash-worthy. Just enough to make the app sluggish after an hour of heavy use.
+
+We'd profiled it. We'd Instruments'd it. We'd stared at allocation traces until our eyes crossed. The retain graph looked clean. The leak was a ghost.
+
+We gave Mythos the prompt template engine — 3,400 lines across 12 files.
+
+Twelve minutes. It found it in twelve minutes.
+
+A closure inside a `Task` block in our template preview coordinator captured `self` strongly. Normally fine — the `Task` completes and releases it. Except when users rapidly swiped between templates, the previous `Task` was never cancelled. Each abandoned task held a reference chain: coordinator → preview renderer → rendered template images. A retain cycle that only appeared under rapid user interaction — the kind of bug that doesn't surface in unit tests because unit tests don't simulate someone nervously swiping through templates before a job interview.
+
+The fix was three lines. `[weak self]`, cancel the previous task, nil out the image cache on deallocation. Three lines for three months of headache.
+
+---
+
+## The Networking Layer Nobody Wanted to Touch
+
+After week one's [security discoveries](/blog/we-tested-claude-mythos-preview-heres-what-happened), we knew our networking code needed work. But "needed work" is diplomatic for "four apps had four different HTTP clients, three different error handling approaches, and two different ways of parsing JSON."
+
+We asked Mythos to design a shared networking module for **ThinkBud**, **PromptKit**, **RoleBud**, and **Renovise**. Proper certificate pinning. Consistent error handling. Retry logic that actually made sense.
+
+What it produced was opinionated in ways that made us uncomfortable — because it was right. Pure `async/await` with structured concurrency. No completion handlers. No Combine publishers for network calls. It argued that our iOS 17 minimum deployment target meant zero reason to maintain pre-concurrency patterns. We were carrying technical debt because it "worked fine" and nobody wanted to be the person who touched the networking layer.
+
+Mythos was that person. It didn't care about our feelings.
+
+The shared module replaced approximately **2,800 lines across four apps with 640 lines** in a single package. Certificate pinning built into the foundation, not bolted on. Error types that included retry eligibility and user-facing descriptions instead of generic "network error" messages.
+
+Shipped to TestFlight on Wednesday. Zero regressions.
+
+---
+
+## The Code Review That Changed Our Process
+
+Thursday, we tried something different. Instead of a task, we gave Mythos a pull request. A real PR, already merged — a "practice mode" feature for **RoleBud's** interview coach.
+
+It found an off-by-one error in pagination. Found a missing edge case where users could trigger two simultaneous practice sessions. Found that our timer would drift 340ms per minute because we used `Timer.scheduledTimer` where `DispatchSourceTimer` was the right call.
+
+But here's the thing that made me put my coffee down: it found a **design problem**. The practice mode was tightly coupled to a specific interview question format. If we ever wanted different practice types — behavioral, technical, case study — we'd duplicate the entire view hierarchy. Mythos proposed a protocol-oriented abstraction that would make the feature extensible without anyone having to predict the future.
+
+Three human reviewers approved that PR. Mythos would have requested changes.
+
+---
+
+## The Scary-Good Moment
+
+Friday. We asked Mythos to optimize batch processing in RoleBud's interview question generator — it was making sequential API calls, fine for one question, painful for a full 15-question practice session.
+
+Mythos restructured it with `TaskGroup`, concurrent calls, intelligent batching in groups of five with back-pressure, and graceful rate-limit handling.
+
+When we asked why groups of five instead of all 15 at once, it referenced API rate limiting behavior it had observed **during security testing in week one**. Different repository. Different context. Different task entirely.
+
+It retained context across sessions, across repos, across fundamentally different objectives. When Anthropic says Mythos maintains "coherent understanding across multi-day sessions," they're not marketing. They mean it literally.
+
+That's the moment it stopped feeling like a tool and started feeling like a colleague who actually remembers what happened on Monday.
+
+---
+
+## The Numbers
+
+| Metric | Before Mythos | After Mythos |
+|---|---|---|
+| ThinkBud cold launch | 1.8s | 1.62s |
+| PromptKit memory ceiling (1hr session) | 340MB | 185MB |
+| Shared networking code (total lines) | ~2,800 | ~640 |
+| ThinkBud test coverage | 67% | 74% |
+| Open tech debt issues | 34 | 19 |
+
+Mythos's [benchmark numbers](https://red.anthropic.com/2026/mythos-preview/) — 93.9% SWE-bench Verified, 77.8% SWE-bench Pro, 82% Terminal-Bench — are impressive in isolation. But for a four-person indie team, the real question is: did it make our apps measurably better?
+
+Yes. Unambiguously yes.
+
+The code Mythos writes feels qualitatively different from Opus 4.7. Not just fewer bugs. Structurally different. Every suggestion considers the broader architecture. Every refactor anticipates maintenance burden. It writes code like someone who's maintained a codebase for five years — defensively, thoughtfully, aware that today's shortcut becomes next quarter's nightmare.
+
+---
+
+## Back to Earth
+
+Our Bedrock gated preview wrapped up Saturday. We're back on Opus 4.7.
+
+Opus 4.7 is excellent — the [12-point CursorBench jump](https://www.anthropic.com/news/claude-opus-4-7) over 4.6 is real, and it's the model most developers should be using. But going from Mythos to Opus 4.7 felt like switching from a Tesla back to a really nice Toyota. The Toyota is great. You'd recommend it. But you've driven something else now, and you can't un-know it.
+
+Anthropic committed [$100 million in Mythos credits](https://red.anthropic.com/2026/mythos-preview/) to Project Glasswing partners — Amazon, Microsoft, Apple, the usual suspects. That makes sense for critical infrastructure defense. But the capability gap between what we experienced and what's available to indie teams? Based on two weeks of usage: it already exists.
+
+We're not waiting around, though. We documented every pattern Mythos suggested. We upgraded our code review process with an "architecture impact" checklist. We shipped the networking module. And we're asking Opus 4.7 better questions — turns out "analyze this module's architecture for maintenance burden over six months" gets you 80% of the way there.
+
+The best tools exist. They work. Most of us just can't use them yet.
+
+We'll keep building with what we have.
+
+---
+
+## Related Reading
+
+- [We Got Our Hands on Claude Mythos Preview](/blog/we-tested-claude-mythos-preview-heres-what-happened) — Week one: the security testing that started it all.
+- [Claude Mythos Escaped Its Sandbox, Found 271 Firefox Bugs](/blog/claude-mythos-escaped-sandbox-271-firefox-bugs) — The sandbox escape incident and what it means.
+- [Is Claude Mythos Too Dangerous to Release?](/blog/claude-opus-47-mythos-ai-too-dangerous-to-release) — Anthropic's unprecedented decision to restrict access.
+- [WWDC 2026: Foldable iPhone APIs and Core AI](/blog/wwdc-2026-foldable-iphone-apis-core-ai-developer-guide) — What we're building next.
