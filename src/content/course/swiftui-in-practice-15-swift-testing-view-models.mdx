@@ -1,0 +1,146 @@
+---
+title: "Swift Testing View Models — @Test, #expect, and the makeSUT Pattern"
+description: "Tests are the difference between code you can change and code you're afraid to touch. Swift Testing makes the boring parts disappear; the makeSUT pattern keeps them isolated. A working preview of the TDD discipline that runs through Course 3."
+courseSlug: "swiftui-in-practice"
+module: 6
+moduleTitle: "Testing"
+lesson: 15
+duration: "12 min read"
+difficulty: "intermediate"
+topics: ["Testing", "Swift Testing", "TDD", "Test Doubles", "View Models"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+There's a moment, two months into a project, where you realize you can't change anything without breaking three other things. The cache works, then the loading state regresses. You fix the loading state, the error toast stops showing. You fix that, and now refresh-during-failure double-fires the network. Each fix is a coin flip.
+
+This is what un-tested view models feel like at scale. And it's not a discipline problem — it's a feedback-loop problem. Without tests, the only way to know if a change broke something is to *use the app*. With tests, you know in 0.4 seconds.
+
+Swift Testing — Apple's replacement for XCTest — is the lowest-friction way to start. The `@Test` macro, `#expect` for assertions, and the `makeSUT` pattern for isolating dependencies. By the end of this lesson you'll have written tests for `WatchlistViewState`'s entire lifecycle: success, empty, failure, and the stale-while-revalidate cache contract.
+
+This is also a preview of the TDD discipline that runs through every lesson of Course 3. Same patterns, more rigor.
+
+---
+
+## The first test, and why the makeSUT pattern matters
+
+Before writing any test, define how you build the System Under Test. A function, not a property. A function that returns the SUT *and* the collaborators you'll inspect.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">@Suite · @Test · #expect · makeSUT</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/15-swift-testing-view-models/snapshots/01-first-test-and-makesut.png" alt="First three Swift Testing tests with makeSUT helper" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Why a function and not a `setUp()` method:
+
+- **Each test gets a fresh SUT.** No shared mutable state. The order of tests doesn't matter, and parallel runs don't fight.
+- **Each test overrides only what it cares about.** `loadFailure` passes a `failure:` argument; the others get the defaults. The intent is local and obvious.
+- **Dependencies are explicit at the call site.** Reading `makeSUT(failure: APIError.offline)` tells you exactly what's special about this test. No hunting for `super.setUp()` somewhere up the chain.
+
+This is the single most important pattern in this lesson. We use it in Course 3 for every test we write. Once it's muscle memory, you'll stop reaching for `setUp` entirely.
+
+The three tests above cover the three core branches of `WatchlistViewState.load()`: successful fetch flips state to `.loaded`, empty fixtures flip to `.empty`, network failure (with no cache) flips to `.failed`. Three tests, ~25 lines, and the entire happy/sad/empty branching is locked down. You can refactor `load()` freely from here without fear.
+
+---
+
+## Test doubles — knowing the four types
+
+"Mock" gets used for everything, and that vagueness costs you. Here are the four kinds, in order of complexity, with the rule for picking which.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Stub · Spy · Mock · Fake</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/15-swift-testing-view-models/snapshots/02-test-doubles-taxonomy.png" alt="Test doubles taxonomy with examples" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The shortest version:
+
+- **Stub** — returns canned data. No state, no recording. Use it when the test is about *output given input*. (Most of your tests.)
+- **Spy** — records what was called and how. Use it when the test is about *the contract* between the SUT and the dependency.
+- **Mock** — strict-TDD term for "spy that asserts during the call." In Swift Testing you'll usually write a Spy and verify with `#expect` at the end. Same idea, less ceremony.
+- **Fake** — a working alternative implementation. `MockMarketsRepository` in the Pulse codebase is technically a Fake — it has fixtures, simulates delays, and can throw. Use a Fake when you want close-to-real behavior without the real dependency (network, DB, file system).
+
+The discipline: **reach for the simplest one that proves the behavior**. If you can use a stub, use a stub. Only escalate to a spy when you need to verify the call. Only escalate to a fake when behavior matters more than canned output.
+
+Tests using the wrong test double are a smell. A spy where a stub would do is testing implementation, not behavior — your tests will break every time you refactor the SUT internals. A stub where a spy is needed is testing nothing and giving false confidence.
+
+---
+
+## Async tests and the cache contract
+
+The bugs that bite in production live at the async boundary. Did the state transition correctly? Did the cache render before the network fired? Did the error clear after a successful retry? These are exactly what you test next.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">SWR cache contract · failure recovery</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/15-swift-testing-view-models/snapshots/03-async-and-cache-tests.png" alt="Async tests for cache and failure recovery" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The tests above lock down three contracts:
+
+1. **Cache hit skips the loading state.** If we have something cached, the user should never see a loading spinner — the cached entries should already be on screen by the time the network refresh begins.
+2. **Failure preserves cached data.** If the network fails *and* we have cache, we keep showing cache. The failure is surfaced as `refreshError` (a banner), not as `.failed` (a full-screen takeover).
+3. **Success clears prior errors.** Easy to forget; easy to regress. A test pins it forever.
+
+These three behaviors are exactly what makes a "good" loading experience versus a janky one. Without tests, you'll regress one of them every couple of months. With tests, you can refactor the cache layer freely — the tests scream the moment behavior changes.
+
+The trick at the async boundary: launch the work in a `Task`, sleep briefly, and assert on the *intermediate* state. That's how you prove "the cache rendered before the network." It's a 20-millisecond pause in test time that catches the entire class of "loading flash" bugs your users complain about.
+
+---
+
+## A trap I see weekly: testing the View, not the View Model
+
+Tempting:
+
+```swift
+@Test func watchlistShowsThreeRows() async throws {
+    let view = WatchlistView()
+    // ... try to count rows somehow ...
+}
+```
+
+You can't really do this without snapshot tests or full UI tests, and both are slow, flaky, and tied to layout. The actual bug you care about isn't "are there three rows" — it's "did the view-state get three entries from the repository?" Test the view-state. The view is a pure function of state, and SwiftUI's preview system catches visual regressions far more reliably than any snapshot test.
+
+The rule: **test the data shape (view-state), not the pixels (view).** One thin happy-path UI test for the entire app is fine. Beyond that, every additional UI test is technical debt.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex justify-center">
+  <figure class="m-0">
+    <img src="/images/courses/swiftui-in-practice/15-swift-testing-view-models/videos/screen.png" alt="Pulse — same screen, but every behavior is now pinned by tests" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+</div>
+
+Visually nothing changes — but `cmd-U` in Xcode now runs in under a second and turns the corner of the IDE green. Add a test, watch it fail, write the code, watch it pass. Refactor anything you want. The tests are the safety net.
+
+[ThinkBud](https://apps.apple.com/app/thinkbud/id6743296798)'s entire view-state layer is tested this way. ~120 tests, run on every commit, full suite under 4 seconds. The first 30 took an afternoon. After that, writing the test is faster than not writing it — because debugging without tests is the slow path.
+
+---
+
+## Takeaway
+
+**Use the `makeSUT` function pattern for every view-state test.** Pick the simplest test double the assertion needs — stub > spy > fake. Test the view-state, not the view. Write tests for the contracts that matter (success, empty, failure, cache hit, retry-after-failure) and skip the ones that don't (every getter, every internal method, every layout pixel).
+
+You're now writing the same shape of tests that drives Course 3 from day one. Course 3 just turns up the rigor: write the test *first*, watch it fail, write the minimum code to pass, refactor, repeat.
+
+Next lesson: Pulse v1 ship checklist. App Store metadata, accessibility audit, Instruments time-profile sweep, the launch checklist that keeps Pulse from getting rejected — and the bridge into Course 3, where we build Atlas with TDD from line one.
