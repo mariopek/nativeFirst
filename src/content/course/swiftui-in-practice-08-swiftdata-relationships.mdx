@@ -1,0 +1,148 @@
+---
+title: "SwiftData with Relationships — Favorites that Survive Restarts"
+description: "Add a FavoriteMarket @Model to Pulse, wire up a star button on every row, and learn the relationship pattern (one-to-many with cascade delete) you'll reach for the moment a model needs children."
+courseSlug: "swiftui-in-practice"
+module: 3
+moduleTitle: "Persistence + Caching"
+lesson: 8
+duration: "9 min read"
+difficulty: "intermediate"
+topics: ["SwiftData", "@Model", "@Query", "Relationships", "Predicates", "Persistence"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+Foundations lesson 17 introduced SwiftData on Brew Log: one model, no relationships, end of story. Real apps eventually need more — a favorite has notes, a user has posts, a watchlist has markets. That's where SwiftData's **relationships** come in: declarative, type-safe, with cascade-delete and inverse-keypath support that stops half the "orphan record" bugs at the type level.
+
+Today's Pulse changes are tiny in code but big in user value: each market row gets a **star button** that persists. Tap it once, the FavoriteMarket lands in SwiftData. Quit the app, open it again, the star is still filled. The pattern is exactly what every "favorites" feature in iOS uses.
+
+We also cover the **one-to-many relationship pattern** in a snippet (FavoriteMarket → Notes), since the moment Pulse evolves to support per-favorite notes, that's the shape we'll reach for.
+
+---
+
+## The simplest @Model — single entity
+
+The favorite has a unique identity (the symbol), a display name, and a timestamp.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Storage/FavoriteMarket.swift</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/08-swiftdata-relationships/snapshots/01-favorite-model.png" alt="FavoriteMarket @Model with @Attribute(.unique) symbol" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three details that pull weight:
+
+- **`@Attribute(.unique)` on `symbol`.** SwiftData enforces this at the database level. Trying to insert a second `FavoriteMarket(symbol: "BTC")` while one already exists silently overwrites — so we don't need to dedupe in code. **One source of truth, enforced at the right layer.**
+- **`Date` for `addedAt`** — sortable, queryable via `#Predicate`, formats with system locale. Always store dates as `Date`, never as String.
+- **A `convenience init(from: MarketEntry)`** — the seam between the API/domain shape (lesson 4-5) and the persisted shape. The view never has to remember "which fields go into the favorite"; the convenience init does.
+
+The `.modelContainer(for: FavoriteMarket.self)` modifier on `WindowGroup` is the only other line — SwiftData creates the SQLite store, handles migrations automatically, injects `\.modelContext` into the environment for every view.
+
+---
+
+## One-to-many relationships, the right way
+
+Pulse doesn't ship Notes today. But the moment it does — the moment any model needs children — this is the pattern:
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">FavoriteMarket → Notes (one-to-many)</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/08-swiftdata-relationships/snapshots/02-relationship-pattern.png" alt="Relationship pattern with cascade delete and inverse keypath" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three pieces matter:
+
+1. **`@Relationship(deleteRule: ..., inverse: ...)`** — both sides of the keypath. Without `inverse:` SwiftData still works but treats the two collections as independent — adding a Note doesn't make the FavoriteMarket's `notes` array see it. The inverse keypath is what fuses them.
+2. **`deleteRule:`** — `.cascade` deletes children when parent goes (favorite deleted → all its notes vanish). `.nullify` (default) breaks the link but keeps the child alive — useful when the child can exist independently. `.deny` blocks the parent delete if children exist (rare but useful for "you can't delete this category, it has 12 items").
+3. **`var notes: [Note] = []` on the parent.** Plain Swift array. SwiftData syncs it with the database; you mutate it like any other array (`favorite.notes.append(Note(...))`).
+
+This pattern scales: many-to-many is just `@Relationship` on both sides with `[Type]` arrays both directions; the inverse keypath ties them.
+
+---
+
+## Querying with predicates
+
+`@Query` got covered in Foundations 17. The advanced version — and what relationships unlock — is **filtering with `#Predicate`**.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">@Query · sort + #Predicate filter</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/08-swiftdata-relationships/snapshots/03-query-with-predicate.png" alt="@Query with sort descriptor and #Predicate filter" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three things that make `@Query` powerful in production:
+
+- **`sort: \KeyPath, order: .reverse`** — pushes sort into SQL. Even with thousands of records, the database returns them ordered without you doing anything.
+- **`filter: #Predicate<T> { ... }`** — Swift macro that expands into an NSPredicate. **Compile-time type checking** for the keypath, so renaming `addedAt` updates every query. Compare to Core Data's stringly-typed predicates that explode at runtime.
+- **Multiple `@Query` declarations in one view.** Different filters, different sorts, all efficient. Ideal for dashboards that show "all favorites" alongside "favorites added in the last week."
+
+A predicate runs against the persistent store, not in memory. Filtering 50,000 favorites by date is no slower than filtering 5 — that's why this matters.
+
+---
+
+## A trap I see weekly: storing relationships as IDs
+
+The hand-rolled-Core-Data version of "favorites with notes":
+
+```swift
+class FavoriteMarket {
+    var id: UUID
+    var noteIDs: [UUID] = []   // ← stringly-typed foreign-key list
+}
+
+class Note {
+    var id: UUID
+    var favoriteID: UUID?       // ← parent ID
+}
+```
+
+Hand-rolled foreign keys. Two big problems:
+1. **No cascade delete.** Delete a favorite, its notes are still in storage with a dangling `favoriteID`. Orphan records, slow growth, eventually a manual cleanup pass.
+2. **No type-safe traversal.** `favorite.notes` requires a separate query: "give me all notes where favoriteID == favorite.id." Every screen reimplements this. Forget once → silent bug.
+
+`@Relationship` solves both at the type level. Cascade enforced at the storage layer. `favorite.notes` is just a property; SwiftData fetches and updates it transparently.
+
+If you ever see ID arrays simulating relationships in modern SwiftData code, **someone copy-pasted from a 2018 Core Data tutorial.** Replace it.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex flex-col sm:flex-row gap-6 items-start justify-center">
+  <figure class="m-0 flex-shrink-0">
+    <img src="/images/courses/swiftui-in-practice/08-swiftdata-relationships/videos/screen.png" alt="Pulse with star buttons on each market row" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+  <figure class="m-0 flex-shrink-0">
+    <video src="/images/courses/swiftui-in-practice/08-swiftdata-relationships/videos/demo.mp4" controls muted playsinline class="block max-w-[260px] rounded-2xl border border-border m-0"></video>
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">Pulse · favoriting markets, persisted to disk</figcaption>
+  </figure>
+</div>
+
+The star button on the right of each row is what's new. Tap it, the star fills. Kill the app, relaunch, the star is still filled because `FavoriteMarket(symbol: "BTC", ...)` lives in SwiftData now. **No "save state" code, no JSON shenanigans, no UserDefaults.** SwiftData handles persistence; we handle UI.
+
+---
+
+## Takeaway
+
+**`@Model` for the entity. `@Attribute(.unique)` for natural keys. `@Relationship(deleteRule:, inverse:)` for one-to-many. `@Query(filter: #Predicate)` for filtered fetching.** The whole API is type-safe, declarative, and fast — predicates run as SQL, not in-memory loops.
+
+Don't simulate relationships with foreign-key arrays. Don't store dates as String. Don't dedupe in code when `.unique` enforces it at the database.
+
+Next lesson: cache strategy. We make Pulse work offline by storing fetched markets in SwiftData and serving them while the network refresh runs — stale-while-revalidate, the pattern that defines how the app feels on a flaky cell connection.
