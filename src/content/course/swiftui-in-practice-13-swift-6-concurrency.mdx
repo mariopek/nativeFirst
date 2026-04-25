@@ -1,0 +1,143 @@
+---
+title: "Swift 6 Strict Concurrency — @MainActor, Sendable, and Reading the Errors"
+description: "The annotations Pulse has been quietly using all course, finally explained. @MainActor, actors, Sendable, nonisolated — what each one does, when you need it, and how to read the diagnostic errors that are coming for everyone."
+courseSlug: "swiftui-in-practice"
+module: 5
+moduleTitle: "Concurrency"
+lesson: 13
+duration: "10 min read"
+difficulty: "intermediate"
+topics: ["Swift 6", "Concurrency", "@MainActor", "Sendable", "Actors", "Data Races"]
+author: "NativeFirst Team"
+draft: false
+pubDate: 2026-04-25
+---
+
+You've been writing Swift 6 strict-concurrency code for ten lessons now and probably haven't noticed because Pulse never made the compiler unhappy. That's the point: when the annotations are right, you don't think about them. When they're wrong, you'll lose an afternoon to one error message. This lesson is the manual you wish you had.
+
+Three concepts cover 95% of what you'll meet: **`@MainActor`** (run this on the main thread), **`Sendable`** (this value is safe to ship across actors), and **`actor`** (your own isolation domain for shared mutable state). The fourth — `nonisolated` — is the escape hatch when you need it.
+
+Strict concurrency is not optional in 2026 Swift. The compiler runs full data-race analysis. Every line of async code Pulse ships compiles cleanly because we've been writing it correctly. When *your* code doesn't, you'll see one of four diagnostic messages — and the fix is almost always one of four small refactors.
+
+---
+
+## Actor isolation — `@MainActor` and your own actors
+
+`@MainActor` is the annotation you've used most. It says: "every property and method on this type runs on the main thread." That's why SwiftUI views, which always render on main, can call into a `@MainActor` view-state without ceremony.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">@MainActor + actor + nonisolated</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/13-swift-6-concurrency/snapshots/01-actor-isolation.png" alt="@MainActor view-state, actor PriceCache, nonisolated extension" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+Three rules:
+
+- **`@MainActor`** for anything that touches UI. SwiftUI's view trees, view-states, anything that updates `@State` or reads from `@Environment` should be main-actor isolated. Add the annotation at the type level (whole class) or method level (one specific entry point).
+- **`actor`** for your *own* isolation domain. A `PriceCache` actor has its own queue; only one task can read or write its mutable state at a time. The compiler enforces it. Use this for shared mutable state that lives outside the main thread (background caches, network connection pools, in-memory KV stores).
+- **`nonisolated`** is the opt-out. Static helpers, immutable computed properties, methods that don't touch isolated state — mark them `nonisolated` so callers don't need to `await`.
+
+Crossing actor boundaries requires `await`. The await isn't a performance cost — it's the compiler signal that "this call may suspend." It's also the signal that you're touching shared state, which is exactly when you want to think.
+
+---
+
+## Sendable — "safe to ship across actors"
+
+`Sendable` is the conformance that says "I'm okay to be shipped from one actor to another without the compiler losing sleep." Most of your value types qualify automatically; classes don't.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Sendable conformance · structs vs classes</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/13-swift-6-concurrency/snapshots/02-sendable.png" alt="Sendable conformance examples" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+What conforms automatically vs needs annotation:
+
+- **Structs of Sendable members** — auto. `MarketEntry` (struct of String/Decimal/Double, all Sendable) gets it for free.
+- **Enums of Sendable cases** — auto. `LoadState`, `APIError` — auto.
+- **Classes** — never auto. Class instances have reference semantics, so the compiler can't prove safety. Three explicit options:
+  - `final class Foo: Sendable` with **only `let` properties**.
+  - `@MainActor final class Foo` — Sendability via main-actor isolation.
+  - `@unchecked Sendable` — the escape hatch for "I know what I'm doing" (e.g., a class with internal locking). **Rare and dangerous.**
+
+The line that surprises people: `@MainActor` makes a class Sendable for free. That's why Pulse's view-states cross from `Task { ... }` to view code without compiler complaints — the isolation provides the guarantee.
+
+---
+
+## Reading the four diagnostics that cover 90% of cases
+
+Most concurrency errors fall into four buckets. Knowing the message → fix mapping is the difference between an hour of frustration and a 2-line edit.
+
+<figure class="not-prose my-8 max-w-lg mx-auto" data-code-snap>
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-surface-2 border border-border border-b-0 rounded-t-lg">
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-pink/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-yellow/60"></span>
+    <span class="w-2.5 h-2.5 rounded-full bg-accent-green/60"></span>
+    <span class="ml-2 text-[11px] font-mono text-text-muted">Common Swift 6 errors → fixes</span>
+    <button data-copy-snippet class="ml-auto text-[11px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 rounded">Copy</button>
+  </div>
+  <img src="/images/courses/swiftui-in-practice/13-swift-6-concurrency/snapshots/03-reading-diagnostics.png" alt="Four common diagnostics with fix patterns" class="block w-full rounded-b-lg border border-border border-t-0 m-0" />
+</figure>
+
+The four errors:
+
+1. **"Call to main actor-isolated method ... in synchronous nonisolated context"** → wrap in `Task { await ... }`, or use SwiftUI's `.task` modifier.
+2. **"Capture of 'self' with non-Sendable type ... in @Sendable closure"** → use `Task { [weak self] in ... }` or mark the type `@MainActor`.
+3. **"Type 'X' does not conform to Sendable"** → add Sendable conformance, mark `@MainActor`, or pass only the values you need (often the cleanest).
+4. **"Sending 'X' risks data races"** → extract a Sendable snapshot before crossing the actor boundary, or refactor the receiver to be on the same actor.
+
+[ThinkBud](https://apps.apple.com/app/thinkbud/id6743296798)'s migration to Swift 6 strict mode took about a day and a half. The cleanup pattern was almost mechanical: read the error, apply one of the four fixes, move on. The real cost was the *first* fix; after that, the same patterns repeated.
+
+---
+
+## A trap I see weekly: silencing diagnostics with `@unchecked Sendable`
+
+Tempting one-liner when you're tired of fighting the compiler:
+
+```swift
+final class SharedState: @unchecked Sendable {
+    var entries: [MarketEntry] = []   // ← actually mutable, not actually safe
+    func update(_ newEntries: [MarketEntry]) {
+        entries = newEntries           // ← no synchronization
+    }
+}
+```
+
+`@unchecked Sendable` tells the compiler "trust me, this is safe." If you're using it because the compiler was actually right and the code has a real race, you've just turned a compile-time error into a runtime data race. Those are 100x harder to debug.
+
+**Use `@unchecked Sendable` only for classes with internal locking** (e.g., a class with `os_unfair_lock` protecting all access). For everything else, use `@MainActor`, an `actor`, or a `final class` with all-let properties. The compiler is on your side; don't override it without understanding what you're hiding.
+
+---
+
+## What it looks like running
+
+<div class="not-prose my-8 flex justify-center">
+  <figure class="m-0">
+    <img src="/images/courses/swiftui-in-practice/13-swift-6-concurrency/videos/screen.png" alt="Pulse home — same UI, all the right concurrency annotations underneath" class="block max-w-[260px] rounded-2xl border border-border m-0" />
+    <figcaption class="text-[11px] font-mono text-text-muted text-center mt-2">iPhone 17 Pro Max · iOS 26.2</figcaption>
+  </figure>
+</div>
+
+Visually, Pulse looks the same as lesson 12. **Underneath**, every async call is annotated correctly: the view-state is `@MainActor`, the repository is `Sendable`, the cache is non-isolated with `let` storage. Strict concurrency is on. Zero data race warnings. The app *would* break under heavy concurrent use without these annotations, but because they're in place, there's nothing to see.
+
+That's what good concurrency looks like: invisible.
+
+---
+
+## Takeaway
+
+**`@MainActor` for UI-touching code. `actor` for shared mutable state. `Sendable` for types that cross actor boundaries. `nonisolated` as the opt-out for code that doesn't need isolation.** Read the four common errors above, match each to one of four fixes, move on.
+
+Don't reach for `@unchecked Sendable` to silence the compiler — it's lying to you for runtime crashes you'll have to debug later.
+
+Next lesson: task cancellation. The flip side of structured concurrency — when does `await` return `CancellationError`, why does your loading spinner outlive the screen if you skip this, and the `.task(id:)` pattern that fixes it.
