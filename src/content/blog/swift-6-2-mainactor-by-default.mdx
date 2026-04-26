@@ -1,0 +1,160 @@
+---
+title: "MainActor by Default in Swift 6.2: Apple Flipped the Script on Concurrency"
+description: "Xcode 26 ships Swift 6.2 with a new default isolation model that makes @MainActor implicit for app types. Here's why Apple made the call, what it means for your existing code, and a test-first walkthrough of the before/after."
+pubDate: 2026-04-26
+tags: ["Swift", "Concurrency", "Swift 6.2", "iOS", "Xcode 26", "TDD", "MainActor"]
+author: "Mario"
+coverImage: "/images/blog/swift-6-2-mainactor-cover.svg"
+coverImageAlt: "Multiple threads converging into a single @MainActor badge — representing Swift 6.2's default isolation model"
+---
+
+Swift 6 concurrency migration gave half the iOS community mild PTSD. You'd turn on strict checking, and suddenly the compiler was screaming about `Sendable` conformances in code that had never caused a single actual race condition in production. It felt like being audited for a crime you didn't commit.
+
+Apple noticed.
+
+In Xcode 26, Swift 6.2 ships a change that quietly rewrites the negotiation: `@MainActor` is now the *default* isolation for types in your app target. No annotation required. The compiler assumes you're on the main thread unless you say otherwise.
+
+---
+
+## Why the Old Model Was Painful
+
+The Swift 6 migration problem wasn't the type system — it was the mismatch between what the compiler assumed and how real apps actually work.
+
+The compiler's default assumption was *no isolation*. Every type starts `nonisolated`. You want to touch `@Published` properties from an `async` function? Annotate the class. Conform to a protocol that's called from a view? Annotate that too. Suddenly every ViewModel, every delegate, every helper class needed `@MainActor` written on it.
+
+The thing is — they *should all be on the main thread*. That was never in dispute. iOS apps are largely single-threaded at the UI layer. You were just writing annotations to tell the compiler something that was obviously true.
+
+I hit this wall last year with Invoize. The app had about 40 view models. Getting to zero Swift 6 warnings took two days and felt like filling out immigration forms. The actual data races I fixed along the way? One. A background network call touching a `@Published` array that genuinely needed fixing. The rest was bureaucracy.
+
+---
+
+## What Swift 6.2 Changes
+
+Swift 6.2 lets you declare a module-wide default isolation. Enable it for your app target in Xcode 26 via **Build Settings → Swift Compiler → Default Actor Isolation → Main Actor**, or in `Package.swift`:
+
+```swift
+// Package.swift
+.target(
+    name: "InvoizeApp",
+    swiftSettings: [
+        .unsafeFlags(["-default-isolation", "MainActor"])
+    ]
+)
+```
+
+With that set, every type and function in the target is implicitly `@MainActor`. The annotation becomes the exception, not the rule.
+
+Let me show you what this looks like test-first.
+
+---
+
+## RED — the test that should just work
+
+Here's the test I want to write for a simple invoice view model. Nothing fancy — fetch some data, check the state updates:
+
+```swift
+// InvoiceViewModelTests.swift
+import Testing
+@testable import InvoizeApp
+
+@Test func load_populatesInvoices() async throws {
+    let repo = StubInvoiceRepository(returning: Invoice.samples)
+    let sut = InvoiceViewModel(repository: repo)
+
+    await sut.load()
+
+    #expect(sut.invoices.count == 3)
+}
+```
+
+In Swift 5 mode, this test compiles and runs cleanly. In Swift 6 *without* `@MainActor` defaults, it generates:
+
+```
+error: expression is 'async' but is not marked with 'await'
+error: main actor-isolated property 'invoices' can not be 
+       mutated from a nonisolated context
+```
+
+The test is correct. The model is correct. The concurrency annotations are just missing. That's the red that shouldn't exist.
+
+---
+
+## GREEN — the implementation under Swift 6.2 defaults
+
+With the default isolation set to `MainActor`, the implementation needs zero concurrency annotations:
+
+```swift
+// InvoiceViewModel.swift
+import Observation
+
+@Observable
+class InvoiceViewModel {
+    var invoices: [Invoice] = []
+    private let repository: any InvoiceRepository
+
+    init(repository: any InvoiceRepository) {
+        self.repository = repository
+    }
+
+    func load() async {
+        invoices = await repository.fetch()
+    }
+}
+```
+
+No `@MainActor` on the class. No annotation on `load()`. The test from above compiles cleanly and passes — the test runner knows `InvoiceViewModel` is `@MainActor`, dispatches to the right thread, and everything is consistent.
+
+The compiler infers from the module default. The annotation is gone because it's true by assumption, not because we stopped caring about thread safety.
+
+---
+
+## REFACTOR — explicit opt-out for real background work
+
+The default is right for 90% of app code. The other 10% — image processing, PDF export, parsing large JSON payloads — genuinely needs a background thread. That's where `nonisolated` comes in:
+
+```swift
+extension InvoiceViewModel {
+    nonisolated func exportToPDF(_ invoice: Invoice) async -> Data {
+        // Explicitly off the main actor — CPU-heavy work
+        await Task.detached(priority: .userInitiated) {
+            PDFExporter.render(invoice)
+        }.value
+    }
+}
+```
+
+And the test for it:
+
+```swift
+@Test func exportToPDF_returnsNonEmptyData() async throws {
+    let sut = InvoiceViewModel(repository: StubInvoiceRepository())
+
+    let data = await sut.exportToPDF(Invoice.sample)
+
+    #expect(data.isEmpty == false)
+}
+```
+
+`nonisolated` is now the escape hatch. You're telling the compiler: "I know this one runs off the main thread, treat it accordingly." The annotation carries meaning because it's the *exception* to the rule, not the default boilerplate.
+
+---
+
+## What This Means for Your Existing Projects
+
+**New projects on Xcode 26:** Enable the default, never look back.
+
+**Projects that finished Swift 6 migration:** You'll find a lot of `@MainActor` annotations that are now redundant. They don't hurt anything, but a cleanup pass feels good. Think of it as archaeological debt removal.
+
+**Projects still on Swift 5 concurrency:** This doesn't shortcut the migration — you still need to reach Swift 6 mode first. But when you get there, the landing is much softer.
+
+One thing to watch: the default only applies to *app targets*, not libraries or frameworks. A library doesn't know which thread its callers run on, so it intentionally gets no opinion. If you're extracting shared code into Swift packages (and you should be), those packages stay `nonisolated` by default.
+
+---
+
+The underlying principle is sound. If most of your code was always supposed to be on the main thread, make that the assumption — and require a conscious decision to leave it. That's better engineering than requiring a conscious decision just to *stay* on the thread you were already on.
+
+Apple took two years to get here after Swift 6's rocky launch. Better late than never.
+
+---
+
+**Tomorrow (Day 2/3):** The decision tree. `@concurrent`, `nonisolated`, and `@MainActor` — which one goes where across four real scenarios: UI updates, network calls, image decoding, and file I/O.
