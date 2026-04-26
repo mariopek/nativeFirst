@@ -1,0 +1,164 @@
+---
+title: "I Migrated Two Apps to SwiftData. Eighteen Months Later, I'm Migrating Half of It Back."
+description: "SwiftData turns three at WWDC 2026. After running it in production across two shipping iOS apps for a year and a half, here's an honest field report — what works, what quietly broke, and the three places we went back to Core Data and don't regret it."
+pubDate: 2026-04-26
+tags: ["SwiftData", "Core Data", "iOS Development", "SwiftUI", "Persistence", "iOS 27", "CloudKit", "Indie Dev", "Apple", "Database"]
+author: "NativeFirst Team"
+coverImage: "/images/blog/liquid-glass-ios-cover.jpg"
+coverImageAlt: "Glassy abstract iOS interface — representing the SwiftUI and SwiftData layer that underpins modern iOS apps in 2026"
+---
+
+{/*
+  SEO target keywords:
+  - SwiftData vs Core Data 2026
+  - SwiftData production issues 18 months
+  - SwiftData migration back to Core Data
+  - SwiftData CloudKit problems
+  - SwiftData performance large datasets
+  - When not to use SwiftData
+  - Core Data still better than SwiftData
+  - SwiftData lessons learned production iOS
+
+  Internal linking strategy:
+  - Links to /apps/promptkit (one of the apps in the story)
+  - Links to /blog/wwdc-2026-foldable-iphone-apis-core-ai-developer-guide (broader iOS dev context)
+  - Links to /blog/abnetworking-modern-ios-networking (sibling iOS architecture piece)
+
+  External reference strategy:
+  - Apple Developer SwiftData documentation
+  - Donny Wals SwiftData migration writeups
+  - Paul Hudson Hacking with Swift SwiftData chapters
+  - Matt Massicotte concurrency posts
+*/}
+
+Two summers ago I sat at WWDC and watched Apple unveil SwiftData. I was completely sold. The macros. The `@Model` annotation that made boilerplate disappear. The promise of "Core Data, but without the part where you want to throw your laptop into the canal."
+
+I went home that week and started migrating. By Q4 2024, both of our shipping apps — Pulse and the indie journaling app I refuse to name publicly because the App Store reviews still haunt me — were running on SwiftData in production.
+
+It is now April 2026. SwiftData is about to turn three at WWDC. And this past month I have quietly been migrating chunks of both apps *back* to Core Data.
+
+This is the part where everyone expects me to say SwiftData is bad. It is not. It is genuinely great for the things it is great at. But after eighteen months of shipping it to real users with real bugs and real one-star reviews, I have a much clearer picture of where the seams are. And those seams are real.
+
+Here's the honest field report.
+
+---
+
+## What SwiftData Got Spectacularly Right
+
+Let me start with the love letter, because it is sincere.
+
+For 80% of small-to-medium iOS apps, SwiftData is the right choice. The developer experience is genuinely better than Core Data ever was. Some specific wins:
+
+- **`@Model` is magic.** Defining a model takes one line and a property list. Done. No xcdatamodeld file. No "did I check the right boxes in the inspector." It just works.
+- **`@Query` in SwiftUI views is the cleanest data binding Apple has ever shipped.** Drop a `@Query` in a view, get a sorted live-updating array. The amount of `NSFetchedResultsController` boilerplate this kills is staggering.
+- **Migration for additive schema changes is mostly painless.** Adding a property? Add it to the struct. Compile. Done. The lightweight migration story is much friendlier than the old Core Data version-bumping ceremony.
+- **Type safety.** Predicates with `#Predicate { $0.title.contains(searchTerm) }` instead of NSPredicate strings is the kind of upgrade that makes you wonder how we lived before.
+
+For 80% of apps, this is enough. If you are building a to-do app, a habit tracker, a notes app, a scoreboard, a recipe collection — anything where your data model is reasonably small and your access patterns are reasonably simple — stay on SwiftData. Do not let me talk you out of it.
+
+But if you are in the other 20%, read on.
+
+---
+
+## Where It Quietly Started Falling Apart
+
+Pulse stores about 40,000 sensor readings per active user, growing roughly 2,000 per week. The journaling app stores entries with attached audio files, photos, and full-text-searchable bodies that average 800 words each.
+
+Both of those apps started fine on SwiftData. Both started having problems around the eight-month mark.
+
+### Problem one: large dataset performance is a real wall
+
+`@Query` is beautiful for views that show 50 items. Try it on a view that needs to show 5,000 grouped sensor readings filtered by time range and sorted by timestamp.
+
+The first time I shipped this in Pulse, the chart view took 3.4 seconds to load on an iPhone 14. On older devices, users were getting visible stutter that looked like the app had frozen. We got a slow but steady stream of one-star reviews about it.
+
+The fix in Core Data is straightforward — you batch fetch, you use faulting, you set fetch limits, you predicate carefully. SwiftData has equivalents but they are less mature, less documented, and the abstractions sometimes work against you. `@Query` does not give you fine-grained control over fetching strategy, and the `FetchDescriptor` API is missing knobs that have been in `NSFetchRequest` since 2009.
+
+We ended up bypassing `@Query` entirely for the chart view. Wrote a manual `ModelContext.fetch` with explicit batching. It worked, but at that point we were writing Core-Data-shaped code on top of SwiftData and getting fewer guarantees than we would have gotten from Core Data directly.
+
+### Problem two: CloudKit sync gets weird at scale
+
+This is where the journaling app started biting us.
+
+SwiftData + CloudKit is set up to be the dream: one annotation, automatic sync, you go home. And for small datasets it really is that good. We had it running for our beta users for six months without any major incidents.
+
+Then we hit two snags.
+
+**Snag one: schema migrations involving CloudKit are still scary.** When we needed to rename a property and add a new relationship, the Core Data version of this migration would have been a 30-minute ceremony with a versioned model. The SwiftData version turned into a four-day investigation involving silent CloudKit schema mismatches that did not show up in the simulator but absolutely did show up in TestFlight, three days after we shipped, when half our beta testers stopped syncing without any visible error.
+
+The diagnostics for "your CloudKit schema is out of sync with your local SwiftData schema" are essentially: nothing happens. The container fails silently, your `@Query` returns local data only, and you get a Slack message from a beta tester saying "hey my Mac and iPhone don't match anymore."
+
+**Snag two: Sendable and concurrency rules around `ModelContext` are a minefield in real apps.** If you stay on the main actor and never touch your context from a background task, you are fine. The moment you have a background sync, an extension, a Live Activity, or anything that needs to write to the store from off the main actor, you discover that the contract is fuzzier than the Core Data equivalent ever was.
+
+We had a bug where a Live Activity update mutated the store from a background context, and the next main-thread `@Query` read returned stale data for about 1.5 seconds. Reproducing it required a specific dance involving the screen locking at exactly the wrong moment. We chased it for two weeks.
+
+### Problem three: the migration story for breaking changes is still rough
+
+Additive migrations in SwiftData are easy. Renaming an attribute, splitting a model into two, merging two models into one, denormalizing for performance — those are the migrations that bite real apps in real production, and SwiftData's migration tooling is still where Core Data's was around 2013.
+
+You can write a `SchemaMigrationPlan` with custom stages. It works. But the documentation is thin, the error messages are unhelpful, and we have personally hit two cases where the migration that worked perfectly on every device in our test rig hard-crashed for users on iPhones that had been carrying the app forward since iOS 17.
+
+The Core Data migration story was painful but battle-tested. Twenty years of devs hitting every edge case, writing every blog post, and getting every weird answer on Stack Overflow. SwiftData's edge cases are still being discovered. By you. In production.
+
+---
+
+## The Three Places We Went Back to Core Data
+
+After all of that, here is the actual decision matrix we ended up with. We did not rip everything out. We split.
+
+**Pulse:**
+- The settings, user preferences, and small reference tables: still SwiftData. Fast to develop, easy to iterate, no problems.
+- The sensor reading store (the part with 40,000+ rows per user): **back on Core Data.** Predictable performance, mature batch operations, well-understood faulting behavior. We ship a small migration on first launch that copies SwiftData rows into the Core Data store and then deletes the SwiftData ones.
+- CloudKit sync: **Core Data + NSPersistentCloudKitContainer.** Still weird, but at least the weird is documented, and the diagnostic tools have ten more years of community knowledge.
+
+**The journaling app:**
+- Entries themselves: **back on Core Data.** The full-text search, attachment management, and CloudKit sync of large bodies were all Core Data strengths.
+- Tags, smart filters, UI state: still SwiftData. Small data, fast queries, lovely `@Query` ergonomics.
+
+In both cases, we are running a hybrid. Two stores. Different responsibilities. SwiftData for the things SwiftData is good at. Core Data for the things that need predictability and battle-tested edges.
+
+If that sounds like overkill, it is — for a small app. For two apps that have to actually keep working for paying users, it has been the calmest production we've had in months.
+
+---
+
+## What I Would Tell You If You Were Starting Today
+
+You are probably building one of three things. Here is the recommendation for each.
+
+**Building a small-to-medium app with reasonable data sizes, simple access patterns, and you want to ship fast?** Use SwiftData. Do not overthink it. The DX win is real and the rough edges will not bite you at this scale. Bookmark this post for the day you cross 10,000 records.
+
+**Building a data-heavy app — sensor data, large media libraries, full-text search at scale, complex relationships?** Core Data. I am sorry. I know it is not the cool answer. Use Core Data.
+
+**Building anything with CloudKit sync that needs to be rock solid?** Core Data + `NSPersistentCloudKitContainer`. It is not flashy and the API surface is older than some junior devs, but it works and it logs problems where you can find them.
+
+**Building anything that mixes the above?** Hybrid. It is fine. Two stores, clear ownership lines, write a small in-app migration for the things that move between them. Welcome to running real apps. Nobody told you this is what shipping looks like.
+
+---
+
+## What I'm Watching For at WWDC 2026
+
+The big open question for me is whether Apple addresses any of this at WWDC 2026.
+
+The wishlist:
+- A real `FetchDescriptor` with all the knobs `NSFetchRequest` has.
+- Better diagnostics for SwiftData + CloudKit schema mismatches. Even a single console message would have saved us four days.
+- A formal, supported, no-asterisks story for off-main-actor `ModelContext` use that does not require a PhD in Swift Concurrency.
+- Proper migration tooling — versioned schemas with previewable migrations and rollback safety.
+
+If Apple ships any two of those four, I will start migrating things back the other way. SwiftData has the better long-term story. The framework just needs to grow up enough to handle the apps we actually ship.
+
+We are 43 days from the keynote. I will report back in June.
+
+---
+
+## The Honest Closing
+
+Some of this post is going to read like I am dunking on SwiftData. I am not. I am dunking on the assumption that any new framework, on any platform, ever, is ready to replace its battle-tested predecessor on day one. That is never the case. Not for Combine, not for SwiftUI, not for Swift Concurrency, not for SwiftData.
+
+The real lesson is more boring: **ship the new framework where the new framework is good. Keep the old framework for the cases it has earned.** Do this without ego. Do not migrate things just because the keynote was exciting.
+
+The journaling app is calmer than it has been in nine months. Pulse stopped getting one-star "app is slow" reviews three weeks after the migration. Both apps still use SwiftData where it shines.
+
+That is what real iOS engineering looks like in 2026. Less keynote-driven, more boring, and your users do not care which framework you used. They just want the app to not freeze on the chart view.
+
+Mine no longer does.
