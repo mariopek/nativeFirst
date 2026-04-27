@@ -19,7 +19,14 @@ export const NAV_LINKS = [
     ],
   },
   { label: 'Blog', href: '/blog' },
-  { label: 'Learn', href: '/learn' },
+  {
+    label: 'Learn',
+    href: '/learn',
+    children: [
+      { label: 'Courses', href: '/learn', description: 'Structured SwiftUI & Claude Code curriculum' },
+      { label: 'Field Notes', href: '/learn/field-notes', description: 'Standalone iOS dev write-ups from shipped apps' },
+    ],
+  },
   { label: 'Contact', href: '/contact' },
 ];
 

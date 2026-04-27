@@ -34,4 +34,20 @@ const course = defineCollection({
   }),
 });
 
-export const collections = { blog, course };
+const fieldNotes = defineCollection({
+  loader: glob({ pattern: '**/*.mdx', base: './src/content/field-notes' }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    pubDate: z.coerce.date(),
+    updatedDate: z.coerce.date().optional(),
+    coverImage: z.string().optional(),
+    coverImageAlt: z.string().optional(),
+    topics: z.array(z.string()).default([]),
+    level: z.enum(['intro', 'intermediate', 'advanced']).default('intermediate'),
+    draft: z.boolean().default(false),
+    author: z.string().default('Mario'),
+  }),
+});
+
+export const collections = { blog, course, fieldNotes };

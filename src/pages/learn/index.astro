@@ -5,8 +5,13 @@ import PageLayout from '../../layouts/PageLayout.astro';
 import StudyBot from '../../components/StudyBot.astro';
 import { getCollection } from 'astro:content';
 import { SITE, COURSE, PREMIUM_COURSE, SWIFTUI_FOUNDATIONS_COURSE, SWIFTUI_IN_PRACTICE_COURSE } from '../../lib/constants';
+import { formatDate } from '../../lib/utils';
 
 const allLessons = await getCollection('course', ({ data }) => !data.draft);
+
+const recentFieldNotes = (await getCollection('fieldNotes', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime())
+  .slice(0, 3);
 
 const freeLessons = allLessons.filter((l) => l.data.courseSlug === 'vibe-code-native');
 const premiumLessons = allLessons.filter((l) => l.data.courseSlug === 'ship-native');
@@ -224,4 +229,63 @@ const courseSections = [
     </div>
   </section>
   ))}
+
+  <!-- Field Notes Section -->
+  <section class="py-16 sm:py-20 bg-surface border-t border-border/50" id="field-notes">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-10 sm:mb-12">
+        <p class="section-label text-text-muted mb-3">Field Notes</p>
+        <h2 class="font-display font-black tracking-tight text-2xl sm:text-3xl text-white mb-3">
+          Notes from <span class="gradient-text">the field.</span> Mostly bruises.
+        </h2>
+        <p class="text-text-muted max-w-2xl mx-auto leading-relaxed">
+          Standalone iOS dev write-ups from shipped apps — concurrency migrations that bit us, SwiftData edges we found in TestFlight, the opinions you only earn by deploying. Not tutorials, not news. Just honest reports.
+        </p>
+      </div>
+
+      {recentFieldNotes.length === 0 ? (
+        <div class="text-center py-12 rounded-2xl border border-dashed border-border bg-bg">
+          <p class="text-text-muted">First note drops soon. Probably right after something breaks.</p>
+        </div>
+      ) : (
+        <div class="grid gap-5 sm:grid-cols-1 md:grid-cols-3 mb-10">
+          {recentFieldNotes.map((note) => (
+            <a
+              href={`/learn/field-notes/${note.id}`}
+              class="group rounded-2xl border border-border bg-bg p-6 hover:border-accent/40 hover:-translate-y-0.5 transition-all duration-300 flex flex-col"
+            >
+              <div class="flex items-center gap-2 mb-3 flex-wrap">
+                <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20 font-semibold">
+                  {note.data.level}
+                </span>
+                <time class="text-xs text-text-muted" datetime={note.data.pubDate.toISOString()}>
+                  {formatDate(note.data.pubDate)}
+                </time>
+              </div>
+              <h3 class="font-display font-bold text-base sm:text-lg text-white mb-2 leading-snug group-hover:text-accent transition-colors line-clamp-3">
+                {note.data.title}
+              </h3>
+              <p class="text-sm text-text-muted leading-relaxed line-clamp-3 mb-4 flex-1">
+                {note.data.description}
+              </p>
+              <span class="text-xs font-mono text-text-muted/80 group-hover:text-accent transition-colors inline-flex items-center gap-1">
+                Read note
+                <svg class="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+              </span>
+            </a>
+          ))}
+        </div>
+      )}
+
+      <div class="text-center">
+        <a
+          href="/learn/field-notes"
+          class="inline-flex items-center gap-2 px-6 py-3 rounded-full border border-border bg-bg text-white font-semibold text-sm hover:border-accent hover:text-accent transition-all duration-300"
+        >
+          Browse all field notes
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+        </a>
+      </div>
+    </div>
+  </section>
 </PageLayout>
