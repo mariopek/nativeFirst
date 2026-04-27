@@ -1,0 +1,166 @@
+---
+import { getCollection } from 'astro:content';
+import { formatDate } from '../../lib/utils';
+import readingTime from 'reading-time';
+
+interface Props {
+  currentId: string;
+  currentTags: string[];
+  currentCollection: 'blog' | 'fieldNotes';
+  count?: number;
+}
+
+const { currentId, currentTags, currentCollection, count = 3 } = Astro.props;
+
+// Pull both collections so related links cross between blog and field-notes
+const blogPosts = await getCollection('blog', ({ data }) => !data.draft);
+const fieldNotePosts = await getCollection('fieldNotes', ({ data }) => !data.draft);
+
+type Candidate = {
+  id: string;
+  body?: string;
+  data: {
+    title: string;
+    description: string;
+    pubDate: Date;
+    coverImage?: string;
+    coverImageAlt?: string;
+  };
+  _source: 'blog' | 'fieldNotes';
+  _href: string;
+  _tags: string[];
+  _sourceLabel: string;
+  _sourceClass: string;
+};
+
+const allCandidates: Candidate[] = [
+  ...blogPosts.map((p) => ({
+    id: p.id,
+    body: p.body,
+    data: p.data,
+    _source: 'blog' as const,
+    _href: `/blog/${p.id}`,
+    _tags: p.data.tags || [],
+    _sourceLabel: 'Blog',
+    _sourceClass: 'bg-accent/10 text-accent border-accent/20',
+  })),
+  ...fieldNotePosts.map((p) => ({
+    id: p.id,
+    body: p.body,
+    data: p.data,
+    _source: 'fieldNotes' as const,
+    _href: `/learn/field-notes/${p.id}`,
+    _tags: p.data.topics || [],
+    _sourceLabel: 'Field Note',
+    _sourceClass: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  })),
+];
+
+// Drop the current post
+const candidates = allCandidates.filter(
+  (p) => !(p.id === currentId && p._source === currentCollection)
+);
+
+// Score by tag overlap (case-insensitive) plus a tiny recency tiebreaker
+const currentTagsLower = currentTags.map((t) => t.toLowerCase());
+const now = Date.now();
+
+const scored = candidates.map((p) => {
+  const candidateTagsLower = p._tags.map((t) => t.toLowerCase());
+  const overlap = candidateTagsLower.filter((t) => currentTagsLower.includes(t)).length;
+  const ageDays = Math.max(0, (now - p.data.pubDate.getTime()) / (1000 * 60 * 60 * 24));
+  // Recency bonus: 0..0.5, decays over a year
+  const recencyBonus = Math.max(0, 0.5 - ageDays / 730);
+  return { ...p, _score: overlap + recencyBonus, _overlap: overlap };
+});
+
+scored.sort((a, b) => {
+  if (b._score !== a._score) return b._score - a._score;
+  return b.data.pubDate.getTime() - a.data.pubDate.getTime();
+});
+
+const related = scored.slice(0, count);
+---
+
+{related.length > 0 && (
+  <aside class="related-posts border-t border-border pt-10 mt-12">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h3 class="font-display font-bold text-xl sm:text-2xl text-white">
+          Keep reading
+        </h3>
+        <p class="text-sm text-text-muted mt-1">
+          Pieces we wrote that touch on the same ideas — or follow on from this one.
+        </p>
+      </div>
+      <a
+        href="/learn"
+        class="hidden sm:inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-accent transition-colors whitespace-nowrap"
+      >
+        Or browse our <span class="font-semibold underline">free SwiftUI courses</span>
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+      </a>
+    </div>
+
+    <div class="grid sm:grid-cols-3 gap-4 sm:gap-5">
+      {related.map((post) => {
+        const rt = readingTime(post.body || '');
+        return (
+          <a
+            href={post._href}
+            class="group rounded-xl border border-border bg-surface hover:border-accent/40 hover:-translate-y-0.5 transition-all duration-300 overflow-hidden flex flex-col"
+          >
+            {post.data.coverImage ? (
+              <div class="aspect-[16/9] overflow-hidden bg-bg flex-shrink-0">
+                <img
+                  src={post.data.coverImage}
+                  alt={post.data.coverImageAlt || post.data.title}
+                  class="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-500"
+                  loading="lazy"
+                />
+              </div>
+            ) : (
+              <div class="aspect-[16/9] bg-gradient-to-br from-accent/10 to-accent-blue/10 flex items-center justify-center flex-shrink-0">
+                <svg class="w-10 h-10 text-accent/40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+            )}
+
+            <div class="p-4 flex-1 flex flex-col">
+              <div class="flex items-center gap-2 mb-2 flex-wrap">
+                <span class={`inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider ${post._sourceClass}`}>
+                  {post._sourceLabel}
+                </span>
+                <time class="text-[11px] text-text-muted" datetime={post.data.pubDate.toISOString()}>
+                  {formatDate(post.data.pubDate)}
+                </time>
+                <span class="w-0.5 h-0.5 rounded-full bg-border"></span>
+                <span class="text-[11px] text-text-muted">{rt.text}</span>
+              </div>
+
+              <h4 class="font-display font-semibold text-sm sm:text-base text-white leading-snug mb-2 line-clamp-3 group-hover:text-accent transition-colors">
+                {post.data.title}
+              </h4>
+
+              <p class="text-xs text-text-muted/80 leading-relaxed line-clamp-2 flex-1">
+                {post.data.description}
+              </p>
+            </div>
+          </a>
+        );
+      })}
+    </div>
+
+    <!-- Mobile-only courses link -->
+    <div class="sm:hidden mt-6 text-center">
+      <a
+        href="/learn"
+        class="inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-accent transition-colors"
+      >
+        Or browse our <span class="font-semibold underline">free SwiftUI courses</span>
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+      </a>
+    </div>
+  </aside>
+)}
