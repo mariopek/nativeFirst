@@ -55,7 +55,7 @@ export const APPS = {
     platform: 'iOS, iPadOS & macOS' as const,
     status: 'available' as const,
     icon: '/images/apps/thinkbud-icon.png',
-    appStoreUrl: 'https://apps.apple.com/app/thinkbud/id6743296798',
+    appStoreUrl: 'https://apps.apple.com/rs/app/thinkbud-notes-flashcards/id6759010323',
     features: [
       { title: 'Import Anything', description: 'Drop a link, PDF, photo, scanned doc, or audio file. Vision OCR for images, PDFKit for documents, Whisper for audio — ThinkBud builds a full study kit in seconds.', icon: 'import' },
       { title: 'Interactive Mind Maps', description: 'Beautiful, zoomable mind maps that break any topic into a clear visual structure. Pan, expand nodes, and export as high-res PNG — perfect for visual thinkers.', icon: 'map' },
