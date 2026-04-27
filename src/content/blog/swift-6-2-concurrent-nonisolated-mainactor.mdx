@@ -1,0 +1,226 @@
+---
+title: "@concurrent, nonisolated, and @MainActor: The Swift 6.2 Decision Tree"
+description: "Part 2 of 3: four real iOS scenarios — UI update, network call, image decode, file I/O — and the exact concurrency modifier each one needs in Swift 6.2."
+pubDate: 2026-04-27
+tags: ["Swift", "Concurrency", "Swift 6.2", "iOS", "Xcode 26", "TDD", "MainActor", "nonisolated"]
+author: "Mario"
+coverImage: "/images/blog/swift-concurrency-decision-tree.svg"
+coverImageAlt: "A decision tree flowchart showing when to use @MainActor, nonisolated, and @concurrent in Swift 6.2"
+---
+
+{/*
+  SEO target keywords:
+  - Swift 6.2 @concurrent nonisolated
+  - @MainActor when to use Swift 6.2
+  - Swift concurrency decision tree
+  - nonisolated vs @concurrent Swift
+  - Swift 6.2 actor isolation tutorial
+  - Xcode 26 concurrency modifiers
+  - Swift async @MainActor default isolation
+*/}
+
+[Yesterday](./swift-6-2-mainactor-by-default) we established that Swift 6.2 makes `@MainActor` the default for your app target. The compiler assumes you're on the main thread unless you say otherwise. Great.
+
+Now the follow-up question everyone actually has: *when* do I opt out, and which of the three modifiers do I reach for?
+
+---
+
+## The Three Players
+
+Quick recap before the scenarios:
+
+- **`@MainActor`** — runs on the main thread. The module default in Swift 6.2 app targets. Anything that touches UI belongs here.
+- **`nonisolated`** — explicit opt-out. No actor. The function runs wherever its caller needs it to, and you're responsible for not blocking the main thread.
+- **`@concurrent`** — new in Swift 6.2. Marks a function or closure as running on Swift's cooperative thread pool, never on any actor. The honest declaration for CPU-heavy work.
+
+The one-sentence rule:
+
+> **UI or shared state → `@MainActor`. Pure logic or async I/O → `nonisolated`. CPU-heavy work → `@concurrent`. Blocking synchronous calls → `nonisolated` + `Task.detached`.**
+
+That's it. Four scenarios below are just evidence.
+
+---
+
+## Scenario 1: UI Update → Stay on Main
+
+Here's the test I want to write for a simple view model. Nothing exotic:
+
+```swift
+// RED
+@Test func setTitle_updatesState() async {
+    let sut = DocumentViewModel()
+    await sut.setTitle("New Invoice")
+    #expect(sut.title == "New Invoice")
+}
+```
+
+With Swift 6.2 module defaults, `DocumentViewModel` is implicitly `@MainActor`. The test above compiles and passes with zero annotations.
+
+```swift
+// GREEN
+@Observable class DocumentViewModel {
+    var title: String = ""
+
+    func setTitle(_ newTitle: String) {
+        title = newTitle
+    }
+}
+```
+
+No annotation on the class. No annotation on the method. The module default does the work.
+
+The mistake I see after Day 1 sinks in is developers going back and adding explicit `@MainActor` onto everything — out of habit, or because they don't fully trust the implicit rule. Don't. It's noise. The annotation is now the *exception*, and adding it everywhere defeats the point of the default.
+
+---
+
+## Scenario 2: Network Call → nonisolated
+
+Here's the classic trap. You have a `UserRepository` that calls a remote API. Background thread, right?
+
+Not quite. URLSession's async API already handles scheduling — it suspends during the request and *resumes on the caller's isolation*. If you call `await repo.fetchUser()` from `@MainActor` code, you land back on the main actor after the response arrives. The actual network I/O runs off-thread regardless.
+
+The real question is whether your repository should be bound to `@MainActor` *at all*. It shouldn't — it has no UI concerns. Binding it to the main actor would force `await`-hops every time you call it from a non-isolated context.
+
+```swift
+// RED
+@Test func fetchUser_returnsCorrectID() async throws {
+    let sut = UserRepository(session: .stubbed([User.sample]))
+    let user = try await sut.fetchUser(id: "42")
+    #expect(user.id == "42")
+}
+```
+
+```swift
+// GREEN — the repository is nonisolated
+struct UserRepository {
+    private let session: URLSession
+
+    nonisolated func fetchUser(id: String) async throws -> User {
+        let url = URL(string: "https://api.example.com/users/\(id)")!
+        let (data, _) = try await session.data(from: url)
+        return try JSONDecoder().decode(User.self, from: data)
+    }
+}
+```
+
+`nonisolated` here signals intent: this service has no business being on the main actor. URLSession does the threading. Your repository stays decoupled and testable.
+
+The test compiles and passes. When called from a view model (which *is* `@MainActor` by default), the async machinery hops correctly without you wiring anything up.
+
+---
+
+## Scenario 3: Image Decode → @concurrent
+
+Image decoding is not I/O — it's CPU work. URLSession can't help you here. If you decode a 6MB HEIC file while sitting on `@MainActor`, you will drop frames. The user will notice. The Instruments trace will look embarrassing.
+
+```swift
+// RED
+@Test func decodeImage_producesNonNilResult() async {
+    let data = TestAssets.heicImageData
+    let decoder = ImageDecoder()
+    let image = await decoder.decode(data)
+    #expect(image != nil)
+}
+```
+
+```swift
+// GREEN — @concurrent for CPU work
+struct ImageDecoder {
+    @concurrent func decode(_ data: Data) async -> UIImage? {
+        UIImage(data: data)
+    }
+}
+```
+
+`@concurrent` marks the function as running on Swift's cooperative thread pool, not on any actor. No `Task.detached` noise. No manual priority hints. You declare the intent once — "this always runs off the main thread" — and the runtime handles it.
+
+Where `@concurrent` really earns its keep is on protocol requirements. Declare the method concurrent on the protocol, and every conformance is forced to implement it without actor isolation:
+
+```swift
+protocol ImageProcessing {
+    @concurrent func decode(_ data: Data) async -> UIImage?
+    @concurrent func resize(_ image: UIImage, to size: CGSize) async -> UIImage
+}
+```
+
+Any conformance that tries to run those on `@MainActor` gets a compiler error. Which is exactly what you want — the protocol enforces the threading contract.
+
+```swift
+// REFACTOR — protocol conformance is correctly non-isolated
+struct HEICDecoder: ImageProcessing {
+    // @concurrent inherited from protocol — no annotation needed here
+    func decode(_ data: Data) async -> UIImage? {
+        UIImage(data: data)
+    }
+
+    func resize(_ image: UIImage, to size: CGSize) async -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+    }
+}
+```
+
+---
+
+## Scenario 4: File I/O → nonisolated + Task.detached
+
+File reading and writing is blocking synchronous I/O. Not CPU-heavy — the thread just sits there waiting for the disk. The right pattern is `nonisolated` to decouple from actors, plus `Task.detached` to shunt the blocking call onto a utility thread.
+
+```swift
+// RED
+@Test func readConfig_returnsStoredValue() async throws {
+    let store = FileConfigStore(url: .temporaryTestFile)
+    try await store.write(["theme": "dark"])
+    let value = try await store.read()
+    #expect(value["theme"] == "dark")
+}
+```
+
+```swift
+// GREEN
+struct FileConfigStore {
+    let url: URL
+
+    nonisolated func write(_ config: [String: String]) async throws {
+        let data = try JSONEncoder().encode(config)
+        try await Task.detached(priority: .utility) {
+            try data.write(to: self.url)
+        }.value
+    }
+
+    nonisolated func read() async throws -> [String: String] {
+        try await Task.detached(priority: .utility) {
+            let data = try Data(contentsOf: self.url)
+            return try JSONDecoder().decode([String: String].self, from: data)
+        }.value
+    }
+}
+```
+
+`Task.detached` here because `Data(contentsOf:)` is a synchronous blocking call. You don't want it sitting on the cooperative thread pool blocking other tasks — detached puts it on a separate thread entirely. The `.utility` priority tells the system it's not time-critical.
+
+File I/O is one of those places where the "just use async/await" answer doesn't fully land yet. `Task.detached` is a bit verbose, and that's fine. Don't feel bad about it.
+
+---
+
+## The Cheat Sheet
+
+| Scenario | Modifier | Why |
+|---|---|---|
+| UI state updates, view models | Default (`@MainActor`) | Always on main thread by module assumption |
+| Network service / repository | `nonisolated` | No actor dependency; URLSession manages threads |
+| CPU-heavy work (image, crypto, parsing) | `@concurrent` | Runs on cooperative pool, never blocks UI |
+| Protocol contract for concurrent work | `@concurrent` on requirement | Forces all conformances to be non-isolated |
+| Blocking synchronous I/O | `nonisolated` + `Task.detached` | Blocking calls need their own thread |
+
+---
+
+One thing worth sitting with: these annotations are declarations of *intent*, not performance hints. `@concurrent` doesn't tell the runtime to go faster — it tells the *reader* (and the compiler) that this function was designed to run concurrently. That's the real value of Swift 6.2's default isolation model. The annotations that remain after you adopt it are the meaningful ones.
+
+The annotations that disappeared? Bureaucracy. Good riddance.
+
+---
+
+**Tomorrow (Day 3/3):** Taking this into a real project. Before/after of a strict concurrency migration in Renovise — actual compiler errors, actual fixes, and the one genuine race condition hiding under three false positives.
+
+*Part of the [30-day iOS development series](/blog). For a deeper look at building modular SwiftUI apps, check out [SwiftUI at Scale](/learn/swiftui-at-scale) in the courses section.*
