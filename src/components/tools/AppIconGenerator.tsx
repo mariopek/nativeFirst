@@ -249,32 +249,26 @@ export default function AppIconGenerator() {
             </div>
           </section>
 
-          {/* Where the ZIP goes — side-by-side instructions */}
+          {/* Where the ZIP goes in Xcode — full walkthrough */}
           <aside className="rounded-2xl border border-accent/20 bg-gradient-to-br from-surface via-surface to-accent/5 p-5 sm:p-6">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 rounded-lg bg-accent/15 flex items-center justify-center">
+              <div className="w-8 h-8 rounded-lg bg-accent/15 flex items-center justify-center flex-shrink-0">
                 <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.5 1.5 0 011.06.44l2.122 2.12a1.5 1.5 0 001.06.44H18A2.25 2.25 0 0120.25 9v.776" />
                 </svg>
               </div>
               <h3 className="font-display font-bold text-white text-sm">
-                What you get + where it goes
+                Where the ZIP goes in Xcode
               </h3>
             </div>
-            <ol className="space-y-2 text-xs text-text-muted leading-relaxed list-decimal list-inside">
-              <li>Drop a square 1024×1024 source (PNG, JPEG, SVG, or WebP)</li>
-              <li>Pick which Apple platforms you ship to</li>
-              <li>Generate → <strong className="text-white">AppIcon.appiconset.zip</strong> downloads</li>
-              <li>Unzip, drag the folder into Xcode's <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Assets.xcassets</code></li>
-              <li>Build &amp; ship — <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Contents.json</code> is wired automatically</li>
+            <ol className="space-y-2.5 text-xs text-text-muted leading-relaxed list-decimal list-inside marker:text-accent marker:font-semibold">
+              <li>Unzip the downloaded <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">AppIcon.appiconset.zip</code></li>
+              <li>Open your Xcode project → find <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Assets.xcassets</code> in Project Navigator</li>
+              <li>If there's already an <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">AppIcon</code> entry, delete it (right-click → Delete)</li>
+              <li>Drag the unzipped <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">AppIcon.appiconset</code> folder into <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Assets.xcassets</code></li>
+              <li>Build &amp; run — Xcode picks up <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Contents.json</code> automatically. No manual config.</li>
+              <li>Verify in Simulator: Settings → Display &amp; Brightness → toggle dark mode and tint to confirm Liquid Glass variants render.</li>
             </ol>
-
-            <div className="mt-4 pt-4 border-t border-border/50">
-              <p className="text-[10px] uppercase tracking-wider font-semibold text-accent mb-2">iOS 26 Bonus</p>
-              <p className="text-[11px] text-text-muted leading-relaxed">
-                Generates Liquid Glass <strong className="text-white">tinted</strong> + <strong className="text-white">dark</strong> variants automatically for iOS app icons. Wired into <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">appearances</code> key in Contents.json.
-              </p>
-            </div>
           </aside>
         </div>
       ) : (
