@@ -26,6 +26,7 @@ export const NAV_LINKS = [
       { label: 'Field Notes', href: '/learn/field-notes', description: 'Standalone iOS dev write-ups from shipped apps' },
     ],
   },
+  { label: 'Tools', href: '/tools' },
   { label: 'Contact', href: '/contact' },
 ];
 
