@@ -1,0 +1,110 @@
+---
+// /deck/<id> — landing page for ThinkBud Universal Links.
+//
+// What renders this page (vs. opening the app directly):
+//   • App not installed → Safari opens this page; user taps "Get the app".
+//   • First time tapping a Universal Link to this domain → iOS shows a
+//     smart banner letting the user choose "Open in ThinkBud" once.
+//   • User explicitly chose "Always open in browser" via long-press →
+//     Safari serves this page. The custom-scheme JS fallback below tries
+//     `thinkbud://deck/<id>` so the install path still converts.
+//
+// SSR (prerender = false) so the OG meta uses the URL's deck id, which
+// gives iMessage / WhatsApp / Slack / X a per-link rich preview instead
+// of the same generic card on every share.
+export const prerender = false;
+
+const { id } = Astro.params;
+// Strict: only allow URL-safe chars in the id we echo back. Defends
+// against an attacker injecting markup into the path — the OG tags
+// and the visible label both use `safeId`.
+const safeId = (id ?? '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 64);
+const customSchemeUrl = `thinkbud://deck/${safeId}`;
+const fullUrl = `https://nativefirstapp.com/deck/${safeId}`;
+const appStoreUrl = 'https://apps.apple.com/app/id6759010323';
+
+const ogTitle = 'Shared study deck — ThinkBud';
+const ogDescription = 'Tap to open this flashcard deck in the ThinkBud app.';
+const ogImage = 'https://nativefirstapp.com/images/apps/thinkbud-flashcards.png';
+---
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{ogTitle}</title>
+
+<!-- Apple smart app banner — surfaces the "Open" button when the user is on iOS Safari -->
+<meta name="apple-itunes-app" content={`app-id=6759010323, app-argument=${fullUrl}`} />
+
+<!-- Open Graph for iMessage / WhatsApp / Slack / Discord rich previews -->
+<meta property="og:title" content={ogTitle} />
+<meta property="og:description" content={ogDescription} />
+<meta property="og:url" content={fullUrl} />
+<meta property="og:type" content="website" />
+<meta property="og:image" content={ogImage} />
+<meta name="twitter:card" content="summary_large_image" />
+
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    margin: 0; padding: 32px 20px; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #FFF5E1 0%, #FDE6F1 100%);
+    color: #1f1f1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: linear-gradient(160deg, #1a1525 0%, #261830 100%); color: #f4f4f4; }
+    .card { background: #2a2235; }
+    .id { color: #b0a8c0; }
+  }
+  .card {
+    max-width: 420px; width: 100%; padding: 40px 28px; border-radius: 24px;
+    background: #fff; box-shadow: 0 20px 60px rgba(0,0,0,0.10);
+    text-align: center;
+  }
+  .mascot { font-size: 64px; margin-bottom: 16px; }
+  h1 { font-size: 24px; font-weight: 800; margin: 0 0 8px; letter-spacing: -0.02em; }
+  p { font-size: 15px; line-height: 1.5; margin: 0 0 28px; opacity: 0.78; }
+  .id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: #888; margin-top: 24px; word-break: break-all; }
+  .btn {
+    display: inline-block; padding: 14px 28px; border-radius: 100px;
+    font-weight: 700; font-size: 16px; text-decoration: none;
+    background: linear-gradient(135deg, #7B5FFF, #A855F7); color: white;
+    box-shadow: 0 8px 20px rgba(123,95,255,0.35);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn.secondary { background: transparent; color: #7B5FFF; box-shadow: none; padding-top: 8px; }
+  .btn + .btn { margin-top: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="mascot">🧠</div>
+    <h1>Open in ThinkBud</h1>
+    <p>This study deck was shared with you. Tap below to open it in the app.</p>
+    <a class="btn" href={customSchemeUrl}>Open in ThinkBud</a>
+    <a class="btn secondary" href={appStoreUrl}>Get the app</a>
+    <div class="id">deck · {safeId}</div>
+  </div>
+
+<script is:inline define:vars={{ customSchemeUrl }}>
+  // Universal Links normally short-circuit before this page even loads.
+  // If we got here on iOS the user either doesn't have ThinkBud installed
+  // or chose "open in browser" once. Try the custom scheme so freshly-
+  // installed users still hop into the app post-install. Guarded by
+  // sessionStorage so we don't trap the user in a redirect loop on revisit.
+  (function () {
+    var ua = navigator.userAgent || '';
+    var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+    if (!isIOS) return;
+    if (sessionStorage.getItem('triedScheme')) return;
+    sessionStorage.setItem('triedScheme', '1');
+    setTimeout(function () { window.location.href = customSchemeUrl; }, 250);
+  })();
+</script>
+</body>
+</html>
