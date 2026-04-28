@@ -24,7 +24,6 @@ export const NAV_LINKS = [
     children: [
       { label: 'Courses', href: '/learn', description: 'Structured SwiftUI & Claude Code curriculum' },
       { label: 'Field Notes', href: '/learn/field-notes', description: 'Standalone iOS dev write-ups from shipped apps' },
-      { label: 'Newsletter', href: '/newsletter', description: 'Weekly iOS dev field notes in your inbox' },
     ],
   },
   { label: 'Contact', href: '/contact' },
