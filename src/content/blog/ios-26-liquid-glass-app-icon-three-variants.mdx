@@ -1,0 +1,172 @@
+---
+title: "We Updated Our App Icon for iOS 26. Apple Now Wants Three of Them. So We Built a Tool."
+description: "iOS 26 Liquid Glass quietly tripled the work to ship an app icon — default, tinted, and dark variants for every iPhone app. Existing icon tools haven't caught up. We hit the wall updating ThinkBud last week, so we built a free generator. Here's what changed in iOS 26, why every iOS dev is about to learn this the hard way, and the tool we shipped to handle it."
+pubDate: 2026-04-28
+tags: ["iOS 26", "Liquid Glass", "App Icon", "iOS Design", "iOS Development", "Apple", "Xcode 26", "App Store", "Indie Dev", "SwiftUI"]
+author: "NativeFirst Team"
+coverImage: "/images/blog/liquid-glass-ios-cover.jpg"
+coverImageAlt: "iOS 26 home screen showing app icons in default, tinted, and dark variants — the new Liquid Glass icon system that demands three versions of every app icon"
+---
+
+{/*
+  SEO target keywords:
+  - iOS 26 Liquid Glass app icon
+  - iOS 26 tinted app icon generator
+  - app icon iOS 26 dark mode
+  - apple liquid glass icon variants
+  - NSAppIcon iOS 26
+  - app icon generator iOS 26
+  - liquid glass icon design
+  - apple icon appearances Contents.json
+  - free app icon generator iOS 26
+  - AppIcon.appiconset Liquid Glass
+
+  Internal linking strategy:
+  - Links to /tools/app-icon-generator (the tool itself — primary CTA)
+  - Links to /tools (tools hub)
+  - Links to /blog/liquid-glass-apple-design-controversy-2026 (companion piece)
+  - Links to /apps/thinkbud (the app this happened to)
+  - Links to /tools/aasa-validator (sibling tool)
+  - Links to /tools/privacy-manifest-generator (sibling tool)
+  - Links to /learn/field-notes (technical depth)
+
+  External reference strategy:
+  - Apple Human Interface Guidelines — App Icons
+  - Apple WWDC 2025 "Designing for Liquid Glass" session
+  - Bakery (existing competitor — friendly mention)
+  - Xcode 26 AssetCatalog Contents.json appearances key
+*/}
+
+Last Tuesday morning, I sat down with what I thought was a simple task: refresh the ThinkBud app icon for iOS 26. New version of iOS, fresh look, ten minutes tops, then back to actual work.
+
+Three hours later, I was still in Figma, surrounded by 37 different exports, six color profiles, and a growing suspicion that I had fundamentally misunderstood what Apple wanted from me.
+
+This post is the part of the iOS 26 launch nobody is warning indie devs about.
+
+---
+
+## What Apple Quietly Did to App Icons
+
+Let's get the basics out of the way. **iOS 26 introduced Liquid Glass**, Apple's new design language. We [wrote about the design controversy](/blog/liquid-glass-apple-design-controversy-2026) when it landed at WWDC 2025 and made Liquid Glass mandatory. Most of that coverage focused on the system UI — the translucent panels, the frosted backgrounds, the readability complaints.
+
+What got buried in the noise: **app icons changed too.**
+
+Specifically, iOS 26 wants every app icon to ship in **three appearance variants**:
+
+1. **Default** — your full-color icon. The one you've been shipping forever.
+2. **Tinted** — a luminance-based monochrome version that the system colors with the user's accent. So your icon becomes silver-on-black, then orange-on-black, then blue-on-black depending on what the user picked in Settings.
+3. **Dark** — a separate icon designed specifically for dark mode. Different palette, possibly different contrast, sometimes different artwork entirely.
+
+Apple's `Asset Catalog` handles this through a new `appearances` key in `Contents.json`. The system picks which variant to render based on user preference and device theme. Ship without these variants and your default icon shows up everywhere — which works, but looks completely out of place when the user has tinted mode enabled and every other icon on their home screen is monochrome except yours.
+
+It's the iOS equivalent of wearing a Hawaiian shirt to a black-tie dinner. Technically allowed. Visibly off.
+
+---
+
+## The Math of Why This Hurts
+
+Here's where it gets unfun.
+
+Pre-iOS 26, you needed one app icon. One source. Done.
+
+Post-iOS 26, for a single iOS app, the math is:
+
+- 1 default icon
+- 1 dark variant
+- 1 tinted variant
+
+That's 3x your design work just for iPhone. Add an iPad target? Another set. macOS via Catalyst? Another. Apple Watch? Another set with different sizes per watch face. Vision Pro? Different again.
+
+**For ThinkBud specifically — universal iPhone+iPad+Mac app — we needed something like 30 distinct PNG files** when you account for all the platform-specific sizes (Settings, Spotlight, Notification, App Store, Dock, Watch faces, etc), times three variants per iOS size that supports them.
+
+Not creative work. Just file generation. The actual design decisions were maybe 20% of the time. The other 80% was exporting at the right pixel dimensions and naming things correctly so Xcode would pick them up.
+
+This is exactly the kind of work that should be automated and was, until iOS 26 broke the chain.
+
+---
+
+## Why Existing Tools Haven't Caught Up
+
+Here's the brutal part. Going into Tuesday morning, I assumed somebody had already solved this. I am not the first iOS dev to ship an app and would not be the last. There must be a tool.
+
+Two hours and a lot of browser tabs later, the picture was clear:
+
+**Apple's Xcode 26 auto-generator** handles the basic iOS sizes from a single 1024×1024 source if you use a Single Size icon set. It does not handle macOS, watchOS, visionOS, or — critically — the iOS 26 tinted and dark variants. Those are still manual.
+
+**Bakery** (the much-loved free Mac app from Mathias Stayer) handles cross-platform sizes really well. Last updated before iOS 26 dropped, no Liquid Glass support yet. Bakery is excellent and I expect it'll get there, but it wasn't going to help me on Tuesday.
+
+**MakeAppIcon** ($5/month) does multi-platform but also no iOS 26 variants in their UI as of last week. The watermark on the free tier was always annoying. Now it's annoying and behind on the spec.
+
+**AppIcon.co** still loads. Still ad-supported. Still stuck in 2019.
+
+**Random Figma plugins** — exactly as patchy as you'd expect from random Figma plugins.
+
+So I had two choices: spend the rest of the day in Figma with a checklist of pixel dimensions, OR build the tool I wished existed and use it on ThinkBud the same afternoon.
+
+Reader, you can probably guess which one I picked.
+
+---
+
+## What We Built
+
+[App Icon Generator](/tools/app-icon-generator) — free, no signup, no watermarks, runs entirely in your browser.
+
+The pitch is simple: drop one 1024×1024 source, get every Apple icon size across iOS, iPadOS, macOS, watchOS, and visionOS, plus the iOS 26 Liquid Glass tinted and dark variants, packaged as a Xcode-ready `AppIcon.appiconset` ZIP file.
+
+Drop it into `Assets.xcassets`. Build. Ship.
+
+The thing I'm most proud of is the **device mockup preview**. You don't just see your icon at 60×60 in a flat grid. You see it on a stylized iPhone home screen, then on the same home screen with iOS 26 tinted mode enabled (and all the dummy icons around it go monochrome too, so you can see how your tinted version actually fits in context), then on dark mode, then on iPad, then in the Apple Watch honeycomb, then in the Mac dock.
+
+That last part was the actual reason I built this. Every other icon generator shows you a grid of empty rectangles labeled "60", "120", "180". That's information, but it's not understanding. **You don't know whether your icon works until you see it on a fake home screen next to other apps.** That's where most icons quietly fail — they look great in isolation, weird in context.
+
+The tinted variant generation is the technically interesting part. iOS 26's tinted mode is a luminance-based monochrome — Apple takes the brightness of each pixel and renders white pixels with alpha proportional to that brightness, then applies the user's tint color over the result. We do exactly the same calculation in browser using the Canvas API:
+
+```
+luminance = 0.2126 * R + 0.7152 * G + 0.0722 * B
+output = white pixel, alpha = (luminance / 255) * source_alpha
+```
+
+That's literally it. The math is high-school grade. The headache is that no existing tool was doing it for you, so you had to know the formula and run it manually in Figma or Sketch with a custom filter.
+
+The dark variant in v1 is auto-darkened (multiply RGB by 0.55, preserve alpha) which is fine as a starting point but **not production quality.** Real dark variants need design judgment — different contrast, brighter outlines, sometimes different artwork. After you ship a hand-crafted dark icon, you replace the file inside the `AppIcon.appiconset` folder and Xcode picks it up automatically. The auto-darken is a fallback for "I just need something working before App Review on Friday."
+
+---
+
+## How It Actually Worked for ThinkBud
+
+After two hours of building the tool, twenty minutes of using it, and one drop into `Assets.xcassets`, ThinkBud's icon was iOS 26-ready across iPhone, iPad, and Mac. The whole second half of Tuesday went back to actual product work.
+
+The `AppIcon.appiconset` folder it generates is structured exactly the way Xcode expects — `Contents.json` wired up with the new `appearances` key for the iOS 60×60 home screen icon and the 1024×1024 App Store icon (those are the two sizes that actually use the Liquid Glass variants — Settings/Spotlight/Notification icons don't get tinted or darkened by the system). Other tools that try to generate variants for every size are doing extra work for nothing.
+
+We tested it on the Simulator with iOS 26 tinted mode toggled, then on a physical iPhone 17 Pro. Both rendered correctly. The default icon shows up in default mode, the tinted variant shows up when the user enables tint, the dark variant shows up in dark mode. Exactly what Apple's spec promises, no manual fiddling.
+
+---
+
+## Where to Find It
+
+Here it is: **[/tools/app-icon-generator](/tools/app-icon-generator)**
+
+It joins two other free tools we've shipped this week:
+
+- [**Universal Links / AASA Validator**](/tools/aasa-validator) — paste a domain, get every check Apple runs on your `apple-app-site-association` file plus the exact fix when something fails. We built this one because Universal Links debugging is the worst.
+- [**Privacy Manifest Generator**](/tools/privacy-manifest-generator) — generate a valid `PrivacyInfo.xcprivacy` file in 30 seconds. Skip the ITMS-91056 App Review bounce.
+
+All three are at [/tools](/tools). All three are client-side, no signup, no ads, no watermarks. Your data never leaves your browser.
+
+---
+
+## The Honest Takeaway
+
+iOS 26's Liquid Glass icon system is a real upgrade — done well, your tinted icon looks beautiful next to the user's accent color, your dark variant feels like a different lighting condition rather than a darkened photocopy, and the system rendering is clean.
+
+But Apple shipped the spec without the tooling to make it easy on indie devs. The Xcode auto-generator handles the basic case. The major existing third-party tools haven't updated yet. Most indie devs are going to hit this exact wall the first time they try to ship a polished icon for iOS 26, lose half a day in Figma, and either give up on Liquid Glass variants entirely or build their own tool.
+
+We're not going to be the only generator that gets there. **Bakery will update**, MakeAppIcon will update, somebody will build a paid SaaS for it within six months. But for the next few weeks while everyone catches up, our tool exists, it's free, and it works.
+
+If it saves you the same Tuesday morning we just lost, we'll consider it a fair trade.
+
+---
+
+If you build iOS apps and want more of this — honest reports from production, free tools when we hit a wall worth solving, the occasional opinion piece on what Apple is doing — there's a [weekly newsletter](/learn/field-notes) and a [field notes section](/learn/field-notes) for the deeper technical stuff. Both are free. No spam, no AI-generated filler. We write what we'd want to read.
+
+And if you find a bug in the icon generator, **reply to the next newsletter** or [contact us](/contact) — we'd rather find out from you than from a one-star App Store review on a customer's app.
