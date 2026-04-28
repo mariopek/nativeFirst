@@ -199,56 +199,110 @@ export default function AppIconGenerator() {
   // ── Render ────────────────────────────────────────────────────────
   return (
     <div className="space-y-8">
-      {/* ── Step 1: Source ─────────────────────────────────────── */}
-      <section
-        onDragEnter={(e) => {
-          e.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={onDrop}
-        className={`rounded-2xl border-2 border-dashed transition-colors ${
-          isDragging
-            ? 'border-accent bg-accent/5'
-            : img
-              ? 'border-border bg-surface'
-              : 'border-border bg-surface hover:border-accent/40 cursor-pointer'
-        }`}
-        onClick={() => !img && fileInputRef.current?.click()}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/svg+xml,image/webp"
-          onChange={onFileInput}
-          className="hidden"
-        />
-
-        {!img ? (
-          <div className="p-10 text-center">
-            <div className="w-14 h-14 mx-auto rounded-2xl bg-accent/15 flex items-center justify-center mb-4">
-              <svg className="w-7 h-7 text-accent" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-              </svg>
+      {/* ── Step 1: Source (pre-upload: side-by-side with Xcode instructions) ── */}
+      {!img ? (
+        <div className="grid lg:grid-cols-[minmax(0,1.2fr),minmax(0,1fr)] gap-5 items-stretch">
+          {/* Drop zone */}
+          <section
+            onDragEnter={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={onDrop}
+            className={`rounded-2xl border-2 border-dashed transition-colors flex items-center justify-center min-h-[260px] cursor-pointer ${
+              isDragging
+                ? 'border-accent bg-accent/5'
+                : 'border-border bg-surface hover:border-accent/40'
+            }`}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/svg+xml,image/webp"
+              onChange={onFileInput}
+              className="hidden"
+            />
+            <div className="p-8 text-center">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-accent/15 flex items-center justify-center mb-4">
+                <svg className="w-7 h-7 text-accent" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+              </div>
+              <h3 className="font-display font-semibold text-white text-base sm:text-lg mb-1.5">
+                Drop your 1024×1024 source icon
+              </h3>
+              <p className="text-xs sm:text-sm text-text-muted mb-4">
+                PNG, JPEG, SVG, or WebP. Square. Up to 16MB. Stays in your browser.
+              </p>
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-full gradient-brand text-white font-semibold text-xs hover:scale-105 transition-transform"
+              >
+                Choose file
+              </button>
             </div>
-            <h3 className="font-display font-semibold text-white text-base sm:text-lg mb-1.5">
-              Drop your 1024×1024 source icon
-            </h3>
-            <p className="text-xs sm:text-sm text-text-muted mb-4">
-              PNG, JPEG, SVG, or WebP. Square. Up to 16MB. Image stays in your browser.
-            </p>
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-full gradient-brand text-white font-semibold text-xs hover:scale-105 transition-transform"
-            >
-              Choose file
-            </button>
-          </div>
-        ) : (
+          </section>
+
+          {/* Where the ZIP goes — side-by-side instructions */}
+          <aside className="rounded-2xl border border-accent/20 bg-gradient-to-br from-surface via-surface to-accent/5 p-5 sm:p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-8 h-8 rounded-lg bg-accent/15 flex items-center justify-center">
+                <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="font-display font-bold text-white text-sm">
+                What you get + where it goes
+              </h3>
+            </div>
+            <ol className="space-y-2 text-xs text-text-muted leading-relaxed list-decimal list-inside">
+              <li>Drop a square 1024×1024 source (PNG, JPEG, SVG, or WebP)</li>
+              <li>Pick which Apple platforms you ship to</li>
+              <li>Generate → <strong className="text-white">AppIcon.appiconset.zip</strong> downloads</li>
+              <li>Unzip, drag the folder into Xcode's <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Assets.xcassets</code></li>
+              <li>Build &amp; ship — <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">Contents.json</code> is wired automatically</li>
+            </ol>
+
+            <div className="mt-4 pt-4 border-t border-border/50">
+              <p className="text-[10px] uppercase tracking-wider font-semibold text-accent mb-2">iOS 26 Bonus</p>
+              <p className="text-[11px] text-text-muted leading-relaxed">
+                Generates Liquid Glass <strong className="text-white">tinted</strong> + <strong className="text-white">dark</strong> variants automatically for iOS app icons. Wired into <code className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg border border-border text-white">appearances</code> key in Contents.json.
+              </p>
+            </div>
+          </aside>
+        </div>
+      ) : (
+        // Compact source bar (after upload)
+        <section
+          onDragEnter={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={onDrop}
+          className={`rounded-2xl border-2 border-dashed transition-colors ${
+            isDragging
+              ? 'border-accent bg-accent/5'
+              : 'border-border bg-surface'
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/svg+xml,image/webp"
+            onChange={onFileInput}
+            className="hidden"
+          />
           <div className="p-5 flex items-center gap-4">
             <img
               src={previews.any || ''}
@@ -263,18 +317,15 @@ export default function AppIconGenerator() {
               </p>
             </div>
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                fileInputRef.current?.click();
-              }}
+              onClick={() => fileInputRef.current?.click()}
               type="button"
               className="text-xs px-3 py-1.5 rounded-md border border-border bg-bg text-text-muted hover:border-accent hover:text-accent transition-colors font-semibold flex-shrink-0"
             >
               Replace
             </button>
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {/* Errors / warnings */}
       {loadError && (
