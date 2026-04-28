@@ -1,0 +1,376 @@
+---
+title: "Migrating a Real Project to Swift 6.2 Strict Concurrency: 86 Errors → 3 Annotations"
+description: "Part 3 of 3: a real before/after of an Invoize strict concurrency migration. Actual compiler errors, the one genuine race condition hiding under three false positives, and the fixes — test-first, with the diff that mattered."
+pubDate: 2026-04-28
+topics: ["Swift", "Concurrency", "Swift 6.2", "Xcode 26", "Migration", "MainActor", "TDD", "Sendable"]
+level: intermediate
+author: "Mario"
+coverImage: "/images/blog/swift-6-2-strict-concurrency-migration.svg"
+coverImageAlt: "A before/after split screen — left side red with 86 Swift 6.2 concurrency errors, right side green and clean with the new MainActor-by-default config"
+---
+
+{/*
+  SEO target keywords:
+  - Swift 6.2 strict concurrency migration
+  - Migrate Swift project to Swift 6.2
+  - Sendable conformance error fix
+  - main actor-isolated property nonisolated context
+  - Xcode 26 concurrency migration guide
+  - Swift 6.2 MainActor default migration
+  - real Swift 6 migration before after
+*/}
+
+[Day 1](./swift-6-2-mainactor-by-default) explained *why* Apple flipped the default. [Day 2](./swift-6-2-concurrent-nonisolated-mainactor) gave you the decision tree for which modifier goes where.
+
+Today is the part everyone actually wants: take a real project, flip the switch, watch what burns, and fix it with the new defaults. The app I'm using is Invoize — the invoicing app I've been shipping for two years. About 40 view models, a SwiftData store, a PDF exporter, a small networking layer for currency conversion. Real surface area, not a toy.
+
+Settle in. This is the post I wished existed when I tried this the first time.
+
+---
+
+## The Setup
+
+Project state going in:
+
+- **Xcode:** 26.0
+- **Swift language mode:** 5 (the safe default a year ago)
+- **Concurrency checking:** Minimal
+- **App target:** `InvoizeApp`
+- **Internal SPM modules:** `InvoizeKit`, `InvoizeUI`, `PDFExporter`
+
+Step zero is bumping the language mode. In Build Settings → **Swift Language Version → Swift 6**, then **Strict Concurrency Checking → Complete**, then the new Swift 6.2 toggle: **Default Actor Isolation → Main Actor** (only on the app target, not on the library targets — libraries stay non-isolated by default for a reason, see Day 1).
+
+Hit build.
+
+86 errors.
+
+Take a screenshot. You'll want it for the after-photo.
+
+---
+
+## The Errors, Sorted by What They Actually Mean
+
+After staring at the issue navigator for a few minutes, the 86 errors fell into four buckets. Bucketing them is the trick — fixing them one-by-one in compiler order will make you cry.
+
+| Bucket | Count | What it usually means |
+|---|---|---|
+| Sendable on model types | 41 | A `struct` or `enum` is fine, just needs the conformance |
+| `@MainActor` violations on view models | 28 | Will disappear once the module default kicks in |
+| Truly nonisolated work mislabelled | 14 | The decision tree from Day 2 fixes these |
+| Real race condition | 3 | One actual bug, hiding behind two false positives |
+
+Three buckets are noise that the new default flushes for free. The fourth is the entire reason you're doing this. Hold that distinction — it's what keeps the migration sane.
+
+---
+
+## Bucket 1: Sendable Conformances on Models
+
+Most of the noise. 41 errors that all look like this:
+
+```
+error: type 'Invoice' does not conform to protocol 'Sendable'
+error: type 'LineItem' does not conform to protocol 'Sendable'
+error: type 'Currency' does not conform to protocol 'Sendable'
+```
+
+Before I touched anything, I wrote a single test that captures the rule: model values must be safe to pass across actor boundaries.
+
+```swift
+// RED — won't even compile in strict mode
+@Test func invoice_isSendableAcrossActors() async {
+    let invoice = Invoice.sample
+    await Task.detached {
+        #expect(invoice.id == Invoice.sample.id)
+    }.value
+}
+```
+
+That `Task.detached` capture is the Sendable trip-wire. If `Invoice` isn't Sendable, the test fails to compile. Good — that's exactly what I want a Sendable test to do.
+
+Fix is mechanical:
+
+```swift
+// GREEN
+struct Invoice: Sendable, Identifiable {
+    let id: UUID
+    var number: String
+    var lineItems: [LineItem]
+    var currency: Currency
+    var issuedAt: Date
+}
+
+struct LineItem: Sendable, Hashable {
+    let id: UUID
+    var description: String
+    var quantity: Decimal
+    var unitPrice: Decimal
+}
+
+enum Currency: String, Sendable, CaseIterable {
+    case usd, eur, gbp, jpy
+}
+```
+
+Three rules I follow when adding Sendable to model types:
+
+1. **If it's a `struct` or `enum` of value types, just add it.** The compiler verifies. Free safety.
+2. **If it has a closure stored in it, you have a different problem.** Pull the closure out. Models shouldn't carry behavior.
+3. **If it has a class reference inside, that class needs to be Sendable too.** Usually that's a `final class` and you mark it `@unchecked Sendable` after auditing it. Not glamorous but honest.
+
+41 errors → 0 in about twenty minutes. Most of the work was scrolling.
+
+---
+
+## Bucket 2: @MainActor Violations That Vanish
+
+These are the ones that disappear the moment you flip the module default. But it's worth understanding what they were trying to tell you, because *some* of them are real and you want to know which.
+
+The pattern looks like this:
+
+```
+error: main actor-isolated property 'invoices' can not be 
+       mutated from a nonisolated context
+```
+
+Here's the offending code from the original project — back when Swift 6 wanted you to annotate everything by hand:
+
+```swift
+// Old, pre-Swift-6.2 idiom — annotation noise
+@MainActor
+class InvoiceListViewModel: ObservableObject {
+    @Published var invoices: [Invoice] = []
+    @Published var isLoading = false
+
+    private let repository: InvoiceRepository
+
+    init(repository: InvoiceRepository) {
+        self.repository = repository
+    }
+
+    @MainActor
+    func load() async {
+        isLoading = true
+        invoices = await repository.fetch()
+        isLoading = false
+    }
+}
+```
+
+Two `@MainActor`s. Two `@Published`s. An `ObservableObject` conformance. And it still threw errors because the test target was nonisolated and called `load()` directly.
+
+After the Swift 6.2 default kicks in (and a small `@Observable` polish from [Day 11's preview](./swift-6-2-mainactor-by-default)):
+
+```swift
+// GREEN — Swift 6.2 defaults, @Observable
+@Observable
+class InvoiceListViewModel {
+    var invoices: [Invoice] = []
+    var isLoading = false
+
+    private let repository: any InvoiceRepository
+
+    init(repository: any InvoiceRepository) {
+        self.repository = repository
+    }
+
+    func load() async {
+        isLoading = true
+        invoices = await repository.fetch()
+        isLoading = false
+    }
+}
+```
+
+And the test that used to scream:
+
+```swift
+// GREEN — same test, now passes without ceremony
+@Test func load_setsInvoicesAndClearsLoading() async {
+    let repo = StubInvoiceRepository(returning: Invoice.samples)
+    let sut = InvoiceListViewModel(repository: repo)
+
+    await sut.load()
+
+    #expect(sut.invoices.count == 3)
+    #expect(sut.isLoading == false)
+}
+```
+
+The test runner knows the view model is `@MainActor` (via the module default), the test method gets the right isolation hop automatically, and you wrote zero ceremony to make it work.
+
+Twenty-eight errors, gone. The test suite kept passing the entire time.
+
+---
+
+## Bucket 3: Things That Genuinely Should Be Off the Main Thread
+
+This is where the [decision tree from Day 2](./swift-6-2-concurrent-nonisolated-mainactor) earns its keep. Some types in the project — the PDF exporter, the currency rate fetcher, the file-backed config store — have *no UI concerns*. Binding them to `@MainActor` would create useless `await`-hops every time a view model used them.
+
+The PDF exporter is the clearest example. It does CPU work. It belongs on the cooperative pool, not on main.
+
+```swift
+// RED — what the test wants to be true
+@Test func render_returnsNonEmptyPDF() async {
+    let sut = PDFExporter()
+    let data = await sut.render(Invoice.sample)
+    #expect(data.isEmpty == false)
+}
+```
+
+```swift
+// GREEN — @concurrent for CPU work (Day 2 scenario 3)
+struct PDFExporter {
+    @concurrent func render(_ invoice: Invoice) async -> Data {
+        let renderer = UIGraphicsPDFRenderer(bounds: .a4)
+        return renderer.pdfData { ctx in
+            InvoiceLayout(invoice: invoice).draw(in: ctx)
+        }
+    }
+}
+```
+
+The currency fetcher is `nonisolated` (network I/O — Day 2 scenario 2):
+
+```swift
+struct CurrencyRateService {
+    private let session: URLSession
+
+    nonisolated func latestRate(_ pair: CurrencyPair) async throws -> Decimal {
+        let url = URL(string: "https://api.exchangerate.host/latest?base=\(pair.base.rawValue)")!
+        let (data, _) = try await session.data(from: url)
+        let response = try JSONDecoder().decode(RateResponse.self, from: data)
+        return response.rates[pair.quote.rawValue] ?? 0
+    }
+}
+```
+
+Fourteen errors. Three meaningful annotations across the whole codebase: `@concurrent` on `PDFExporter.render`, `nonisolated` on `CurrencyRateService.latestRate`, and `nonisolated` on `FileBackedSettingsStore.read`. That's it. The annotations now mean something — they're declarations of intent, not bureaucracy.
+
+This is the part the Apple migration guide undersells. The point of Swift 6.2 isn't that you write *fewer* annotations — it's that the annotations you keep actually carry information.
+
+---
+
+## Bucket 4: The One Real Race Condition
+
+This is the bug worth doing the migration for. It had been in production for nine months. Nobody had reported it because it manifested as occasional duplicate invoice numbers, and people assumed they'd fat-fingered the input.
+
+The original code:
+
+```swift
+// The bug, pre-migration
+@MainActor
+class InvoiceNumberGenerator {
+    private var lastNumber: Int = 0
+
+    nonisolated func nextNumber() async -> String {
+        // Three things go wrong here. See if you can spot them.
+        let next = lastNumber + 1
+        lastNumber = next
+        return String(format: "INV-%05d", next)
+    }
+}
+```
+
+Strict concurrency caught all three:
+
+```
+error: main actor-isolated property 'lastNumber' can not be 
+       read from a nonisolated context
+error: main actor-isolated property 'lastNumber' can not be 
+       mutated from a nonisolated context
+error: actor-isolated property 'lastNumber' can not be referenced 
+       from a nonisolated function
+```
+
+Two of those errors are the same false positive the new default flushes (cross-actor reads from non-isolated callers). One is real: there's no synchronization, so two concurrent calls can both read the same `lastNumber`, both increment to `n+1`, and emit the same invoice number. Classic lost-update race.
+
+Test-first, the bug captured:
+
+```swift
+// RED — this fails on the original implementation, intermittently
+@Test func nextNumber_isUniqueUnderConcurrency() async {
+    let sut = InvoiceNumberGenerator()
+
+    let numbers = await withTaskGroup(of: String.self) { group in
+        for _ in 0..<1000 {
+            group.addTask { await sut.nextNumber() }
+        }
+        var collected: [String] = []
+        for await value in group { collected.append(value) }
+        return collected
+    }
+
+    #expect(Set(numbers).count == 1000)
+}
+```
+
+On the original implementation, this test failed with `Set(numbers).count` somewhere around 994–998, depending on the run. Three or four collisions per thousand calls. That matches the "occasional duplicate invoice number" bug report exactly.
+
+The fix is to model the generator as an actor. Not because the migration forced you to, but because it should have been one from the start:
+
+```swift
+// GREEN
+actor InvoiceNumberGenerator {
+    private var lastNumber: Int = 0
+
+    func nextNumber() -> String {
+        lastNumber += 1
+        return String(format: "INV-%05d", lastNumber)
+    }
+}
+```
+
+The test now passes 100% of runs. The strict concurrency migration didn't *create* this work — it *surfaced* the bug. Three false-positive errors hiding one real one. That's the dynamic to internalize: when something looks like noise, scan it once for the genuine signal before you suppress it.
+
+This is the trade. You spend an afternoon on bureaucracy and you collect one production bug fix in the process. Worth it.
+
+---
+
+## The Migration Order I'd Recommend
+
+I did it the wrong way the first time. Here's the order that actually works:
+
+1. **Bump language mode and concurrency checking on libraries first.** They have the smallest surface area and the most clarity about isolation.
+2. **Add Sendable to your model types.** Mechanical, low-risk, unblocks everything downstream.
+3. **Flip the app target's Default Actor Isolation to MainActor.** This is the moment most of the noise vanishes.
+4. **Fix the genuinely off-main work** with `nonisolated` and `@concurrent` (the Day 2 decision tree).
+5. **Audit each remaining error for race conditions.** This is the only step where you slow down.
+6. **Delete redundant `@MainActor` annotations** in a separate cleanup PR. Don't mix it with the migration commit — reviewers will lose their minds.
+
+Total time on Invoize: about four hours. Three of those were bucket 1 (Sendable on models). One was bucket 4 (the actor refactor and writing the concurrency stress test). The two middle buckets were nearly free once the default was flipped.
+
+---
+
+## What Made the Difference
+
+Three things turned this from a slog into a manageable session:
+
+**Bucket the errors before fixing them.** The compiler dumps them in source-order. Resorting them by *what they actually mean* is the single biggest force multiplier. You stop re-reading the same noise.
+
+**Trust the new default.** The whole point of Swift 6.2's `@MainActor` default is that 90% of the errors you saw under Swift 6.0 strict mode were the compiler not knowing what you knew. Flipping the toggle isn't laziness — it's encoding that knowledge.
+
+**Write the concurrency stress test before fixing the real race.** A 1000-task `TaskGroup` is the most effective race-condition reproducer I've used. It's not academic — it's what shipped to production fixes look like.
+
+---
+
+## The Honest Numbers
+
+| Metric | Before | After |
+|---|---|---|
+| Concurrency errors | 86 | 0 |
+| `@MainActor` annotations | 47 | 0 in app target, 8 in libraries |
+| `nonisolated` annotations | 6 | 3 |
+| `@concurrent` annotations | n/a | 1 |
+| Real race conditions found | — | 1 (in production for 9 months) |
+| Time spent | — | ~4 hours over one afternoon |
+| Time spent feeling like compliance officer | — | ~10% of that |
+
+That last row is the real headline. The Swift 6.0 migration made you feel like you were filling out tax forms. Swift 6.2 makes you feel like you're shipping software with one fewer bug than you started with.
+
+---
+
+That closes out the Swift 6.2 trilogy. [Day 1](./swift-6-2-mainactor-by-default) on the philosophy, [Day 2](./swift-6-2-concurrent-nonisolated-mainactor) on the decision tree, today on the migration in anger.
+
+**Tomorrow (Day 4):** Liquid Glass for existing SwiftUI apps. The minimum-effort path to making your app look native on iOS 26 — what you get from a recompile alone, and what's worth customizing.
+
+*Part of the [30-day iOS development series](/learn/field-notes). If you want a deeper look at structuring real iOS apps the way this Invoize migration was set up — modules, isolation, test seams — [SwiftUI at Scale](/learn/swiftui-at-scale) walks the full architecture in the courses section.*
