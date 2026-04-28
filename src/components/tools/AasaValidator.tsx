@@ -116,9 +116,9 @@ export default function AasaValidator() {
             </label>
             <div className="flex flex-col sm:flex-row gap-3">
               <div className="flex-1 relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted text-sm font-mono pointer-events-none">
-                  https://
-                </span>
+                <div className="absolute left-0 top-0 bottom-0 flex items-center pl-3 pr-2.5 border-r border-border pointer-events-none">
+                  <span className="text-text-muted text-sm font-mono select-none">https://</span>
+                </div>
                 <input
                   id="domain-input"
                   type="text"
@@ -129,7 +129,7 @@ export default function AasaValidator() {
                   autoCorrect="off"
                   spellCheck={false}
                   disabled={loading}
-                  className="w-full pl-[68px] pr-3 py-3 rounded-lg bg-bg border border-border text-white text-base font-mono placeholder:text-text-muted/60 focus:outline-none focus:border-accent disabled:opacity-50"
+                  className="w-full pl-[88px] pr-3 py-3 rounded-lg bg-bg border border-border text-white text-base font-mono placeholder:text-text-muted/60 focus:outline-none focus:border-accent disabled:opacity-50"
                 />
               </div>
               <button

@@ -122,20 +122,52 @@ export async function validateAasa(
     };
   }
 
-  // Fetch
+  // Fetch — follow up to 3 redirects, but track them so we can warn the user.
+  // Apple's docs say "no redirects" but swcd does follow 1-2 in practice (apex
+  // → www is the most common case). We follow + warn rather than fail outright.
   const checks: CheckResult[] = [];
   let response: Response;
+  let finalUrl = url;
+  const redirectChain: { from: string; to: string; status: number }[] = [];
+
   try {
-    response = await fetch(url, {
-      redirect: 'manual', // Apple doesn't follow redirects on AASA
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: {
-        // Some servers block default fetch UAs. Identify ourselves clearly.
-        'User-Agent':
-          'NativeFirst-AASA-Validator/1.0 (+https://nativefirstapp.com/tools/aasa-validator)',
-        Accept: 'application/json, application/octet-stream, */*',
-      },
-    });
+    let currentUrl = url;
+    let hops = 0;
+    const MAX_HOPS = 3;
+
+    while (true) {
+      const r = await fetch(currentUrl, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: {
+          'User-Agent':
+            'NativeFirst-AASA-Validator/1.0 (+https://nativefirstapp.com/tools/aasa-validator)',
+          Accept: 'application/json, application/octet-stream, */*',
+        },
+      });
+
+      if (r.status >= 300 && r.status < 400) {
+        const location = r.headers.get('location');
+        if (!location) {
+          response = r;
+          break;
+        }
+        const nextUrl = new URL(location, currentUrl).toString();
+        redirectChain.push({ from: currentUrl, to: nextUrl, status: r.status });
+        hops += 1;
+        if (hops > MAX_HOPS) {
+          response = r;
+          finalUrl = currentUrl;
+          break;
+        }
+        currentUrl = nextUrl;
+        continue;
+      }
+
+      response = r;
+      finalUrl = currentUrl;
+      break;
+    }
   } catch (e) {
     const message =
       e instanceof Error
@@ -160,13 +192,40 @@ export async function validateAasa(
     };
   }
 
-  // ── HTTPS (we always try HTTPS, document the requirement) ────────
-  checks.push({
-    category: 'network',
-    name: 'Served over HTTPS',
-    status: 'pass',
-    details: 'Apple requires HTTPS. HTTP is rejected outright.',
-  });
+  // ── HTTPS ────────────────────────────────────────────────────────
+  // Surface any insecure step in the redirect chain too.
+  const httpsViolations = redirectChain.filter((r) => r.to.startsWith('http://'));
+  if (httpsViolations.length === 0) {
+    checks.push({
+      category: 'network',
+      name: 'Served over HTTPS',
+      status: 'pass',
+      details: 'Apple requires HTTPS. HTTP is rejected outright.',
+    });
+  } else {
+    checks.push({
+      category: 'network',
+      name: 'Served over HTTPS',
+      status: 'fail',
+      details: `Redirect chain includes an HTTP step: ${httpsViolations[0].to}`,
+      fix: 'Every link in the chain (and the final destination) must use HTTPS.',
+    });
+  }
+
+  // ── Redirect chain (warn if any) ─────────────────────────────────
+  if (redirectChain.length > 0) {
+    const chainText = redirectChain
+      .map((r, i) => `${i + 1}. ${r.from} → ${r.to} (${r.status})`)
+      .join('\n');
+    checks.push({
+      category: 'network',
+      name: redirectChain.length === 1 ? 'Single redirect followed' : `${redirectChain.length} redirects followed`,
+      status: 'warn',
+      details: chainText,
+      fix:
+        "Apple's docs say AASA files should not redirect. In practice swcd follows 1–2 hops (apex → www is the most common), but the safest setup is hosting the file directly at the original URL with status 200. Move the file (or copy it) to skip the redirect.",
+    });
+  }
 
   // ── HTTP status ──────────────────────────────────────────────────
   if (response.status === 200) {
@@ -174,20 +233,22 @@ export async function validateAasa(
       category: 'network',
       name: 'HTTP 200 OK',
       status: 'pass',
-      details: 'Status 200 — file served directly.',
+      details:
+        redirectChain.length === 0
+          ? 'Status 200 — file served directly.'
+          : `Status 200 — file served at the final redirect target.`,
     });
   } else if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get('location');
     checks.push({
       category: 'network',
-      name: 'HTTP 200 OK (no redirects)',
+      name: 'HTTP 200 OK',
       status: 'fail',
-      details: `Got ${response.status} → ${location || '(no location header)'}.`,
-      fix: 'Apple does NOT follow redirects on AASA files (since iOS 11). Serve the file directly from the original URL with status 200, or place it at the redirect target instead.',
+      details: `Hit redirect limit (${redirectChain.length} hops) — last status was ${response.status}.`,
+      fix: 'Too many redirects. Apple gives up after a couple of hops. Reduce the redirect chain.',
     });
     return {
       domain,
-      url,
+      url: finalUrl,
       fetchSucceeded: true,
       passed: false,
       checks,
