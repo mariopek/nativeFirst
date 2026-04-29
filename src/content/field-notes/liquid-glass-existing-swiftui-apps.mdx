@@ -1,0 +1,265 @@
+---
+title: "Liquid Glass for Existing SwiftUI Apps: What You Get Free vs. What's Worth Customizing"
+description: "Day 4 of 30. The minimum-effort path to making an existing SwiftUI app look native on iOS 26 — what a recompile gives you, where glassEffect() is worth a custom touch, and the toolbar/backgroundExtensionEffect pieces nobody mentions."
+pubDate: 2026-04-29
+topics: ["SwiftUI", "Liquid Glass", "iOS 26", "Xcode 26", "Design", "TDD"]
+level: intermediate
+author: "Mario"
+coverImage: "/images/blog/liquid-glass-existing-swiftui-apps.svg"
+coverImageAlt: "Three frosted Liquid Glass surfaces — a toolbar pill, a sheet card, and a floating tab bar — over a soft blue/purple/pink gradient. The headline reads Liquid Glass, for Free."
+---
+
+{/*
+  SEO target keywords:
+  - Liquid Glass SwiftUI tutorial
+  - iOS 26 Liquid Glass existing app
+  - glassEffect SwiftUI
+  - backgroundExtensionEffect SwiftUI
+  - SwiftUI toolbar iOS 26
+  - update existing SwiftUI app for iOS 26
+  - Liquid Glass minimum effort migration
+*/}
+
+The first three days of this series ([Day 1](./swift-6-2-mainactor-by-default), [Day 2](./swift-6-2-concurrent-nonisolated-mainactor), [Day 3](./swift-6-2-strict-concurrency-migration-real-project)) were a Swift 6.2 trilogy — concurrency under the hood. Today we surface back up. iOS 26 ships Liquid Glass, and your existing SwiftUI app is going to look weirdly out of place at WWDC dinner conversations if you don't at least know what's already happening to it.
+
+Here's the honest pitch: a *huge* amount of Liquid Glass adoption is free. Recompile against the iOS 26 SDK in Xcode 26, and your toolbars, tab bars, sheets, and navigation surfaces quietly upgrade themselves. No code changes, no design review, no project meeting where a stakeholder asks "but does it sparkle?".
+
+That's the good half. The other half is figuring out where you should *actually* reach for `glassEffect()` and friends. That's the part that matters for solo devs trying to ship without burning a sprint on chrome.
+
+Let me walk you through what a real audit of an existing app looks like — using Invoize again, the same project from Day 3 — and TDD the bits that need behavior, not just looks.
+
+---
+
+## The "Just Recompile" Inventory
+
+I opened the Invoize project, switched the deployment target to iOS 26, and ran on a real device. Here's what changed without me touching a single line of SwiftUI:
+
+| Surface | Before (iOS 18) | After (iOS 26) |
+|---|---|---|
+| `NavigationStack` toolbar | Solid blurred bar, hard edge at the bottom | Floating pill, clear-glass material, content scrolls *under* it |
+| `TabView` (default style) | Solid blur strip at the bottom | Floating glass capsule, smaller footprint |
+| `.sheet` presentations | Rounded card, opaque material | Glass material with refraction at the edges |
+| `Menu` and contextual popovers | Vibrancy material | Glass with a subtle parallax tilt |
+| `Button(role: .destructive)` in toolbars | Red text | Red text, but the surrounding glass picks up a faint warm tint |
+
+That's a lot of free design work. The catch is one thing: **content under the new toolbars and tab bars now needs breathing room.** If you set `.toolbarBackground(.visible, for: .navigationBar)` two years ago to force a hard edge, that line is now actively fighting iOS 26. Delete it. Let the system do its thing.
+
+The other catch — and this trips everyone — is that any view that drew its own background to the screen edge will now be eaten by the floating bars. Swap your `Color.background.ignoresSafeArea()` for `.background(Color.background)` without the safe-area override, and let the new bars float over content the way Apple intends. Your scroll content will look right immediately.
+
+---
+
+## The One Layout Test Worth Writing First
+
+Before I touch any Liquid Glass APIs, I want a behavioral test for the thing that's most likely to regress: the toolbar should *transition* between transparent and glass-tinted as the user scrolls. That's the iOS 26 behavior — and it's the thing that breaks if you accidentally hardcode a background somewhere up the view tree.
+
+I expose a tiny observable that owns that decision so I can test it without spinning up a full UI test:
+
+```swift
+// RED — describe the rule before I implement it
+@Observable
+final class ToolbarSurfaceModel {
+    enum Surface: Equatable { case clear, glass }
+    private(set) var surface: Surface = .clear
+
+    func contentDidScroll(toOffset offset: CGFloat) {
+        // intentionally unimplemented — the test will drive this
+    }
+}
+
+@Test func toolbar_isClear_whenContentAtTop() async {
+    let sut = ToolbarSurfaceModel()
+    sut.contentDidScroll(toOffset: 0)
+    #expect(sut.surface == .clear)
+}
+
+@Test func toolbar_becomesGlass_afterScrollingPastThreshold() async {
+    let sut = ToolbarSurfaceModel()
+    sut.contentDidScroll(toOffset: 24)
+    #expect(sut.surface == .glass)
+}
+
+@Test func toolbar_returnsClear_whenScrolledBackToTop() async {
+    let sut = ToolbarSurfaceModel()
+    sut.contentDidScroll(toOffset: 200)
+    sut.contentDidScroll(toOffset: 0)
+    #expect(sut.surface == .clear)
+}
+```
+
+GREEN is barely worth a code block — but the point of the exercise isn't the implementation, it's that the *rule* is now documented as a test:
+
+```swift
+// GREEN
+@Observable
+final class ToolbarSurfaceModel {
+    enum Surface: Equatable { case clear, glass }
+    private(set) var surface: Surface = .clear
+
+    private let threshold: CGFloat = 16
+
+    func contentDidScroll(toOffset offset: CGFloat) {
+        surface = offset > threshold ? .glass : .clear
+    }
+}
+```
+
+And then the SwiftUI side just reads it:
+
+```swift
+struct InvoiceListView: View {
+    @State private var surfaceModel = ToolbarSurfaceModel()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(invoices) { InvoiceRow(invoice: $0) }
+                }
+                .padding()
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                geo.contentOffset.y
+            } action: { _, newValue in
+                surfaceModel.contentDidScroll(toOffset: newValue)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("New", systemImage: "plus") { /* ... */ }
+                }
+            }
+        }
+    }
+}
+```
+
+Why the indirection? Because next month, when a designer asks "can the toolbar pulse when there are unread items?", you have an `Observable` model with a clear surface state and a unit test. You don't go hunting for the right view modifier in a 400-line view.
+
+That's the Essential Developer move: keep the *decision* outside SwiftUI, test it like normal Swift, then let the view be a thin reader.
+
+---
+
+## Where `glassEffect()` Earns Its Keep
+
+The system handles toolbars and tab bars on its own. `glassEffect()` is for the surfaces *you* draw — floating action buttons, custom card overlays, badge pills, the small UI you invented because the system didn't have it.
+
+The single most useful application I've found is the bottom-pinned action bar that a lot of apps use over a list (Invoize uses one for "Send invoice"). Pre-iOS 26 you'd give it a blurred material. In iOS 26 you give it real glass:
+
+```swift
+struct InvoiceDetailView: View {
+    let invoice: Invoice
+    @State private var isSending = false
+
+    var body: some View {
+        ScrollView {
+            InvoiceContent(invoice: invoice)
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 12) {
+                Button("Preview", systemImage: "eye") { /* ... */ }
+                    .buttonStyle(.bordered)
+
+                Button("Send Invoice", systemImage: "paperplane.fill") {
+                    isSending = true
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSending)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .glassEffect(.regular, in: .capsule)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+}
+```
+
+Three things to call out:
+
+- `.glassEffect(.regular, in: .capsule)` — `.regular` is the default, `.thin` and `.thick` exist. Stick to `.regular` for the first pass and only adjust if a designer asks.
+- The `in:` shape is what makes Liquid Glass *feel* native. A rectangle here would scream "I'm new at this." A capsule, rounded rectangle, or custom `Shape` aligns with how iOS 26 handles every system surface.
+- The outer `.padding` after `.glassEffect` is what gives the capsule room to *be* floating. Without it the glass kisses the screen edge and looks like a mistake.
+
+I tend to add a TDD test around the *behavior* of the action bar — when "Send" is tapped and the model's `isSending` flips, the view should disable the button. Same idea as the toolbar surface test: the look is system-managed, the *logic* is what you test.
+
+---
+
+## The Sleeper Feature: `backgroundExtensionEffect`
+
+This is the one nobody is talking about, and it's quietly the move that makes apps feel premium on iOS 26.
+
+Imagine a hero image at the top of a detail screen. Pre-iOS 26 you'd extend it under the navigation bar with `.ignoresSafeArea(edges: .top)`. iOS 26 gives you something better: `backgroundExtensionEffect`. The image extends under the toolbar, but the system samples its colors and uses them to *tint the glass*, so the toolbar feels like a continuation of the image instead of a hat sitting on top of it.
+
+```swift
+struct InvoiceClientView: View {
+    let client: Client
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                Image(client.coverImageName)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(height: 280)
+                    .clipped()
+                    .backgroundExtensionEffect()
+
+                ClientDetails(client: client)
+                    .padding()
+            }
+        }
+        .navigationTitle(client.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+```
+
+That single modifier is the difference between "an app from 2021 that recompiled" and "an app that was built for iOS 26". One line. Costs you nothing. If your app has any kind of cover-image header — playlist, profile, recipe, project — go through your codebase and add it everywhere it belongs. It's the highest leverage one-line change you'll make this year.
+
+There's no behavior to test here — it's pure visual sugar. But there *is* a sanity check worth running: take a screenshot before and after on a real device, side by side, and notice how much warmer the toolbar feels when it's borrowing the image's palette. That's the iOS 26 feel in a sentence.
+
+---
+
+## What to Delete
+
+Half of the iOS 26 polish work is *removing* code, not writing new code. Things to grep for in your codebase and seriously consider yanking:
+
+- `.toolbarBackground(.visible, for: .navigationBar)` — fights the new floating chrome.
+- `.toolbarBackground(.hidden, for: .navigationBar)` paired with custom blur views — the system does this better now.
+- Custom `UIVisualEffectView` wrappers via `UIViewRepresentable` — most are redundant. Audit each one.
+- Hand-rolled "frosted card" backgrounds with `.background(.ultraThinMaterial)` *inside* sheets — sheets are already glass.
+- Hardcoded `Color.systemBackground` on root containers when you used to fight the toolbar — let it inherit.
+
+The rule of thumb: **if the comment next to the line says "// hack to make the toolbar look right", delete the line.** Try it on iOS 26 with nothing. Almost always, the system now does what you were faking.
+
+---
+
+## When to Stay Out of Glass
+
+Two cases where the answer is "leave it alone":
+
+**Dense data tables.** If your app shows a 12-column financial table (Invoize's reports view, for example), the user wants high contrast and zero distraction, not refraction. Glass on a data-heavy screen actively reduces legibility. Use plain backgrounds.
+
+**Onboarding paywalls.** Every conversion test I've ever run says clear, opaque CTAs convert better than translucent ones. Save your glass for in-app surfaces, not the moment a wallet is about to come out.
+
+[Day 5 covers custom Liquid Glass components](./swift-6-2-mainactor-by-default) — when to leave the system defaults and roll your own shape, plus the layering pitfalls that quietly tank scroll performance. (Coming tomorrow.)
+
+---
+
+## The Honest Audit Checklist
+
+If you only do five things on an existing app to look at home on iOS 26, do these:
+
+1. **Bump the deployment target to iOS 26 and run on a real device.** Take screenshots. Most surfaces are already done.
+2. **Grep your codebase for `toolbarBackground` and delete defensive uses.** They were a tax for an iOS 18 world that doesn't exist anymore.
+3. **Add `glassEffect(.regular, in: ...)` to your floating action bars.** One modifier per FAB, capsule shape.
+4. **Find every cover-image header and add `backgroundExtensionEffect()`.** Single-line change, premium feel.
+5. **Skip glass on data tables and paywalls.** Pick your spots.
+
+Total time on Invoize for everything above: under two hours, including the screenshot diffing. The app went from "ported" to "intentional" in an afternoon. There's an Apple-shaped gravitational pull toward over-applying Liquid Glass right now — resist it. The system already does most of the work. Your job is to know where to add the small touches and where to stay out of the way.
+
+---
+
+**Tomorrow (Day 5):** Custom Liquid Glass components — `glassEffect(in:)` with a custom `Shape`, layering glass effects without nuking your scroll performance, and the three mistakes I made the first time so you don't have to.
+
+*Part of the [30-day iOS development series](/learn/field-notes). For the bigger architectural picture — how a real app like Invoize is broken into modules so that surfacing changes like Liquid Glass don't ripple through your whole codebase — [SwiftUI at Scale](/learn/swiftui-at-scale) is the long-form companion in the courses section.*
