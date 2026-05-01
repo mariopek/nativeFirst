@@ -1,0 +1,191 @@
+---
+title: "Icon Composer and the New App-Icon Era: One SVG, Four Variants, Zero Photoshop"
+description: "Day 6 of 30. Apple's Icon Composer turns a single source asset into the full light, dark, clear, and tinted set iOS 26 demands. Walking through the actual workflow on an Invoize rebrand — and the gotchas that don't make it into the WWDC slides."
+pubDate: 2026-05-01
+topics: ["iOS 26", "Icon Composer", "App Icon", "Liquid Glass", "Xcode 26", "Design"]
+level: intro
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1643567397184-4a2b08f01d45?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a colorful mosaic tile design — many small colored tiles arranged into a single pattern. Photo by Iryna Muller via Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - Icon Composer iOS 26
+  - Icon Composer Xcode 26 tutorial
+  - app icon variants light dark tinted clear
+  - iOS 26 app icon workflow
+  - Liquid Glass app icon
+  - .icon bundle Xcode 26
+  - app icon tinted variant iOS 26
+  - app icon dark mode iOS 26
+*/}
+
+I spent most of last weekend rebranding Invoize. New mark, new color story, new everything — partly because the old icon was three years old and looked like it had been designed in a hurry on a tram (it had), and partly because iOS 26 quietly turned "ship one app icon" into "ship four." Light, dark, clear, tinted. If you skip any of them in 2026, your icon will render with that slightly-off "we forgot about you" look on someone's home screen, and you will know.
+
+The good news: Apple shipped a tool for this called **Icon Composer**. It's bundled with Xcode 26, lives one click away from `Show in Finder`, and does the boring half of the job — generating every size and variant from a single source — automatically. The bad news: most of the tutorials about it skip the parts that actually matter, like how to design a single asset that survives all four lighting modes without looking like garbage in at least one of them.
+
+This is the workflow I landed on after rebranding two apps with it. It is opinionated, slightly impatient, and assumes you'd rather ship than admire your own gradients.
+
+---
+
+## Why Four Variants Is Not Optional Anymore
+
+In iOS 18 you got away with one icon. iOS 26 introduces what Apple calls "icon appearances" — the system swaps the rendered version based on the user's setting and time of day:
+
+- **Default** (the canonical version, the one you've always made).
+- **Dark** — for users with dark mode home screen icons. The system used to dim your default icon; now it expects you to ship a darker rendition with adjusted contrast.
+- **Tinted** — the monochrome wash that picks up the user's current home screen accent. This is the variant most apps get wrong, because designers ship a "white version" and the tint engine swallows the contrast.
+- **Clear** — the new Liquid Glass variant. Your icon is rendered as if etched into glass, with the wallpaper showing through. This is the showpiece of iOS 26 and the hardest one to design for.
+
+You ship all four or you ship a half-finished icon. There's no "default that looks fine in dark mode" path anymore — the system will pick your default and gray it out, and on a glass surface that's the visual equivalent of mumbling.
+
+If this is the first time you're meeting these variants, [Day 4 of this series](/learn/field-notes/liquid-glass-existing-swiftui-apps) covers what Liquid Glass actually does to your existing UI and why these four icon modes are part of the same redesign — same physics, same engine, same expectation that your assets are *prepared* for it. Today's post is the icon half of that story.
+
+---
+
+## What Icon Composer Actually Is
+
+Icon Composer is a small standalone macOS app that ships with Xcode 26 (`Xcode → Open Developer Tool → Icon Composer`). It opens a `.icon` bundle — a new format that replaces the old `Contents.json + N PNGs` AppIcon asset for iOS 26 targets — and gives you a layered editor that's roughly "Sketch with constraints baked in for app icons."
+
+The mental model: you don't design four icons. You design **one layered composition**, and Icon Composer renders the four variants from it. Layers can be flagged as "show in tinted," "show in clear," "hide in dark," etc., and the tool generates the right thing for each mode automatically.
+
+This is a real shift. The old workflow was "design four PNGs and pray you remember to update them all in lockstep next time." The new workflow is "maintain one source of truth and let the tool fan out." If you've ever shipped a redesign and found that the dark icon was 2 versions behind the light one because somebody forgot to re-export — Icon Composer fixes that class of bug structurally.
+
+---
+
+## The Source Asset: Get This Right Or The Rest Doesn't Matter
+
+Before you open Icon Composer, the highest-leverage decision you'll make is the source asset itself. The tool will not save a bad mark from itself.
+
+Here's the cheat sheet I now follow, learned from making every mistake on the list at least once:
+
+1. **Vector, not raster.** Icon Composer wants SVGs (or PDF) for the source. If you import a 1024×1024 PNG it'll let you, but you've thrown away the variant flexibility — the tool can't re-render at glass thicknesses, can't compose layers cleanly, can't separate fill from stroke for the tinted pass. Vectors first, always.
+2. **Layered, not flattened.** Export your source with the foreground mark and the background as separate layers. The tinted variant strips the background entirely and the clear variant treats them differently. If your designer hands you a flattened SVG, send it back. (I had to politely send my own SVG back to myself, which is the most awkward kind of code review.)
+3. **No fine detail under 60px equivalent.** The tinted variant blurs out anything below a certain stroke weight, and the clear variant refracts thin lines into mush. If your icon has a 1-pixel highlight that "makes the whole thing pop" — it's going to vanish in two of the four modes. Design for the worst case.
+4. **One color for the foreground in tinted-eligible layers.** The tinted engine wants a monochrome silhouette to apply the user's accent to. If your foreground has gradients, the tinted variant will pick the average and you will not love it. Save gradients for the default and clear variants only.
+
+Concretely, for the Invoize rebrand my source bundle ended up with three layers: a solid fill background, the "I" letterform as a single-color foreground, and a subtle highlight stroke that's flagged "default + clear only." Three layers. Four variants. No exports.
+
+---
+
+## The Actual Workflow: Source SVG → Four Variants in About 15 Minutes
+
+Open `Xcode → Open Developer Tool → Icon Composer`. Hit `File → New → App Icon`. Drag your layered SVG into the canvas. You'll see five tabs along the top: **Default**, **Dark**, **Tinted**, **Clear**, and **All**.
+
+Walk them in order. Don't try to perfect Default and then move on — every variant teaches you something about your source asset, and you will be going back to fix the source.
+
+**Default** (1 minute). It just works. If your SVG is sized right (1024×1024 art board) and the layers are clean, the canvas shows the icon and you move on.
+
+**Dark** (3 minutes). Click into the dark tab. By default Icon Composer samples your background color and darkens it — and that's usually wrong, because what you actually want for dark is a *different* background that your foreground sits on with proper contrast. In the layer panel, mark your background layer as "Dark variant: custom" and pick the new color. Your foreground usually stays the same. Done.
+
+**Tinted** (5 minutes — this is where most icons die). Switch to the tinted tab. Apple shows you a default tint preview. Look at the foreground silhouette: is it readable? If your icon depends on an internal color split — a two-tone mark, a logo with white-on-blue lettering — the tinted variant flattens that to a single tone, and what you'll see is a blob. If that happens, your fix is at the source: redesign the foreground so its *silhouette alone* communicates the brand. The Invoize "I" works because it's a single-stroke letter. The old "Inv" with three colors did not, and that's a big reason I rebranded.
+
+**Clear** (5 minutes). The glass variant. This is the one designers fall in love with and developers get nervous about. Click in, and Icon Composer simulates the icon on a few wallpapers — light, dark, busy, abstract. Your foreground gets a refractive treatment, your background mostly disappears, and any layer flagged "clear-only" gets composited on top. The two things that go wrong here: foregrounds that are too thin (they refract into invisibility), and backgrounds that are too high-contrast (they fight the wallpaper). For Invoize I dropped the background opacity to ~30% in the clear variant and flagged a subtle inner shadow as "clear only" to give the letter dimension on glass. Two minutes of work. Looks like a different app.
+
+**All** (1 minute). The grid view. Eyeball all four side by side. If one of them looks "off-brand," that's almost always a source-asset issue, not a tool issue. Fix the source, re-import, repeat.
+
+That's the whole workflow. Fifteen minutes of focused work for an asset that used to take a half-day of exporting and renaming PNGs.
+
+---
+
+## Wiring The `.icon` Into Xcode
+
+Once Icon Composer is happy, save the bundle. You get a single `Invoize.icon` directory (it's a package on disk, like `.xcassets`). Drag it into your asset catalog. In your target's Build Settings, set `ASSETCATALOG_COMPILER_APPICON_NAME` to the bundle name, the same as you would for the old asset format. Build, run on a device with iOS 26, and your home screen now respects the user's appearance setting automatically.
+
+The piece I keep forgetting: if you're shipping an iOS 26 + iOS 18 universal binary, you need to keep your *old* AppIcon assets around for the iOS 18 fallback. Xcode 26 will use the `.icon` for iOS 26 and fall back to the legacy `AppIcon.appiconset` for older OSes. Don't delete the old PNG set the day you migrate — leave it for a release cycle until your iOS 18 user share is below whatever threshold you care about. (Mine is 5%. Yours might be different.)
+
+---
+
+## The TDD Bit: Yes, There's One
+
+You can't unit-test pixels. You *can* unit-test the logic that decides *which* icon name to ask the system for, and if you have an alternate-icon feature (Invoize has a Pro tier that unlocks a "stealth" black icon), that decision is exactly the kind of thing that breaks silently and ships to production unloved.
+
+Here's the testable piece:
+
+```swift
+struct AppIconCatalog {
+    enum Variant: String, CaseIterable {
+        case standard = "AppIcon"
+        case stealth  = "AppIcon-Stealth"
+        case classic  = "AppIcon-Classic"
+    }
+
+    enum Entitlement {
+        case free, pro
+    }
+}
+
+@Observable
+final class AppIconModel {
+    private(set) var current: AppIconCatalog.Variant
+    private let entitlement: AppIconCatalog.Entitlement
+
+    init(current: AppIconCatalog.Variant = .standard,
+         entitlement: AppIconCatalog.Entitlement) {
+        self.current = current
+        self.entitlement = entitlement
+    }
+
+    func canSelect(_ variant: AppIconCatalog.Variant) -> Bool {
+        switch variant {
+        case .standard: return true
+        case .stealth, .classic: return entitlement == .pro
+        }
+    }
+
+    func select(_ variant: AppIconCatalog.Variant) -> Bool {
+        guard canSelect(variant) else { return false }
+        current = variant
+        return true
+    }
+}
+```
+
+Notice what this is *not* doing: it's not calling `UIApplication.shared.setAlternateIconName(_:)`. The system call is a side effect; it lives in a thin SwiftUI view at the very edge. The model is plain data and a couple of guards, and the tests are boring in the best way:
+
+```swift
+@Test func freeUsers_cannotSelectPaidIcons() {
+    let sut = AppIconModel(entitlement: .free)
+    #expect(sut.select(.stealth) == false)
+    #expect(sut.current == .standard)
+}
+
+@Test func proUsers_canSwitchAndStateUpdates() {
+    let sut = AppIconModel(entitlement: .pro)
+    #expect(sut.select(.classic) == true)
+    #expect(sut.current == .classic)
+}
+
+@Test func reselectingCurrentVariant_isIdempotent() {
+    let sut = AppIconModel(current: .stealth, entitlement: .pro)
+    _ = sut.select(.stealth)
+    #expect(sut.current == .stealth)
+}
+```
+
+Same shape as [Day 5's `FABModel`](/learn/field-notes/custom-liquid-glass-components) and [Day 4's `ToolbarSurfaceModel`](/learn/field-notes/liquid-glass-existing-swiftui-apps). The system API is rendered *as a function of state*; the state has tests; the rendering does not. It's the same recipe whether you're rendering a glass surface or a different home-screen icon — separate the decision from the side effect.
+
+---
+
+## The Five Mistakes I Made So You Don't Have To
+
+1. **Designing the default first and "fixing" the others.** The tinted variant exposes the weakest part of your mark. Design the silhouette first, *then* the colors. You'll save a redesign cycle.
+2. **Trusting the tinted preview's default tint.** Apple's preview shows a neutral blue. Real users have weird wallpapers that produce weird tints. Switch the preview color to a saturated red and a saturated green at least once before you call it done.
+3. **Importing a flattened SVG "just to see."** You will ship that flattened SVG. You always do. Refuse the shortcut.
+4. **Skipping the clear variant.** Easy to deprioritize because most users aren't on Liquid Glass wallpapers yet. But the clear variant is the variant that screenshots travel on social. The 5% of users on a glass setup will be the ones taking the photo of your screen.
+5. **Forgetting `UIPrerenderedIcon`.** If you have a launch screen that displays your icon, Icon Composer doesn't manage that — it's a separate `Info.plist` entry and a separate asset. Yes, you need to update that too. Yes, I shipped a build where the launch screen showed the *old* icon for a week. No, I'm not proud.
+
+---
+
+## Where This Connects Back
+
+The reason this fits cleanly into a NativeFirst series instead of a one-off design post: **app icons are an asset surface in exactly the same way Liquid Glass UI is a rendering surface.** Both are externally controlled (the OS decides what to render based on user settings and time of day), both demand layered sources rather than baked outputs, and both reward apps where the *logic of which thing to show* is separated from the *rendering of that thing*.
+
+If you've been following this series, [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default), [Day 4](/learn/field-notes/liquid-glass-existing-swiftui-apps), and [Day 5](/learn/field-notes/custom-liquid-glass-components) all hammer the same nail: thin views, observable models, testable decisions, side effects pushed to the edge. Icon Composer is a design tool, but the engineering pattern around it is the same one. That separation — between the decision and the rendering — is the spine of [SwiftUI at Scale](/learn/swiftui-at-scale) in the courses section, and it pays for itself the moment Apple ships a new appearance mode and you need to slot it in without rewriting anything that matters.
+
+---
+
+**Tomorrow (Day 7):** `UIDesignRequiresCompatibility` — the Info.plist flag that lets you opt your app *out* of Liquid Glass for one full year. Going to make the practical case for when that's the responsible choice (banking, regulated UI, mid-redesign roadmaps) versus when it's just procrastination wearing a tie.
+
+*Part of the [30-day iOS development series](/learn/field-notes). For the full architectural pattern that makes "another asset variant" a one-screen change instead of a sprint, [SwiftUI at Scale](/learn/swiftui-at-scale) is the long-form companion in the courses section. If you want the tool half — we shipped a free generator while writing this series — see [the iOS 26 app icon variants tool](/blog/ios-26-liquid-glass-app-icon-three-variants).*
