@@ -1,0 +1,208 @@
+---
+title: "TipKit Got Liquid Glass and Quietly Broke Half My Tooltips"
+description: "Day 7 of 30. iOS 26 swapped TipKit's default tooltip rendering to Liquid Glass material — which is great, until your custom Tip styles silently stop adapting. Walking through the migration on ThinkBud's onboarding, with the gotcha that cost me an hour."
+pubDate: 2026-05-02
+topics: ["iOS 26", "TipKit", "Liquid Glass", "SwiftUI", "Onboarding", "Xcode 26"]
+level: intro
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1568716353609-12ddc5c67f04?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Frosted glass surface with soft refracted light — visual stand-in for the new Liquid Glass material iOS 26 ships across system tooltips and overlays."
+---
+
+{/*
+  SEO target keywords:
+  - TipKit iOS 26
+  - TipKit Liquid Glass
+  - TipKit custom style migration
+  - TipView Liquid Glass background
+  - SwiftUI onboarding tooltips iOS 26
+  - TipKit deprecation Liquid Glass
+*/}
+
+A ThinkBud beta tester sent me a Loom on Tuesday with the subject line "your tooltips look weird." I almost didn't open it. We had three crashes that morning, the App Store review was sitting in "In Review" for the fourth day, and I had convinced myself "looks weird" was someone with their dark mode set wrong.
+
+It wasn't. The TipKit tooltips I had spent two evenings polishing back in iOS 18 were rendering with a flat white card and a hard black drop shadow, while every other surface in the app was floating in iOS 26's new Liquid Glass material. They looked exactly like what they were — a 2024 design dropped on a 2026 stage.
+
+This post is what I learned fixing them, and why the fix is easier than it looks.
+
+---
+
+## What changed in TipKit on iOS 26
+
+TipKit's default `TipView` body now adopts Liquid Glass material automatically. The frosted backdrop, the subtle refraction at the edges, the soft inner highlight — all of it comes for free as long as you do nothing.
+
+That's the line that breaks people. As long as you do nothing.
+
+If your `Tip` conformance overrides nothing, you get the new look immediately after rebuilding for the iOS 26 SDK. If your code has *any* of the following, you're stuck on the old card:
+
+- A custom `TipViewStyle`
+- A `.tipBackground(_:)` modifier with a hardcoded `Color`
+- A wrapper view that places the tip inside a `Capsule().fill(.background)` or similar
+- A custom `View` that ignores the `body` of `TipView` entirely
+
+Apple did the right thing here — they didn't break your code. Your custom style still renders. It just renders the same way it did in iOS 18, while the rest of your app jumped to a new design language.
+
+So the bug isn't a crash. It's a slow visual divergence.
+
+---
+
+## What ThinkBud was doing wrong
+
+Here's the relevant slice of `OnboardingTip.swift` from before:
+
+```swift
+import TipKit
+import SwiftUI
+
+struct StreakReminderTip: Tip {
+    var title: Text {
+        Text("Tap to keep your streak alive")
+    }
+
+    var message: Text? {
+        Text("Review one card to mark today as done.")
+    }
+
+    var image: Image? {
+        Image(systemName: "flame.fill")
+    }
+}
+
+// And the styling I had been so proud of:
+struct ThinkBudTipStyle: TipViewStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                configuration.image?.foregroundStyle(.orange)
+                configuration.title.font(.headline)
+                Spacer()
+            }
+            configuration.message?.foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(Color(.systemBackground))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color(.separator), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.1), radius: 12, y: 4)
+    }
+}
+```
+
+That was iOS 18 best practice. I had the system color, the rounded corners, the soft shadow. It looked good against `.systemBackground`.
+
+Against iOS 26's Liquid Glass home view, it looked like a bandage.
+
+---
+
+## The fix — let TipKit do the heavy lifting
+
+The most counter-intuitive part of moving to Liquid Glass is that the cleanest fix is *deleting* most of your custom code. The new material handles the surface for you — your job is to compose the inner content.
+
+Here's the rewritten style:
+
+```swift
+struct ThinkBudTipStyle: TipViewStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                configuration.image?
+                    .foregroundStyle(.orange)
+                    .symbolRenderingMode(.hierarchical)
+                configuration.title
+                    .font(.headline)
+                Spacer()
+            }
+            configuration.message?
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        // No background. No shadow. No stroke.
+        // The TipView body itself supplies Liquid Glass.
+    }
+}
+```
+
+That's it. The tip now floats with the same frosted backdrop as the rest of iOS 26.
+
+The mental model shift: in iOS 18, you styled the tooltip *card*. In iOS 26, you style the tooltip *contents* and let the system style the card.
+
+---
+
+## The gotcha that cost me an hour
+
+I missed the obvious thing. After deleting the background and shadow, my tip rendered correctly inside the regular ThinkBud screens — but on the dark study-session view, it was almost invisible. White text on a near-transparent panel over a dark blue background. You had to squint.
+
+The cause: I was setting `foregroundStyle(.secondary)` on the message text. On iOS 26, when the parent material is Liquid Glass, `.secondary` resolves against the *material*, not the underlying view. On a glass surface over a dark background, `.secondary` reduces to almost nothing.
+
+Fix:
+
+```swift
+configuration.message?
+    .foregroundStyle(.secondary)
+    .font(.subheadline)
+    .blendMode(.plusDarker) // makes secondary text legible on glass
+```
+
+`.plusDarker` is one of those blend modes nobody talks about until iOS 26 forces them to. It darkens the text against whatever the material is sitting on, which is exactly what you want when "secondary" needs to mean "still readable."
+
+Apple has a whole section on this in the Materials & Vibrancy docs that I had skimmed twice and not internalized until I shipped a broken build to TestFlight.
+
+---
+
+## When to override anyway
+
+Liquid Glass defaults are great for almost every tip — onboarding nudges, feature spotlights, "tap here" hints. But there's one case where I keep a custom style: tips that need to be *intentionally* loud.
+
+ThinkBud has a "you're about to lose your 47-day streak" warning that pops up right before a session expires. That tip needs to feel urgent, not floaty.
+
+For that one I keep an opaque background with a strong color:
+
+```swift
+struct UrgentTipStyle: TipViewStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        // ... contents ...
+        .padding(16)
+        .background(.red.opacity(0.95)) // intentionally not glass
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .red.opacity(0.3), radius: 16, y: 6)
+    }
+}
+```
+
+The rule of thumb I landed on: if a tip is *informative*, let it adopt Liquid Glass. If a tip is *interruptive*, give it presence with an opaque material.
+
+---
+
+## Migration checklist for your own app
+
+If you ship something that uses TipKit and you're rebuilding for iOS 26, here's the 4-minute audit:
+
+1. **Search for `tipBackground`** in your project. Every hit is a candidate for deletion.
+2. **Search for `TipViewStyle`** conformances. For each one, decide: should this still be a custom style, or can the default + content tweaks handle it?
+3. **Build and run on iOS 26 Sequoia.** Walk through every screen that surfaces a tip. Take a screenshot of each. Then run the same flow on iOS 18 simulator and compare.
+4. **Test on both light and dark with a busy background.** That's where `.secondary` text on glass falls apart. If anything is hard to read, reach for `.plusDarker` or a stronger foreground style.
+
+The whole migration on ThinkBud took me one evening, including the hour I lost on the blend mode. The diff was net negative — I deleted more code than I added.
+
+---
+
+## What I'd do differently next time
+
+I would have run the iOS 26 SDK build *before* shipping the iOS 18 polish I was so proud of. I had the seeds for two months. I just kept telling myself "I'll deal with iOS 26 in June."
+
+It's May. The bill came due.
+
+The lesson is the same one I keep relearning: when Apple ships a new design language, the assumption is that you'll rebuild for it. If your app is going to live in the iOS 26 era, the iOS 18 polish becomes legacy code the day the SDK lands. Better to find that out from your beta testers in May than from your App Store reviews in October.
+
+Tomorrow's note is on the other thing iOS 26 quietly killed: every remaining `ObservableObject` class in my codebase. That one took longer than TipKit.
+
+— Mario
+
+---
+
+*Tomorrow's Day 8 of the 30-day series: killing `ObservableObject` — what migrating ThinkBud's last twelve view models to `@Observable` actually broke, and how to spot the silent ones.*

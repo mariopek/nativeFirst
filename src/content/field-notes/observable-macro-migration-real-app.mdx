@@ -1,0 +1,246 @@
+---
+title: "Killing the Last ObservableObject in ThinkBud — What @Observable Actually Breaks"
+description: "Day 8 of 30. Spent Friday converting ThinkBud's final twelve ObservableObject classes to the @Observable macro. Three things broke silently, two broke loudly, and one of them I only caught because a beta tester had bad Wi-Fi."
+pubDate: 2026-05-03
+topics: ["Swift", "Observation", "@Observable", "SwiftUI", "Migration", "iOS 26", "Architecture"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1742400517284-14a4ec01560a?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Wires and cables organized into clean bundles — visual stand-in for the cleanup that the Observation framework brings to SwiftUI state."
+---
+
+{/*
+  SEO target keywords:
+  - @Observable migration SwiftUI
+  - ObservableObject to Observable
+  - SwiftUI Observation framework iOS 26
+  - @Published replacement
+  - SwiftUI Observable macro production
+  - migrating from ObservableObject ThinkBud
+*/}
+
+I've been putting this off since iOS 17 shipped the `@Observable` macro. The path was clear, the migration was supposed to be straightforward, and I had bigger things to ship — flashcards don't review themselves. Two and a half years later, ThinkBud was still running twelve `ObservableObject` view models alongside two `@Observable` ones, and Friday afternoon I finally sat down and did the cleanup.
+
+Three things broke silently. Two broke loudly. One of them I only caught because a beta tester named Mara had bad Wi-Fi at her cabin and screen-recorded what should have been impossible. This is what I wish I'd known before I started.
+
+---
+
+## Why migrate at all in 2026
+
+Quick refresher in case you're still on the fence. The `@Observable` macro replaces:
+
+- `class FooModel: ObservableObject` → `@Observable class FooModel`
+- `@Published var bar: String` → `var bar: String`
+- `@StateObject var model = FooModel()` → `@State var model = FooModel()`
+- `@ObservedObject var model: FooModel` → `var model: FooModel` (just pass it as a regular property)
+- `@EnvironmentObject var model: FooModel` → `@Environment(FooModel.self) private var model`
+
+The runtime trick: instead of broadcasting *every* property change to *every* view that holds the object (the `ObservableObject` model), `@Observable` tracks at the property-access level. A view that only reads `model.title` doesn't re-render when `model.body` changes. In ThinkBud's study session view, this cut re-renders by something like 60% — measured with the SwiftUI Instruments template, not vibes.
+
+That's a meaningful win on a long study session where the model updates 30 times per minute.
+
+---
+
+## What broke loudly (visible at compile time)
+
+These two are the easy wins. Xcode 26 will yell at you.
+
+### 1. `objectWillChange.send()` calls everywhere
+
+I had three of these scattered through the codebase. They were Friday afternoon hacks from 2023 — places where I needed to manually trigger a re-render because some computed value had a side effect that SwiftUI couldn't otherwise track.
+
+```swift
+// before — works in ObservableObject world, won't compile after migration
+func reshuffleDeck() {
+    cards.shuffle()
+    objectWillChange.send()
+}
+```
+
+The fix is usually that you didn't need it. `@Observable` tracks property-level mutations, so as long as you're modifying an observable property, the view re-renders.
+
+```swift
+// after — Observable handles the notification automatically
+func reshuffleDeck() {
+    cards.shuffle()
+}
+```
+
+If you genuinely need to trigger a re-render without mutating an observable property, the new pattern is `withMutation(keyPath: \.someProperty) { ... }` — but in 100% of my real-world cases I just didn't need the manual trigger.
+
+### 2. `@Published` projections and Combine bindings
+
+This one bit me harder. ThinkBud has a search field that uses Combine to debounce input:
+
+```swift
+// before
+class SearchModel: ObservableObject {
+    @Published var query: String = ""
+
+    init() {
+        $query
+            .debounce(for: 0.3, scheduler: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] q in self?.runSearch(q) }
+            .store(in: &cancellables)
+    }
+}
+```
+
+After the migration, `$query` doesn't exist anymore — `@Observable` doesn't expose a `Publisher`. Xcode 26 flagged this immediately, no silent failure here.
+
+Two ways to fix:
+
+**Option A — keep Combine, drop `@Observable` for this one class.** If a class is fundamentally Combine-driven, leave it as `ObservableObject`. Mixing the two is fine.
+
+**Option B — replace Combine with structured concurrency.** This is what I did:
+
+```swift
+@Observable
+class SearchModel {
+    var query: String = ""
+
+    @ObservationIgnored
+    private var searchTask: Task<Void, Never>?
+
+    func queryChanged() {
+        searchTask?.cancel()
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            if Task.isCancelled { return }
+            await runSearch(query)
+        }
+    }
+}
+```
+
+Then in the view:
+
+```swift
+TextField("Search…", text: $model.query)
+    .onChange(of: model.query) { _, _ in
+        model.queryChanged()
+    }
+```
+
+Slightly more code at the call site, but I removed Combine entirely from this part of the app, which felt like a win. Combine is fine; not maintaining a second async paradigm is also fine.
+
+---
+
+## What broke silently (the dangerous ones)
+
+The compile-time errors I caught in 30 minutes. The silent failures cost me three hours and a beta tester with bad Wi-Fi.
+
+### 3. `didSet` on `@Published` properties
+
+This is the one that cost me real time.
+
+```swift
+// before
+class SyncModel: ObservableObject {
+    @Published var isOnline: Bool = true {
+        didSet {
+            if !isOnline { pauseAllUploads() }
+        }
+    }
+}
+```
+
+In `ObservableObject` world, `didSet` runs when the property changes. After migration to `@Observable`, *the property setter still calls `didSet`* — that part is fine. The trap is more subtle: the `@Observable` macro generates a custom `set` accessor that tracks the mutation. If you wrap your property in `@ObservationIgnored` to opt out of tracking (because, say, you don't want this property to trigger view updates), the macro doesn't generate the custom setter — but `didSet` *does* still run.
+
+That sounds equivalent. It isn't. The order of operations changed in subtle ways for properties touched from background actors. In my case, `pauseAllUploads()` was being called before the `isOnline = false` write was visible to the upload queue, which lived on a different actor.
+
+Result: when Mara's Wi-Fi dropped at the cabin, the upload queue happily kept trying to PUT card-review JSON into a void for about ninety seconds. The UI showed "offline." The queue thought it was online. They disagreed for a minute and a half.
+
+The fix:
+
+```swift
+@Observable
+class SyncModel {
+    var isOnline: Bool = true
+}
+
+// And handle the side effect at the call site, in a deterministic order:
+func setOnline(_ online: Bool) async {
+    if !online { await pauseAllUploads() }
+    isOnline = online
+}
+```
+
+The lesson: `didSet` is a side-effect mechanism that pre-dates structured concurrency. When you migrate to `@Observable` *and* your code is actor-isolated, push the side effects out of `didSet` and into explicit functions. The behavior becomes ordered and testable.
+
+### 4. `Equatable` conformance on view models
+
+I had several view models that conformed to `Equatable` for fancy diffing in `ForEach`. After the migration, the synthesized conformance changed in a way that nominally should have been compatible — but my deck list view started misidentifying which deck was which, because the synthesized `==` now compared the macro-generated tracking storage instead of the underlying values.
+
+```swift
+// before — this Just Worked
+class Deck: ObservableObject, Identifiable, Equatable {
+    @Published var id: UUID
+    @Published var title: String
+
+    static func == (lhs: Deck, rhs: Deck) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+```
+
+The explicit `==` saved me. If you relied on synthesized `Equatable` on a view model, write it out by hand after migration. Don't trust the macro to produce a meaningful comparison — it tracks property *access*, not property *equality*.
+
+### 5. `@EnvironmentObject` lookup that wasn't actually wired
+
+This is the dumbest one and the most common. After the migration, every `@EnvironmentObject var foo: FooModel` becomes `@Environment(FooModel.self) private var foo`. The injection pattern at the parent changes from `.environmentObject(foo)` to `.environment(foo)`.
+
+I missed exactly one site. The `Settings` sheet was injecting `.environmentObject(syncModel)` (old API) while the inner view was reading `@Environment(SyncModel.self)` (new API). They ignored each other. The view crashed on first read.
+
+Old `@EnvironmentObject` had a runtime crash with a clear error message ("No ObservableObject of type X found"). The new `@Environment(_)` has a slightly worse one — it returns a *default-initialized* instance if you forgot to inject the real one. So your code "works" but the model has no state. You're staring at empty arrays wondering why your settings are gone.
+
+If you're migrating: search-and-replace `.environmentObject(` to `.environment(` before you move on. Every single time.
+
+---
+
+## What I wish I'd done first
+
+I tried to migrate one view model at a time, in alphabetical order. That was wrong. The right order, in retrospect:
+
+1. **Leaf models first** — view models that don't depend on other view models. These are the cleanest migrations.
+2. **Then anything used through `@EnvironmentObject`** — these affect injection sites at the App level.
+3. **Combine-driven models last, or never** — if a class is fundamentally a Combine pipeline, leave it as `ObservableObject` and bridge at the boundary.
+
+Alphabetical order had me migrating the `App` root model second, which broke every single view at once for forty-five minutes while I chased dependencies.
+
+The audit script I wrote afterwards (in case you want to copy it):
+
+```bash
+# Find all remaining ObservableObject conformances
+rg "class \w+:.*ObservableObject" --type swift -l
+
+# Find all environmentObject injections (need to update to .environment)
+rg "\.environmentObject\(" --type swift
+
+# Find all @EnvironmentObject reads (need to update to @Environment)
+rg "@EnvironmentObject" --type swift
+
+# Find @Published properties (will need to drop the wrapper after migration)
+rg "@Published" --type swift
+```
+
+Run those before you start. Total time saved: probably an hour.
+
+---
+
+## Was it worth it
+
+Yes. Re-renders on the study session view dropped from ~1100/minute to ~430/minute (Instruments, SwiftUI template, on a 47-card deck). Battery on a 30-minute session went from 4% drained to 2%. The codebase is shorter by about 280 lines.
+
+But the bigger win is mental: the codebase now has *one* state model. No more "is this an `@Published` property or a regular var, can I read it from a non-`@MainActor` context, do I need `objectWillChange`." It's just properties on a class, and SwiftUI tracks what you read.
+
+If you're still running `ObservableObject` classes in 2026, the migration is real but it's also bounded. Block out a Friday afternoon, run the audit script, and start with leaves.
+
+Just don't forget the `.environmentObject` → `.environment` rename. And maybe test on bad Wi-Fi.
+
+— Mario
+
+---
+
+*Tomorrow's Day 9 of the 30-day series: how I'm thinking about Foundation Models — the on-device LLM that ships with iOS 26 — for ThinkBud's auto-card-generation feature, including the unfortunate evening when the prompt template ate 30% of my battery in 8 minutes.*
