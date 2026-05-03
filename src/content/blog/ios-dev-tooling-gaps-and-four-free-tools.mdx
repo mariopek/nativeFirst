@@ -1,0 +1,133 @@
+---
+title: "What iOS Dev Land Is Missing in 2026 — and a Few Things I Built to Fill the Gaps"
+description: "There are a handful of small, specific frictions every iOS developer hits this year that should not still exist in 2026 — Privacy Manifests, Universal Links validation, iOS 26 icon variants, App Store screenshots. Walking through what's actually missing, why it persists, and four free tools I made for myself that you might find useful too."
+pubDate: 2026-05-02
+tags: ["iOS Development", "Indie iOS", "Developer Tools", "Open Source", "App Store", "iOS 26", "Free Tools", "Apple Developer"]
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Workshop bench with tools laid out — visual stand-in for the small specific tools an iOS developer reaches for during a typical week of shipping."
+---
+
+{/*
+  SEO target keywords:
+  - free ios dev tools 2026
+  - ios developer tooling gaps
+  - free privacy manifest generator
+  - free aasa validator
+  - free ios 26 app icon generator
+  - free app store screenshot generator
+  - what iOS developers need 2026
+  - missing iOS dev tools
+*/}
+
+I keep a small text file open in the corner of my second monitor. It's just a list of moments during the week where I wanted to throw my laptop at the wall over something that should have been a 30-second task. Most weeks the list is short. The week of an App Store submission, the week before WWDC, the week iOS 26 dropped — those weeks the list filled an entire screen.
+
+The pattern in that file is consistent. The thing that frustrates me isn't usually a hard problem. It's the *small, specific, recurring* annoyance that someone could have solved once and then everyone could move on. PrivacyInfo files. AASA validation. Icon variants for a new OS. Screenshot composition. None of these are *engineering* problems. They're all "this is the third time this month I'm doing this by hand and it's still painful."
+
+This post is about four of those gaps in iOS dev tooling that I think should not still exist in 2026, why they do, and four small tools I built so I would stop adding entries to that text file. They're free, they live in your browser, and they're sitting at [nativefirstapp.com/tools](https://nativefirstapp.com/tools) if any of them save you the same Saturday they saved me.
+
+---
+
+## Gap 1: writing PrivacyInfo.xcprivacy by hand
+
+Apple started requiring `PrivacyInfo.xcprivacy` for new App Store submissions a while back. It's a small XML manifest that declares which Required Reason APIs your app calls and what data your app collects. The official documentation is, by my count, fourteen separate PDFs and developer pages.
+
+The friction isn't the writing — it's the *deciding*. The Required Reason API list reads like a tax form. "Do you use `UserDefaults`? Yes? Pick one of CA92.1, 1C8F.1, C56D.1, AC6B.1." Each code has a 200-word definition. None of them mean what they sound like.
+
+The pattern most indie devs follow is: open the docs, get overwhelmed, copy a PrivacyInfo file from a Stack Overflow answer dated 2024, hope it covers what your app actually does, ship. Two months later you get an email from App Store Review asking you to clarify a tracking domain you don't remember declaring.
+
+There's no good reason this isn't a wizard. The decision tree is finite. The list of legitimate APIs is bounded. The mapping from "what does your app do" to "which codes you need" is something a one-page web form can do.
+
+So I made one. [Privacy Manifest Generator](/tools/privacy-manifest-generator) — five plain-English questions ("Does your app read or write files outside its container?", "Do you use UserDefaults?", "Do you measure system boot time?"), a tracking domain list, and it generates a valid `PrivacyInfo.xcprivacy` ready to drop into Xcode. Free, no signup, takes about 60 seconds.
+
+If you've ever submitted an iOS app and felt like the privacy declaration was a guess — this is for you. If you've never submitted one and you're about to: this will save you the same evening it saved me.
+
+---
+
+## Gap 2: Apple's own AASA validator is bad
+
+Universal Links are one of the most leveraged features Apple ships. A working AASA file means a tap on a link to your domain opens the app instead of Safari, which is the difference between a 60% drop-off and a smooth deep-link. A *broken* AASA file means none of that works and you usually don't notice for weeks because it fails silently for some users.
+
+Apple has [a validator](https://search.developer.apple.com/appsearch-validation-tool/). It hard-fails on 3xx redirects with a one-word error ("invalid"). It doesn't tell you which path or component is wrong. It doesn't check your `Content-Type` header — a common silent failure mode. It doesn't check both `/apple-app-site-association` and `/.well-known/apple-app-site-association`, only one of them.
+
+If you're debugging Universal Links in production at 2 AM because TestFlight users can't reach a deep link, Apple's validator gives you nothing actionable. You end up with `curl` and `cat` and a creeping sense that you're missing something obvious.
+
+A better validator would: follow up to a few redirects with warnings instead of hard-failing, validate the JSON shape against Apple's actual spec, tell you which `appID`, paths, or components have issues, check both well-known locations, and check the `Content-Type` header.
+
+So I made one. [AASA Validator](/tools/aasa-validator) — paste your domain, get a structured breakdown of what's working, what's warning, what's failing, and exactly why. It's the tool I wish I had during the seven-hour window in February when Invoize's deep links were broken in production.
+
+---
+
+## Gap 3: every iOS 26 icon generator is broken
+
+iOS 26 added new icon variants. The light variant is what every app already shipped. The dark variant is a darker companion the system shows in dark mode. The clear variant is for the new translucent-icon home screen layout. The tinted variant is what shows when the user has the system-wide icon tint setting on, and it's the one most generators get wrong.
+
+The wrong way to generate a tinted variant is to desaturate the original icon. Every quick-and-dirty tool does this. The result looks washed-out and dim — *technically* a tinted icon, but visibly worse than what a hand-tuned version produces.
+
+The right way is what Apple does internally: convert to grayscale using Rec. 709 luminance weights (R × 0.2126 + G × 0.7152 + B × 0.0722), preserve the alpha channel, and let the system apply the user's chosen tint at runtime. The luminance preservation matters because human perception of brightness isn't linear across the color spectrum — green is perceived much brighter than blue at the same numeric value. Naive desaturation throws this away. Rec. 709 keeps it.
+
+Most paid icon generators (the $5-20 one-time tools that have been around since iOS 7) haven't been updated since iOS 25. The ones that *have* been updated mostly skip the tinted variant entirely or do it the wrong way.
+
+So I made one. [App Icon Generator](/tools/app-icon-generator) — drop a 1024×1024 PNG, get all required iOS sizes including the iOS 26 variants done correctly, plus a side-by-side preview of how each variant will look in the Xcode asset catalog. Outputs a labeled folder ready to drag into `Assets.xcassets`. Free, client-side.
+
+If you're rebuilding your icon for iOS 26 (and if your app is going to live on iOS 26 home screens, you should), this is the version of the tool that won't ship you a washed-out tinted variant.
+
+---
+
+## Gap 4: App Store screenshot tools cost $30-150/month
+
+This one is the gap with the largest dollar-amount tax on indie devs. Mockuuups Studio is $99/year. AppLaunchpad is $30/month. Previewed.app is $25/month. There are free options but they're built around a watermark removal upsell or they're missing iOS 26 templates entirely.
+
+What none of them do — and this is the part that bothers me as someone who's read a lot of App Store conversion data — is run *conversion checks* on your screenshots. The single biggest predictor of App Store thumbnail conversion is whether the headline is readable at thumbnail size. Most screenshot tools let you drop a 12-word headline in three lines of body text and ship it, no warning. Then your gallery thumbnail in App Store search is unreadable, and you wonder why your CTR is bad.
+
+What also doesn't exist anywhere I could find: ready-made *presets*. Not "templates" in the empty-skeleton sense, but actual fully-styled compositions where someone has already made the typography decisions, picked the colors, positioned a badge or a star rating or a footer signature — so all you do is swap in your screenshot and tweak the copy. The paid tools have skeletons. The free tools have nothing.
+
+So I made one. [App Store Hero Maker](/tools/app-store-hero-maker) — 17 ready-made presets (Hero, Feature, Social Proof, Trust), live conversion guidance for each slide (headline length, WCAG color contrast, "and"/"or" conjunction warnings), iOS 26 Liquid Glass template, brand color extraction from your uploaded screenshot, and bulk export to every required iPhone and iPad size as a ZIP with sortable filenames so they upload to App Store Connect in order.
+
+This is the most ambitious of the four and the one I'm proudest of. It's also the one most likely to surface bugs, because it's a real editor — drag, resize, layer text, swap backgrounds. If you find a broken edge case, tell me and I'll fix it that day.
+
+---
+
+## Why these gaps persist
+
+Worth saying out loud: none of the four gaps above exist because they're hard. They exist because they don't make business sense for the people best positioned to solve them.
+
+Apple isn't going to ship a better third-party PrivacyInfo wizard because Apple's official position is "the docs are fine." (They are not fine.) The big paid tools have no incentive to add free conversion checks because the upsell-to-pro pattern works. The small paid icon generators got abandoned because their authors moved on and the maintenance load isn't worth it.
+
+The result is a category of tooling where the obvious move is for one or two devs in the community to build the missing piece for their own use, share it, and move on. The reason free dev tools survive in this space isn't because of altruism — it's because the actual cost of building them is small once you've already built the underlying logic for your own app. I had Privacy Manifest logic in Invoize. I had icon-variant generation in ThinkBud. I had an AASA validator in a notes file from a debugging session. The "tool" was mostly putting a UI on code I had already written.
+
+If more devs did this — even for *one* tool, even for the next thing they happen to need — the community of iOS developers in 2027 would have a meaningfully better Saturday morning than we do in 2026.
+
+---
+
+## What's still missing
+
+Here's what's on my list of "someone should build this" and isn't there yet, in case any of these are sitting half-finished on your hard drive:
+
+- **A Foundation Models prompt cost calculator** — iOS 26 ships an on-device LLM. There's no good way to estimate prompt energy cost on different chips before you ship a feature that drains user batteries. (I almost shipped one of these on ThinkBud and pulled it the day before.)
+- **App Intents schema validator** — App Intents are easy to write and hard to verify. The difference between a working Siri intent and a silent failure is often a single mismatched parameter type.
+- **Live Activity widget previewer** — Xcode's Live Activity preview is functional but doesn't simulate the actual Dynamic Island states well. You end up shipping and finding out.
+- **TestFlight crash deduplicator** — Apple groups crashes by symbol but the grouping is fuzzy. A tool that smartly deduplicates against your repo history would save hours per release.
+
+If you've already built one of these or you have another candidate, send me a line at [pekmario@gmail.com](mailto:pekmario@gmail.com). I'm trying to keep a running list and link to anything that's good. The point isn't that I have to build all of them — the point is that they should *exist*.
+
+---
+
+## Try them, break them, tell me
+
+If you're shipping iOS apps in 2026 and any of these four sound like they'd save you an hour:
+
+- [Privacy Manifest Generator](/tools/privacy-manifest-generator)
+- [AASA Validator](/tools/aasa-validator)
+- [App Icon Generator](/tools/app-icon-generator)
+- [App Store Hero Maker](/tools/app-store-hero-maker)
+
+All four are free. None of them collect anything — your screenshots, your icons, your privacy answers all live in your browser and never leave it. None of them require an account, an email, or an "upgrade to pro" interaction.
+
+If something breaks for you, the fastest way to get it fixed is to email me the input that broke it. The slowest way is to assume someone else will report it.
+
+— Mario
+
+---
+
+*A few of the field notes that fed into these tools, if you want the longer technical context: [Day 5 — Custom Liquid Glass components](/learn/field-notes/custom-liquid-glass-components/), [Day 6 — Icon Composer and the new app-icon variants](/learn/field-notes/icon-composer-app-icon-variants/), [Day 7 — TipKit Liquid Glass migration](/learn/field-notes/tipkit-liquid-glass-onboarding/).*
