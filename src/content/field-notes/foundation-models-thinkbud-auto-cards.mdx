@@ -1,0 +1,288 @@
+---
+title: "Foundation Models in a Real App: ThinkBud's First On-Device AI Feature, And the Night I Cooked My Battery"
+description: "Day 9 of 30. Apple's Foundation Models framework gives every iOS 26 app a 3-billion parameter LLM for free, on-device, no backend. Wiring it into ThinkBud's auto-card generator took an afternoon. Making it not melt the iPhone took the rest of the week."
+pubDate: 2026-05-04
+topics: ["Foundation Models", "On-Device AI", "iOS 26", "Swift", "SwiftUI", "Generable", "ThinkBud", "TDD"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A robotic hand against a soft blue background — visual stand-in for the on-device model that now ships with every iPhone running iOS 26. Photo by Possessed Photography on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - Foundation Models framework iOS 26
+  - Apple on-device LLM Swift
+  - Foundation Models tutorial Swift
+  - LanguageModelSession SwiftUI
+  - Apple FoundationModels @Generable
+  - on-device AI iPhone Swift 6.2
+  - Foundation Models battery drain
+  - Swift LLM no backend tutorial
+  - ThinkBud Foundation Models flashcards
+
+  Internal linking strategy:
+  - /learn/field-notes/observable-macro-migration-real-app — Day 8, where this teaser came from
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1, the concurrency context
+  - /learn/field-notes/liquid-glass-existing-swiftui-apps — Day 4
+  - /learn/swiftui-at-scale — long-form companion course
+  - /blog/apple-foundation-models-on-device-ai-iphone — earlier high-level post about the same framework
+
+  External references:
+  - Apple developer docs: FoundationModels framework
+  - WWDC 2025 "Meet the Foundation Models framework"
+  - The on-device safety / refusal model
+*/}
+
+The teaser at the bottom of [yesterday's @Observable migration post](/learn/field-notes/observable-macro-migration-real-app) was not a joke. Last Tuesday evening I sat on the couch, plugged the test iPhone into Xcode, kicked off ThinkBud's brand new "auto-generate flashcards from a paragraph of notes" feature, and watched the device temperature climb in Instruments while the battery indicator dropped from 78% to 47% in eight minutes flat.
+
+The cards generated were *fine*. Pretty good, honestly. The iPhone was, briefly, a small pancake-warming device.
+
+This is the post about what Foundation Models actually is, what it costs you when you wire it up wrong, and the tested pattern I landed on after the second try didn't melt my pocket.
+
+---
+
+## What Foundation Models actually is
+
+Quick recap, because the marketing has been a bit fluffy and the docs are a lot. The **Foundation Models framework** ships with iOS 26 (and iPadOS, macOS, visionOS — same OS family). It's the Swift API in front of Apple's **on-device foundation model** — about 3 billion parameters, quantized down to fit in iPhone-class memory, running on the Neural Engine.
+
+The pitch, plainly:
+
+- **Local.** No network call. Works on a plane, a cabin, a tunnel, an angry coffee shop Wi-Fi.
+- **Free.** No per-token billing. No backend to operate. No OpenAI invoice. No Anthropic invoice.
+- **Private.** The user's text never leaves the device. You don't have to write a privacy paragraph about a vendor that doesn't exist.
+- **Built-in safety.** Apple's safety stack runs in front of the model, so you don't have to build your own moderation layer. (You also can't easily turn it off, which is a feature, not a bug — more on that later.)
+
+The model is a `LanguageModelSession`. You hand it instructions and a prompt, you get back text — or, if you do the slightly fancier thing, you get back a strongly-typed Swift struct. That's the part most blog posts skip and it's the most useful part for app developers.
+
+---
+
+## The minimum example: summarize a paragraph
+
+Before the structured-output bit, here's the absolute smallest working call. This compiles in any iOS 26 target.
+
+```swift
+import FoundationModels
+
+@MainActor
+func summarize(_ text: String) async throws -> String {
+    let session = LanguageModelSession(
+        instructions: "Summarize the user's note in one sentence. Be concrete."
+    )
+    let response = try await session.respond(to: text)
+    return response.content
+}
+```
+
+That's it. No SDK, no API key, no `URLSession`. You're calling a 3-billion-parameter model and getting a string back. It still feels slightly absurd typing it out, two months in.
+
+The first time I ran this on a real device it took ~600 ms for a paragraph of about 80 words. The second time, ~120 ms — because the framework caches the loaded model. Cold-load is real, warm-call is fast enough for interactive UI.
+
+Where most people stop with their on-device AI tutorial: this snippet, plus a `Text("Hello!").onAppear { ... }`, plus a screenshot, plus *"as you can see, the future is here."* Let's keep going, because this is also the snippet that ate 30% of my battery.
+
+---
+
+## Story: the 8-minute battery murder
+
+ThinkBud's new feature: paste a paragraph of notes, get back 5–10 flashcards. The shape of the call I started with was almost identical to the snippet above — instructions plus prompt, returning text, parsed into cards on the Swift side with a couple of regexes I would not call elegant.
+
+I built it in an afternoon. It worked on the simulator. I plugged in the iPhone 17 Pro and ran it for real.
+
+And then I did something that, in retrospect, was the actual mistake: **I left the feature running in a `Timer.publish` loop in a debug screen** so I could iterate on prompt wording without rebuilding the whole app each time. Fire one inference every 4 seconds, eyeball the output, tweak the system prompt, repeat.
+
+What I forgot: every fire was a *new* `LanguageModelSession`. Every fire was reloading the model graph, re-running the safety pass, doing the warm-up that's supposed to happen *once*. The Neural Engine was not idling between fires — it was being thrashed.
+
+Eight minutes, 31% battery, a warm device, and a confused expression on my face.
+
+The fix in code was three lines. The lesson is bigger.
+
+---
+
+## Lesson 1: own the session lifecycle
+
+A `LanguageModelSession` is not free to construct. Treat it like a `URLSession` or a Core Data stack — make one, hold onto it, reuse it.
+
+Concretely, this is what ThinkBud's auto-card feature looks like now. Notice the model owns a single session for its whole lifetime:
+
+```swift
+@Observable
+@MainActor
+final class CardGeneratorModel {
+    enum State {
+        case idle
+        case generating
+        case ready([DraftCard])
+        case failed(String)
+    }
+
+    private(set) var state: State = .idle
+
+    private let session: LanguageModelSession
+    private let generator: any CardGenerating
+
+    init(generator: any CardGenerating = FoundationModelsCardGenerator()) {
+        self.session = LanguageModelSession(
+            instructions: """
+            You generate study flashcards from the user's notes.
+            Each card has a short question and a 1-2 sentence answer.
+            Use the user's own wording where possible. Do not invent facts.
+            """
+        )
+        self.generator = generator
+    }
+
+    func generate(from note: String) async {
+        state = .generating
+        do {
+            let cards = try await generator.generate(from: note, using: session)
+            state = .ready(cards)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+}
+```
+
+Three things going on here, all on purpose:
+
+1. **One session, lifetime of the model.** The expensive setup happens once.
+2. **Generator behind a protocol.** The model doesn't talk to `FoundationModels` directly. It talks to `any CardGenerating`. That's the whole testing trick.
+3. **`State` is an enum.** SwiftUI can render every UI state from this one property. The view is dumb. We've used this same pattern in [Day 5's `FABModel`](/learn/field-notes/custom-liquid-glass-components) and [Day 8's @Observable cleanup](/learn/field-notes/observable-macro-migration-real-app) — same recipe, different feature.
+
+---
+
+## Lesson 2: ask for a struct, not a string
+
+Here's the part most tutorials don't show. Foundation Models has a feature called `@Generable` — it lets you define a Swift type and ask the model to fill it in. No regex parsing. No "did the model put two newlines or three between cards." The framework constrains decoding so the model can only emit text that conforms to your type's schema.
+
+```swift
+@Generable
+struct DraftCard: Equatable {
+    @Guide(description: "A short question, max 12 words.")
+    let question: String
+
+    @Guide(description: "A complete answer in 1-2 sentences.")
+    let answer: String
+}
+
+@Generable
+struct DraftCardSet {
+    @Guide(description: "Between 3 and 8 cards. Skip near-duplicates.")
+    let cards: [DraftCard]
+}
+```
+
+Then the call is:
+
+```swift
+protocol CardGenerating {
+    func generate(from note: String, using session: LanguageModelSession) async throws -> [DraftCard]
+}
+
+struct FoundationModelsCardGenerator: CardGenerating {
+    func generate(from note: String, using session: LanguageModelSession) async throws -> [DraftCard] {
+        let response = try await session.respond(
+            to: "Notes:\n\(note)",
+            generating: DraftCardSet.self
+        )
+        return response.content.cards
+    }
+}
+```
+
+That's the whole adapter. Six lines of real code. The model is constrained to emit something that decodes into `DraftCardSet`. If it tries to emit malformed JSON or a wrong field, the framework retries inside the same call until it gets it right. From your code's perspective, you `await` and you get cards.
+
+This is the thing I'd press on the loudest if you take one piece away from this post: **stop parsing strings out of LLM output.** `@Generable` is in the framework, it's free, and it removes an entire class of "the model decided to put a markdown bullet today" bugs.
+
+---
+
+## Lesson 3: this is testable. Test it.
+
+The trap with on-device AI is the assumption that because the model is non-deterministic, the *feature* is untestable. That's wrong. The non-determinism is in the generator. Everything around the generator is plain Swift.
+
+Here's the boring, fast unit test for `CardGeneratorModel` that doesn't run the model at all:
+
+```swift
+import Testing
+@testable import ThinkBud
+
+struct StubGenerator: CardGenerating {
+    let result: Result<[DraftCard], Error>
+
+    func generate(from note: String, using session: LanguageModelSession) async throws -> [DraftCard] {
+        switch result {
+        case .success(let cards): return cards
+        case .failure(let error): throw error
+        }
+    }
+}
+
+@Test
+func startsIdle_thenShowsCards_whenGeneratorSucceeds() async {
+    let cards = [DraftCard(question: "Q1", answer: "A1")]
+    let sut = await CardGeneratorModel(generator: StubGenerator(result: .success(cards)))
+
+    #expect(sut.state == .idle)
+    await sut.generate(from: "anything")
+    #expect(sut.state == .ready(cards))
+}
+
+@Test
+func showsFailureState_whenGeneratorThrows() async {
+    struct Boom: Error {}
+    let sut = await CardGeneratorModel(generator: StubGenerator(result: .failure(Boom())))
+
+    await sut.generate(from: "anything")
+    if case .failed = sut.state { /* ok */ } else { Issue.record("expected .failed") }
+}
+```
+
+These tests run in 8 ms total. They prove the state machine, not the model. **The model itself you test with a tiny set of recorded fixtures**, ideally on a CI runner that has a real device or a Mac with the same Apple silicon family — but that's a separate test target that runs nightly, not on every PR. Your view-driving model is what you test on every commit, and that's a unit-level thing.
+
+This is the same separation we did in [Day 3's strict-concurrency migration](/learn/field-notes/swift-6-2-strict-concurrency-migration-real-project): keep the side effect at the edge, push the decision into a plain object, write tests against the plain object. Foundation Models is just the new edge.
+
+---
+
+## Where Foundation Models still loses to a hosted API
+
+Honest section, because this framework is being oversold by people with more enthusiasm than shipping experience.
+
+The on-device model is great for:
+
+- **Summaries**, **rewrites**, **extracting structured data from text**, **classification**, short **conversational** turns.
+- **Privacy-sensitive** input the user wouldn't want to send to a vendor.
+- **Offline** use. Tunnels, planes, airline Wi-Fi that costs €19 and doesn't work.
+
+It's clearly weaker for:
+
+- **Long-context** tasks. The on-device context window is small enough that summarizing a 20-page document means chunking, and chunked summaries lose nuance.
+- **Tasks requiring world knowledge** beyond what Apple chose to train on. Niche academic content, very recent events, specialized professional jargon — the hosted models from Anthropic/OpenAI are still meaningfully better.
+- **Anything where the user paid you for top-shelf quality and would prefer the best.** ThinkBud's free tier uses the on-device model. The Pro tier offers a "use the best available model" toggle that calls a hosted API. That's the right product line.
+
+Don't ship Foundation Models to a use case where the on-device limitations will be the user's problem. Use it where "decent and free and private and offline" is the win.
+
+---
+
+## The five things I wish I'd known on Tuesday
+
+1. **One session, reused.** Construction is expensive. Hold the session in your model.
+2. **`@Generable` over string parsing.** Always. The hour you save on regex compounds.
+3. **Hide the framework behind a protocol.** Tests stay fast, the rest of your code stays vendor-agnostic, and the day Apple ships v2 of the API you have one file to update.
+4. **Don't loop inferences in a debug screen with a fresh session each fire.** Or do, but plug into a charger and don't cry to me.
+5. **Apple's safety layer will refuse some prompts.** You can't bypass it. If your feature genuinely needs that — you're picking the wrong framework. Either rephrase the prompt or fall back to a hosted model.
+
+---
+
+## Where this connects back
+
+The pattern under all of this — *hide the side effect, test the decision* — is the same pattern from the rest of the series. [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) on `@MainActor` defaults gets you a model that's safe to call from any view. [Day 4](/learn/field-notes/liquid-glass-existing-swiftui-apps) and [Day 5](/learn/field-notes/custom-liquid-glass-components) show the same SwiftUI shape — observable model, dumb view. [Day 8](/learn/field-notes/observable-macro-migration-real-app) on the @Observable cleanup is what makes this kind of state-machine model cheap to render at 60 fps.
+
+Foundation Models is a great test of whether your architecture holds up: the moment you wire an LLM into your app, the temptation to pollute view code with `try await session.respond(...)` calls is real. The cleanup you did in Days 1–8 is what keeps the new feature one screen instead of a refactor.
+
+If you want the long-form version of "decision in the model, side effect at the edge" — that's the spine of [SwiftUI at Scale](/learn/swiftui-at-scale) in the courses section, and it's worth the read once Foundation Models gives you yet another thing to keep at arm's length.
+
+---
+
+**Tomorrow (Day 10):** the structured-output deep dive — what `@Guide` actually does to the prompt under the hood, how `@Generable` compares to OpenAI's structured outputs and Anthropic's tool calling, and the three `@Generable` patterns I now reach for on every feature. Including the one that quietly fixes the "the model returned an empty array" failure mode.
+
+*Part of the [30-day iOS development series](/learn/field-notes). For the architectural pattern that makes "wire in a new AI provider" a one-file change, [SwiftUI at Scale](/learn/swiftui-at-scale) is the long-form companion in the courses section. Earlier high-level take on this same framework — written before I shipped anything with it — is over in [the Foundation Models announcement post](/blog/apple-foundation-models-on-device-ai-iphone).*
