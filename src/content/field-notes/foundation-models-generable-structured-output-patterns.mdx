@@ -1,0 +1,290 @@
+---
+title: "Stop Parsing Strings Out of LLMs: The Three @Generable Patterns I Actually Ship"
+description: "Day 10 of 30. What @Generable does to the prompt under the hood, how Apple's structured output compares to OpenAI and Anthropic tool calling, and the three patterns that survived contact with a real app — including the one that quietly fixes 'the model returned an empty array'."
+pubDate: 2026-05-05
+topics: ["Foundation Models", "Generable", "On-Device AI", "iOS 26", "Swift", "SwiftUI", "Structured Output", "TDD"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a circuit board — a visual stand-in for the structured grid you get when you stop letting an LLM hand you a free-form string. Photo by Alexandre Debiève on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - Foundation Models @Generable Swift
+  - Apple structured output Swift LLM
+  - @Guide Foundation Models tutorial
+  - Foundation Models vs OpenAI structured outputs
+  - Foundation Models vs Anthropic tool calling
+  - LanguageModelSession respond generating
+  - Swift LLM empty array bug
+  - on-device AI typed response Swift
+  - iOS 26 Generable patterns
+
+  Internal linking strategy:
+  - /learn/field-notes/foundation-models-thinkbud-auto-cards — Day 9, the battery-melt story this picks up from
+  - /learn/field-notes/observable-macro-migration-real-app — Day 8, observable model that hosts the generator
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1, why the session is @MainActor
+  - /learn/swiftui-at-scale — long-form companion course, "decision in the model, side effect at the edge"
+  - /blog/apple-foundation-models-on-device-ai-iphone — earlier high-level take on the framework
+
+  External references:
+  - Apple developer docs: FoundationModels framework, Generable macro, Guide
+  - WWDC 2025: "Deep dive into the Foundation Models framework"
+  - OpenAI structured outputs (response_format: json_schema)
+  - Anthropic tool use API
+*/}
+
+[Yesterday's post](/learn/field-notes/foundation-models-thinkbud-auto-cards) ended with a promise: today we go inside `@Generable`. The reason that promise wasn't a footnote is that this is the part of the framework that quietly does the most for you. Most "wire up an LLM" tutorials stop at *string in, string out*. Real apps need typed data back — a list of cards, an enum case, a struct with five fields, a bounded array — and once you've used `@Generable` you don't go back to parsing prose with regex.
+
+I've been shipping `@Generable` features in two apps for three weeks now. I have opinions. I also have one specific bug that bit me on a Sunday and a fix I want you to know about before you find it the same way.
+
+---
+
+## What `@Generable` actually does
+
+When you write this:
+
+```swift
+@Generable
+struct DraftCard {
+    @Guide(description: "A short question, max 12 words.")
+    let question: String
+
+    @Guide(description: "A complete answer in 1-2 sentences.")
+    let answer: String
+}
+```
+
+The macro generates two things at compile time:
+
+1. **A schema descriptor** — a normalized description of the type's shape (fields, types, constraints from `@Guide`) that the framework can hand to the model.
+2. **A constrained decoder** — a Swift decoder that the framework calls during sampling, not after. The model can only emit tokens that keep the in-progress output decodable into your type.
+
+That second point is the part that matters. This is **not** "ask the model nicely for JSON, then `JSONDecoder` it." It's **constrained decoding**: at every token step, the framework masks the logits so the model is only allowed to choose tokens that keep the running output valid against the schema. The model literally cannot emit a malformed payload, because the tokens that would make it malformed have probability zero.
+
+The practical effect: you don't need a try/catch around "the model decided to put an extra newline today." You don't need a regex. You don't need a "did it return markdown" branch. You `await` and you get your struct.
+
+The `@Guide` description is concatenated into the prompt that the model sees, alongside the schema. So `@Guide` is doing two jobs at once — it tells the *human-readable model* what you want (steers behavior), and it travels with the *machine-readable schema* that constrains decoding (steers shape). That's why writing useful `@Guide` strings is half the engineering.
+
+---
+
+## How this compares to OpenAI and Anthropic
+
+I've shipped structured-output features against all three by now. The mental model is similar; the ergonomics are not.
+
+**OpenAI's structured outputs** (`response_format: { type: "json_schema", strict: true }`): you write a JSON Schema by hand or generate one from a Pydantic / Zod / Swift type. The server enforces it. Strict mode also uses constrained decoding under the hood. Works well, but you live in JSON-schema land — discriminated unions and recursive types take some massaging.
+
+**Anthropic's tool use**: you describe an "input schema" for a tool, the model decides whether to call it, and you get back a parsed `input` argument shaped like your schema. Great when the structured output is a *side effect of a decision* ("call the `book_meeting` tool with these fields"). Awkward when you just want a typed answer back.
+
+**Apple's `@Generable`**: you write a Swift type. The macro generates the schema. You pass `generating: MyType.self`. You get back `MyType`. Zero JSON, zero schema strings, zero decoder boilerplate. The cost is that this only works on-device with Apple's foundation model — you don't get to point it at GPT-4o.
+
+The right way to think about it: `@Generable` is the cleanest of the three for the *typed answer* case, on the platform it runs on. When you outgrow the on-device model — long context, world knowledge, top-shelf quality — you switch to a hosted API and pay the schema-building tax. Hide both behind the same protocol and the rest of your code doesn't notice. (We did exactly this in [yesterday's `CardGenerating`](/learn/field-notes/foundation-models-thinkbud-auto-cards) — that protocol is what lets ThinkBud Pro swap to Claude when the user toggles the "best available model" switch.)
+
+---
+
+## Pattern 1: the leaf type with bounded fields
+
+The simplest useful `@Generable` is a flat struct with primitive fields. Here's the actual one I'm using to extract a meeting from a free-form note in a side project:
+
+```swift
+import FoundationModels
+
+@Generable
+struct ExtractedMeeting: Equatable, Sendable {
+    @Guide(description: "Meeting title in 2-6 words. Use the user's own wording.")
+    let title: String
+
+    @Guide(description: "ISO-8601 date if mentioned, otherwise empty string.")
+    let date: String
+
+    @Guide(description: "Duration in minutes between 5 and 480. 30 if not specified.")
+    let durationMinutes: Int
+
+    @Guide(description: "One short sentence. Plain text, no bullets.")
+    let agenda: String
+}
+```
+
+Three things to call out about the `@Guide` strings, because this is where most people leave performance on the table:
+
+1. **State the bound, not the wish.** "max 12 words" is enforceable in your head when reading the output; "concise" is not. Bounded numbers (`between 5 and 480`) actually shape behavior more than you'd expect.
+2. **Tell it the fallback.** Models hate ambiguity in the absence of data. `"empty string if not mentioned"` and `"30 if not specified"` are how I stopped getting `"unknown"` and `"TBD"` in fields that should have been empty.
+3. **Forbid the formatting you don't want.** "plain text, no bullets" is shorter than the post-processing that strips markdown. Free win.
+
+I'd ship this struct with no test, but you wouldn't, because Essential-Developer brain. Here's the test, written first, against a stubbed generator:
+
+```swift
+import Testing
+@testable import MeetingNotes
+
+protocol MeetingExtracting {
+    func extract(from text: String) async throws -> ExtractedMeeting
+}
+
+struct StubExtractor: MeetingExtracting {
+    let result: ExtractedMeeting
+    func extract(from text: String) async throws -> ExtractedMeeting { result }
+}
+
+@Test
+func extractedMeeting_drivesIdleToReadyState() async {
+    let stub = ExtractedMeeting(
+        title: "Sprint review",
+        date: "2026-05-08",
+        durationMinutes: 60,
+        agenda: "Walk the team through this week's shipped work."
+    )
+    let sut = await MeetingFormModel(extractor: StubExtractor(result: stub))
+
+    #expect(sut.state == .empty)
+    await sut.extract(from: "Sprint review on Friday for an hour.")
+    #expect(sut.state == .ready(stub))
+}
+```
+
+That's the red. The green is a one-liner inside `MeetingFormModel.extract` that calls the protocol. The refactor — the part where you wire `FoundationModelsExtractor: MeetingExtracting` to the real `LanguageModelSession` — is the only place the framework appears in the codebase. Same shape as [Day 3's strict-concurrency migration](/learn/field-notes/swift-6-2-strict-concurrency-migration-real-project) and [Day 9's card generator](/learn/field-notes/foundation-models-thinkbud-auto-cards). Decision in the model, side effect at the edge.
+
+---
+
+## Pattern 2: the wrapped collection (and the empty-array bug)
+
+This is the one I want you to know about before you find it the way I did.
+
+The naive shape for "give me back a list of things":
+
+```swift
+// don't do this for non-trivial features
+@Generable
+struct DraftCardList {
+    let cards: [DraftCard]
+}
+```
+
+This compiles. It runs. It mostly works. About one call in fifteen, the `cards` array comes back **empty**, especially when the input was short or ambiguous. The model decided "I have nothing useful to add" and emitted the empty list, which is technically valid against the schema.
+
+The fix is two extra lines on the wrapper, and they made my failure rate drop to zero in the eval set I run against this feature.
+
+```swift
+@Generable
+struct DraftCardSet: Sendable {
+    @Guide(description: "Between 3 and 8 cards. Skip near-duplicates. Never return fewer than 3 — if the input is too short, generate cards on related sub-topics implied by the text.")
+    let cards: [DraftCard]
+}
+```
+
+Two parts of that doing real work:
+
+- **Bounded count** ("between 3 and 8") is reflected in the schema and steers decoding away from the zero-element terminator.
+- **The escape hatch** ("if the input is too short, generate cards on related sub-topics") is the part that earns its keep. Without it, the model sometimes ignored the lower bound because it couldn't figure out what to put in the cards. Telling it *what to do when stuck* is the same trick that makes it reliable in the leaf-type case — give it a fallback in plain English and the empty-result branch quietly disappears.
+
+The eval that catches this regression is small but specific: 20 inputs that range from "two sentences of trivia" to "a full lecture transcript." For each, the test asserts `cards.count >= 3` and `cards.count <= 8`. Run it nightly, not on every PR — it hits the real on-device model. The fast unit tests use the protocol stub from Pattern 1.
+
+---
+
+## Pattern 3: the tagged enum (and why this is the killer feature)
+
+Apple's docs do not put this front and center, which is a marketing crime. `@Generable` works on enums with associated values. That means the model can **choose a branch**, and the framework constrains its output to fit the branch you'd accept.
+
+This is the single feature that made me retire two regex-based parsers in BetFree last weekend. Real example, slightly simplified:
+
+```swift
+@Generable
+enum SessionInsight: Sendable {
+    @Guide(description: "User reported a craving. Provide a short coping reframe.")
+    case craving(reframe: String)
+
+    @Guide(description: "User reported a slip. Provide a one-sentence non-judgmental acknowledgement and a small next step.")
+    case slip(acknowledgement: String, nextStep: String)
+
+    @Guide(description: "User reported progress. Provide a specific, evidence-grounded compliment.")
+    case progress(compliment: String)
+
+    @Guide(description: "Input was too vague or off-topic. Use this branch instead of guessing.")
+    case unclear(reason: String)
+}
+```
+
+The model receives the schema for the enum, picks a case, and fills in only that case's associated values. You get back a `SessionInsight`. Your `switch` in the view is exhaustive at compile time.
+
+What used to be:
+
+1. Send the prompt.
+2. Get back free-form text.
+3. Run it through three regexes to figure out which kind of insight this is.
+4. Branch on that.
+5. Cry quietly when the model invented a fourth category.
+
+Becomes:
+
+1. `let insight = try await session.respond(to: text, generating: SessionInsight.self).content`
+2. `switch insight { ... }`
+
+Two notes from production:
+
+- **Always include an "out" branch.** The `unclear` case is what stops the model from forcing one of the real branches when the input doesn't fit any of them. Without it, you get the equivalent of LLMs going *"sure, that's a craving I guess"* about a question that wasn't a craving.
+- **`@Guide` on cases steers the choice.** Each case's description is the single biggest lever for getting the right branch. Treat them like the docstring of the case — they appear in the prompt and matter as much as the case names.
+
+This is the pattern that I think will quietly become the dominant shape for AI features in iOS apps over the next year. It's typed, it's testable, and the view code looks like view code — no AI mess in the rendering layer.
+
+---
+
+## Testing this without melting your CPU
+
+The same protocol-behind-the-edge trick from [Day 9](/learn/field-notes/foundation-models-thinkbud-auto-cards) works for all three patterns. The unit tests live behind a protocol stub. The integration tests that actually call the on-device model live in a separate target that runs nightly on a real device.
+
+Here's the integration-test shape I'm using for the enum pattern, just so you have a starting point:
+
+```swift
+import Testing
+import FoundationModels
+@testable import BetFree
+
+@MainActor
+@Test(.tags(.integration))
+func sessionInsight_branchesCorrectly_onCravingInput() async throws {
+    let session = LanguageModelSession(instructions: SessionInsight.instructions)
+    let response = try await session.respond(
+        to: "Walked past the betting shop on the way home and felt a pull.",
+        generating: SessionInsight.self
+    )
+
+    if case .craving(let reframe) = response.content {
+        #expect(!reframe.isEmpty)
+    } else {
+        Issue.record("expected .craving, got \(response.content)")
+    }
+}
+```
+
+That test is slow (200–600 ms), real, and catches schema regressions when I rewrite a `@Guide` string and accidentally make the model pick the wrong branch. Tagged with `.integration` so it doesn't run on every commit. Five of these per feature is plenty.
+
+The fast unit test, in the same file, mocks the response and proves the *view-driving* model does the right thing for each branch. That's where the volume goes — one test per case in the enum, plus error paths. Runs in milliseconds.
+
+This is exactly the **red-green-refactor** cycle that Essential Developer-style TDD calls for: write the test against the protocol, watch it fail, write the smallest model code to pass, then refactor the side effect (the `LanguageModelSession` call) behind the protocol. The framework being on-device doesn't change the testing recipe at all.
+
+---
+
+## The five rules I now follow on every `@Generable`
+
+1. **Every field gets a `@Guide`.** No exceptions. Vague fields are where bad output comes from.
+2. **State bounds, fallbacks, and forbidden formats explicitly.** "between 3 and 8", "empty string if missing", "no markdown" — each of those costs you nothing and saves a post-processing step.
+3. **Always include an "out" branch on enums.** `case unclear(reason: String)` is the single most underrated line of Swift in this framework.
+4. **Wrap collections.** Bare `[T]` works; a wrapper struct with a bounded `@Guide` description on the array is what makes it reliable.
+5. **Hide the framework behind a protocol.** Same as Day 9. You'll thank yourself the day Apple ships v2 of the API, the day you add a Pro-tier hosted-model fallback, or the day you write a unit test.
+
+---
+
+## Where this connects back
+
+The thread running through Days 8, 9, and today is the same one that runs through the rest of the series: **decision lives in a plain Swift object, side effects live at the edge, the view stays dumb.** [Day 8's @Observable cleanup](/learn/field-notes/observable-macro-migration-real-app) gave us the cheap-to-render model. [Day 9's session lifecycle](/learn/field-notes/foundation-models-thinkbud-auto-cards) gave us the long-lived expensive object. Today's `@Generable` patterns are how the model hands you typed data without contaminating the rest of the app.
+
+The pattern under all of this — *protocol at the edge, fixture-driven tests at the unit level, real-device tests at the integration level* — is the spine of [SwiftUI at Scale](/learn/swiftui-at-scale) over in the courses section. If today's post made you nod, that course is where the same idea is applied across networking, persistence, and AI features end-to-end.
+
+If you came in cold and want the high-level "what is Foundation Models even for" version first, [the announcement post over on the blog](/blog/apple-foundation-models-on-device-ai-iphone) has the not-yet-shipped-anything take. This post and Day 9 are the I-have-shipped-something take. Both are useful; they're for different days of your decision.
+
+---
+
+**Tomorrow (Day 11):** the `ObservableObject → @Observable` *gotcha* I keep seeing in code reviews — the one where `@StateObject`'s autoclosure hid an `init()` cost that `@State` does not, and how the symptom shows up as "my form lags for a quarter second when I open it." With a recording of the slow case and the fix that made it disappear.
+
+*Part of the [30-day iOS development series](/learn/field-notes). For the long-form architectural pattern that makes "wire in a new AI provider" a one-file change, [SwiftUI at Scale](/learn/swiftui-at-scale) is the course-section companion. Earlier high-level take on the framework: [the Foundation Models announcement post](/blog/apple-foundation-models-on-device-ai-iphone).*
