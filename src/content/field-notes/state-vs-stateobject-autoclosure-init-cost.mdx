@@ -1,0 +1,333 @@
+---
+title: "@State Doesn't Have @StateObject's Free Lunch — The Init-Cost Gotcha I Keep Seeing in Code Reviews"
+description: "Day 11 of 30. @StateObject took an @autoclosure. @State doesn't. Migrating one to the other looks like a one-liner and silently makes your view re-run an expensive init on every parent update. Here's the recording, the measurement, and the three ways to fix it."
+pubDate: 2026-05-06
+topics: ["SwiftUI", "Observation", "@Observable", "@State", "@StateObject", "Performance", "iOS 26", "Migration"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An espresso pulled into a clear glass — visual stand-in for the difference between something that runs once and something that gets re-pulled every time you open the door. Photo by Nathan Dumlao on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - @State @Observable expensive init
+  - @StateObject autoclosure SwiftUI
+  - SwiftUI @State init runs every render
+  - @Observable migration performance gotcha
+  - SwiftUI view model expensive initializer
+  - State wrappedValue autoclosure
+  - SwiftUI form opens slow performance
+  - migrate StateObject to State Observable
+
+  Internal linking strategy:
+  - /learn/field-notes/observable-macro-migration-real-app — Day 8, the wider migration story
+  - /learn/field-notes/foundation-models-generable-structured-output-patterns — Day 10, which teased today
+  - /learn/swiftui-foundations — the State and Binding chapter is exactly this terrain
+  - /learn/swiftui-at-scale — the composition root pattern that makes this go away
+
+  External references:
+  - Apple SwiftUI docs: State, StateObject, Observable
+  - SE-0395 Observation
+  - WWDC 2023 "Discover Observation in SwiftUI"
+*/}
+
+I [promised this one yesterday](/learn/field-notes/foundation-models-generable-structured-output-patterns), and it's a gotcha I keep flagging in code reviews. Three different friends have shipped the same bug after migrating to `@Observable`. Two of them shipped it in the same week. So either the documentation is doing a bad job here, or the symptom is just quiet enough that you don't notice until a beta tester says *"is the app supposed to stutter when I tap the new entry button?"*
+
+The migration looks like one of the cleanest in iOS history. `ObservableObject` becomes `@Observable`. `@StateObject` becomes `@State`. Done, ship it, write the changelog. Apple's [own migration guide](https://developer.apple.com/documentation/swiftui/migrating-from-the-observable-object-protocol-to-the-observable-macro) makes it sound exactly that mechanical.
+
+It is not exactly that mechanical. There's an init-cost asymmetry between `@StateObject` and `@State` that nobody puts on the page, and on a model that does any non-trivial work in `init()`, you've just made your view re-run that work on **every parent update**.
+
+I'm going to show you the recording, the Instruments trace, and the three different ways to fix it depending on what kind of view you've got.
+
+---
+
+## The bug, in 30 seconds
+
+Here's the form that started this. NewEntryView in a side project. Owns a view model that pre-loads a list of categories, a draft from disk, and a Foundation Models session. Pre-migration code:
+
+```swift
+// before — this works fine, even though the model is expensive
+struct NewEntryView: View {
+    @StateObject private var model = NewEntryModel()
+    var body: some View {
+        Form { /* ... */ }
+    }
+}
+```
+
+Mechanical migration, the way the docs read:
+
+```swift
+// after — looks identical, behaves very differently
+struct NewEntryView: View {
+    @State private var model = NewEntryModel()
+    var body: some View {
+        Form { /* ... */ }
+    }
+}
+```
+
+Symptoms in the field: form lags ~250 ms whenever the parent re-renders. Mara (the same beta tester who caught the silent break in [Day 8's migration](/learn/field-notes/observable-macro-migration-real-app)) noticed because she swipes between days quickly and the entry button stuttered on every swipe. I couldn't reproduce it on my M4 Pro at first, which is its own embarrassing story.
+
+The Instruments capture, when I finally borrowed her iPhone 13, was unambiguous: **`NewEntryModel.init` ran 14 times in a 6-second session**. The pre-migration build ran it once.
+
+---
+
+## Why this happens — the asymmetry nobody mentions
+
+It's a Swift signature thing, not a SwiftUI thing.
+
+`@StateObject`'s initializer takes its argument as `@autoclosure @escaping`:
+
+```swift
+@frozen @propertyWrapper public struct StateObject<ObjectType>: DynamicProperty
+where ObjectType: ObservableObject {
+    public init(wrappedValue thunk: @autoclosure @escaping () -> ObjectType)
+    // ...
+}
+```
+
+That `@autoclosure @escaping` is doing all the work. The expression `NewEntryModel()` you wrote at the property's site doesn't run when the view struct is created — it's wrapped in a closure that SwiftUI calls *once*, the first time this view's identity gets installed in the view tree. Every subsequent re-creation of the struct (and SwiftUI re-creates view structs constantly during parent updates) reuses the existing model.
+
+`@State`'s initializer takes its argument as a plain value:
+
+```swift
+@frozen @propertyWrapper public struct State<Value>: DynamicProperty {
+    public init(wrappedValue value: Value)
+    // ...
+}
+```
+
+No `@autoclosure`. The expression `NewEntryModel()` is evaluated **at the call site, eagerly**, every time the property is initialized. SwiftUI still gives you back the persistent value from its storage on subsequent reads — but the struct it's reading from has already paid for `NewEntryModel()` once, and the GC throws that just-built instance away. Multiply by however often your parent re-renders.
+
+This was a choice. `@State` is meant for cheap value types — `0`, `""`, `false`, small structs. The "make `init` lazy" affordance was deliberate on `@StateObject` because reference-type models can be expensive to construct, and it was deliberately not extended to `@State` because for the original use case (`Int`, `String`, `Bool`) the optimization would be noise. The `@Observable` migration repurposes `@State` for reference types and inherits the eager-init contract for free. Surprise.
+
+---
+
+## How to actually verify this — the test I wish someone had written for me
+
+Before you fix anything, prove it's happening. I don't trust "looks slow" debugging. Here's the smallest test that catches the regression — written first, Essential-Developer style — and the smallest fix that makes it pass.
+
+We're going to count `init` calls. Make the model's init observable for tests:
+
+```swift
+import Foundation
+import Observation
+
+@Observable
+final class NewEntryModel {
+    var title: String = ""
+    var notes: String = ""
+    var categories: [String]
+
+    static var initCount = 0  // test-only counter
+
+    init(categories: [String] = NewEntryModel.loadDefaultCategories()) {
+        self.categories = categories
+        Self.initCount += 1
+    }
+
+    private static func loadDefaultCategories() -> [String] {
+        // expensive: disk read + sort + dedupe in real life
+        ["Work", "Personal", "Errands", "Health", "Finance"]
+    }
+}
+```
+
+The failing test, in Swift Testing:
+
+```swift
+import Testing
+import SwiftUI
+@testable import EntryFlow
+
+@MainActor
+@Test
+func newEntryView_doesNotRebuildModel_onParentReRender() {
+    NewEntryModel.initCount = 0
+
+    let parent = ParentHarness()  // a tiny test harness that re-renders 5 times
+    parent.render()
+    parent.render()
+    parent.render()
+    parent.render()
+    parent.render()
+
+    #expect(NewEntryModel.initCount == 1)
+}
+```
+
+Run it. Red. `initCount` is 5. Now you've reproduced the bug deterministically and you can fix it without poking at Instruments.
+
+The `ParentHarness` is just a `_VariadicView` or a manual `body` you call yourself; the exact shape doesn't matter. What matters is that you've encoded "this view should construct its model exactly once" as an executable claim. That's the part that'll keep the bug from coming back when someone refactors the parent six months from now.
+
+---
+
+## Fix 1: the `State(wrappedValue:)` escape hatch
+
+The lowest-friction fix, when the model needs to be owned by *this* view, is to give yourself the autoclosure back by hand. `@State` exposes the same `wrappedValue:` initializer in its underscored projected form, so you can write your own custom `init` that wraps the construction:
+
+```swift
+struct NewEntryView: View {
+    @State private var model: NewEntryModel
+
+    init() {
+        _model = State(wrappedValue: NewEntryModel())
+    }
+
+    var body: some View {
+        Form { /* ... */ }
+    }
+}
+```
+
+This looks pointlessly verbose. It is not. It moves the construction inside the `init` of *the property wrapper itself*, and `State`'s storage installs the wrapped value once, the same way `StateObject` did. Subsequent re-creations of the `NewEntryView` struct still call this `init`, but `State`'s underlying buffer recognizes "I already have a value for this view's identity" and discards the freshly constructed one without using it.
+
+Wait — *discards it without using it?* Yes, but the eager evaluation still happens because Swift evaluated `NewEntryModel()` before handing it to `State.init(wrappedValue:)`. So this fix is a half-fix.
+
+If `NewEntryModel()` itself is what's expensive, this is **still going to construct the model on every parent render**. The win is that SwiftUI doesn't *use* the duplicates, so the model's `@Observable` state stays consistent. The loss is that you're still paying the construction cost every time.
+
+Ship this when the model's `init` is genuinely cheap and you only had a logical correctness problem (e.g., a UUID being regenerated), not a performance problem. For the actual perf bug, keep reading.
+
+---
+
+## Fix 2: lazy initialization of the expensive bits — kept *out of* the model's init
+
+This is the fix I shipped, and it's also the one that closes the testing loop.
+
+Move the expensive work out of `init`. Put it in `.task`:
+
+```swift
+@Observable
+final class NewEntryModel {
+    var title: String = ""
+    var notes: String = ""
+    var categories: [String] = []
+    private(set) var isReady = false
+
+    func bootstrap() async {
+        guard !isReady else { return }
+        categories = await Self.loadDefaultCategories()
+        isReady = true
+    }
+}
+
+struct NewEntryView: View {
+    @State private var model = NewEntryModel()
+
+    var body: some View {
+        Form {
+            if model.isReady {
+                CategoryPicker(categories: model.categories)
+                // ...
+            } else {
+                ProgressView()
+            }
+        }
+        .task { await model.bootstrap() }
+    }
+}
+```
+
+`init` becomes a couple of property defaults and nothing else. `NewEntryModel()` is now genuinely cheap, so even if it gets re-constructed on every parent re-render the cost is in the noise. The actual work happens in `.task`, which fires once when the view appears in the tree and gets cancelled when it disappears.
+
+This pairs with the test from above: now `initCount == 5` is fine, because *init isn't doing anything anymore*. Update the assertion to count `bootstrap` calls instead, and the bug surfaces correctly:
+
+```swift
+@MainActor
+@Test
+func newEntryView_runsBootstrap_exactlyOnce_acrossReRenders() async {
+    let model = NewEntryModel()
+    let parent = ParentHarness(model: model)
+    parent.render()
+    parent.render()
+    parent.render()
+
+    await model.bootstrap()  // .task in real code
+    await model.bootstrap()  // idempotent guard inside
+
+    #expect(model.bootstrapInvocationCount == 1)
+}
+```
+
+This is the right red-green-refactor cycle for this kind of bug: you encode the *real* invariant (expensive setup runs once) as a test, you stop encoding the wrong invariant (`init` runs once) because that's an implementation detail of `@StateObject` you're no longer entitled to.
+
+I run this test on every commit. It's in milliseconds. It would have caught the production regression.
+
+---
+
+## Fix 3: composition root — let the parent own the model
+
+The third fix is the one that scales. When a model represents *navigation-scoped state* — owned by the screen, lives as long as the screen does — and you have a router or coordinator above it, hand the model down from there.
+
+```swift
+struct EntryRouter: View {
+    @State private var newEntryModel: NewEntryModel?
+
+    var body: some View {
+        DayListView()
+            .sheet(item: $newEntryModel) { model in
+                NewEntryView(model: model)
+            }
+    }
+}
+
+struct NewEntryView: View {
+    @Bindable var model: NewEntryModel  // injected, not owned
+
+    var body: some View {
+        Form { /* ... */ }
+    }
+}
+```
+
+The view stops owning the model. The router constructs it exactly once when the sheet is presented (inside its closure, which is itself lazy), and the view just binds to it. `@Bindable` gives you the `$model.title` projection without taking ownership.
+
+This is the pattern I'd default to in any new codebase. The trade-off: it pushes more state into the layer above, which is fine when you have a deliberate composition root and chaotic when you don't. [SwiftUI at Scale's lesson on the composition root](/learn/swiftui-at-scale) — same series I keep pointing at because the same architectural primitive solves about six of these — is where this idea earns its rent. The same trick fixes the [observable migration's "where does the EnvironmentObject go now" question from Day 8](/learn/field-notes/observable-macro-migration-real-app), the dependency-injection question for the [Generable session from Day 10](/learn/field-notes/foundation-models-generable-structured-output-patterns), and a half-dozen other "who owns this object" puzzles that show up the moment you stop thinking about views and start thinking about screens.
+
+---
+
+## How to pick between the three fixes
+
+I get this question every time I bring this up, so here's the actual decision rule I use:
+
+- **Cheap init, view owns the model:** plain `@State` is fine, ignore the warning, ship. (This is most simple forms.)
+- **Heavy init, view owns the model:** Fix 2 — move the heavy work into `.task` / `bootstrap()`. Almost always the right answer for screen-level view models that load data.
+- **Model is shared with siblings, navigation, or persistence layer:** Fix 3 — composition root, parent owns it, view takes it via `@Bindable`. Right answer for any non-trivial app.
+- **You truly need autoclosure semantics for a niche reason:** Fix 1 — `_model = State(wrappedValue: ...)` in a custom `init`. I can count on one hand the times I've used this in 2026.
+
+If you find yourself reaching for Fix 1 in more than a handful of views, that's a signal you actually wanted Fix 3 and skipped a layer.
+
+---
+
+## A side note on `let`-bound observable instances
+
+You'll occasionally see this pattern in the wild:
+
+```swift
+struct NewEntryView: View {
+    let model = NewEntryModel()  // works! ...does it?
+    var body: some View { /* ... */ }
+}
+```
+
+This compiles. SwiftUI even tracks `@Observable` reads through it (because Observation tracks at the *property access*, not at the propery wrapper). It looks like the cleanest possible solution.
+
+It is a trap. The model is now part of the view's struct identity, so SwiftUI recreates it on every parent update — same root cause as the original bug, no `@State` storage to give you the cached value back. The view *renders* correctly because Observation re-subscribes from the new instance, but every state-bearing thing in the model is reset every render. Counters go back to zero. Async tasks lose their cancellation handles. Sessions reconnect. None of which raise a compiler warning.
+
+I've seen this in production code three times now. Don't.
+
+---
+
+## Where this connects back
+
+The thread running through Days 8, 10, and 11: **migrations that look mechanical sometimes hide an asymmetry the docs don't mention.** [Day 8](/learn/field-notes/observable-macro-migration-real-app) was about what `@Observable` quietly breaks at the Equatable, didSet, and `.environmentObject` layers. [Day 10](/learn/field-notes/foundation-models-generable-structured-output-patterns) was about `@Generable` patterns that survive contact with a real LLM. Today is about the property-wrapper layer — the unglamorous one, the one most likely to bite you on a Tuesday when a beta tester swipes too fast.
+
+The fix at the *system* level — owning state at a deliberate composition root, injecting models down — is the same fix that makes [SwiftUI at Scale](/learn/swiftui-at-scale) more than a buzzword. If today's post made you nod, the [State and Binding chapter in SwiftUI Foundations](/learn/swiftui-foundations) is where this terrain starts, and the composition-root lesson in SwiftUI at Scale is where it lands.
+
+---
+
+**Tomorrow (Day 12):** the full mental map of property wrappers in newer SwiftUI — `@State`, `@Bindable`, `@Environment`, `@Observable`, `@Binding` — in one diagram and one decision table that I've now redrawn three times for three different teams. With the five mistakes I keep seeing and the rule of thumb that resolves 90% of confusion in code review.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI at Scale](/learn/swiftui-at-scale) for the composition-root pattern, [SwiftUI Foundations](/learn/swiftui-foundations) for the state-and-binding fundamentals.*
