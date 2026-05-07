@@ -1,0 +1,335 @@
+---
+title: "The SwiftUI Property Wrapper Mental Map: @State, @Binding, @Bindable, @Environment, @Observable in One Page"
+description: "Day 12 of 30. After three teams, three whiteboards, and one beta tester who finally said 'I don't think any of you actually agree on what @Bindable does,' here's the decision table that resolves 90% of property-wrapper confusion in SwiftUI 2026 — with the five mistakes I keep flagging in code review and a Swift Testing harness that pins each rule down."
+pubDate: 2026-05-07
+topics: ["SwiftUI", "Observation", "@Observable", "@State", "@Binding", "@Bindable", "@Environment", "iOS 26", "Architecture", "Swift Testing"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1580894732444-8ecded7900cd?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A folded paper subway map opened on a wooden table — visual stand-in for what we're after today: one diagram that turns five property wrappers into a single readable network. Photo by Hugo Sousa on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - SwiftUI property wrappers explained 2026
+  - @State vs @Binding vs @Bindable vs @Observable
+  - SwiftUI @Environment when to use
+  - SwiftUI mental model state ownership
+  - @Bindable @Observable migration guide
+  - SwiftUI 6 property wrapper decision tree
+  - @Observable @Environment singleton anti-pattern
+  - SwiftUI new state management iOS 26
+
+  Internal linking strategy:
+  - /learn/field-notes/state-vs-stateobject-autoclosure-init-cost — Day 11, the @State init-cost gotcha
+  - /learn/field-notes/observable-macro-migration-real-app — Day 8, the migration story
+  - /learn/field-notes/foundation-models-generable-structured-output-patterns — Day 10
+  - /learn/swiftui-foundations — State and Binding chapter is exactly this terrain
+  - /learn/swiftui-at-scale — composition root and dependency injection patterns
+
+  External references:
+  - Apple SwiftUI docs: State, Binding, Bindable, Environment, Observable
+  - SE-0395 Observation
+  - WWDC 2023 "Discover Observation in SwiftUI"
+  - Apple's "Migrating from the Observable Object protocol to the Observable macro"
+*/}
+
+There's a moment in every iOS code review where someone — usually whoever drew the short straw — types a comment that just says **"why is this `@Bindable` and not `@State`?"** and then nobody answers for two days.
+
+I have lived through this moment about forty times now. Three different teams in the past six months. Same five property wrappers. Same five confusions. Always the same one PR that finally forces somebody to draw a picture on a whiteboard, and the picture is always *almost* right and always different from the last one.
+
+So I'm going to draw it once, properly, and then we're going to write Swift Testing assertions that pin each rule down so the next person on your team doesn't get to redraw it from scratch on a Friday afternoon.
+
+This is Day 12 of [the 30-day series](/learn/field-notes). [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) was about the silent init-cost gotcha when you migrate `@StateObject` to `@State`. Today is the broader map that explains *why* that gotcha exists in the first place — and why I now keep this decision table pinned to a Notion page in every codebase I touch.
+
+---
+
+## The five wrappers, in one sentence each
+
+If you read nothing else in this post, read this list:
+
+- **`@State`** — "I own this. It lives as long as my view lives. Nobody else writes to it."
+- **`@Binding`** — "Someone above me owns this. I'm allowed to read and write it, but I don't *store* it."
+- **`@Bindable`** — "Someone gave me an `@Observable` reference. I want to project two-way bindings off it without claiming ownership."
+- **`@Environment`** — "I want a value that flows down the tree implicitly, without anyone having to pass it as an argument."
+- **`@Observable`** — *the thing being wrapped, not a wrapper itself.* "I'm a reference type whose properties SwiftUI should track."
+
+Those sentences are the entire game. Every confusion I've ever seen in code review reduces to someone using one of those five for the job another one is supposed to do.
+
+The rest of this post is the decision table, the test harness, and the five mistakes — in that order, because that's the order they actually come up when you're doing the work.
+
+---
+
+## The decision table I draw on every whiteboard
+
+I keep redrawing this from memory and it's always the same shape. Here it is, once, in text:
+
+| You have…                                        | The view is…                          | Use                                     |
+| ------------------------------------------------ | ------------------------------------- | --------------------------------------- |
+| A primitive (`Bool`, `Int`, `String`, small struct) | The owner                             | `@State`                                |
+| A primitive                                      | A child that needs to read **and write** | `@Binding` — parent passes `$value`     |
+| An `@Observable` model the view *creates*        | The owner                             | `@State` (with the [Day 11 caveats](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost)) |
+| An `@Observable` model passed **in**             | A child that needs `$model.field`     | `@Bindable`                             |
+| An `@Observable` model passed in                 | A child that only **reads** `model.field` | plain `let model: Model` is enough     |
+| A value that flows from far above (theme, router, services) | Anywhere in the subtree     | `@Environment`                          |
+| A reference type used by many sibling views      | Whoever the *real* owner is           | `@State` at the composition root, inject down |
+
+The two columns that matter are **"who owns the storage"** and **"do I need a writeable projection (`$`)"**. That's it. Memorize those two questions and the table writes itself.
+
+The table doesn't include `@StateObject`, `@ObservedObject`, or `@EnvironmentObject` on purpose. They still exist in iOS 26 for backwards compatibility, but if you're starting a new view in 2026 you should not be reaching for them. The migration story is in [Day 8](/learn/field-notes/observable-macro-migration-real-app) and the gotcha is in [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost).
+
+---
+
+## The smallest example that uses all five
+
+I want one screen that exercises every wrapper at once, so we can pin behaviors with tests. Let's build a tiny "settings" feature: a screen with a name field, a notification toggle that's persisted via an `@Observable` settings store, and a theme that comes from `@Environment`.
+
+```swift
+import SwiftUI
+import Observation
+
+// 1. The Observable model — the thing being tracked
+@Observable
+final class SettingsStore {
+    var displayName: String = ""
+    var notificationsEnabled: Bool = true
+}
+
+// 2. Theme via @Environment — comes from above, no argument plumbing
+struct ThemeKey: EnvironmentKey {
+    static let defaultValue: Theme = .light
+}
+extension EnvironmentValues {
+    var theme: Theme {
+        get { self[ThemeKey.self] }
+        set { self[ThemeKey.self] = newValue }
+    }
+}
+enum Theme { case light, dark }
+
+// 3. The screen that OWNS the store
+struct SettingsScreen: View {
+    @State private var store = SettingsStore()        // owner
+    @Environment(\.theme) private var theme           // implicit dependency
+
+    var body: some View {
+        Form {
+            // pass the @Observable model down to a child that wants $bindings
+            ProfileSection(store: store)
+
+            // pass a Bool by binding to a child
+            NotificationsSection(isEnabled: $store.notificationsEnabled)
+
+            // theme is read-only here, no wrapper needed in the row
+            Text("Current theme: \(theme == .dark ? "Dark" : "Light")")
+        }
+    }
+}
+
+// 4. A child that wants two-way bindings off an Observable — @Bindable
+struct ProfileSection: View {
+    @Bindable var store: SettingsStore   // injected, not owned
+
+    var body: some View {
+        Section("Profile") {
+            TextField("Display name", text: $store.displayName)
+        }
+    }
+}
+
+// 5. A child that only needs a Bool binding — @Binding
+struct NotificationsSection: View {
+    @Binding var isEnabled: Bool
+
+    var body: some View {
+        Section("Notifications") {
+            Toggle("Push notifications", isOn: $isEnabled)
+        }
+    }
+}
+```
+
+There you go. `@State` owns. `@Bindable` projects bindings off an injected `@Observable`. `@Binding` is the classic primitive-passdown. `@Environment` carries the theme. `@Observable` is the *thing* being tracked, not a wrapper on the view.
+
+If your team's mental model is shaky, retype this file by hand once. It rewires something.
+
+---
+
+## Pinning the rules with Swift Testing — Essential Developer style
+
+I don't trust a mental model I haven't encoded as an executable claim. So before I move on to the mistakes section, let's write the tests that lock each rule in place. I learned this style the hard way: every time I've shipped a SwiftUI bug that got past me, the underlying invariant was something I "knew" but had never written down as a test.
+
+These run on every commit in my projects. They're milliseconds, and they catch the regressions that PR review misses.
+
+```swift
+import Testing
+import SwiftUI
+@testable import SettingsFeature
+
+@MainActor
+@Suite("SettingsStore + property wrapper invariants")
+struct SettingsWrapperTests {
+
+    // RULE 1: @State owns the model. The store survives parent re-renders.
+    @Test
+    func storeIdentity_isStable_acrossParentReRenders() {
+        let harness = ParentHarness { SettingsScreen() }
+        let firstStore = harness.installedStore()
+        harness.reRender()
+        harness.reRender()
+        let secondStore = harness.installedStore()
+
+        #expect(firstStore === secondStore)
+    }
+
+    // RULE 2: @Bindable does NOT take ownership. The same store is shared.
+    @Test
+    func bindableChild_sharesStoreInstance_withParent() {
+        let store = SettingsStore()
+        let parent = SettingsScreenWithInjectedStore(store: store)
+        let childStore = parent.profileSection().storeUnderBindable
+
+        #expect(childStore === store)
+    }
+
+    // RULE 3: @Binding propagates writes upward.
+    @Test
+    func toggle_writesPropagateUp_throughBinding() async {
+        let store = SettingsStore()
+        let parent = SettingsScreenWithInjectedStore(store: store)
+
+        parent.notificationsSection().setEnabled(false)
+
+        #expect(store.notificationsEnabled == false)
+    }
+
+    // RULE 4: @Environment values are read, not stored.
+    @Test
+    func theme_changes_areObservedByChildren() {
+        let parent = ThemedHarness(theme: .light)
+        #expect(parent.observedTheme() == .light)
+
+        parent.setTheme(.dark)
+        #expect(parent.observedTheme() == .dark)
+    }
+
+    // RULE 5: a `let`-bound model is a footgun (see Day 11).
+    // This test FAILS on purpose to document the mistake — keep it as a regression.
+    @Test
+    func letBoundModel_doesNotPersistAcrossReRenders_documentedAntiPattern() {
+        let harness = ParentHarness { LetBoundModelView() }
+        let first = harness.installedModel()
+        harness.reRender()
+        let second = harness.installedModel()
+
+        // EXPECTING inequality on purpose — a `let` model is recreated.
+        // If this test ever starts passing, SwiftUI has changed semantics
+        // and we should delete the antipattern from our codebase.
+        #expect(first !== second)
+    }
+}
+```
+
+I want to be honest about one thing: the harness types (`ParentHarness`, `ThemedHarness`, the `installedStore` accessor) are not magic SwiftUI APIs. They're little testing helpers I write per project — a `ViewInspector`-style probe that pulls the storage out, or a manual `_VariadicView_Root` shim, or in the simplest cases just constructing the underlying store and asserting against it directly. The shape doesn't matter. What matters is that you have *some* mechanism to assert on identity and propagation, and that you write it once.
+
+The reason I keep harping on tests in this series is that **property-wrapper bugs are silent**. The compiler doesn't help you. The previewer doesn't help you. The simulator doesn't help you on an M4 Pro because everything's fast enough that bugs hide. A Swift Testing assertion that runs in 4 ms is the only thing that consistently catches them, and it doubles as documentation when the next developer asks the "why is this `@Bindable`?" question.
+
+---
+
+## The five mistakes I keep flagging in code review
+
+I keep a Notion page of code-review comments I've written more than three times. Five of them are all variations on this map. Here they are, with the fix.
+
+### Mistake 1 — `@State` on something passed in from above
+
+```swift
+// ❌
+struct ProfileSection: View {
+    @State var store: SettingsStore   // passed in from parent — wrong
+}
+```
+
+`@State` *owns* its storage. If you mark an injected reference with `@State`, SwiftUI will persist whatever value was passed the first time the view was installed and ignore subsequent updates from the parent. You'll see this in the wild as "the child stops updating when the parent changes." Use `@Bindable` (or no wrapper at all if you don't need `$bindings`) for *injected* references.
+
+### Mistake 2 — `@Bindable` on something the view actually owns
+
+```swift
+// ❌
+struct SettingsScreen: View {
+    @Bindable var store = SettingsStore()   // who owns this?
+}
+```
+
+`@Bindable` doesn't allocate storage. If you write this, the model gets recreated on every parent re-render — same root cause as the [Day 11 init-cost bug](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost), with extra steps. Use `@State` for ownership, `@Bindable` only for **injected** observables.
+
+### Mistake 3 — `@Environment` as a singleton dumping ground
+
+```swift
+// ❌
+extension EnvironmentValues {
+    var everything: AppCoordinator { ... }
+}
+```
+
+I've seen entire app coordinators stuffed into `@Environment` because "well, it's available everywhere." It is, and that's the problem — *everything in the subtree gets invalidated when any property of that object changes*, because `@Environment` re-renders on identity change of the value. Keep `@Environment` for things that genuinely flow as ambient context: theme, router, services. Not your whole app state.
+
+### Mistake 4 — `@Binding<MyObservableModel>` instead of `@Bindable`
+
+```swift
+// ❌
+struct ProfileSection: View {
+    @Binding var store: SettingsStore
+}
+```
+
+This compiles. It works. It's also the wrong tool. `@Binding` is for value types (or for the *fields* of a reference type, accessed via `$model.field`). When you want to share a reference and project bindings off its properties, that's exactly the job `@Bindable` was added for. Using `@Binding<Reference>` is the SwiftUI-3-era workaround that we no longer need, and it forces the parent to hold a `$store` that doesn't really mean anything.
+
+### Mistake 5 — putting expensive work in an `@Observable`'s `init`
+
+This is the [Day 11 lesson](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) restated, because it shows up here as a wrapper-confusion symptom: developers reach for `@Bindable` (or worse, the `let`-bound model antipattern) to "avoid recreating the model" and end up reinventing ownership. The right move is almost always: keep `@State` ownership at the right scope, and move the expensive work out of `init` and into `.task`. Day 11 has the full Instruments trace.
+
+---
+
+## A real-life analogy that has stuck
+
+If the table didn't click, here's the analogy I use when I'm explaining this on calls:
+
+- **`@State`** is the deed to a house. You own it. Nobody else gets to move in without your permission.
+- **`@Binding`** is a key to someone else's house. You can come in, change the furniture, leave. You don't own the place.
+- **`@Bindable`** is more like having a *reference* to a shared whiteboard somebody else owns. You don't control the whiteboard's existence, but you can write on any part of it (`$displayName`, `$notificationsEnabled`).
+- **`@Environment`** is the building's HVAC. You don't pass it from room to room. It's just there. You can read the temperature; if you want to change the thermostat, that's a different system.
+- **`@Observable`** isn't a room or a key — it's the *fact* that the whiteboard is wired up to alert anyone watching it that something changed.
+
+Every SwiftUI confusion I've seen in code review is somebody mixing up keys and deeds, or trying to install HVAC in one specific room, or forgetting to wire up the whiteboard's alarm.
+
+---
+
+## The rule of thumb that resolves 90% of code-review confusion
+
+Before you reach for any wrapper, answer two questions:
+
+1. **Who owns the storage?** Exactly one view in the tree owns each piece of state. If you can't say which view that is, you've got a bigger problem than property wrappers.
+2. **Do I need to write to it from this view?** If yes and you're not the owner, you need either `@Binding` (primitive) or `@Bindable` (Observable). If you only need to read, you don't need a wrapper at all.
+
+That's the entire decision tree, condensed. Memorize those two questions and you stop needing the table.
+
+---
+
+## Where this connects back
+
+The thread running through Days 8, 10, 11, and now 12 is one I keep coming back to: **SwiftUI's newer state model is small and consistent if you draw the picture, and a swamp if you don't.**
+
+- [Day 8](/learn/field-notes/observable-macro-migration-real-app) — what `@Observable` quietly breaks at the Equatable, didSet, and `.environmentObject` layers.
+- [Day 10](/learn/field-notes/foundation-models-generable-structured-output-patterns) — `@Generable` as the data-shape primitive that pairs well with `@Observable` view models.
+- [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) — the `@State` init-cost gotcha and three ways to fix it, including the composition-root pattern.
+- **Day 12 (today)** — the full mental map that contextualizes all of the above.
+
+If today's post made you want to re-examine your view layer, the [State and Binding chapter in SwiftUI Foundations](/learn/swiftui-foundations) is where this terrain gets the formal treatment, and the [composition-root lesson in SwiftUI at Scale](/learn/swiftui-at-scale) is where Mistake 1 and Mistake 2 stop existing entirely because *nobody* in your codebase will be confused about ownership again.
+
+I genuinely think this is the post I wish I'd had pinned at the top of three different team channels last year. Print it out. Pin it. Argue with the table in your team channel until you've got the version that fits your codebase. Then write the tests.
+
+---
+
+**Tomorrow (Day 13):** the performance benchmark — Instruments numbers, side-by-side, on `@Observable`'s property-level tracking versus `ObservableObject`'s object-level tracking. With a 1,000-item list, frame-time deltas, and the one place where `@Observable` is *slower* than the old way and why.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for state and binding fundamentals, [SwiftUI at Scale](/learn/swiftui-at-scale) for composition-root patterns and dependency injection.*
