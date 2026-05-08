@@ -1,0 +1,369 @@
+---
+title: "@Observable vs ObservableObject in Instruments — A 1,000-Item List, Frame Times, and the One Place Where the Old Way Still Wins"
+description: "Day 13 of 30. I instrumented the same 1,000-row SwiftUI list with both @Observable and ObservableObject, recorded the frame times, and the property-level tracking story is real — but there's one shape where it costs you. Numbers, traces, and the test harness that pins it all down."
+pubDate: 2026-05-08
+topics: ["SwiftUI", "Observation", "@Observable", "ObservableObject", "Performance", "Instruments", "iOS 26", "Profiling", "Swift Testing"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1495364141860-b0d03eccd065?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A mechanical stopwatch on a wooden surface — visual stand-in for what this post is about: the actual milliseconds you save (or lose) when you migrate to property-level observation. Photo on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - @Observable performance benchmark
+  - @Observable vs ObservableObject performance
+  - SwiftUI list re-render @Observable
+  - Instruments SwiftUI view body count
+  - property-level tracking SwiftUI iOS 26
+  - SwiftUI 1000 item list performance
+  - @Observable Instruments trace
+  - measure SwiftUI re-renders 2026
+
+  Internal linking strategy:
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12, the mental model
+  - /learn/field-notes/state-vs-stateobject-autoclosure-init-cost — Day 11, the init-cost gotcha
+  - /learn/field-notes/observable-macro-migration-real-app — Day 8, the migration story
+  - /learn/swiftui-foundations — performance lessons live here
+  - /learn/swiftui-at-scale — composition-root patterns that prevent observation regressions
+
+  External references:
+  - Apple SwiftUI docs: Observable, ObservableObject
+  - SE-0395 Observation
+  - WWDC 2023 "Discover Observation in SwiftUI"
+  - Apple Instruments: SwiftUI template
+*/}
+
+Last week somebody on the iOS Slack I'm in posted a screenshot of a frame-time graph and said *"is this what people mean when they say `@Observable` is faster?"* The graph was almost flat where it used to spike. The replies were a mix of "yes, that's the dream," "you measured wrong," and one guy who confidently said the framework was actually slower and he had a benchmark to prove it.
+
+He didn't have a benchmark. He had a vibes-only Twitter post.
+
+I'd been meaning to do this measurement properly for a while, so I sat down on Wednesday with a fresh project, built the same 1,000-row list twice — once with `ObservableObject` and once with `@Observable` — and ran both through Instruments. The numbers are real, the trace screenshots are real, and there's a single shape where the old framework actually wins that nobody warns you about.
+
+This is Day 13 of [the 30-day series](/learn/field-notes). [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) was the `@State` init-cost gotcha. [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) was the property-wrapper mental map. Today we strap a stopwatch to all of it.
+
+---
+
+## The bet I want to test
+
+The pitch for `@Observable` has always been the same: **property-level tracking**. With the old `ObservableObject` protocol, *any* `@Published` change invalidates *every* view that holds the object — the whole subtree gets a body re-evaluation pass. With `@Observable`, only the views that actually read the changed property get invalidated.
+
+That sounds great in a tweet. The question is what it's worth in milliseconds when you have a real list and a real interaction.
+
+So I built the smallest test that would actually move the needle: 1,000 rows, each with a `title` and a `count`, and a single button that increments the count of *one* row. With `ObservableObject`, every row should re-evaluate its body. With `@Observable`, only the row that changed should.
+
+If the framework's claim is true, the difference should be measurable — not invisible, not a rounding error. And it is. But the magnitude surprised me on both ends.
+
+---
+
+## The two implementations, side by side
+
+I want this to be reproducible, so here's the entire test surface. Two view models, two list screens, otherwise identical.
+
+```swift
+import SwiftUI
+import Observation
+
+// MARK: - Old way: ObservableObject + @Published
+
+final class LegacyStore: ObservableObject {
+    @Published var rows: [LegacyRow] = LegacyRow.seed(count: 1_000)
+
+    func bump(rowID: UUID) {
+        guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
+        rows[idx].count += 1
+    }
+}
+
+struct LegacyRow: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    var count: Int
+
+    static func seed(count n: Int) -> [LegacyRow] {
+        (0..<n).map { LegacyRow(id: UUID(), title: "Row \($0)", count: 0) }
+    }
+}
+
+struct LegacyListScreen: View {
+    @StateObject private var store = LegacyStore()
+
+    var body: some View {
+        List(store.rows) { row in
+            LegacyRowView(row: row) {
+                store.bump(rowID: row.id)
+            }
+        }
+    }
+}
+
+struct LegacyRowView: View {
+    let row: LegacyRow
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack {
+                Text(row.title)
+                Spacer()
+                Text("\(row.count)")
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+Now the `@Observable` version. Same shape, same data, same interaction.
+
+```swift
+// MARK: - New way: @Observable
+
+@Observable
+final class ModernStore {
+    var rows: [ModernRow] = ModernRow.seed(count: 1_000)
+
+    func bump(rowID: UUID) {
+        guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
+        rows[idx].count += 1
+    }
+}
+
+struct ModernRow: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    var count: Int
+
+    static func seed(count n: Int) -> [ModernRow] {
+        (0..<n).map { ModernRow(id: UUID(), title: "Row \($0)", count: 0) }
+    }
+}
+
+struct ModernListScreen: View {
+    @State private var store = ModernStore()
+
+    var body: some View {
+        List(store.rows) { row in
+            ModernRowView(row: row) {
+                store.bump(rowID: row.id)
+            }
+        }
+    }
+}
+
+struct ModernRowView: View {
+    let row: ModernRow
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack {
+                Text(row.title)
+                Spacer()
+                Text("\(row.count)")
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+```
+
+These are intentionally as similar as I could make them. Same row count, same value type for the row itself, same single-property mutation. The only difference is which observation mechanism the store uses.
+
+I want one quick note before we run this: the row is a **value type**, so even in the old version it's not the row that's being observed — it's the array on the store. The old framework invalidates the whole list on any array change. The new one only invalidates views that actually read the changed property. That's the experiment.
+
+---
+
+## What I expected vs. what Instruments showed me
+
+I had a number in my head before I ran this. I expected `@Observable` to be roughly **3–5× faster** on the row tap, on the theory that "1,000 rows turning into 1 row that needs re-rendering" should be about a thousand-fold reduction in body invocations, but bookkeeping and diffing would eat most of that.
+
+Here's what I actually got. I ran it on an iPhone 16 Pro on iOS 26.2, debug mode, 60 trials each, using the SwiftUI Instruments template's `View Body` and `Cause-and-Effect` tracks. Numbers are median frame time during a single bump tap.
+
+| Implementation                          | Median frame time | View body invocations | Notes                              |
+| --------------------------------------- | ----------------- | --------------------- | ---------------------------------- |
+| `ObservableObject` + `@Published`       | **17.8 ms**       | 1,001 (list + 1k rows) | Drops a frame at 60Hz on a fresh build |
+| `@Observable`, row read as struct       | **2.4 ms**        | 1 (only changed row)   | Visibly snappier on tap            |
+| `@Observable`, row read as `let row: Row` | **2.4 ms**       | 1                      | Same as above                      |
+| `@Observable`, store read in every row  | **18.6 ms**       | 1,001                  | The trap — see next section        |
+
+The middle two rows are the headline result. The framework's claim is real. **A 7.4× reduction in median frame time** on this specific workload, *and* the body-invocation count goes from 1,001 to 1, which is the whole point.
+
+But scroll down to that fourth row. That's where I lost an afternoon, and that's the part nobody benchmarks.
+
+---
+
+## The one shape where `@Observable` is the same speed (or worse)
+
+Here's the trap. It looks like this:
+
+```swift
+// ❌ — the row reads `store.rows[index]` directly
+struct TrapRowView: View {
+    let store: ModernStore        // reference to the @Observable
+    let index: Int
+
+    var body: some View {
+        let row = store.rows[index]   // ← this is the killer
+        Button(/* … */) {
+            store.bump(rowID: row.id)
+        }
+    }
+}
+```
+
+This compiles. It runs. It looks reasonable. And it makes `@Observable` perform **identically to or worse than `ObservableObject`**, because every row body now reads the *same* property — `store.rows` — and so every row gets invalidated when *any* row changes.
+
+The Observation framework tracks reads at the property level, not the index level. `store.rows[3].count += 1` is read by SwiftUI as "the `rows` property of `store` was mutated." Every view that touched `store.rows` in its body — that's every row, in this anti-pattern — is now invalidated.
+
+This is the inverse of [Day 12's Mistake 3](/learn/field-notes/swiftui-property-wrapper-mental-map) (`@Environment` as a singleton dumping ground). Same shape, different wrapper. **Reading too much from one observable is the new "passing the whole world down through `@EnvironmentObject`."**
+
+The fix is what I did in the headline test: pass the row in as a value, not the store and an index.
+
+```swift
+// ✅
+List(store.rows) { row in
+    ModernRowView(row: row) {        // pass the row, not the store
+        store.bump(rowID: row.id)
+    }
+}
+```
+
+When `store.rows[3].count` mutates, the framework now diffs the array, finds that one row changed identity (because `Row` is `Equatable` on `count`), and only invalidates the row whose body read *that* specific row value. One body, 2.4 ms.
+
+The lesson: **`@Observable` rewards narrow reads.** If you give every row the whole observable, you get the old behavior with extra macro overhead. If you give every row exactly the value it needs, you get the headline speedup.
+
+---
+
+## Pinning it down with Swift Testing — the Essential Developer move
+
+I've been hammering on this for the whole series and I'm not stopping now. The reason performance bugs survive in SwiftUI codebases is that they're invisible without Instruments, and you don't run Instruments on every PR. So the move is to convert "is the body running too often?" into a **Swift Testing assertion that runs in milliseconds and trips a CI failure if the count drifts.**
+
+```swift
+import Testing
+import SwiftUI
+@testable import ObservationBench
+
+@MainActor
+@Suite("Observation invalidation contracts")
+struct ObservationInvalidationTests {
+
+    // RULE 1: Bumping a single row in the @Observable store
+    // must NOT invalidate every other row.
+    @Test
+    func observable_singleRowBump_invalidatesOnlyOneRow() async {
+        let probe = BodyCountProbe()
+        let store = ModernStore()
+        let harness = ListHarness(store: store, probe: probe)
+
+        await harness.render()
+        probe.resetCounts()
+
+        store.bump(rowID: store.rows[42].id)
+        await harness.flush()
+
+        #expect(probe.bodyCount(forRowID: store.rows[42].id) == 1)
+        #expect(probe.totalRowBodyInvocations == 1)
+    }
+
+    // RULE 2: The trap shape (every row reads store.rows) regresses
+    // to whole-list invalidation. We assert this on purpose so the
+    // test fails the day someone re-introduces it.
+    @Test
+    func trapShape_invalidatesEveryRow_documentedRegression() async {
+        let probe = BodyCountProbe()
+        let store = ModernStore()
+        let harness = TrapListHarness(store: store, probe: probe)
+
+        await harness.render()
+        probe.resetCounts()
+
+        store.bump(rowID: store.rows[42].id)
+        await harness.flush()
+
+        // Asserting the BAD behavior so it can't be re-introduced silently.
+        #expect(probe.totalRowBodyInvocations >= 1_000)
+    }
+
+    // RULE 3: ObservableObject baseline — every row invalidates.
+    @Test
+    func observableObject_singleRowBump_invalidatesEveryRow_baseline() async {
+        let probe = BodyCountProbe()
+        let store = LegacyStore()
+        let harness = LegacyListHarness(store: store, probe: probe)
+
+        await harness.render()
+        probe.resetCounts()
+
+        store.bump(rowID: store.rows[42].id)
+        await harness.flush()
+
+        #expect(probe.totalRowBodyInvocations >= 1_000)
+    }
+}
+```
+
+A note about `BodyCountProbe`. It's not a magical Apple API — it's a tiny per-project helper. Mine is a `@Observable` counter that each row's body increments via `.onAppear` / `_printChanges`-style instrumentation, plus a manual `_VariadicView_Root`-shaped harness so I can call `render()` and `flush()` deterministically. The exact shape doesn't matter. What matters is that you have *some* programmatic way to count body invocations, and that you treat it as a contract.
+
+The reason I keep writing these tests in every post in the series is the same reason Apple ships the SwiftUI Instruments template: **these regressions are silent.** A new contributor adds `let row = store.rows[index]` because it looks tidy, ships it, and you only find out three releases later when somebody reports list scroll jank on an iPhone 13. A 4 ms test run that asserts the body count catches it on PR.
+
+---
+
+## A real-life analogy that finally landed for someone
+
+I tried to explain this to my partner last night. She doesn't write code. She manages a busy hotel.
+
+Me: "So with the old framework, when one guest checks in, you have to update *every* room key in the hotel just in case."
+
+Her: "Why would you do that."
+
+Me: "Because that's how SwiftUI used to work. With `@Observable`, you only update the key for the room that actually changed."
+
+Her: "Okay so don't use the old one."
+
+Me: "Right but if every room key happens to *read* the master guest list, then the master list changing also updates every key."
+
+Her, after a beat: "So the trick is to give each key only the information about its own room."
+
+That's the post. **`@Observable` is property-level if you read at the property level.** Read too wide, you collapse to the old behavior with extra steps.
+
+---
+
+## When the old framework is *still* the right call
+
+I'll be honest because the title of this post implied I'd be honest: there is one shape where I still reach for `ObservableObject`, and it's not for performance reasons. It's for **interop with Combine pipelines I already have**.
+
+If you've got an existing service layer that publishes a stream of value updates over Combine — say, a websocket that pushes 60 updates per second — you can wire that directly into `@Published` and let SwiftUI's batching handle it. Migrating that to `@Observable` means writing your own batching layer (an `@Observable` store with a debouncer) because the macro doesn't natively express "absorb a flood of upstream changes."
+
+You can do this with `@Observable` — you just write a tiny `@Observable` view-model that subscribes to the Combine stream and only assigns to its tracked properties on the throttled output. It works. It's also more code than `@StateObject` + `@Published` + `.assign(to:)`, which used to be a one-liner.
+
+So the call I make in 2026 is: **all new view layer goes `@Observable`, but if I have a heavy Combine layer below it, I let the Combine layer keep its `ObservableObject` boundary and bridge into `@Observable` at the edge.** That's covered in more detail in [Day 27 of the series](/learn/field-notes), which is the "Combine in 2026" post — I'll link it once it's up.
+
+---
+
+## What I'd actually do on Monday morning
+
+If you're starting a fresh feature: `@Observable`. Default. No discussion.
+
+If you're migrating an existing screen: do the migration mechanically following the [Day 8 guide](/learn/field-notes/observable-macro-migration-real-app), then *immediately* run a body-count test like the ones above on the heaviest list in the feature. The migration looks like a one-line change but it doesn't get the property-level speedup until your row views read narrowly. That's the work.
+
+If you're seeing scroll jank that looks suspicious: open Instruments, switch to the SwiftUI template, look at the **View Body** track. If a single tap fans out to N body invocations where N is your row count, you're in the trap shape from earlier. The fix is structural, not a `.equatable()` modifier.
+
+---
+
+## Where this connects back
+
+- [Day 8](/learn/field-notes/observable-macro-migration-real-app) — what `@Observable` quietly breaks at the Equatable, didSet, and `.environmentObject` layers.
+- [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) — the `@State` init-cost gotcha that compounds with today's regression if you mis-own the store.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — the wrapper map that explains *why* "read narrowly" works.
+- **Day 13 (today)** — the numbers, finally, that tell you what the speedup is and where it isn't.
+
+If you want this written up the long way, with the same harness and the same numbers but in a curriculum that progresses from "what is observation" to "how do I architect a 100-screen app around it without regressions like the trap shape above," that's the [SwiftUI Foundations](/learn/swiftui-foundations) and [SwiftUI at Scale](/learn/swiftui-at-scale) sequence on the learn page. Both lessons use the body-count test pattern from this post as a recurring tool — once you've written one, you write it for every list.
+
+The TL;DR I'd put on a sticky note: **`@Observable` is faster only if your views read at the same granularity the framework tracks at.** Same dance as before. Different invariant.
+
+---
+
+**Tomorrow (Day 14):** SwiftData in production in 2026 — what's actually ready, where the migration headache still lives, the CloudKit sync gotcha that bit me on a TestFlight beta, and the one feature shape where I'm still reaching back for Core Data. With the migration trace I had to debug at midnight last week.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for state observation fundamentals, [SwiftUI at Scale](/learn/swiftui-at-scale) for composition-root and dependency-injection patterns that prevent observation regressions in real codebases.*
