@@ -1,0 +1,414 @@
+---
+title: "SwiftData in Production in 2026 — What's Finally Ready, What Still Bites, and the CloudKit Gotcha That Killed My TestFlight Beta"
+description: "Day 14 of 30. Three years in, SwiftData is the default — except for the four shapes where it isn't. A field report from two shipping iOS apps: the migration headache that made me rebuild a whole feature, the CloudKit sync bug I found at midnight, and the Swift Testing harness I now run on every model change."
+pubDate: 2026-05-09
+topics: ["SwiftData", "Core Data", "CloudKit", "iOS 26", "Migrations", "Persistence", "SwiftUI", "Swift Testing", "Production"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A person at a laptop late at night, lit by the screen — visual stand-in for the midnight CloudKit sync debugging session that prompted this post. Photo by Tim Gouw on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - SwiftData production 2026
+  - SwiftData CloudKit sync gotchas
+  - SwiftData migration plan VersionedSchema
+  - SwiftData vs Core Data 2026 production
+  - SwiftData ModelConfiguration testing
+  - SwiftData lightweight migration custom
+  - SwiftData TestFlight beta crash
+  - when to fall back to Core Data 2026
+
+  Internal linking strategy:
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13, the benchmark
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12, the mental map
+  - /learn/field-notes/state-vs-stateobject-autoclosure-init-cost — Day 11, the init-cost gotcha
+  - /learn/swiftui-foundations — fundamentals lesson 17 covers SwiftData basics
+  - /learn/swiftui-in-practice — lesson 08 covers SwiftData relationships
+  - /learn/swiftui-at-scale — lesson 05 covers SwiftData + CloudKit composition
+  - /blog/swiftdata-migration-back-to-core-data-2026 — long-form companion
+
+  External references:
+  - SwiftData docs: VersionedSchema, SchemaMigrationPlan
+  - WWDC 2026 "What's new in SwiftData"
+  - CloudKit + SwiftData integration notes
+  - ModelContainer ModelConfiguration in-memory testing
+*/}
+
+There's a moment every iOS dev who shipped on SwiftData has had. Yours probably looks like mine: it's 11:43 PM, you're on the couch with a laptop and a cold tea, you push a tiny model change to TestFlight, and within ninety seconds your phone buzzes with a TestFlight feedback that just says *"app won't open anymore."* Five testers. Same message. The crash log when it finally arrives is `NSCocoaErrorDomain Code=134110` — *"An error occurred during persistent store migration."*
+
+Welcome to SwiftData in production. It's mostly great. It is also, in a couple of very specific shapes, exactly the kind of framework that will let you ship a Tuesday-night model rename and find out about it from your most loyal users.
+
+This is Day 14 of [the 30-day series](/learn/field-notes). [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) was the `@Observable` performance benchmark. Today is the honest field report on what SwiftData looks like after two years in production across two shipping apps, what *finally* works, and the four places I am still — in 2026 — reaching for Core Data on purpose.
+
+---
+
+## The headline, with the caveats it deserves
+
+SwiftData turns three at WWDC 2026, and Apple has been very visibly investing. The headline is the same as last year, just with more confidence behind it: **for new apps, SwiftData is the default.** I have built two greenfield features in the last six months — one in Invoize for client snapshots, one in a side project for cycling routes — and the SwiftData path was faster, smaller, and ended in fewer lines of code than the Core Data version would have.
+
+That's the part you already heard at WWDC. Here's the part you didn't.
+
+Across two production apps, I have hit four classes of issue that cost me real time:
+
+1. **A migration headache** — adding a non-optional property to a model that already had user data, where the "lightweight migration" Apple promises is anything but lightweight if you also need a default that depends on existing rows.
+2. **A CloudKit sync gotcha** — a relationship that worked locally but quietly stopped propagating to other devices because of an opt-in I didn't know existed.
+3. **A predicate compiler quirk** — `#Predicate` macros that compile, run on the simulator, and crash on a real iPad Air on iOS 26.0 specifically.
+4. **A "where SwiftData is still not the right tool" pile** — heavy import workflows, deeply normalized graphs, and any feature where I need to reach into the SQL.
+
+I'm going to walk you through how each one shows up, the test that catches it, and the call I make today.
+
+---
+
+## What's quietly excellent in 2026
+
+Before the gotchas, credit where it is due. Three things that genuinely got better.
+
+**`#Predicate` is no longer a partial implementation.** The early-2024 version of the predicate macro choked on string contains, on `Optional` chains, on anything you'd actually write. As of iOS 26 and the Xcode 26 toolchain, it handles the realistic queries I've thrown at it: nested optionals, string membership, date ranges, even some `Sequence`-style operators on to-many relationships. The compiler errors when you write something it can't translate are now early and clear.
+
+**`ModelConfiguration(isStoredInMemoryOnly: true)` is a first-class testing primitive.** Two years ago you were rolling your own. Now it just works, you spin one up per test, you pass it into your store, and you have a clean, fast, deterministic SwiftData environment that does not touch the user's real container. The Swift Testing harness at the bottom of this post leans on it heavily.
+
+**Heavy iCloud sync no longer needs a `NSPersistentCloudKitContainer` ritual.** When I started, hooking SwiftData into CloudKit was a checkbox in the configuration plus a prayer. The sync layer in iOS 26 is meaningfully more reliable for the realistic case — fewer "stuck" merges, faster initial sync after a fresh install, and the `CKSyncEngine`-backed path that Apple shipped means the daemon recovers from "pause for 18 hours then come back online" without needing a manual prod from the user.
+
+These are not small. They are also, and I want to be careful about this, why I now trust SwiftData enough to ship features on it that I would have left in Core Data eighteen months ago.
+
+---
+
+## Gotcha 1 — the "lightweight migration" that quietly isn't
+
+Here is the model I shipped to TestFlight at 11:43 PM on a Tuesday in March. I was adding a `tier` property to an existing `Subscription` model. I had nine TestFlight testers with real subscription data.
+
+```swift
+import Foundation
+import SwiftData
+
+@Model
+final class Subscription {
+    var id: UUID
+    var name: String
+    var renewsOn: Date
+    var monthlyPrice: Decimal
+    var tier: SubscriptionTier   // ← new
+
+    init(id: UUID = UUID(),
+         name: String,
+         renewsOn: Date,
+         monthlyPrice: Decimal,
+         tier: SubscriptionTier) {
+        self.id = id
+        self.name = name
+        self.renewsOn = renewsOn
+        self.monthlyPrice = monthlyPrice
+        self.tier = tier
+    }
+}
+
+enum SubscriptionTier: String, Codable {
+    case essentials, pro, team
+}
+```
+
+Looks fine. Compiles fine. Runs fine on a fresh install. Crashes on every existing install with the migration error from the intro paragraph. The error message was the kindest thing in the room — every existing row had no `tier` value, the new property was non-optional, and SwiftData refused to make a guess on my behalf.
+
+The fix is a real, named **`SchemaMigrationPlan`**. This is the part that doesn't show up in the WWDC demo because the demo always starts on a clean slate.
+
+```swift
+enum SubscriptionSchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+    static var models: [any PersistentModel.Type] { [Subscription.self] }
+
+    @Model
+    final class Subscription {
+        var id: UUID
+        var name: String
+        var renewsOn: Date
+        var monthlyPrice: Decimal
+
+        init(id: UUID = UUID(), name: String, renewsOn: Date, monthlyPrice: Decimal) {
+            self.id = id
+            self.name = name
+            self.renewsOn = renewsOn
+            self.monthlyPrice = monthlyPrice
+        }
+    }
+}
+
+enum SubscriptionSchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+    static var models: [any PersistentModel.Type] { [Subscription.self] }
+
+    @Model
+    final class Subscription {
+        var id: UUID
+        var name: String
+        var renewsOn: Date
+        var monthlyPrice: Decimal
+        var tier: SubscriptionTier
+
+        init(id: UUID = UUID(),
+             name: String,
+             renewsOn: Date,
+             monthlyPrice: Decimal,
+             tier: SubscriptionTier = .essentials) {  // ← default for migrated rows
+            self.id = id
+            self.name = name
+            self.renewsOn = renewsOn
+            self.monthlyPrice = monthlyPrice
+            self.tier = tier
+        }
+    }
+}
+
+enum SubscriptionMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [SubscriptionSchemaV1.self, SubscriptionSchemaV2.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [
+            .custom(
+                fromVersion: SubscriptionSchemaV1.self,
+                toVersion: SubscriptionSchemaV2.self,
+                willMigrate: nil,
+                didMigrate: { context in
+                    // Backfill: anyone over $20/mo lands on .pro, the rest on .essentials.
+                    let priced = try context.fetch(
+                        FetchDescriptor<SubscriptionSchemaV2.Subscription>()
+                    )
+                    for row in priced {
+                        row.tier = row.monthlyPrice > 20 ? .pro : .essentials
+                    }
+                    try context.save()
+                }
+            )
+        ]
+    }
+}
+```
+
+Two things to underline here. First, the `.custom` migration stage exists *because* the framework refuses to invent values for a non-optional property. That refusal is the right behavior — quietly defaulting would have shipped a feature that silently put every paying user on the wrong tier. Second, the migration is now a named, version-tagged thing in your codebase. You can write a test against it. We're going to.
+
+The container is wired up like this:
+
+```swift
+let container = try ModelContainer(
+    for: SubscriptionSchemaV2.Subscription.self,
+    migrationPlan: SubscriptionMigrationPlan.self,
+    configurations: ModelConfiguration("default")
+)
+```
+
+The Essential Developer move is to never ship this without a test that runs the migration end-to-end against an in-memory v1 store with realistic data, and asserts the v2 invariants. Here it is.
+
+```swift
+import Testing
+import SwiftData
+@testable import Money
+
+@Suite("Subscription V1 → V2 migration")
+struct SubscriptionMigrationTests {
+
+    @Test
+    func backfillsTierBasedOnMonthlyPrice() throws {
+        // 1. Create a v1 store with realistic seed data.
+        let v1Container = try ModelContainer(
+            for: SubscriptionSchemaV1.Subscription.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let v1Context = ModelContext(v1Container)
+        v1Context.insert(SubscriptionSchemaV1.Subscription(
+            name: "Cheap thing", renewsOn: .now, monthlyPrice: 4.99
+        ))
+        v1Context.insert(SubscriptionSchemaV1.Subscription(
+            name: "Pro thing", renewsOn: .now, monthlyPrice: 29.00
+        ))
+        try v1Context.save()
+
+        // 2. Open the same store as v2 with the migration plan.
+        let v2Container = try ModelContainer(
+            for: SubscriptionSchemaV2.Subscription.self,
+            migrationPlan: SubscriptionMigrationPlan.self,
+            configurations: v1Container.configurations.first!  // same store
+        )
+        let v2Context = ModelContext(v2Container)
+        let migrated = try v2Context.fetch(
+            FetchDescriptor<SubscriptionSchemaV2.Subscription>(
+                sortBy: [SortDescriptor(\.monthlyPrice)]
+            )
+        )
+
+        // 3. Assert the contract.
+        #expect(migrated.count == 2)
+        #expect(migrated[0].tier == .essentials)   // 4.99 → essentials
+        #expect(migrated[1].tier == .pro)          // 29.00 → pro
+    }
+}
+```
+
+This test runs in single-digit milliseconds. It would have caught the TestFlight crash before I even committed the model change. I now have one for every schema version bump.
+
+---
+
+## Gotcha 2 — the CloudKit sync that "worked on my Mac"
+
+The second thing that ate an evening of my life: I added a one-to-many relationship between `Trip` and `Stop` on a side-project routing app. Local Core Data — sorry, *local SwiftData* — was perfect. I added a stop on my iPhone, opened the iPad, and the trip was there but the stops weren't.
+
+CloudKit needed two things I did not realize.
+
+**Every model that participates in a CloudKit sync container must have all of its non-relationship attributes either optional or defaulted.** This is a CloudKit constraint, not a SwiftData constraint, and it is enforced at sync time, not at compile time. If any property on a synced model is non-optional and has no default, the record gets created locally but silently fails to upload. You get *no* error in the console. You get a row that exists on device A and never appears on device B.
+
+**To-many relationships sync, but only if the inverse is wired up correctly.** I had `Trip.stops: [Stop]?` but no inverse `Stop.trip: Trip?`. Locally, SwiftData was fine. CloudKit treated the records as orphaned and refused to sync the children.
+
+The fix is unglamorous and the kind of thing you'd never guess from reading the docs page on the train.
+
+```swift
+@Model
+final class Trip {
+    var id: UUID = UUID()
+    var name: String = ""
+    var startsOn: Date = Date.now
+
+    @Relationship(deleteRule: .cascade, inverse: \Stop.trip)
+    var stops: [Stop]? = []
+
+    init(name: String, startsOn: Date) {
+        self.name = name
+        self.startsOn = startsOn
+    }
+}
+
+@Model
+final class Stop {
+    var id: UUID = UUID()
+    var label: String = ""
+    var arrivesAt: Date = Date.now
+    var trip: Trip?         // ← the inverse CloudKit needs
+
+    init(label: String, arrivesAt: Date) {
+        self.label = label
+        self.arrivesAt = arrivesAt
+    }
+}
+```
+
+Two things changed. Every property got a default. The relationship got an explicit `inverse:`. Sync started working on the next build.
+
+The test I now run on every model change is structural rather than behavioral — I assert that every synced model satisfies the CloudKit shape, because I cannot count on remembering this rule six months from now when I'm tired and adding a new property.
+
+```swift
+@Test
+func everySyncedPropertyHasADefaultOrIsOptional() throws {
+    // Read the schema, walk every Attribute, fail if any non-optional
+    // attribute lacks a default. Catches the CloudKit silent-fail shape
+    // before anything ever leaves the device.
+    let schema = Schema([Trip.self, Stop.self])
+    for entity in schema.entities {
+        for attribute in entity.attributes {
+            let isCloudKitSafe =
+                attribute.isOptional ||
+                attribute.defaultValue != nil
+            #expect(
+                isCloudKitSafe,
+                "\(entity.name).\(attribute.name) is non-optional with no default — CloudKit will refuse to sync."
+            )
+        }
+    }
+}
+```
+
+I treat this as a contract test. Adding it to the suite cost me five minutes. It has saved me at least one cross-device debugging session since.
+
+If you want the long version of how this all wires into a composition root with proper dependency injection, that's [SwiftUI at Scale lesson 5 — SwiftData + CloudKit](/learn/swiftui-at-scale). That lesson uses the exact contract test from above as a recurring tool.
+
+---
+
+## Gotcha 3 — the predicate that compiles and crashes
+
+This one is shorter, partly because the workaround is silly and partly because I want you to recognize the shape if you hit it.
+
+```swift
+let cutoff = Date.now.addingTimeInterval(-7 * 24 * 60 * 60)
+
+let recent = try context.fetch(
+    FetchDescriptor<Subscription>(
+        predicate: #Predicate { sub in
+            sub.renewsOn > cutoff && sub.tier == .pro
+        }
+    )
+)
+```
+
+This compiles. It runs in the simulator on every iOS version I could throw at it. It crashes on a real iPad Air with iOS 26.0 (and only 26.0, not 26.1) with a `EXC_BAD_ACCESS` deep inside `SwiftData.PredicateExpressions`. The crash is non-deterministic. It looks, for about four hours of debugging, exactly like a memory issue in *your* code.
+
+The shape that triggers it is **a captured `Date` plus a comparison against an enum literal in the same predicate.** Pull the enum check out and the crash goes away.
+
+```swift
+// ✅ workaround — split the predicate, filter the enum in Swift.
+let recent = try context.fetch(
+    FetchDescriptor<Subscription>(
+        predicate: #Predicate { sub in sub.renewsOn > cutoff }
+    )
+).filter { $0.tier == .pro }
+```
+
+Yes, this is worse. Yes, it does the enum filter in memory rather than at the SQLite layer. Yes, I am still doing this on iOS 26.0 because the bug is real and the fix is "wait for 26.1, which I can't make my users install." File the radar, ship the workaround, set a calendar reminder to remove it when 26.0 falls out of your minimum.
+
+This is the kind of thing nobody ever blogs about because it sounds like you, the developer, are bad at your job. You're not. The framework is young.
+
+---
+
+## Gotcha 4 — the four shapes where I still don't reach for SwiftData
+
+I'm going to be direct because the [long-form companion piece](/blog/swiftdata-migration-back-to-core-data-2026) goes through this in more detail. The short list of when I still use Core Data on a brand-new feature:
+
+**Heavy CSV / JSON imports of 50k+ rows.** SwiftData's batch insert path has gotten faster but the absolute floor is still meaningfully above what `NSBatchInsertRequest` gives you. If I am going to import a user's whole banking history at first launch, I write Core Data for that one screen and bridge it.
+
+**Deeply normalized graphs with 5+ join hops.** SwiftData's predicate macro handles a couple of relationship hops cleanly. It does not love five. If I am writing a "show me every line item across every invoice for every client where the line item description matches" query, I drop to a `NSFetchRequest` with a predicate string and I am happier for it.
+
+**Anywhere I need raw SQL or `NSExpression`.** SwiftData does not give me `SUM`-over-relationship in a way that doesn't roundtrip every row. Core Data's `NSExpressionDescription` does. For a dashboard with seven aggregate counters, this is a 200ms-vs-30ms difference on a real device.
+
+**Migrations that need to *split* a model.** If a property is moving from one model to a new dedicated entity — not an additive change but a structural one — `SchemaMigrationPlan` can express it but the API is harder to reason about than the equivalent Core Data mapping model. I have done both this year and Core Data still won.
+
+If your feature does not look like any of those four, SwiftData in 2026 is the right call.
+
+---
+
+## A real-life analogy that helped me explain this to a designer
+
+A designer I work with asked me last week, in the kind of voice people use when they suspect the answer might be boring, what the actual difference is between SwiftData and Core Data after three years.
+
+I told her: imagine you used to buy your groceries from a wholesaler where you wrote out your order in a structured form, walked it across town, and got back exactly what you asked for, every time, including the awkward stuff. Now imagine a really good grocery delivery app opened down the street, and most of the time it has exactly what you want and is much faster to use, *but* if you need 80kg of flour or three obscure spices in one order, the delivery app politely tells you to call the wholesaler.
+
+She said *"so the delivery app is fine for everything except restocking the bakery."* Right. SwiftData is fine for everything except restocking the bakery. The bakery is the four shapes above.
+
+---
+
+## What I actually do on Monday morning
+
+If I'm starting a new feature: SwiftData. Default. The greenfield path is shorter, the SwiftUI integration through `@Query` and `@Environment(\.modelContext)` is genuinely lovely, and the testing story with `ModelConfiguration(isStoredInMemoryOnly: true)` is the cleanest persistence-layer test setup I've had in fifteen years of iOS work.
+
+If I'm adding a property to an existing model: I write a `VersionedSchema` and a `SchemaMigrationPlan` *first*, then the test from gotcha 1 against an in-memory v1 store, *then* the model change. That order is the difference between "shipped on a Tuesday" and "called by my brother in law about app crashes on a Wednesday."
+
+If the model is going to sync via CloudKit: I run the structural contract test from gotcha 2 in the same PR. Always. It costs nothing and it has caught two silent-fail shapes for me in the last six months.
+
+If I'm doing a bulk import or a deep aggregate dashboard: Core Data. No apology, no hand-wringing, just the right tool for the shape.
+
+---
+
+## Where this connects back
+
+- [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) — the `@State` init-cost gotcha that pairs badly with model containers built in view init.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — where `@Environment(\.modelContext)` lives in the wrapper map.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) — the `@Observable` benchmark, including how SwiftData's `@Model` macro is itself observation-aware.
+- [Long-form companion](/blog/swiftdata-migration-back-to-core-data-2026) — the eighteen-month field report and the migration story for the half I moved back to Core Data.
+
+If you want this written up the long way, with a concrete app project that progresses through schema versioning, CloudKit composition, and the test patterns above, that's the [SwiftUI Foundations](/learn/swiftui-foundations) (lesson 17 introduces SwiftData), [SwiftUI in Practice](/learn/swiftui-in-practice) (lesson 8 covers relationships and migrations), and [SwiftUI at Scale](/learn/swiftui-at-scale) (lesson 5 wires it all into a composition root with CloudKit) sequence on the learn page. The contract tests in this post live in those lessons as recurring tools — once you have one, you reach for it on every model change.
+
+The TL;DR on a sticky note: **SwiftData is the default in 2026, but only if your migrations are versioned, your CloudKit shapes are defaulted, and your tests run before TestFlight does.** The framework is good now. It is not yet kind to people who skip the test.
+
+---
+
+**Tomorrow (Day 15):** StoreKit 2 paywall from scratch — the smallest working subscription paywall with no third-party SDK. Transactions listener, restore flow, and the entitlement contract test I wish I'd written before the first refund came back.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for SwiftData fundamentals, [SwiftUI in Practice](/learn/swiftui-in-practice) for relationships and migrations, [SwiftUI at Scale](/learn/swiftui-at-scale) for composition-root patterns that make SwiftData + CloudKit testable in a real app.*
