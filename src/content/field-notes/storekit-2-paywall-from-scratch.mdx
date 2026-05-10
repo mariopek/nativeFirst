@@ -1,0 +1,466 @@
+---
+title: "StoreKit 2 Paywall from Scratch — the Smallest Working Subscription, No RevenueCat, No SDK, No Apology"
+description: "Day 15 of 30. The minimal working StoreKit 2 paywall — products loaded from a .storekit file, purchase flow with the transaction listener nobody shows you, restore flow, and the Swift Testing harness that pins the entitlement contract before the first refund hits. Part 1 of a 3-post series."
+pubDate: 2026-05-10
+topics: ["StoreKit 2", "Subscriptions", "Paywall", "iOS 26", "SwiftUI", "Swift Testing", "Monetization", "Indie Dev", "@Observable"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1554224155-6726b3ff858f?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A fan of credit cards on a flat surface — visual stand-in for the part of indie iOS where you stop building the app and start asking it for money. Photo by rupixen on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - StoreKit 2 paywall tutorial 2026
+  - StoreKit 2 subscription from scratch
+  - StoreKit 2 without RevenueCat
+  - SwiftUI paywall StoreKit 2
+  - StoreKit 2 transactions listener
+  - StoreKit 2 restore purchases
+  - StoreKit 2 Swift Testing
+  - .storekit configuration file Xcode 26
+  - StoreKit 2 entitlement test
+  - iOS 26 in-app purchase implementation
+
+  Internal linking strategy:
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/swiftui-foundations — fundamentals
+  - /learn/swiftui-in-practice — purchase / paywall lesson
+  - /learn/swiftui-at-scale — composition root for paid features
+
+  External references:
+  - Apple StoreKit 2 docs (Product, Transaction, Transaction.updates)
+  - WWDC 2023 / 2024 StoreKit sessions
+  - App Store Server API workflow (covered in Day 17)
+*/}
+
+A friend texted me on Tuesday with a question I have been getting about once a month for two years: *"What do you actually use for the paywall in your apps? RevenueCat?"*
+
+I do not. I have not used RevenueCat or Glassfy or Adapty or any of the others on a single one of the five apps I currently ship. Not because they are bad — they are genuinely good, and if you are a small team with a complicated monetization model and a budget, they will save you weeks. But for the apps I run as a solo dev, the math just stops working: their per-MRR cut, on top of Apple's cut, on top of my own time integrating the SDK, never beats writing the 200 lines of StoreKit 2 directly.
+
+This is the post where I show you those 200 lines.
+
+This is Day 15 of [the 30-day series](/learn/field-notes), and it is part one of three. [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) was the SwiftData field report. Today: the smallest working StoreKit 2 paywall, end to end, with a Swift Testing harness around it. Day 16 is free trials, intro offers, and win-back offers — the configuration in App Store Connect plus the Swift code. Day 17 is server-side receipt validation with the App Store Server API, including the Cloudflare Workers shape for indies who do not run a backend.
+
+By the end of today, you will have a working SwiftUI paywall that loads products from your bundle, runs a purchase, listens for transactions on app launch, restores prior purchases on demand, and gates a feature with an `isPremium` boolean you can trust. With a test that proves it.
+
+---
+
+## Why StoreKit 2 changed the calculation
+
+The reason I never seriously considered a third-party SDK after iOS 15 is that **StoreKit 2 turned in-app purchases from the worst Apple framework into one of the best.** The story I had to tell beta testers in 2018 — yes, I know the receipt is broken, yes, I know the restore flow is flaky, yes, I am rebuilding the receipt parser from scratch because ours stopped working when iOS 12 shipped — that story is gone.
+
+In 2026, on iOS 26, what you actually deal with is three concrete types:
+
+- **`Product`** — you ask for products by ID and StoreKit gives you a struct with the localized price, period, family, and a `purchase()` method.
+- **`Transaction`** — every successful purchase becomes a `Transaction` value with a verified JWS payload. `Transaction.currentEntitlements` is a typed async sequence of "what does this user own right now."
+- **`Transaction.updates`** — an `AsyncSequence` you have to be listening on, always, because Apple delivers asynchronous transactions (Ask to Buy approvals, family sharing changes, refunds, win-back redemptions) into it whether your app is in the foreground or not.
+
+That last one is the bug surface 90% of homebrew implementations get wrong. We are going to do it right. Or at least correctly enough that the test passes.
+
+---
+
+## Step 1 — The `.storekit` configuration file (the part you do once and forget)
+
+Before any Swift, the project setup. Xcode 26 has had `.storekit` configuration files since Xcode 12, but the workflow is so much smoother now that I want to call it out for anyone who learned StoreKit before this existed.
+
+In Xcode, **File → New → File → StoreKit Configuration File**, save it as `Products.storekit` at the project root. Add a single auto-renewable subscription:
+
+- **Reference Name**: `Pro Monthly`
+- **Product ID**: `app.example.pro.monthly`
+- **Subscription Group**: `Pro`
+- **Price**: $4.99
+- **Subscription Duration**: 1 Month
+
+Then in your scheme: **Edit Scheme → Run → Options → StoreKit Configuration**, pick `Products.storekit`. Now the simulator can run the full purchase flow without ever hitting App Store Connect. You can also add a sandbox failure mode under **Debug → StoreKit → Manage Transactions** to test what happens when a user gets refunded, which is the entire reason any of this matters.
+
+This is your local development source of truth for products. The same product IDs, prices, and group must exist in App Store Connect when you submit, but for everything before submission, the `.storekit` file is what you work against.
+
+---
+
+## Step 2 — The model: one `@Observable` store, one boolean
+
+The whole subscription state of a small indie app fits in one observable object with two pieces of state: the loaded products and the set of currently entitled product IDs.
+
+```swift
+import Foundation
+import StoreKit
+import Observation
+
+@Observable
+final class PaywallStore {
+
+    // The products fetched from StoreKit. Empty until `loadProducts()` succeeds.
+    private(set) var products: [Product] = []
+
+    // The set of product IDs the user currently owns / is subscribed to.
+    private(set) var entitledProductIDs: Set<Product.ID> = []
+
+    // Convenience used by the rest of the app to gate features.
+    var isPremium: Bool {
+        !entitledProductIDs.isDisjoint(with: Self.premiumProductIDs)
+    }
+
+    static let premiumProductIDs: Set<Product.ID> = [
+        "app.example.pro.monthly"
+    ]
+
+    private var updatesTask: Task<Void, Never>?
+
+    deinit {
+        updatesTask?.cancel()
+    }
+}
+```
+
+Two observations before we add behavior. First, the rest of your app reads exactly one boolean — `paywallStore.isPremium` — and never thinks about transactions, JWS, or Apple. Second, [this is `@Observable` not `ObservableObject`](/learn/field-notes/observable-vs-observableobject-performance-benchmark), which means a SwiftUI view that reads `isPremium` only re-evaluates when *that* value flips, not when the products array changes. That difference matters when the paywall is mounted in a tab bar that is also showing a list view.
+
+---
+
+## Step 3 — Load the products (the easy part)
+
+```swift
+extension PaywallStore {
+
+    func loadProducts() async {
+        do {
+            let fetched = try await Product.products(for: Self.premiumProductIDs)
+            // Sort cheapest-first so the paywall layout is deterministic.
+            products = fetched.sorted { $0.price < $1.price }
+        } catch {
+            // Swallow for now — Day 17 covers the retry / observability story.
+            products = []
+        }
+    }
+}
+```
+
+Three things to underline. The product IDs come from `Self.premiumProductIDs` so the paywall and the entitlement check can never disagree about what "premium" means. The fetch is `async`, so you call it in a `.task` modifier, not in `onAppear`. And the sort is stable, because nothing breaks user trust faster than a paywall whose tier order shuffles between launches.
+
+Now, before we write the purchase flow, the test.
+
+---
+
+## Step 4 — The TDD red light: the entitlement contract test
+
+Essential Developer move: write the failing test first, then make it pass. The contract we care about is "if `Transaction.currentEntitlements` says the user owns the monthly product, `isPremium` is true." Everything else is implementation detail.
+
+`StoreKitTest` is the testing framework Apple ships for exactly this. You spin up an in-process `SKTestSession` against your `.storekit` file, buy products programmatically, and assert against your store.
+
+```swift
+import Testing
+import StoreKit
+import StoreKitTest
+@testable import App
+
+@Suite("PaywallStore entitlement contract")
+struct PaywallStoreTests {
+
+    @Test
+    func isPremiumIsFalseBeforeAnyPurchase() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let store = PaywallStore()
+        await store.refreshEntitlements()
+
+        #expect(store.isPremium == false)
+    }
+
+    @Test
+    func isPremiumFlipsTrueAfterMonthlyPurchase() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let store = PaywallStore()
+        await store.loadProducts()
+        let monthly = try #require(
+            store.products.first { $0.id == "app.example.pro.monthly" }
+        )
+
+        let result = try await monthly.purchase()
+        if case .success(let verification) = result,
+           case .verified(let transaction) = verification {
+            await transaction.finish()
+        }
+        await store.refreshEntitlements()
+
+        #expect(store.isPremium == true)
+    }
+}
+```
+
+Run this and both tests fail — the first because `refreshEntitlements()` does not exist yet, the second because `loadProducts()` is the only method we have. That is the red light. Now we make it green.
+
+---
+
+## Step 5 — `refreshEntitlements()` and the transaction listener
+
+Two methods. One walks the *current* set of entitled transactions on demand. The other starts a never-ending listener for the *future* asynchronous ones. You call the first on launch and after every purchase. You start the second once, on launch, and never stop it.
+
+```swift
+extension PaywallStore {
+
+    /// Walk the currently-entitled transactions and rebuild the local set.
+    /// Call on launch and after every successful purchase.
+    func refreshEntitlements() async {
+        var owned: Set<Product.ID> = []
+        for await result in Transaction.currentEntitlements {
+            guard case .verified(let transaction) = result else { continue }
+            // Skip refunded / expired entitlements explicitly. CurrentEntitlements
+            // already filters most of these but iOS 26.0 has a subtle window where
+            // a just-refunded transaction shows up here for ~30 seconds.
+            if transaction.revocationDate == nil,
+               transaction.isUpgraded == false {
+                owned.insert(transaction.productID)
+            }
+        }
+        entitledProductIDs = owned
+    }
+
+    /// Listen forever for asynchronous transactions:
+    /// - Ask to Buy approvals from a parent
+    /// - Family sharing changes
+    /// - Refunds
+    /// - Win-back redemptions (Day 16)
+    /// Start once, store the Task, cancel in deinit.
+    func startTransactionListener() {
+        updatesTask?.cancel()
+        updatesTask = Task.detached { [weak self] in
+            for await result in Transaction.updates {
+                guard case .verified(let transaction) = result else { continue }
+                await transaction.finish()
+                await self?.refreshEntitlements()
+            }
+        }
+    }
+}
+```
+
+The detail every homemade StoreKit implementation gets wrong is the listener. If you only refresh entitlements after a purchase you initiated, the user who got refunded yesterday will keep their premium features until they relaunch the app *and* you happen to refresh. With the listener wired up, the refund propagates within seconds. The same path catches the family-sharing parent who approved a kid's purchase three minutes after the kid tapped Buy.
+
+The `Task.detached` matters. The listener has to outlive any single view's lifetime, so it cannot be tied to a `.task` modifier on a paywall sheet that gets dismissed.
+
+---
+
+## Step 6 — The purchase method
+
+```swift
+extension PaywallStore {
+
+    enum PurchaseError: Error {
+        case productMissing
+        case unverified
+        case userCancelled
+        case pending
+    }
+
+    func purchase(_ product: Product) async throws {
+        let result = try await product.purchase()
+
+        switch result {
+        case .success(let verification):
+            switch verification {
+            case .verified(let transaction):
+                await transaction.finish()
+                await refreshEntitlements()
+            case .unverified:
+                throw PurchaseError.unverified
+            }
+        case .userCancelled:
+            throw PurchaseError.userCancelled
+        case .pending:
+            // Ask to Buy / SCA — the listener will pick it up when the parent approves.
+            throw PurchaseError.pending
+        @unknown default:
+            throw PurchaseError.unverified
+        }
+    }
+}
+```
+
+The `case .pending` branch is the one beginners drop. When a kid in a family sharing setup taps Buy, the purchase sits in a pending state until a parent approves. Your UI needs to know — "we sent the request, watch your screen for the approval prompt" — and then the listener does the rest when the parent says yes. If you don't handle pending, your paywall just looks broken to half the families on iOS.
+
+Now run the tests again. Both pass. Green light.
+
+---
+
+## Step 7 — The SwiftUI paywall
+
+The view is almost embarrassingly small.
+
+```swift
+import SwiftUI
+import StoreKit
+
+struct PaywallView: View {
+    @Environment(PaywallStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var purchasing = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("Unlock Pro")
+                .font(.largeTitle.bold())
+
+            Text("Everything in Free, plus the things you actually came for.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+
+            ForEach(store.products) { product in
+                Button {
+                    Task { await buy(product) }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(product.displayName).font(.headline)
+                            Text(product.description).font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(product.displayPrice).font(.headline.monospacedDigit())
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(purchasing)
+            }
+
+            Button("Restore Purchases") {
+                Task { await restore() }
+            }
+            .font(.footnote)
+            .disabled(purchasing)
+
+            if let error {
+                Text(error).font(.footnote).foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .task {
+            await store.loadProducts()
+            await store.refreshEntitlements()
+        }
+    }
+
+    private func buy(_ product: Product) async {
+        purchasing = true
+        defer { purchasing = false }
+        do {
+            try await store.purchase(product)
+            if store.isPremium { dismiss() }
+        } catch PaywallStore.PurchaseError.userCancelled {
+            // Quiet — the user changed their mind, don't shame them.
+        } catch PaywallStore.PurchaseError.pending {
+            error = "Waiting for approval. We'll unlock as soon as it's confirmed."
+        } catch {
+            self.error = "Something went wrong. Please try again."
+        }
+    }
+
+    private func restore() async {
+        purchasing = true
+        defer { purchasing = false }
+        try? await AppStore.sync()
+        await store.refreshEntitlements()
+        if !store.isPremium {
+            error = "We didn't find any active subscription on this Apple ID."
+        }
+    }
+}
+```
+
+Two notes. **`AppStore.sync()`** is the official restore-purchases call in StoreKit 2 — it is a single line, it triggers an Apple ID re-auth if needed, and after it returns you re-walk `Transaction.currentEntitlements`. Forget every old `restoreCompletedTransactions` API; you do not need it. And the empty restore case has a real human message — not "no purchases found," which makes the user feel accused, but a sentence that explains what was checked.
+
+---
+
+## Step 8 — Wire it up in your `@main`
+
+```swift
+@main
+struct ExampleApp: App {
+    @State private var paywallStore = PaywallStore()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(paywallStore)
+                .task {
+                    paywallStore.startTransactionListener()
+                    await paywallStore.refreshEntitlements()
+                }
+        }
+    }
+}
+```
+
+The order is deliberate. Listener first — so if a transaction comes in during the entitlement refresh, you don't miss it. Refresh second — so the UI on first paint already knows whether to show the paywall.
+
+Anywhere in the app:
+
+```swift
+struct ProFeatureGate<Content: View>: View {
+    @Environment(PaywallStore.self) private var store
+    @State private var showingPaywall = false
+    let content: () -> Content
+
+    var body: some View {
+        if store.isPremium {
+            content()
+        } else {
+            Button("Unlock Pro") { showingPaywall = true }
+                .sheet(isPresented: $showingPaywall) { PaywallView() }
+        }
+    }
+}
+```
+
+That is the entire surface area of "is this user paying?" in the rest of the codebase. One environment object, one boolean.
+
+---
+
+## A real-life analogy that helped me explain this to a friend
+
+The friend who asked me about RevenueCat is a designer. He follows iOS dev podcasts at the gym and absorbed the idea, somewhere along the way, that "doing your own StoreKit" was like rolling your own crypto.
+
+I told him: it used to be. StoreKit 1 was the framework where you parsed receipts manually, validated them against an Apple endpoint that returned different shapes depending on the moon phase, and shipped a bug to production every time iOS got a major version bump. Doing that yourself was insane.
+
+StoreKit 2 is more like Apple Pay. The hard parts — receipt parsing, JWS verification, transaction lifecycle — are inside the framework, and what you write is the small wrapper that says "okay, but in *my* app, premium means this set of products and the gate looks like that." The wrapper is not the dangerous part. The wrapper is the part nobody else can write for you anyway.
+
+If you are at the scale where the analytics, the cohort segmentation, and the experimentation matter more than the integration, by all means use the SDK. For the first ten thousand subscribers, the wrapper above is enough.
+
+---
+
+## What I actually do on Monday morning
+
+If I'm starting a new app: I add the `.storekit` file before the second screen is built. Cheap insurance against postponing monetization until the codebase is too big to retrofit cleanly.
+
+If I'm adding a paywall to an existing app: I copy the `PaywallStore` above, swap the product IDs, and ship the entitlement contract test from step 4 in the same PR. The test catches the most common regression — somebody changes the product ID in one place and forgets the other.
+
+If I'm wondering whether to reach for RevenueCat: I check whether I actually need cross-platform receipts (Android subscriptions managed alongside iOS), real cohorted experiments on paywall variants, or churn analytics I would otherwise have to build. If the answer is no to all three, the wrapper above wins on cost and on lines of code I have to maintain.
+
+---
+
+## Where this connects back
+
+- [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) — the `@StateObject` init-cost gotcha that pairs badly with paywall stores built in view init. Build it once at `@main`, hand it down with `.environment`.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — where `@Environment(PaywallStore.self)` lives in the wrapper map.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) — why `@Observable` matters for a paywall store specifically: views that only read `isPremium` don't re-render when `products` updates.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) — the SwiftData migration tests are the same shape as the StoreKit contract test. Both are "I never want to find this out from a one-star review."
+
+If you want this written up the long way — with a real app, a `.storekit` file in the repo, a tested `PaywallStore`, and a feature gate composed at the root — that's the [SwiftUI Foundations](/learn/swiftui-foundations) (lesson on app composition), [SwiftUI in Practice](/learn/swiftui-in-practice) (the paywall lesson), and [SwiftUI at Scale](/learn/swiftui-at-scale) (composition root for paid features that stays testable) sequence on the learn page. The contract test from step 4 lives in the in-practice lesson as a recurring tool — you reach for it on every product ID change.
+
+The TL;DR on a sticky note: **`Product.products(for:)`, `Transaction.currentEntitlements`, `Transaction.updates`, `AppStore.sync()`. Four APIs, one `@Observable` store, one boolean for the rest of your app. Test the contract before you ship. RevenueCat is not the wrong choice — it's just not the only one.**
+
+---
+
+**Tomorrow (Day 16):** StoreKit 2 part 2 — free trials, intro offers, win-back offers, and promo codes. The App Store Connect configuration plus the Swift code, including the win-back redemption path most indie apps don't realize is leaving money on the table.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for app composition, [SwiftUI in Practice](/learn/swiftui-in-practice) for the paywall lesson, [SwiftUI at Scale](/learn/swiftui-at-scale) for the composition-root pattern that keeps paid features testable in a real app.*
