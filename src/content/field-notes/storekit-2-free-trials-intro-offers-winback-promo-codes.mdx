@@ -1,0 +1,344 @@
+---
+title: "StoreKit 2 — Free Trials, Intro Offers, Win-Back, and Promo Codes (The Money Indies Leave on the Table)"
+description: "Day 16 of 30. The four StoreKit 2 offer types every indie app should ship — App Store Connect configuration plus the Swift code that handles eligibility, redemption, and the win-back path most apps never wire up. Part 2 of a 3-post StoreKit 2 series."
+pubDate: 2026-05-11
+topics: ["StoreKit 2", "Subscriptions", "Free Trial", "Intro Offer", "Win-Back Offer", "Promo Codes", "iOS 26", "SwiftUI", "Swift Testing", "Monetization"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1565514020179-026b92b84bb6?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A booklet of paper tickets fanned out — a visual stand-in for the four kinds of offers StoreKit 2 lets you hand to a prospective subscriber. Photo by Erik Mclean on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - StoreKit 2 free trial tutorial 2026
+  - StoreKit 2 intro offer Swift
+  - StoreKit 2 win-back offer redemption
+  - StoreKit 2 promo code iOS 26
+  - App Store Connect subscription offer configuration
+  - isEligibleForIntroOffer StoreKit 2
+  - SubscriptionStoreView win-back
+  - StoreKit 2 PromotionalOffer code redemption
+  - iOS 26 subscription offer eligibility
+  - StoreKit 2 testing free trial
+
+  Internal linking strategy:
+  - /learn/field-notes/storekit-2-paywall-from-scratch — Day 15
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice — paywall lesson with offer eligibility
+  - /learn/swiftui-at-scale — composition root for paid features
+
+  External references:
+  - Apple StoreKit 2 docs (Product.SubscriptionOffer, SubscriptionInfo.RenewalInfo)
+  - WWDC 2024 "What's new in StoreKit and StoreKit Test"
+  - App Store Server API workflow (covered in Day 17)
+*/}
+
+Yesterday I shipped [the smallest working StoreKit 2 paywall](/learn/field-notes/storekit-2-paywall-from-scratch). One product, one boolean, one contract test. A friend read it last night and replied with two lines on iMessage: *"okay but what about the free trial. and the discount you ping people with when they cancel."*
+
+That is today's post.
+
+This is Day 16 of [the 30-day series](/learn/field-notes), part two of three on StoreKit 2. [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch) was the bare-bones paywall. [Day 17](/learn/field-notes) is server-side receipt validation with the App Store Server API. Today is the bit between — the four offer types that most indie apps know about, but only half of them actually wire up. Free trials. Introductory offers. Win-back offers. Promo codes.
+
+I will tell you the ones that move the needle on my own apps, the ones that look great in conference slides but rarely earn back the integration time, and the eligibility traps that turn a beautiful banner into a `PurchaseError` at 11pm on a Saturday.
+
+---
+
+## A quick map before we touch any code
+
+There are, broadly, **four ways Apple lets you discount a subscription** through StoreKit 2 in 2026:
+
+1. **Introductory offer** — a one-time perk for *new* subscribers to a subscription group. The classic "7 days free" or "first month at $0.99". Configured in App Store Connect under the subscription's *Introductory Offers* tab.
+2. **Promotional offer** — a *signed* offer for *existing or lapsed* subscribers that you target via your backend. Requires a signing key.
+3. **Win-back offer** — newer than the other two. Apple shows it automatically to users who cancelled, both in your app *and on the App Store product page itself.* Configured entirely in App Store Connect; no backend signing required.
+4. **Promo code** — a string a user pastes into App Store → Redeem, or that the user redeems via `SKPaymentQueue.presentCodeRedemptionSheet()` (UIKit) / the newer `offerCodeRedemption` SwiftUI scene. Free or discounted; generated in App Store Connect, ~150 per quarter cap.
+
+Free trial is **not** a fifth type. It is just an introductory offer with type *Free*. Apple's docs are confusing on this — the UI shows "Free Trial" as if it were a separate category, but at the StoreKit level it is one entry in the `Product.SubscriptionOffer` array with `paymentMode == .freeTrial`. We will treat it that way.
+
+The two that almost every indie ships are intro offers (free trials) and win-back. The two most indies *skip* are promotional offers (because the signing dance is annoying without a backend) and promo codes (because they forget they exist). We are going to ship intro offers and win-back today, and I will show you how to redeem a promo code in three lines so you have no excuse next launch.
+
+---
+
+## Step 1 — The `.storekit` configuration, expanded
+
+Open the `Products.storekit` file from [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch). Select the `Pro Monthly` product. There are two tabs you will live in:
+
+- **Introductory Offers** → click **+**.
+  - **Reference Name**: `Pro Monthly — 7 Day Free Trial`
+  - **Type**: *Free*
+  - **Duration**: 1 Week
+  - **Eligibility**: *New subscribers* (default; see the trap below)
+- **Win-Back Offers** → click **+**.
+  - **Reference Name**: `Pro Monthly — Win-Back 50% Off for 2 Months`
+  - **Type**: *Pay As You Go*
+  - **Discount**: 50% off ($2.49)
+  - **Duration**: 2 Months
+  - **Customer Eligibility**: *Previous subscribers who churned 7+ days ago* (you can also leave eligibility broad while testing — the simulator does not enforce the "7+ days ago" criterion, only production does)
+
+The point of doing this in the `.storekit` file first is that you can iterate locally without any App Store Connect round trip. When you submit, you will configure the identically-named offers in App Store Connect — the reference names are how Apple ties the simulator config to the production config later.
+
+**The eligibility trap.** *New subscribers* in App Store Connect language means "Apple ID that has never been subscribed to *any product in this subscription group.*" Not "this product." Not "for the last year." Ever. If your group has two products (monthly + yearly) and a user once tried the yearly for a week three years ago, they are no longer eligible for the monthly's free trial. This is correct behavior, but it surprises people every single time, and your support inbox will reflect that.
+
+---
+
+## Step 2 — The TDD red light: eligibility contract
+
+Same Essential Developer move as yesterday. Write the failing test first. The contract today is *"if the user has never subscribed to this group, `freeTrialOffer(for:)` returns a non-nil offer."*
+
+```swift
+import Testing
+import StoreKit
+import StoreKitTest
+@testable import App
+
+@Suite("PaywallStore — offers and eligibility")
+struct PaywallOffersTests {
+
+    @Test
+    func freeTrialOfferIsExposedForNewSubscriber() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let store = PaywallStore()
+        await store.loadProducts()
+
+        let monthly = try #require(
+            store.products.first { $0.id == "app.example.pro.monthly" }
+        )
+
+        let trial = store.freeTrialOffer(for: monthly)
+        #expect(trial != nil)
+        #expect(trial?.paymentMode == .freeTrial)
+        #expect(trial?.period.unit == .week)
+    }
+
+    @Test
+    func freeTrialOfferIsNilForReturningSubscriber() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let store = PaywallStore()
+        await store.loadProducts()
+        let monthly = try #require(
+            store.products.first { $0.id == "app.example.pro.monthly" }
+        )
+
+        // Simulate a prior subscription in the same group.
+        _ = try await session.buyProduct(identifier: monthly.id)
+        await store.refreshEntitlements()
+
+        let trial = store.freeTrialOffer(for: monthly)
+        #expect(trial == nil)
+    }
+}
+```
+
+Both tests fail — there is no `freeTrialOffer(for:)` on `PaywallStore` yet. Red light. Let's make it green.
+
+---
+
+## Step 3 — Expose the free-trial offer with proper eligibility
+
+Most apps make this two-line mistake: they read `product.subscription?.introductoryOffer` and slap "7 days free" on the button. That is wrong, because `introductoryOffer` returns the offer *configured for the product*, not whether *this Apple ID is eligible to use it.* The two diverge the moment the user has any history in the subscription group.
+
+The right call is `Product.SubscriptionInfo.isEligibleForIntroOffer`. It is async, and it is per-product.
+
+Add this to `PaywallStore` (continuing from [yesterday's file](/learn/field-notes/storekit-2-paywall-from-scratch)):
+
+```swift
+extension PaywallStore {
+
+    /// Cache of "is this Apple ID eligible for the intro offer on each product?"
+    /// Re-populated on launch and after every transaction update.
+    private(set) var introEligibility: [Product.ID: Bool] = [:]
+
+    /// Returns the free-trial offer for `product` if and only if the current
+    /// Apple ID is eligible for it. Otherwise nil — show full price.
+    func freeTrialOffer(for product: Product) -> Product.SubscriptionOffer? {
+        guard introEligibility[product.id] == true,
+              let intro = product.subscription?.introductoryOffer,
+              intro.paymentMode == .freeTrial else {
+            return nil
+        }
+        return intro
+    }
+
+    func refreshIntroEligibility() async {
+        var next: [Product.ID: Bool] = [:]
+        for product in products {
+            guard let info = product.subscription else { continue }
+            next[product.id] = await info.isEligibleForIntroOffer
+        }
+        introEligibility = next
+    }
+}
+```
+
+Then update the launch sequence so eligibility is computed alongside entitlements:
+
+```swift
+// In ExampleApp.task
+paywallStore.startTransactionListener()
+await paywallStore.loadProducts()
+await paywallStore.refreshEntitlements()
+await paywallStore.refreshIntroEligibility()
+```
+
+And inside `startTransactionListener()` from [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch), call `refreshIntroEligibility()` after each `refreshEntitlements()` — because the moment a user buys, their eligibility for the trial on the same group flips to false, and a stale cache makes the paywall lie to them. Bigger problem than it sounds when the user comes back from a refund.
+
+Run the tests. Both pass. Green light.
+
+---
+
+## Step 4 — The win-back offer (the part most indies skip)
+
+Win-back offers are the StoreKit 2 feature with the **best ROI-to-effort ratio I have seen in three years.** They are configured entirely in App Store Connect, they show up on the *App Store product page* of your app to lapsed subscribers automatically (which is a marketing slot you previously could not buy), and they require zero signing, zero backend, zero JWS.
+
+In Xcode 26, `Product.SubscriptionInfo` exposes a `winBackOffers` array. From iOS 18+, you can purchase one by passing a `Product.PurchaseOption.winBackOffer(...)` into `purchase()`, and the system handles the eligibility check, the redemption sheet, and the entitlement update.
+
+```swift
+extension PaywallStore {
+
+    /// First win-back offer this user is eligible for on `product`, or nil.
+    func winBackOffer(for product: Product) async -> Product.SubscriptionOffer? {
+        guard let info = product.subscription else { return nil }
+        // From iOS 18+, eligibility is filtered server-side; the array is
+        // already trimmed to offers this Apple ID can redeem.
+        return info.winBackOffers.first
+    }
+
+    func purchaseWithWinBack(_ product: Product,
+                             offer: Product.SubscriptionOffer) async throws {
+        let result = try await product.purchase(options: [
+            .winBackOffer(id: offer.id)
+        ])
+        try await handlePurchaseResult(result)
+    }
+
+    private func handlePurchaseResult(_ result: Product.PurchaseResult) async throws {
+        switch result {
+        case .success(let verification):
+            switch verification {
+            case .verified(let transaction):
+                await transaction.finish()
+                await refreshEntitlements()
+                await refreshIntroEligibility()
+            case .unverified:
+                throw PurchaseError.unverified
+            }
+        case .userCancelled:
+            throw PurchaseError.userCancelled
+        case .pending:
+            throw PurchaseError.pending
+        @unknown default:
+            throw PurchaseError.unverified
+        }
+    }
+}
+```
+
+`handlePurchaseResult` is shared between the regular `purchase(_:)` from Day 15 and `purchaseWithWinBack(_:offer:)` — pull the body out, keep the policy in one place.
+
+Add a banner to the paywall that only shows when a win-back is available:
+
+```swift
+if let winBack = winBackOffer {
+    Button {
+        Task { await buyWithWinBack(winBack) }
+    } label: {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Welcome back — 50% off for 2 months").font(.headline)
+            Text("We hate to lose you. Here's a thank-you for trying us again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .buttonStyle(.borderedProminent)
+    .tint(.green)
+}
+```
+
+`winBackOffer` is a `@State` you load in the `.task` modifier of the paywall by calling `store.winBackOffer(for: monthly)`. If it returns non-nil, you show the banner. If it returns nil, the banner stays hidden and the user sees a normal paywall.
+
+**Why I called this the best ROI feature**: the same offer also shows up on your *App Store product page* for the same lapsed user, without you doing anything. Apple uses the App Store Connect configuration to render a "Welcome back — 50% off for 2 months" pill on the page. You did not buy that placement. You did not negotiate it. It is just there, and it is yours.
+
+---
+
+## Step 5 — Promo codes, in three lines
+
+Promo codes are the one I forgot existed for a year because I never used them in my first three apps. Then a tester emailed and asked for one, I shrugged, generated 5 in App Store Connect, and watched two of them get redeemed into paid customers the same week.
+
+The redemption surface in SwiftUI is one modifier:
+
+```swift
+import SwiftUI
+import StoreKit
+
+struct PaywallView: View {
+    @State private var showingRedemption = false
+
+    var body: some View {
+        VStack {
+            // ...your paywall...
+            Button("Have a code?") { showingRedemption = true }
+                .font(.footnote)
+        }
+        .offerCodeRedemption(isPresented: $showingRedemption) { result in
+            // The result is a `Result<Void, Error>`. Apple already handled
+            // the entitlement; just refresh ours so the UI catches up.
+            Task { await store.refreshEntitlements() }
+        }
+    }
+}
+```
+
+That is it. Three lines plus a button. The user pastes the code, Apple verifies it, the transaction lands in `Transaction.updates` (the listener you wired up [yesterday](/learn/field-notes/storekit-2-paywall-from-scratch)), and your UI flips to premium. No extra plumbing.
+
+App Store Connect gives you 150 codes per quarter per product. Use them for journalists, beta testers, support escalations, and your most engaged free users. They convert at multiples of normal paywall traffic.
+
+---
+
+## A real-life analogy: the four offers as four kinds of free coffee
+
+The way I explained this to my friend on iMessage last night is the way I think about it.
+
+- **Intro offer / free trial** = the first cup is on the house when you walk into a new café. It is a one-time thing. They will not give you a second free first cup, ever.
+- **Win-back offer** = the café you used to go to, who saw you stopped coming, sticks a "50% off your next three drinks" coupon under your windshield wiper. It costs them nothing to print. It pulls you back in for a fraction of the cost of acquiring a new customer.
+- **Promotional offer** = the same café texting your phone, individually, with a custom discount because *they* decided you are worth winning back. Requires the café to have your number (your backend, with a signing key) and to know who you are (your user ID mapping). Powerful, but heavier.
+- **Promo code** = a paper voucher they hand you at a trade show. Anyone can redeem it; you printed a fixed number.
+
+The first three pull from the *same* lapsed-user well. The fourth is a separate hand-out channel. You can ship all four; you can also ship just two (intro + win-back) and capture 90% of the lift with 30% of the integration cost. For my own apps, that is the line I draw.
+
+---
+
+## What I actually do on launch day
+
+If I'm shipping a new app, I configure **intro offer (7-day free trial)** and **two win-back offers** (one at 30 days post-churn, one at 90 days post-churn) before submission. Both are configured in `.storekit` for local development, and mirrored in App Store Connect before review. Promo codes I keep in my back pocket for support and PR.
+
+I skip promotional offers until I have a backend (covered in [Day 17](/learn/field-notes), which is server-side receipt validation and is the prerequisite for ever signing a promotional offer). Adding a signing key, a per-user offer ID, and a `PurchaseOption.promotionalOffer` flow before you even have a backend is over-engineering yourself into a corner you never needed to enter.
+
+The order matters: paywall first, intro offer + win-back second, server validation + promotional offers third. Each layer earns its keep before the next one shows up.
+
+---
+
+## Where this connects back
+
+- [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch) — the base `PaywallStore` this post extends. If you have not built it, start there; this post stacks directly on top.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) — why the `introEligibility` dictionary on `@Observable` does not cause unrelated re-renders. SwiftUI views that only read `isPremium` are untouched when the eligibility cache changes.
+- [Day 11](/learn/field-notes/state-vs-stateobject-autoclosure-init-cost) — same reason `PaywallStore` lives at `@main`, not in the paywall view init. The store has to outlive every paywall mount, because the transaction listener catches refunds while no paywall is on screen.
+
+The long-form companions on the [Learn](/learn) page carry this further. [SwiftUI Foundations](/learn/swiftui-foundations) covers where the paywall store sits in app composition. The paywall lesson in [SwiftUI in Practice](/learn/swiftui-in-practice) walks the eligibility/refresh flow with a tested example. [SwiftUI at Scale](/learn/swiftui-at-scale) shows the composition-root pattern that keeps paid features testable when you add a second tier (monthly + yearly + lifetime) and the eligibility logic gets non-trivial.
+
+The TL;DR on a sticky note: **`isEligibleForIntroOffer` not `introductoryOffer`. `winBackOffers` is free real estate. `offerCodeRedemption` is three lines. Promotional offers wait for a backend. Configure in `.storekit`, mirror in App Store Connect, test the eligibility contract before you ship.**
+
+---
+
+**Tomorrow (Day 17):** StoreKit 2 part 3 — server-side receipt validation with the App Store Server API, including the Cloudflare Workers shape for indies who don't run a backend, and why you should never trust the client even when the framework looks like it already verified everything.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for app composition, [SwiftUI in Practice](/learn/swiftui-in-practice) for the paywall + eligibility lesson, [SwiftUI at Scale](/learn/swiftui-at-scale) for the composition-root pattern that keeps paid features testable.*
