@@ -1,0 +1,476 @@
+---
+title: "Server-Side Receipt Validation in 2026: The App Store Server API Without a Backend Team"
+description: "Day 17 of 30. The third and final part of the StoreKit 2 series — why client-side verification is not enough, the App Store Server API JWS flow, and the smallest Cloudflare Workers shape that gives a solo indie real server-side validation without standing up a backend team."
+pubDate: 2026-05-12
+topics: ["StoreKit 2", "App Store Server API", "Receipt Validation", "Cloudflare Workers", "JWS", "Server Notifications", "iOS 26", "Swift", "Vapor", "Monetization", "Security"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1554224155-6726b3ff858f?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of a printed paper receipt curling on a wooden table — the analog version of the JWS-signed transaction your server actually trusts. Photo by Michael Walter on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - StoreKit 2 server-side receipt validation 2026
+  - App Store Server API tutorial Swift
+  - JWS verification iOS subscription
+  - Cloudflare Workers App Store Server API
+  - App Store Server Notifications V2
+  - StoreKit 2 verify transaction backend
+  - signedTransactionInfo JWS Apple
+  - iOS 26 receipt validation server
+  - App Store Server Library Swift
+  - indie developer subscription validation
+
+  Internal linking strategy:
+  - /learn/field-notes/storekit-2-free-trials-intro-offers-winback-promo-codes — Day 16
+  - /learn/field-notes/storekit-2-paywall-from-scratch — Day 15
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice — paywall lesson
+  - /learn/swiftui-at-scale — composition root for paid features
+
+  External references:
+  - Apple App Store Server API docs (getTransactionInfo, getSubscriptionStatuses)
+  - App Store Server Notifications V2 spec
+  - Apple App Store Server Library (Swift, Node, Python, Java)
+  - WWDC 2024 "What's new in StoreKit and StoreKit Test"
+*/}
+
+There is a quiet, awful Sunday morning in every indie developer's life. You open the App Store Connect dashboard with your coffee, and the subscriber number is suspiciously high. You scroll into the transactions detail — and a third of them are pending, refunded, or chargeback. Half of those users still have premium unlocked in your app because *your code never noticed.*
+
+This is the post about why that happens, and the smallest possible fix.
+
+This is Day 17 of [the 30-day iOS development series](/learn/field-notes), and the final part of the three-post StoreKit 2 arc. [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch) was the bare-bones paywall. [Day 16](/learn/field-notes/storekit-2-free-trials-intro-offers-winback-promo-codes) was free trials, win-back, and promo codes. Today is server-side validation with the **App Store Server API**, and I will keep this honest — most indies do not need a Kubernetes cluster, a microservice mesh, or a Vapor app on Linode. They need about 80 lines of TypeScript on Cloudflare Workers, two App Store Connect keys, and a webhook URL. That is the entire backend.
+
+I'll show you the why, the contract test that drove me to do it in the first place, and the deployable shape I run for my own apps.
+
+---
+
+## Why the client cannot be trusted (yes, even in 2026)
+
+StoreKit 2 looks reassuring. The framework hands you a `VerificationResult<Transaction>` that already does *cryptographic* verification of the JWS. You check `.verified`, you call `transaction.finish()`, you flip your `isPremium` flag. Done. Right?
+
+Not quite. Here is what the local verification does and does not give you:
+
+- ✅ The transaction payload was signed by Apple. Nobody has tampered with the bytes.
+- ❌ The transaction is **still valid right now**. Refunds, family-sharing revokes, billing failures, and Ask-to-Buy denials all happen *after* the transaction was originally signed.
+- ❌ The user did not jailbreak their device, swap out the StoreKit framework, and feed your app a perfectly-signed *test* transaction from someone else's purchase.
+- ❌ The same Apple ID does not already have an entitlement on three other devices that you would want to count against a per-account limit.
+
+The fraud case is real but rare. The refund case is the one that gets everybody. I once shipped a non-trivial Q3 of free service to users who had already chargebacked because my `Transaction.updates` listener depended on the app being open in the background, and the iOS background time budget kept skipping the update. The fix is a server you trust, and a webhook from Apple that tells that server the moment a transaction changes state.
+
+The phrase "verify on the server" used to mean "post the base64 receipt to `verifyReceipt`." That endpoint still works in 2026, but Apple has been pushing everyone to the **App Store Server API** for over two years. It is the only thing that gets new features now — refund lookups, subscription history per Apple ID, send-test-notification, the whole `getAllSubscriptionStatuses` flow. The old `verifyReceipt` is deprecated in spirit if not yet in code, and any new code should ignore it.
+
+---
+
+## A real-life analogy: the bouncer at the door
+
+Imagine a club with a strict guest list.
+
+- The wristband from the front entrance is the *signed JWS* from StoreKit 2. It proves you came in tonight.
+- The bouncer who walks around at 1am, checking wristbands against a *live list of who has been kicked out since they got in*, is the App Store Server API.
+- The walkie-talkie call from the front desk saying "table 12 got refunded, revoke their wristband" is a **Server Notification V2.**
+
+Without the bouncer, the wristband is honored forever. Without the walkie-talkie, the bouncer has to check every five seconds. With both, the system is calm: most users keep their wristband, the few who shouldn't get caught fast, and the front of the room is not where you spend energy.
+
+We are going to build the bouncer and the walkie-talkie.
+
+---
+
+## What we are shipping today
+
+Three things, all of which compose with the [Day 15 PaywallStore](/learn/field-notes/storekit-2-paywall-from-scratch):
+
+1. A `EntitlementSync` actor in Swift that, on every transaction update, sends the JWS to *our* server for a second opinion before flipping `isPremium`. Includes the TDD contract.
+2. An ~80-line Cloudflare Worker that takes that JWS, calls Apple's `getTransactionInfo` endpoint, verifies the signature, and returns a clean `EntitlementVerdict` to the app.
+3. A *second* route on the same Worker that receives App Store Server Notifications V2 and writes the latest known state to KV, so when the app asks "is user X still premium?" we don't always need a round trip to Apple.
+
+We are not building a database, a user system, or analytics. The user identifier is Apple's `appAccountToken` (a UUID you generate per user and pass into `purchase(options:)`), and the store of truth is Apple. KV is just a cache.
+
+---
+
+## Step 1 — The TDD red light: entitlement contract
+
+Same Essential Developer move as the last two posts. The behavior I want to lock in is *"a verified local transaction does not flip `isPremium` until the server confirms it is still valid."* Write the failing test first.
+
+```swift
+import Testing
+import StoreKit
+import StoreKitTest
+@testable import App
+
+@Suite("EntitlementSync — server agrees before isPremium flips")
+struct EntitlementSyncTests {
+
+    @Test
+    func localVerifiedTransactionDoesNotFlipPremiumWithoutServer() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let stubServer = StubEntitlementServer(nextVerdict: .pending)
+        let store = PaywallStore()
+        let sync = EntitlementSync(server: stubServer, store: store)
+        await store.loadProducts()
+
+        let monthly = try #require(
+            store.products.first { $0.id == "app.example.pro.monthly" }
+        )
+
+        _ = try await session.buyProduct(identifier: monthly.id)
+        await sync.processPendingUpdates()
+
+        #expect(store.isPremium == false)
+        #expect(stubServer.callCount == 1)
+    }
+
+    @Test
+    func serverActiveVerdictFlipsPremiumOn() async throws {
+        let session = try SKTestSession(configurationFileNamed: "Products")
+        session.resetToDefaultState()
+        session.disableDialogs = true
+
+        let stubServer = StubEntitlementServer(nextVerdict: .active(expires: .distantFuture))
+        let store = PaywallStore()
+        let sync = EntitlementSync(server: stubServer, store: store)
+        await store.loadProducts()
+        let monthly = try #require(
+            store.products.first { $0.id == "app.example.pro.monthly" }
+        )
+
+        _ = try await session.buyProduct(identifier: monthly.id)
+        await sync.processPendingUpdates()
+
+        #expect(store.isPremium == true)
+    }
+
+    @Test
+    func serverRevokedVerdictFlipsPremiumOff() async throws {
+        // Simulate: user was premium, then refunded.
+        let stubServer = StubEntitlementServer(nextVerdict: .revoked)
+        let store = PaywallStore()
+        store.isPremium = true
+        let sync = EntitlementSync(server: stubServer, store: store)
+
+        await sync.reconcile(transactionID: 1234)
+
+        #expect(store.isPremium == false)
+    }
+}
+```
+
+The three tests fail — none of `EntitlementSync`, `StubEntitlementServer`, or `EntitlementVerdict` exist yet. Red light. Let's make them green.
+
+---
+
+## Step 2 — The `EntitlementSync` actor on the Swift side
+
+The actor's job is one sentence: *take every JWS that StoreKit hands us, ask our server for a verdict, and update `PaywallStore.isPremium` accordingly.*
+
+```swift
+import Foundation
+import StoreKit
+
+enum EntitlementVerdict: Equatable, Sendable {
+    case active(expires: Date)
+    case revoked
+    case pending
+}
+
+protocol EntitlementServer: Sendable {
+    func verdict(forSignedTransaction jws: String) async throws -> EntitlementVerdict
+    func verdict(forTransactionID id: UInt64) async throws -> EntitlementVerdict
+}
+
+actor EntitlementSync {
+
+    private let server: EntitlementServer
+    private let store: PaywallStore
+    private var task: Task<Void, Never>?
+
+    init(server: EntitlementServer, store: PaywallStore) {
+        self.server = server
+        self.store = store
+    }
+
+    func start() {
+        guard task == nil else { return }
+        task = Task { [weak self] in
+            guard let self else { return }
+            for await update in Transaction.updates {
+                await self.handle(update)
+            }
+        }
+    }
+
+    /// Convenience for tests — drains whatever is already in the stream.
+    func processPendingUpdates() async {
+        for await update in Transaction.updates.prefix(1) {
+            await handle(update)
+        }
+    }
+
+    func reconcile(transactionID: UInt64) async {
+        do {
+            let verdict = try await server.verdict(forTransactionID: transactionID)
+            await apply(verdict)
+        } catch {
+            // Network failure: do NOT change isPremium. We keep the last
+            // known state until either the next update or the next launch.
+        }
+    }
+
+    private func handle(_ result: VerificationResult<Transaction>) async {
+        guard case .verified(let transaction) = result else { return }
+        let jws = result.jwsRepresentation
+        do {
+            let verdict = try await server.verdict(forSignedTransaction: jws)
+            await apply(verdict)
+            await transaction.finish()
+        } catch {
+            // Same policy as reconcile: failure is not a downgrade.
+        }
+    }
+
+    @MainActor
+    private func apply(_ verdict: EntitlementVerdict) async {
+        switch verdict {
+        case .active:
+            store.isPremium = true
+        case .revoked:
+            store.isPremium = false
+        case .pending:
+            break // do nothing; wait for the next notification
+        }
+    }
+}
+```
+
+Two things to call out:
+
+- **Network failure is not a downgrade.** If the server is unreachable, we leave `isPremium` as it was. The alternative is a premium user losing their feature flag every time their cellular signal hiccups, which is worse than the failure mode of a refunded user keeping access for an extra five minutes.
+- **`.pending` is silent on purpose.** Server Notifications V2 will tell us later. Forcing a state change on `pending` is what causes the "ghost subscriber" bug I described in the intro.
+
+The stub for tests:
+
+```swift
+final class StubEntitlementServer: EntitlementServer, @unchecked Sendable {
+    private(set) var callCount = 0
+    private let lock = NSLock()
+    var nextVerdict: EntitlementVerdict
+
+    init(nextVerdict: EntitlementVerdict) { self.nextVerdict = nextVerdict }
+
+    func verdict(forSignedTransaction jws: String) async throws -> EntitlementVerdict {
+        lock.withLock { callCount += 1 }
+        return nextVerdict
+    }
+    func verdict(forTransactionID id: UInt64) async throws -> EntitlementVerdict {
+        lock.withLock { callCount += 1 }
+        return nextVerdict
+    }
+}
+```
+
+Run the tests. All three pass. Green light.
+
+---
+
+## Step 3 — The Cloudflare Worker, in about 80 lines
+
+Cloudflare Workers cost zero dollars for indie traffic, deploy with one command, and give you a stable URL with TLS in 30 seconds. For a one-app indie this is a more honest "backend" than spinning up Vapor.
+
+You will need two things from App Store Connect first:
+
+1. An **App Store Server API key** — Users and Access → Integrations → App Store Server API → Generate Key. Note the *Key ID*, the *Issuer ID*, and download the `.p8`.
+2. The **bundle ID** of your app.
+
+These three values, plus the `.p8` contents, go into Cloudflare as secrets:
+
+```bash
+wrangler secret put APPLE_KEY_ID
+wrangler secret put APPLE_ISSUER_ID
+wrangler secret put APPLE_BUNDLE_ID
+wrangler secret put APPLE_P8_KEY    # paste contents of the .p8
+```
+
+Now the Worker itself. This is the deployable shape, with the boring parts elided:
+
+```ts
+import { decodeJwt, importPKCS8, SignJWT } from "jose";
+
+interface Env {
+  APPLE_KEY_ID: string;
+  APPLE_ISSUER_ID: string;
+  APPLE_BUNDLE_ID: string;
+  APPLE_P8_KEY: string;
+  ENTITLEMENTS: KVNamespace; // bound in wrangler.toml
+}
+
+const APPLE_HOST = "https://api.storekit.itunes.apple.com";
+
+async function appleBearerToken(env: Env): Promise<string> {
+  const pk = await importPKCS8(env.APPLE_P8_KEY, "ES256");
+  return await new SignJWT({ bid: env.APPLE_BUNDLE_ID })
+    .setProtectedHeader({ alg: "ES256", kid: env.APPLE_KEY_ID, typ: "JWT" })
+    .setIssuer(env.APPLE_ISSUER_ID)
+    .setIssuedAt()
+    .setExpirationTime("20m")
+    .setAudience("appstoreconnect-v1")
+    .sign(pk);
+}
+
+async function fetchTransactionInfo(env: Env, txID: string) {
+  const token = await appleBearerToken(env);
+  const res = await fetch(`${APPLE_HOST}/inApps/v1/transactions/${txID}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Apple returned ${res.status}`);
+  const { signedTransactionInfo } = await res.json<{ signedTransactionInfo: string }>();
+  return decodeJwt(signedTransactionInfo) as {
+    bundleId: string;
+    expiresDate?: number;
+    revocationDate?: number;
+    transactionId: string;
+    originalTransactionId: string;
+  };
+}
+
+function verdictOf(payload: Awaited<ReturnType<typeof fetchTransactionInfo>>) {
+  if (payload.revocationDate) return { kind: "revoked" };
+  if (payload.expiresDate && payload.expiresDate > Date.now()) {
+    return { kind: "active", expires: payload.expiresDate };
+  }
+  return { kind: "pending" };
+}
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+
+    if (req.method === "POST" && url.pathname === "/verify") {
+      const { jws } = await req.json<{ jws: string }>();
+      const claims = decodeJwt(jws) as { transactionId: string; bundleId: string };
+      if (claims.bundleId !== env.APPLE_BUNDLE_ID) {
+        return new Response("wrong bundle", { status: 401 });
+      }
+      const info = await fetchTransactionInfo(env, claims.transactionId);
+      const verdict = verdictOf(info);
+      await env.ENTITLEMENTS.put(info.originalTransactionId, JSON.stringify(verdict),
+        { expirationTtl: 60 * 60 * 24 });
+      return Response.json(verdict);
+    }
+
+    if (req.method === "POST" && url.pathname === "/apple-notifications") {
+      const { signedPayload } = await req.json<{ signedPayload: string }>();
+      const payload = decodeJwt(signedPayload) as {
+        data: { signedTransactionInfo: string };
+        notificationType: string;
+      };
+      const tx = decodeJwt(payload.data.signedTransactionInfo) as {
+        originalTransactionId: string;
+        revocationDate?: number;
+        expiresDate?: number;
+      };
+      const verdict = verdictOf(tx as never);
+      await env.ENTITLEMENTS.put(tx.originalTransactionId, JSON.stringify(verdict),
+        { expirationTtl: 60 * 60 * 24 });
+      return new Response("ok");
+    }
+
+    return new Response("not found", { status: 404 });
+  },
+};
+```
+
+This is deliberately the minimal shape. It does **not** verify the JWS signature against Apple's root cert chain — Apple does that for you when you hand the transaction back through `getTransactionInfo`, because that endpoint only returns data Apple itself signed. If you want belt-and-suspenders verification on the Worker side too, Apple ships an [App Store Server Library](https://github.com/apple/app-store-server-library-swift) (also in Node, Python, Java) that gives you `SignedDataVerifier` and does the chain validation in one call. For a solo indie, the trust-Apple's-response model is fine; for a fintech, use the library.
+
+Set the `/apple-notifications` URL on the App Store Connect side under **App → App Information → App Store Server Notifications → Production Server URL** (and a separate sandbox URL). Apple will retry for 72 hours on non-2xx responses, which is generous.
+
+---
+
+## Step 4 — Wiring the Worker into the app
+
+The `EntitlementServer` protocol you wrote in step 2 needs a real implementation:
+
+```swift
+struct RemoteEntitlementServer: EntitlementServer {
+    let baseURL: URL // e.g. https://entitlements.example.workers.dev
+    let session: URLSession = .shared
+
+    func verdict(forSignedTransaction jws: String) async throws -> EntitlementVerdict {
+        var req = URLRequest(url: baseURL.appending(path: "/verify"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["jws": jws])
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        return try decode(data)
+    }
+
+    func verdict(forTransactionID id: UInt64) async throws -> EntitlementVerdict {
+        // Same shape — the Worker reads from KV when called with just an ID,
+        // and falls through to Apple when the cache is cold. Left as an
+        // exercise; the dispatch is identical to /verify.
+        throw URLError(.unsupportedURL)
+    }
+
+    private func decode(_ data: Data) throws -> EntitlementVerdict {
+        struct Body: Decodable { let kind: String; let expires: TimeInterval? }
+        let body = try JSONDecoder().decode(Body.self, from: data)
+        switch body.kind {
+        case "active":
+            return .active(expires: Date(timeIntervalSince1970: (body.expires ?? 0) / 1000))
+        case "revoked":
+            return .revoked
+        default:
+            return .pending
+        }
+    }
+}
+```
+
+And the launch composition is one new line on top of [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch):
+
+```swift
+let server = RemoteEntitlementServer(baseURL: URL(string: "https://entitlements.example.workers.dev")!)
+let sync = EntitlementSync(server: server, store: paywallStore)
+await sync.start()
+```
+
+That's the integration. Three components: the actor on device, the Worker, and the Server Notifications webhook.
+
+---
+
+## What to *actually* skip on launch day, and what to ship
+
+The honest indie progression I run for my own apps:
+
+1. **Day-one launch:** ship the [Day 15 paywall](/learn/field-notes/storekit-2-paywall-from-scratch) only. No server. Yes, you will pay a small refund tax. Yes, it is fine.
+2. **First 1,000 paying users:** ship this post. The `/verify` route plus the `/apple-notifications` webhook. Refund handling becomes accurate within seconds.
+3. **Real revenue (let's say $5k MRR):** add a real database in front of KV, store subscription history per `appAccountToken`, start running the `getAllSubscriptionStatuses` endpoint nightly to reconcile. This is when you graduate from "Worker as a backend" to "Worker as the API gateway in front of a real backend."
+
+The mistake I see most often is jumping from step 1 to step 3 because someone read a thread on Hacker News about how their indie app could never possibly trust the client. They spend three months on a backend they did not need, ship features 30% slower, and by the time their refund rate would have mattered, they have already churned.
+
+Server validation is a *step*, not the *price of admission*.
+
+---
+
+## Where this connects back
+
+- [Day 16](/learn/field-notes/storekit-2-free-trials-intro-offers-winback-promo-codes) — promotional offers (the one offer type we skipped) require this server to sign offer payloads. With today's Worker shape, you can add a `/sign-offer` route next.
+- [Day 15](/learn/field-notes/storekit-2-paywall-from-scratch) — the local `PaywallStore` and `Transaction.updates` listener that this post composes on top of.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) — if you persist `isPremium` to SwiftData, the revoke path here is the one that has to land before the user opens another device. The CloudKit-sync timing gotchas there are the same shape as the entitlement-sync timing gotchas here.
+
+The long-form companions on the [Learn](/learn) page pick up where this leaves off. [SwiftUI Foundations](/learn/swiftui-foundations) covers where `EntitlementSync` and `PaywallStore` sit in app composition. The paywall lesson in [SwiftUI in Practice](/learn/swiftui-in-practice) walks the full client + server contract with stubs and recorded traffic. [SwiftUI at Scale](/learn/swiftui-at-scale) takes the composition-root pattern and shows how to swap the `EntitlementServer` between a local fake (unit tests), a recorded fixture (UI tests), and the real Worker (production) without touching any view code.
+
+The TL;DR on a sticky note: **Client verification is signature-only. Refunds, revokes, and family-share kicks all happen after that signature. The smallest honest fix is two routes on a Cloudflare Worker — `/verify` and `/apple-notifications` — talking to the App Store Server API. Network failure is never a downgrade. Apple's API is your source of truth; everything else is a cache.**
+
+---
+
+**Tomorrow (Day 18):** modular architecture with Swift Package Manager — when to split, when *not* to split, and the build-time threshold that flips the trade-off. The counter-argument to the modularization hype, with numbers.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companion: [SwiftUI Foundations](/learn/swiftui-foundations) for app composition, [SwiftUI in Practice](/learn/swiftui-in-practice) for the paywall + server lesson, [SwiftUI at Scale](/learn/swiftui-at-scale) for composition-root patterns that keep paid features testable.*
