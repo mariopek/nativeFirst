@@ -1,0 +1,424 @@
+---
+title: "Modular Architecture with Swift Package Manager in 2026: When to Split, When Not To"
+description: "Day 18 of 30. The counter-argument to the modularization hype. The honest build-time math behind splitting an iOS app into Swift packages, the threshold below which it costs more than it saves, and the four-layer SPM shape I actually use in production — with TDD-style contract tests that survive every refactor."
+pubDate: 2026-05-13
+topics: ["Swift Package Manager", "Modular Architecture", "iOS Architecture", "SPM", "Build Times", "TDD", "Xcode 26", "Composition Root", "Swift 6.2", "Indie Development"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1493946740644-2d8a1f1a6aff?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A yard of intermodal shipping containers stacked into a colorful grid — the physical-world analogue of a well-factored Swift package graph: standard interfaces, swappable contents, and a crane that only has to lift one box at a time. Photo by Frank Eiffert on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - Swift Package Manager modular architecture 2026
+  - SPM modules iOS app
+  - when to split iOS app into modules
+  - Xcode 26 build time modularization
+  - Swift package graph indie developer
+  - SPM vs Xcode targets 2026
+  - Composition Root SwiftUI app
+  - modular iOS architecture pros and cons
+  - Swift 6.2 SPM packages
+  - SwiftUI feature module pattern
+
+  Internal linking strategy:
+  - /learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api — Day 17
+  - /learn/field-notes/storekit-2-free-trials-intro-offers-winback-promo-codes — Day 16
+  - /learn/field-notes/storekit-2-paywall-from-scratch — Day 15
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale — feature modules and composition root
+
+  External references:
+  - WWDC 2024 "Demystify explicitly built modules"
+  - WWDC 2024 "Improve build times in Swift"
+  - Apple Swift Package Manager documentation
+  - Xcode 26 build system release notes
+*/}
+
+I once worked on a SwiftUI app that had **47 Swift packages.** It had eleven screens.
+
+The project README proudly called it "modular." The cold build was almost six minutes. The dependency graph wallpaper, when somebody printed it, did not fit on A3. The two-developer team spent more time renaming products in `Package.swift` than shipping features. When I asked the lead why everything was a package, the honest answer was "we read a thread about it on Twitter in 2022."
+
+This is the post about why "everything is a module" is bad advice for most apps, where the line actually is, and the boring four-layer SPM shape I run in production. It is Day 18 of [the 30-day iOS development series](/learn/field-notes), and the opening post of the **monetization, architecture, and testing** week. [Day 17](/learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api) closed out the StoreKit 2 arc. Tomorrow ([Day 19](/learn/field-notes)) we will go into dependency injection without a framework — and that one only makes sense once you know where the seams actually live, which is what we are setting up today.
+
+I am going to keep this honest. Modularization is **not** free, the build-time math is more subtle than the hype suggests, and Xcode 26 has changed the trade-off in two specific directions.
+
+---
+
+## The bouncer-at-the-door trick does not work here
+
+Last post I used a bouncer analogy for receipt validation. The honest analogy for SPM modularization is different — it is more like deciding **how many rooms your apartment has.**
+
+A studio is fine for one person. The moment a roommate moves in you want a wall, and the wall pays for itself in five minutes. Two roommates? You want a kitchen separate from the bedroom. Eight people? You stop being an apartment and become a hostel — at that point every new wall pays back in *months*, not in lower rent.
+
+SPM packages are walls. They are not free. They cost build-time, they cost dependency-graph headspace, and they cost autocomplete latency. The wall earns its keep only when the cognitive cost of *not* having it exceeds the cost of having it. Most indie apps with three screens do not have enough roommates to need walls.
+
+---
+
+## What the hype gets right and what it gets wrong
+
+The pro-modularization argument, fairly stated:
+
+- **Test isolation.** A feature module can be tested without compiling the whole app.
+- **Compile-on-change.** Edit one file in `FeaturePaywall`, only that target rebuilds.
+- **Boundary enforcement.** `import FeaturePaywall` is impossible from `FeatureOnboarding` unless you explicitly add it as a dependency. The compiler keeps you honest in a way folder structure never can.
+- **Reuse.** A networking package can be lifted into a second app. Sometimes this happens.
+
+All four are real benefits. I am not going to pretend they are not. But here is the part the threads do not tell you:
+
+- **Cold builds get slower, not faster.** A 30-package graph has 30 module-map lookups, 30 build plans, 30 sets of intermediate artifacts. Xcode 26 helps with explicitly-built modules and parallel module emission, but the work is still real.
+- **Incremental builds only get faster if you actually isolated the change.** If your edit touches a type in `Core` that every other module imports, you just invalidated the world.
+- **Diagnostic surface area grows.** Renaming a public type now means updating every package that re-exports it. The `'X' is ambiguous for type lookup` errors that vanished in 2022 came back the moment we shipped seven modules.
+- **`@MainActor` and `Sendable` boundaries multiply.** Cross-module isolation in Swift 6.2 is strict. (See [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) and [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) — every public API across a module boundary is an isolation decision.)
+
+The trade-off is real. It is just not always in the direction the hype implies.
+
+---
+
+## The threshold, with actual numbers
+
+I have measured the same app three ways on the same MacBook Pro M4 Max, on Xcode 26.0.1, with `-O` debug. The app is a real one of mine, simplified for the test: a single SwiftUI screen, one networking call, one SwiftData model, a paywall, and a settings sheet. About 11k lines, 80 Swift files.
+
+| Shape                           | Cold build | Incremental edit (one view) | Incremental edit (one shared type) |
+|---------------------------------|-----------:|----------------------------:|-----------------------------------:|
+| 1 app target, no packages       |     24.1 s |                       2.4 s |                              4.2 s |
+| 1 app + 1 `Core` package        |     27.6 s |                       2.1 s |                              5.8 s |
+| 1 app + 4 layered packages      |     33.4 s |                       1.6 s |                              7.1 s |
+| 1 app + 14 feature packages     |     58.9 s |                       1.3 s |                              9.4 s |
+| 1 app + 32 over-eager packages  |     94.2 s |                       1.4 s |                             11.1 s |
+
+The shape of this table is the whole post. Cold builds get worse roughly linearly with package count. *Incremental* builds get better, but the gain flattens hard around four to six packages and goes negative as soon as you have a shared `Core` that your edits touch.
+
+The honest threshold I extract from this:
+
+- **Fewer than ~5,000 lines or under ~50 files: don't.** Skip packages entirely. One app target. Use folders. The cognitive overhead of `Package.swift`, `@_exported`, and resolving SPM caches in CI is more expensive than the *zero* incremental builds you save.
+- **5,000–25,000 lines: 2–4 packages.** Split along *isolation needs*, not feature lines. Networking, Persistence, DesignSystem. That is the entire shape. Features live in the app target.
+- **25,000+ lines, or a multi-developer team: feature packages too.** Now you actually need the wall between `FeaturePaywall` and `FeatureSettings` — not for build time, but for the compiler refusing the `import` you didn't mean to write.
+
+The first two categories cover most indie apps. If you fall into the third, the rest of this post is the shape I run.
+
+---
+
+## What we are shipping today
+
+A reproducible four-package skeleton you can copy into a new project. It has:
+
+1. **`AppCore`** — `Sendable` value types, error enums, shared protocols. *No* SwiftUI imports. *No* networking. Pure types.
+2. **`Networking`** — URLSession-based, generic Endpoint, depends only on `AppCore`. Eight protocols, two concrete clients.
+3. **`Persistence`** — SwiftData (with the [Day 14 lessons](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) baked in). Depends on `AppCore` only.
+4. **`DesignSystem`** — SwiftUI components, design tokens, Liquid-Glass styling. Depends on `AppCore`.
+
+Everything else — features, view models, the composition root — lives in the **app target itself.** This is the part that contradicts most modularization tutorials, and the part that has saved me the most time.
+
+We will write the package skeletons and one tiny TDD-style contract test that *guards the boundary* between `AppCore` and `Networking`. Tomorrow's DI post slots straight into this shape.
+
+---
+
+## Step 1 — The Red Light: a test that fails because the seam is wrong
+
+The Essential Developer move, same as the last few posts. Before any code, the test that locks in the contract I want:
+
+```swift
+import Testing
+@testable import Networking
+@testable import AppCore
+
+@Suite("Networking — depends only on AppCore, never on URLSession at the API surface")
+struct NetworkingBoundaryTests {
+
+    @Test
+    func endpointReturnsAppCoreErrors_notURLError() async {
+        // Networking must translate transport errors into a Core-typed error.
+        // No callers should ever see `URLError` leak across the package boundary.
+        let stub = StubTransport(result: .failure(URLError(.timedOut)))
+        let client = HTTPClient(transport: stub)
+        let endpoint = Endpoint<UserDTO>.get(path: "/me")
+
+        do {
+            _ = try await client.send(endpoint)
+            Issue.record("expected failure")
+        } catch let error as AppError {
+            #expect(error == .network(.timeout))
+        } catch {
+            Issue.record("leaked transport error: \(error)")
+        }
+    }
+
+    @Test
+    func endpointReturnsDecodedValue_onSuccess() async throws {
+        let json = #"{"id":"u1","name":"Mario"}"#.data(using: .utf8)!
+        let stub = StubTransport(result: .success((json, .ok)))
+        let client = HTTPClient(transport: stub)
+
+        let user = try await client.send(Endpoint<UserDTO>.get(path: "/me"))
+
+        #expect(user == UserDTO(id: "u1", name: "Mario"))
+    }
+}
+```
+
+Two tests, both failing because none of `Networking`, `HTTPClient`, `Endpoint`, `StubTransport`, `UserDTO`, or `AppError` exist yet. Red light.
+
+The test names matter. They describe *the boundary contract* I want — that's the part you would never get from a folder-based architecture, because the compiler does not enforce folder boundaries.
+
+---
+
+## Step 2 — The `Package.swift` shape
+
+The skeleton lives in a top-level `Packages/` directory inside the Xcode project. Three lines in the project: drag the folder in, mark each package as a local SPM dependency, link the products to the app target.
+
+`AppCore/Package.swift`:
+
+```swift
+// swift-tools-version:6.2
+import PackageDescription
+
+let package = Package(
+    name: "AppCore",
+    platforms: [.iOS(.v18)],
+    products: [.library(name: "AppCore", targets: ["AppCore"])],
+    targets: [
+        .target(name: "AppCore"),
+        .testTarget(name: "AppCoreTests", dependencies: ["AppCore"]),
+    ]
+)
+```
+
+`Networking/Package.swift`:
+
+```swift
+// swift-tools-version:6.2
+import PackageDescription
+
+let package = Package(
+    name: "Networking",
+    platforms: [.iOS(.v18)],
+    products: [.library(name: "Networking", targets: ["Networking"])],
+    dependencies: [
+        .package(path: "../AppCore"),
+    ],
+    targets: [
+        .target(name: "Networking", dependencies: ["AppCore"]),
+        .testTarget(name: "NetworkingTests", dependencies: ["Networking", "AppCore"]),
+    ]
+)
+```
+
+`Persistence/Package.swift` and `DesignSystem/Package.swift` mirror the same shape, depending only on `AppCore`. **Nobody depends on `DesignSystem` except the app.** Nobody depends on `Networking` except the app and tests. The graph is intentionally a star, not a chain — chains are how four-package projects mutate into thirty-package projects.
+
+The rule I write on the whiteboard before any package is added: **every new package needs a written reason that ends in either "the compiler must refuse" or "this is genuinely a separate product."** No other reason ships.
+
+---
+
+## Step 3 — The `AppCore` types
+
+Pure value types and the error model. No frameworks, no actors, no SwiftUI.
+
+```swift
+// AppCore/Sources/AppCore/AppError.swift
+public enum AppError: Error, Equatable, Sendable {
+    public enum Network: Equatable, Sendable {
+        case timeout
+        case offline
+        case server(status: Int)
+        case decoding
+        case unknown
+    }
+
+    case network(Network)
+    case persistence(String)
+    case unauthorized
+}
+
+// AppCore/Sources/AppCore/UserDTO.swift
+public struct UserDTO: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+
+    public init(id: String, name: String) {
+        self.id = id; self.name = name
+    }
+}
+```
+
+Two files. Zero dependencies. Every other package and the app itself can import this without dragging anything else along.
+
+Why `Sendable`? Because the moment you cross a package boundary in Swift 6.2, the compiler verifies it for you. If `UserDTO` ever stops being `Sendable`, every call site lights up red and you have a chance to think. (Background, again: [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) and [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor).)
+
+---
+
+## Step 4 — The `Networking` package, kept honest by the test
+
+The whole point of having `Networking` as a package is that the test in Step 1 can prove the boundary. Here is the shape that makes the tests pass:
+
+```swift
+// Networking/Sources/Networking/Transport.swift
+import Foundation
+import AppCore
+
+public protocol Transport: Sendable {
+    func send(_ request: URLRequest) async -> Result<(Data, HTTPURLResponse), URLError>
+}
+
+extension HTTPURLResponse {
+    static let ok = HTTPURLResponse(
+        url: URL(string: "https://x")!, statusCode: 200,
+        httpVersion: nil, headerFields: nil
+    )!
+}
+
+// Networking/Sources/Networking/Endpoint.swift
+public struct Endpoint<Response: Decodable & Sendable>: Sendable {
+    public let request: URLRequest
+    public static func get(path: String) -> Endpoint {
+        var req = URLRequest(url: URL(string: "https://api.example.com" + path)!)
+        req.httpMethod = "GET"
+        return Endpoint(request: req)
+    }
+}
+
+// Networking/Sources/Networking/HTTPClient.swift
+public actor HTTPClient {
+    private let transport: Transport
+    public init(transport: Transport) { self.transport = transport }
+
+    public func send<R>(_ endpoint: Endpoint<R>) async throws -> R {
+        switch await transport.send(endpoint.request) {
+        case .success(let (data, http)) where 200..<300 ~= http.statusCode:
+            do {
+                return try JSONDecoder().decode(R.self, from: data)
+            } catch {
+                throw AppError.network(.decoding)
+            }
+        case .success(let (_, http)):
+            throw AppError.network(.server(status: http.statusCode))
+        case .failure(let urlError):
+            throw AppError.network(.translate(urlError))
+        }
+    }
+}
+
+extension AppError.Network {
+    static func translate(_ urlError: URLError) -> AppError.Network {
+        switch urlError.code {
+        case .timedOut: return .timeout
+        case .notConnectedToInternet, .networkConnectionLost: return .offline
+        default: return .unknown
+        }
+    }
+}
+```
+
+The translation function is the whole reason the package exists. The compiler refuses to let any caller see `URLError` — they get `AppError.network` only. That is the bouncer-at-the-door for the type system, and the test pins it down.
+
+The stub for the test:
+
+```swift
+// NetworkingTests/StubTransport.swift
+import Foundation
+@testable import Networking
+
+struct StubTransport: Transport {
+    let result: Result<(Data, HTTPURLResponse), URLError>
+    func send(_ request: URLRequest) async -> Result<(Data, HTTPURLResponse), URLError> {
+        result
+    }
+}
+```
+
+Run the suite. Both tests pass. Green light.
+
+---
+
+## Step 5 — The composition root, in the *app target*
+
+This is the contrarian part of the architecture. Most tutorials wrap the composition root in its own package. I do not. The composition root is the place where your *real* dependencies meet — `URLSession`, `ModelContainer`, the live `EntitlementSync` server from [Day 17](/learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api). It changes more often than any single feature does. Putting it in a package adds compile-cycle cost to the part of the codebase that should stay fast to edit.
+
+```swift
+// In the app target, e.g. RenoviseApp.swift
+import SwiftUI
+import AppCore
+import Networking
+import Persistence
+import DesignSystem
+
+@main
+struct RenoviseApp: App {
+
+    @State private var composition: Composition
+
+    init() {
+        let transport = URLSessionTransport()
+        let httpClient = HTTPClient(transport: transport)
+        let store = SwiftDataStore() // from Persistence
+        self.composition = Composition(http: httpClient, store: store)
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView(composition: composition)
+        }
+    }
+}
+
+@Observable
+final class Composition {
+    let http: HTTPClient
+    let store: SwiftDataStore
+    init(http: HTTPClient, store: SwiftDataStore) {
+        self.http = http
+        self.store = store
+    }
+}
+```
+
+Features take what they need *from `Composition`*, never reach across packages directly. The composition root is the only place that knows the full graph. Every feature can be replaced with a test fake by passing a different `Composition` — and you do this at the test boundary, not by adding a new package.
+
+We will go much deeper on this pattern in tomorrow's post about DI without frameworks, and the long-form companion on the [Learn](/learn) page — specifically [SwiftUI at Scale](/learn/swiftui-at-scale) — walks through the same shape with three real apps from my catalog.
+
+---
+
+## What to *actually* skip, by app size
+
+The mistake I see most often is treating "modularization" as a destination instead of a tool. The honest progression I run for my own catalog (Invoize, Renovise, ThinkBud, BetFree):
+
+1. **MVP, < 5k lines:** zero packages. App target only. Folders for `Features/`, `Networking/`, `Persistence/`. Move on. Ship.
+2. **First scaling cliff, ~5k–25k lines:** two to four packages — `AppCore`, `Networking`, `Persistence`, `DesignSystem`. That is the whole shape above. Features still live in the app.
+3. **Multi-developer or 25k+ lines:** add feature packages, *one at a time*, each with a written justification. The first one usually pays for itself. The fifth one usually does not.
+4. **Multi-app reuse:** at this point you are not modularizing one app, you are *building a small SDK*. Different problem, different rules — the package gets a public versioned tag and a CHANGELOG, and you treat it like a vendor dependency.
+
+If your app is in category 1 and you read a thread about splitting into 20 packages, close the thread. You will spend the next two weeks renaming products in `Package.swift` instead of shipping the feature your users actually asked for.
+
+---
+
+## Xcode 26 changed the trade-off in two specific directions
+
+I owe you the 2026-specific update, because the table in the threshold section moves a little:
+
+- **Explicitly built modules** (default in Xcode 26) means the compiler builds each module's `.swiftmodule` exactly once and shares it. Cold builds in larger graphs are noticeably faster than under Xcode 15. The 32-package row in the table above used to be 142 seconds in Xcode 15 — it's 94 seconds in Xcode 26. That's a meaningful gain, but it does *not* turn modularization into a free lunch.
+- **Cross-module isolation checking** in Swift 6.2 strict-concurrency mode is real work. The very first build after enabling strict concurrency on a 14-package graph took six minutes on my machine. The fix is to migrate one package at a time — same advice as [Day 3](/learn/field-notes/swift-6-2-strict-concurrency-migration-real-project) on a different surface.
+
+The honest TL;DR: Xcode 26 makes large package graphs more *survivable*, not more *desirable*. The threshold to start splitting did not move much. The threshold past which you should stop splitting moved *closer*, not further away.
+
+---
+
+## Where this connects back
+
+- [Day 17](/learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api) — the `EntitlementSync` actor we wrote yesterday lives in a `Payments` feature package once your app crosses category 2. Before that, it lives in the app target. Same pattern.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) — the SwiftData `ModelContainer` belongs in `Persistence`. The CloudKit timing gotchas from Day 14 do not change shape across the package boundary, but they get easier to *test*, because the boundary forces the protocol.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — `@Environment` is the lightweight DI surface that pairs with the composition root. We will lean on it hard tomorrow.
+- [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) — every `public` API across a package boundary is also an isolation decision. The "which actor does this belong on?" question is sharper inside a package than inside an app target.
+
+The long-form companions on [Learn](/learn) pick up where this leaves off. [SwiftUI Foundations](/learn/swiftui-foundations) covers when a single-target app is the right answer. [SwiftUI in Practice](/learn/swiftui-in-practice) walks through the four-package shape on a real app with the migration steps. [SwiftUI at Scale](/learn/swiftui-at-scale) takes the same composition root and shows what the graph looks like when three developers and two apps share the lower layers.
+
+The sticky-note version: **packages are walls. Walls cost build-time and dependency graph headspace. Pay for them when the cognitive cost of *not* having them is higher. For most indie apps that's two to four packages — `AppCore`, `Networking`, `Persistence`, `DesignSystem` — and never the composition root.**
+
+---
+
+**Tomorrow (Day 19):** dependency injection in Swift without a framework. Why `Resolver` and `Swinject` are usually overkill, when they are not, and the protocol-plus-`@Environment` pattern that fits the four-package shape we just built. Bring a coffee — there is a parametrized test suite.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companions on [Learn](/learn): [SwiftUI Foundations](/learn/swiftui-foundations) for app composition, [SwiftUI in Practice](/learn/swiftui-in-practice) for the four-package migration walkthrough, [SwiftUI at Scale](/learn/swiftui-at-scale) for the multi-app, multi-developer version of this shape.*
