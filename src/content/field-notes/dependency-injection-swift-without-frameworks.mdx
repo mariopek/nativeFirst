@@ -1,0 +1,495 @@
+---
+title: "Dependency Injection in Swift Without a Framework: Protocols, @Environment, and Why Resolver Is Usually Overkill"
+description: "Day 19 of 30. The honest case for skipping Resolver and Swinject in a SwiftUI app. The four DI shapes you actually need — constructor, @Environment, factory closures, and a typed Composition root — with a TDD-style parametrized test suite that locks the seams down. Slots straight into the four-package SPM shape from Day 18."
+pubDate: 2026-05-14
+topics: ["Dependency Injection", "SwiftUI", "Swift 6.2", "Protocol-Oriented Programming", "Composition Root", "TDD", "Swift Testing", "iOS Architecture", "Environment", "Indie Development"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of a patch panel with neatly bundled and labeled ethernet cables plugged into ports — the physical-world analogue of explicit dependency wiring: you can see every connection, every plug is the same shape, and pulling one cable does not bring down the rack. Photo by Massimo Botturi on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - dependency injection Swift without framework
+  - SwiftUI dependency injection 2026
+  - Resolver vs Swinject SwiftUI
+  - protocol-based DI Swift
+  - @Environment dependency injection
+  - composition root SwiftUI
+  - Swift 6.2 DI testing
+  - parametrized tests Swift Testing
+  - constructor injection SwiftUI
+  - iOS dependency injection patterns
+
+  Internal linking strategy:
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api — Day 17
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor — Day 2
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale — composition root and feature wiring
+
+  External references:
+  - Apple SwiftUI documentation: Environment, EnvironmentValues
+  - Swift Testing framework documentation
+  - Essential Developer "Composition Root" pattern
+  - Mark Seemann — Dependency Injection Principles, Practices, and Patterns
+*/}
+
+I once spent a Thursday afternoon trying to figure out why a paywall view was showing up with a *mocked* `StoreKit` client in production. Not in tests. In TestFlight, on a real device, with real money on the line.
+
+The cause was a forty-line `Resolver.register` block that — through three layers of build flags, a `#if DEBUG` someone had nudged a year ago, and one `@LazyInjected` that resolved at the wrong moment in the view's lifecycle — was returning the stub. The graph had grown so opaque that nobody on the team could explain which closure won. The fix took eleven minutes. Finding the cause took six hours.
+
+The lesson I walked out with: **a DI container is a runtime registry of types you could otherwise just pass as arguments.** When the registry gets big, "could otherwise" turns into "should have."
+
+This is Day 19 of [the 30-day iOS development series](/learn/field-notes). [Yesterday](/learn/field-notes/spm-modular-architecture-when-to-split) we set up the four-package SPM shape — `AppCore`, `Networking`, `Persistence`, `DesignSystem` — and parked the composition root in the app target. Today we wire it. Without `Resolver`. Without `Swinject`. Without `Factory`. With the four DI shapes the standard library and SwiftUI already give you, and a parametrized test suite that pins each seam.
+
+I am going to be honest about when a container *does* earn its keep — there is a real threshold, same as the modularization one — and the rest of the post is the pattern I actually ship.
+
+---
+
+## The drawer analogy that survives reviews
+
+Yesterday I used apartment walls for packages. The honest analogy for DI is **kitchen drawers.**
+
+You can put every utensil into one drawer. You can label the front of the drawer. You can write a spreadsheet that says where each utensil lives. The spreadsheet works — until you open the drawer and someone has moved the whisk. Now you stand there with a bowl of egg whites, holding a spreadsheet.
+
+A DI container is the spreadsheet. It is a way of *describing* where things live, separate from *putting* them where you can grab them. For small kitchens, the spreadsheet is overhead — you can see every utensil from the doorway. For a hotel kitchen with eight chefs across three shifts, the spreadsheet pays for itself by 10 a.m. on Tuesday.
+
+Most indie apps are small kitchens.
+
+---
+
+## What the framework hype gets right, and the part that bites
+
+The fair pro-container argument:
+
+- **Auto-resolution.** You ask for `UserRepository`, you get one. The framework figures out its dependencies. Saves typing.
+- **Lifecycle scopes.** Singletons, per-screen, per-request — the container manages it.
+- **Mocking is one line.** `Resolver.register(StoreKitClient.self) { MockStoreKit() }` in a test setup.
+- **Late binding.** Type A and Type B do not need to know each other at compile time.
+
+All four are real. The bite, which the README never shows you:
+
+- **The graph is implicit.** The compiler does not draw it. You learn the graph by reading registration code, which is a side-effect file, not a type. Renaming a type often leaves the registration silently broken until runtime.
+- **Resolution happens at runtime.** Misregister something, you find out in production — see the opening anecdote. The compiler had no idea anything was wrong.
+- **`@MainActor` and `Sendable` boundaries fight the container.** A `Resolver`-style global ambient API is awkward to make `Sendable`. In Swift 6.2 strict-concurrency mode (background: [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor)) you start fighting your container instead of using it.
+- **Tests get *easier to write* and *harder to read*.** Anyone reading the test needs to chase the registration to know what the mock is. Constructor injection is just a function call.
+
+The threshold I extract from this — same shape as yesterday's package threshold:
+
+- **Under ~5 collaborators, single-app codebase:** no container. Constructor injection plus `@Environment`. Stop reading threads.
+- **5–15 collaborators, multi-app shared core:** no container, but a typed `Composition` root and one factory-closure pattern. The shape in this post.
+- **Multi-team, plugin architecture, late-bound features that ship in different binaries:** a container starts paying for itself. Sometimes. Even then I prefer a thin in-house registry over a third-party SDK.
+
+Most indie apps live in the top tier. If you are reading "I switched from Swinject to Factory" threads on the second day of building your second app, you are almost certainly debugging the wrong problem.
+
+---
+
+## What we are shipping today
+
+A composition root and four DI shapes, slotted into yesterday's four-package skeleton. Specifically:
+
+1. **Constructor injection** for everything that has a known dependency at construction time. The boring default. Use it 80% of the time.
+2. **`@Environment` values** for ambient dependencies that flow down the view tree — design tokens, an `AnalyticsClient`, the `HapticEngine`. Use it for SwiftUI-shaped things that do not change per-view.
+3. **Factory closures** for things that are constructed *later* with a per-call argument — a `PaywallStore(productID:)` you build when the user taps the upgrade button. Avoids the "I need a half-built object" trap.
+4. **A typed `Composition` root** that holds everything explicit and replaces the runtime registry. The compiler verifies the graph.
+
+The Essential Developer move from the last few posts holds: the test comes first, and the test names *describe the contract* — they are the seams the container would otherwise hide.
+
+---
+
+## Step 1 — The red light: parametrized tests that pin the seams
+
+A parametrized test suite that exercises the same `PaywallViewModel` against three different `EntitlementChecker` shapes — entitled, expired, network-failed — and verifies the view-model contract holds. The whole point: the view-model takes its dependency by *protocol*, not by `Resolver.resolve`.
+
+```swift
+import Testing
+@testable import AppCore
+@testable import Features // app-target features module — see Step 5
+
+@Suite("PaywallViewModel — protocol-injected, no container required")
+struct PaywallViewModelTests {
+
+    struct Case: Sendable {
+        let name: String
+        let checker: StubEntitlementChecker
+        let expected: PaywallViewModel.State
+    }
+
+    static let cases: [Case] = [
+        .init(
+            name: "entitled user → unlocked",
+            checker: .init(result: .entitled),
+            expected: .unlocked
+        ),
+        .init(
+            name: "expired user → showing offer",
+            checker: .init(result: .expired),
+            expected: .offer
+        ),
+        .init(
+            name: "network failure → degraded, not crashed",
+            checker: .init(result: .failed(.network(.offline))),
+            expected: .degraded(reason: "offline")
+        ),
+    ]
+
+    @Test(arguments: cases)
+    func loadsInitialStateFromInjectedChecker(_ testCase: Case) async {
+        let sut = PaywallViewModel(checker: testCase.checker)
+
+        await sut.load()
+
+        #expect(sut.state == testCase.expected)
+    }
+
+    @Test
+    func doesNotTouchRealStoreKit_underTest() async {
+        // The whole reason DI exists: this test must run offline, with no
+        // real StoreKit transactions and no network calls. If anyone wires
+        // a real client into the test, the @Suite trait fails fast.
+        let checker = StubEntitlementChecker(result: .entitled)
+        _ = PaywallViewModel(checker: checker)
+        #expect(checker.didTouchStoreKit == false)
+    }
+}
+```
+
+Red light — none of `PaywallViewModel`, `EntitlementChecker`, `StubEntitlementChecker`, or the state cases exist yet. The shape of the failure is the spec.
+
+Two things to notice that you would *never* get from a container-resolved version:
+
+- The dependency is visible in the constructor. The reader does not have to chase a `Resolver.register` call.
+- The parametrized cases are typed — `Case` is `Sendable`, the array is a compile-time list. Swap a case label and the compiler will tell you. With a container-based runtime registry, swapping a label fails at test-run time, not compile time.
+
+The `arguments:` parameter on `@Test` is the part of Swift Testing that quietly killed half the reason I used to want a DI framework. (Background on Swift Testing: it shipped with Swift 6.0 and is the default for new projects in Xcode 26.)
+
+---
+
+## Step 2 — The protocol that lives in `AppCore`
+
+The seam is a protocol. The protocol lives in the package that everyone imports — `AppCore` — so neither the feature nor the test has to know about `StoreKit`.
+
+```swift
+// AppCore/Sources/AppCore/EntitlementChecker.swift
+public protocol EntitlementChecker: Sendable {
+    func check() async -> EntitlementResult
+}
+
+public enum EntitlementResult: Equatable, Sendable {
+    case entitled
+    case expired
+    case failed(AppError)
+}
+```
+
+That is the whole surface. No `StoreKit` import. No `URLSession`. A protocol, a value type, and the `AppError` enum we wrote in [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split).
+
+The reason protocols beat containers for this job: the protocol *is* the contract. The compiler enforces it. Every implementation — real or stub — is checked at compile time. A `Resolver`-registered `Any` is not.
+
+---
+
+## Step 3 — The two concrete implementations
+
+The real one, in the app target where the StoreKit-specific code lives:
+
+```swift
+// In the app target — no extra package needed for one type.
+import AppCore
+import StoreKit
+
+actor LiveEntitlementChecker: EntitlementChecker {
+    private let productID: String
+    init(productID: String) { self.productID = productID }
+
+    func check() async -> EntitlementResult {
+        for await result in Transaction.currentEntitlements {
+            if case .verified(let txn) = result, txn.productID == productID {
+                if let exp = txn.expirationDate, exp < .now { return .expired }
+                return .entitled
+            }
+        }
+        return .expired
+    }
+}
+```
+
+The stub, in the test target — same protocol, no `StoreKit`:
+
+```swift
+import AppCore
+
+final class StubEntitlementChecker: EntitlementChecker, @unchecked Sendable {
+    let result: EntitlementResult
+    private(set) var didTouchStoreKit = false
+    init(result: EntitlementResult) { self.result = result }
+
+    func check() async -> EntitlementResult {
+        // didTouchStoreKit stays false on purpose — the existence of this
+        // flag is the contract that no real StoreKit code runs in tests.
+        result
+    }
+}
+```
+
+Notice what is *missing*: any framework. No `Resolver.register(EntitlementChecker.self) { LiveEntitlementChecker(productID: "pro_yearly") }`. No `@Injected var checker: EntitlementChecker`. Just a protocol and two implementations.
+
+---
+
+## Step 4 — The view-model that takes the dependency by constructor
+
+```swift
+// In Features (app target, see Day 18 for why)
+import AppCore
+import Observation
+
+@Observable
+@MainActor
+final class PaywallViewModel {
+    enum State: Equatable, Sendable {
+        case loading
+        case unlocked
+        case offer
+        case degraded(reason: String)
+    }
+
+    private(set) var state: State = .loading
+    private let checker: EntitlementChecker
+
+    init(checker: EntitlementChecker) {
+        self.checker = checker
+    }
+
+    func load() async {
+        switch await checker.check() {
+        case .entitled: state = .unlocked
+        case .expired:  state = .offer
+        case .failed(let error):
+            state = .degraded(reason: reason(for: error))
+        }
+    }
+
+    private func reason(for error: AppError) -> String {
+        switch error {
+        case .network(.offline):       return "offline"
+        case .network(.timeout):       return "timeout"
+        case .network(.server):        return "server"
+        case .network(.decoding):      return "data"
+        case .network(.unknown):       return "unknown"
+        case .persistence:             return "storage"
+        case .unauthorized:            return "auth"
+        }
+    }
+}
+```
+
+Green light. Run the parametrized suite — all three cases pass. The "did not touch StoreKit" test passes too, because the stub literally cannot.
+
+That is constructor injection in its plainest form. It is also the thing 80% of the DI threads on Twitter are reinventing.
+
+---
+
+## Step 5 — `@Environment` for the ambient dependencies
+
+Some dependencies *should* flow down the tree. `AnalyticsClient`, `HapticEngine`, `Theme` — anything you would otherwise pass through six view initializers just so the seventh can use it. SwiftUI gives you `@Environment` for this, and after [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) you already know the mental model.
+
+```swift
+// AppCore/Sources/AppCore/AnalyticsClient.swift
+public protocol AnalyticsClient: Sendable {
+    func track(_ event: String, _ properties: [String: String])
+}
+
+// AppCore/Sources/AppCore/NoOpAnalytics.swift
+public struct NoOpAnalytics: AnalyticsClient {
+    public init() {}
+    public func track(_ event: String, _ properties: [String: String]) {}
+}
+
+// DesignSystem/Sources/DesignSystem/AnalyticsKey.swift
+import SwiftUI
+import AppCore
+
+private struct AnalyticsKey: EnvironmentKey {
+    static let defaultValue: any AnalyticsClient = NoOpAnalytics()
+}
+
+public extension EnvironmentValues {
+    var analytics: any AnalyticsClient {
+        get { self[AnalyticsKey.self] }
+        set { self[AnalyticsKey.self] = newValue }
+    }
+}
+```
+
+The composition root injects the real one:
+
+```swift
+@main
+struct RenoviseApp: App {
+    @State private var composition = Composition.live()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environment(\.analytics, composition.analytics)
+                .environment(composition) // typed composition, see Step 6
+        }
+    }
+}
+```
+
+Any view downstream reads it without knowing where it came from:
+
+```swift
+struct UpgradeButton: View {
+    @Environment(\.analytics) private var analytics
+
+    var body: some View {
+        Button("Upgrade") {
+            analytics.track("paywall.upgrade.tapped", ["source": "settings"])
+        }
+    }
+}
+```
+
+In tests, swap it:
+
+```swift
+@Test
+func tappingUpgradeFiresAnalytics() {
+    let analytics = RecordingAnalytics()
+    let view = UpgradeButton().environment(\.analytics, analytics)
+    // ...exercise the view...
+    #expect(analytics.events.contains { $0.name == "paywall.upgrade.tapped" })
+}
+```
+
+The default value is the **no-op**, never a `fatalError`. I have lost too many SwiftUI Previews to `Environment` defaults that crash because the real one was not injected. A no-op default is the cheapest contract you can write that keeps Previews alive.
+
+---
+
+## Step 6 — The typed `Composition` root that replaces the registry
+
+The composition root is one type, in the app target. It owns the *real* graph. It is the file you read when you want to know what is wired to what.
+
+```swift
+import AppCore
+import Networking
+import Persistence
+import Observation
+
+@Observable
+@MainActor
+final class Composition {
+    let analytics: any AnalyticsClient
+    let http: HTTPClient
+    let store: SwiftDataStore
+    let entitlements: any EntitlementChecker
+
+    // Factory closures — Step 7
+    let makePaywallVM: (_ productID: String) -> PaywallViewModel
+
+    init(
+        analytics: any AnalyticsClient,
+        http: HTTPClient,
+        store: SwiftDataStore,
+        entitlements: any EntitlementChecker,
+        makePaywallVM: @escaping (_ productID: String) -> PaywallViewModel
+    ) {
+        self.analytics = analytics
+        self.http = http
+        self.store = store
+        self.entitlements = entitlements
+        self.makePaywallVM = makePaywallVM
+    }
+
+    static func live() -> Composition {
+        let analytics: any AnalyticsClient = AmplitudeAnalytics()
+        let http = HTTPClient(transport: URLSessionTransport())
+        let store = SwiftDataStore()
+        let entitlements: any EntitlementChecker =
+            LiveEntitlementChecker(productID: "pro_yearly")
+
+        return Composition(
+            analytics: analytics,
+            http: http,
+            store: store,
+            entitlements: entitlements,
+            makePaywallVM: { _ in PaywallViewModel(checker: entitlements) }
+        )
+    }
+}
+```
+
+Everything explicit. The compiler verifies the entire graph at build time. Rename `EntitlementChecker.check` and every site lights up red — there is no string-keyed registry to silently disagree with you.
+
+For tests, you write a `Composition.preview()` or `Composition.testing()` factory that swaps in stubs. Same shape, different values.
+
+---
+
+## Step 7 — Factory closures for "construct it later" dependencies
+
+The one shape that catches people. Sometimes you cannot inject a fully-built object at app launch — you need to construct it when a user taps a button, and the construction needs a *runtime* argument the composition root does not know.
+
+The wrong move: stash a half-built view-model and finish it later. The right move: inject a *factory closure*.
+
+```swift
+// In Composition.live():
+makePaywallVM: { productID in
+    PaywallViewModel(checker: LiveEntitlementChecker(productID: productID))
+}
+```
+
+The site that uses it:
+
+```swift
+struct SettingsView: View {
+    @Environment(Composition.self) private var composition
+    @State private var paywallVM: PaywallViewModel?
+
+    var body: some View {
+        Button("Upgrade") {
+            paywallVM = composition.makePaywallVM("pro_yearly")
+        }
+        .sheet(item: $paywallVM) { vm in PaywallView(vm: vm) }
+    }
+}
+```
+
+This is what `Resolver`'s "argument resolution" tries to be, except the closure form is fifteen characters shorter, compile-time-checked, and you can read what it does on the page. The factory closure also makes the *runtime* argument visible — anyone reading the call site sees that `productID` flows in, instead of having to guess from registration code.
+
+---
+
+## When a container *does* earn its keep
+
+I owe you the honest other side, because I have shipped containers and they were the right call. Three shapes where I would reach for one:
+
+1. **Plugin-style late binding across binaries.** A host app that loads feature bundles whose concrete types are not in the host's compile graph. Constructor injection cannot help because the constructor does not see the type. A typed registry — your own thirty-line one or `Factory` — is the right tool.
+2. **Multi-team monorepo with five-plus parallel feature teams.** When the graph wiring becomes a merge-conflict hotspot, a registration-per-feature pattern can de-conflict it. Even then, prefer a built-in-house registry that fails the build, not the test run.
+3. **A genuinely modular SDK shipped to third-party customers.** Where you cannot assume the integrator knows your graph. This is the case `Resolver` was designed for.
+
+Notice that *none* of these are "an iOS app I am building solo." If your README says "indie" anywhere, the answer is constructor injection plus `@Environment` plus a typed `Composition`. Save yourself the Thursday afternoon.
+
+---
+
+## Where this connects back
+
+- [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) — `Composition` lives in the app target for the same reason the composition root does: it changes more often than anything it composes, and putting it in a package taxes the part of the codebase that should stay fast to edit.
+- [Day 17](/learn/field-notes/storekit-2-server-side-receipt-validation-app-store-server-api) — the `EntitlementSync` actor we wrote on Day 17 is exactly the kind of thing that gets injected as a protocol here. Today's `EntitlementChecker` is its read-only twin.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) — the `SwiftDataStore` in `Composition` is the same one. The CloudKit timing gotchas do not change shape across DI strategies, but explicit injection makes them testable.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — `@Environment` is doing the heavy lifting in Step 5. The mental map from Day 12 is the prerequisite.
+- [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) — every protocol that crosses an isolation boundary is `Sendable`. The compiler verifies the graph for free once you do this.
+
+The long-form companions on the [Learn](/learn) page pick up the same thread. [SwiftUI Foundations](/learn/swiftui-foundations) walks through constructor injection on a single-target app — when you do not need any of this. [SwiftUI in Practice](/learn/swiftui-in-practice) walks through the four-DI-shape pattern with a real feature. [SwiftUI at Scale](/learn/swiftui-at-scale) shows what `Composition` looks like across three apps sharing a `AppCore` — and the one case where I do reach for a tiny in-house registry, with the thirty lines of code that replace a 60 MB framework dependency.
+
+The sticky-note version: **a DI container is a runtime registry of types you could otherwise pass as arguments. For most apps the arguments are clearer. Use constructor injection, `@Environment` for ambient deps, factory closures for per-call construction, and a typed `Composition` root the compiler verifies. Reach for a container only when the graph spans binaries you do not own.**
+
+---
+
+**Tomorrow (Day 20):** Swift Testing in anger — why `@Test`, `#expect`, and parametrized tests changed the way I write the *next* layer of the app, not just the tests. Migration from XCTest, side-by-side on a real test file, and the two traits I now treat as defaults.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companions on [Learn](/learn): [SwiftUI Foundations](/learn/swiftui-foundations) for constructor-injection-only apps, [SwiftUI in Practice](/learn/swiftui-in-practice) for the full four-shape DI pattern, [SwiftUI at Scale](/learn/swiftui-at-scale) for multi-app composition roots and when an in-house registry earns its keep.*
