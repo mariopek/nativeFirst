@@ -1,0 +1,468 @@
+---
+title: "TDD for SwiftUI Without the Academic Ceremony: Don't Test the View, Test the Observable Model Behind It"
+description: "Day 21 of 30. The honest red-green-refactor cycle for a real Renovise feature — invoice line-item editor — written test-first against an @Observable view-model. Why testing SwiftUI views is mostly a category error, the four signals that tell you you're testing the wrong thing, and the workflow I actually run on a Tuesday afternoon. Sits directly on top of yesterday's Swift Testing migration."
+pubDate: 2026-05-16
+topics: ["TDD", "SwiftUI", "@Observable", "Swift Testing", "View Model", "Red-Green-Refactor", "Test-Driven Development", "iOS Testing", "Swift 6.2", "Indie Development"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1530819568329-97653eafbbfa?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An overhead shot of a workshop bench with a marked-up wooden plank, a pencil, a square, and a hand-saw — the analog version of the red-green-refactor cycle: you mark the line first, you cut to the line, then you sand the rough edge. Photo by Greyson Joralemon on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - TDD SwiftUI 2026
+  - test-driven development SwiftUI view model
+  - @Observable testing Swift Testing
+  - red green refactor SwiftUI
+  - SwiftUI view model TDD
+  - test SwiftUI views or view models
+  - Swift Testing TDD workflow
+  - Essential Developer SwiftUI testing
+  - parametrized tests view model
+  - iOS unit testing 2026
+
+  Internal linking strategy:
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice — TDD with Swift Testing on view-models (chapter 15)
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Essential Developer — testing strategies for iOS
+  - Apple — Testing your app with Swift Testing
+  - Kent Beck — Test-Driven Development: By Example
+  - Apple — Observation framework (@Observable)
+*/}
+
+The fastest way to ruin a Tuesday is to write a SwiftUI view test that screenshots the rendered output, fails on a one-pixel kerning change, and gives you no idea whether the *behavior* changed. I have done it twice. The second time I told myself I was learning. The third time I admitted I was procrastinating.
+
+Testing SwiftUI views directly is mostly a category error. The view is a *projection*. The thing you actually want to lock down — the thing that fails the business — lives in the `@Observable` model behind the view. Test that. The view becomes a one-line `Text(viewModel.totalText)` that is its own correctness proof.
+
+This is Day 21 of [the 30-day iOS development series](/learn/field-notes). [Yesterday](/learn/field-notes/swift-testing-migration-from-xctest) we migrated XCTest files to Swift Testing and earned the parallel default. Today we use that runner the way Essential Developer trains you to: red light first, smallest production code that turns it green, refactor under a green bar. A real feature from Renovise — the invoice line-item editor — end-to-end, in the order I would actually write it on a Tuesday.
+
+No screenshot testing. No "rendering" the view in a snapshot harness. Just the model, the tests, and the muscle memory.
+
+---
+
+## The bricklayer analogy I keep going back to
+
+I grew up watching my uncle lay brick walls. He never started by laying bricks. He started by stretching a string line between two pegs, at the exact height the next course had to land. The line was the contract. Every brick went under the line. If a brick missed, you saw it immediately — the line did not care how good the brick looked from the front.
+
+TDD is the string line. You stretch it first — one test, one expectation about a piece of behavior. Then you put the brick down. You can see in the same second whether it touched the line. The view is the front face of the wall. Pretty, important, but you cannot *level* the wall by staring at the front of it.
+
+The most common TDD failure mode I see in SwiftUI is people trying to stretch the string line across the front face — screenshotting the view, asserting on rendered pixels — when the only line that actually levels the wall is behind it, on the model.
+
+---
+
+## The four signals you're testing the wrong layer
+
+Before the workflow, the heuristics. If any of these show up while you are writing the test, you are testing the view when you should be testing the model. Pull back one layer.
+
+- **The test imports `SwiftUI` and starts building a view hierarchy.** You are about to test the framework, not your app. Test the model the view binds to instead.
+- **The assertion talks about colors, fonts, or sizes.** Those are design tokens. They belong in a visual regression tool (separate budget, separate cadence) or in the manual smoke test before TestFlight — not in your unit suite.
+- **The test takes more than 50 ms to run.** A view-model test on an M-series Mac runs in microseconds. If yours is slow, you are spinning up a layout pass or a `UIHostingController`, which means you are testing the rendering, not the logic.
+- **You cannot tell what failed without opening the simulator.** A good unit test failure tells you the expected and actual value of *one* property in one sentence. If the only debugging strategy is "run the app and see," the test is not pulling its weight.
+
+Two out of four means re-aim. Three out of four means delete and start over with the model.
+
+---
+
+## The feature: Renovise invoice line-item editor
+
+The brick we are laying today. In Renovise, the invoice editor lets you add line items, edit quantity and unit price, and shows a live total at the bottom. The behavior surface is small enough to fit in your head:
+
+- Empty invoice → total is `0.00 EUR`, "Add item" button enabled, "Send" button disabled.
+- One line item with valid amount and quantity → total reflects sum, "Send" enabled.
+- Any line item with quantity `0` or non-positive amount → "Send" disabled and the offending row marks itself invalid.
+- Mixed currencies across lines → "Send" disabled and a banner reads "Pick one currency per invoice."
+- Removing the last invalid line → state recovers automatically.
+
+Five behaviors. Five-ish tests, give or take a parametrization. That is the contract. We have not opened Xcode yet.
+
+---
+
+## Step 0 — Stretch the string line (write the suite shell)
+
+I start with the suite name. The suite name is the chapter heading of the contract. If I cannot write a one-sentence chapter heading, I do not yet understand the feature well enough to test it.
+
+```swift
+import Testing
+@testable import Renovise
+
+@Suite("InvoiceEditorViewModel — totals, validation, and the Send button")
+@MainActor
+struct InvoiceEditorViewModelTests { }
+```
+
+That is the whole step. The `@MainActor` is from [Gotcha 3 yesterday](/learn/field-notes/swift-testing-migration-from-xctest) — the view-model will be `@MainActor` because it backs a SwiftUI view, so the suite is too. No exceptions, save yourself the Saturday.
+
+I have not written a line of production code. I have not even decided what type `InvoiceEditorViewModel` is. The suite shell is the commitment that I am about to.
+
+---
+
+## Step 1 — The first red light (empty invoice)
+
+The simplest, cheapest, most boring case first. Always. Empty input is where naming and shape decisions happen with zero behavior pressure.
+
+```swift
+@Test
+func emptyInvoiceHasZeroTotalAndDisabledSend() {
+    let sut = InvoiceEditorViewModel()
+    #expect(sut.totalText == "0.00 EUR")
+    #expect(sut.canSend == false)
+    #expect(sut.canAddItem == true)
+}
+```
+
+Hit run. Three errors. `InvoiceEditorViewModel` does not exist. That is your red light. Not a failed assertion — a *compile error*. Both are red. Both are TDD-valid. The compiler is the fastest test runner you own.
+
+Now you write the smallest production shape that makes it compile.
+
+```swift
+import Observation
+
+@MainActor @Observable
+final class InvoiceEditorViewModel {
+    var totalText: String = "0.00 EUR"
+    var canSend: Bool = false
+    var canAddItem: Bool = true
+}
+```
+
+Three stored properties with the values the test wants on day one. The compiler is happy. The test is green. You have not solved anything; you have stretched the line one course higher.
+
+This is the part juniors skip and seniors do religiously. Yes, the property is a hardcoded string. *That is the point.* The next test will force it to do real work. Premature generality kills the rhythm.
+
+---
+
+## Step 2 — The first useful red (one valid line item)
+
+The shape of the next test forces the model to grow a method, an input type, and a computation. One test, three forcing functions.
+
+```swift
+@Test
+func singleValidLineItemUpdatesTotal() {
+    let sut = InvoiceEditorViewModel()
+    sut.add(LineItem(unitPrice: .init(100, "EUR"), quantity: 2))
+    #expect(sut.totalText == "200.00 EUR")
+    #expect(sut.canSend == true)
+}
+```
+
+Red. `add` does not exist, `LineItem` does not exist, `Money` (the `.init(100, "EUR")`) does not exist.
+
+The temptation here is to design `LineItem` and `Money` in your head, write fifty lines, and ship. Do not. Write the *minimum* that compiles, run the test, fix the next failure.
+
+```swift
+struct Money: Equatable, Sendable {
+    let amount: Decimal
+    let currency: String
+    init(_ amount: Decimal, _ currency: String) {
+        self.amount = amount
+        self.currency = currency
+    }
+}
+
+struct LineItem: Identifiable, Sendable {
+    let id = UUID()
+    var unitPrice: Money
+    var quantity: Int
+}
+
+@MainActor @Observable
+final class InvoiceEditorViewModel {
+    private(set) var items: [LineItem] = []
+
+    var totalText: String { format(total) }
+    var canSend: Bool { !items.isEmpty }
+    var canAddItem: Bool { true }
+
+    func add(_ item: LineItem) { items.append(item) }
+
+    private var total: Money {
+        guard let first = items.first else { return Money(0, "EUR") }
+        let sum = items.reduce(Decimal(0)) { $0 + $1.unitPrice.amount * Decimal($1.quantity) }
+        return Money(sum, first.currency.currency)
+    }
+
+    private func format(_ money: Money) -> String {
+        String(format: "%.2f %@", NSDecimalNumber(decimal: money.amount).doubleValue, money.currency)
+    }
+}
+
+private extension LineItem {
+    var currency: LineItem { self }
+    var currency2: String { unitPrice.currency }
+}
+```
+
+Run. The compiler yells about my deliberately silly `currency`/`currency2` extension on `LineItem` — let me clean that up before I move on, because dirty code under a green bar will compound. Refactor pass:
+
+```swift
+private var total: Money {
+    guard let first = items.first else { return Money(0, "EUR") }
+    let sum = items.reduce(Decimal(0)) { $0 + $1.unitPrice.amount * Decimal($1.quantity) }
+    return Money(sum, first.unitPrice.currency)
+}
+```
+
+Green. The first test still green. The second test green. Three minutes elapsed, total. **The discipline that pays off here is running the first test again after each step.** The instant a previously-green test goes red, you know which keystroke broke it. With Swift Testing's parallel default ([Gotcha 4 yesterday](/learn/field-notes/swift-testing-migration-from-xctest)), the full suite run still takes a third of a second.
+
+---
+
+## Step 3 — The parametrized red (the validation cases)
+
+Now I push three behaviors at once with one test, because they share a shape: "send is disabled if any line is invalid, for these reasons."
+
+```swift
+@Suite("InvoiceEditorViewModel — totals, validation, and the Send button")
+@MainActor
+struct InvoiceEditorViewModelTests {
+
+    struct InvalidCase: Sendable {
+        let name: String
+        let items: [LineItem]
+        let expectedInvalidIDs: Set<UUID>
+    }
+
+    static let invalidCases: [InvalidCase] = {
+        let zeroQty   = LineItem(unitPrice: .init(50, "EUR"),   quantity: 0)
+        let negPrice  = LineItem(unitPrice: .init(-10, "EUR"),  quantity: 1)
+        let mixed1    = LineItem(unitPrice: .init(100, "EUR"),  quantity: 1)
+        let mixed2    = LineItem(unitPrice: .init(50,  "USD"),  quantity: 1)
+        return [
+            .init(name: "zero quantity",     items: [zeroQty],          expectedInvalidIDs: [zeroQty.id]),
+            .init(name: "non-positive price", items: [negPrice],         expectedInvalidIDs: [negPrice.id]),
+            .init(name: "mixed currencies",   items: [mixed1, mixed2],   expectedInvalidIDs: [mixed1.id, mixed2.id]),
+        ]
+    }()
+
+    @Test(arguments: invalidCases)
+    func invalidLinesDisableSendAndMarkRows(_ testCase: InvalidCase) {
+        let sut = InvoiceEditorViewModel()
+        for item in testCase.items { sut.add(item) }
+        #expect(sut.canSend == false)
+        #expect(Set(sut.invalidLineIDs) == testCase.expectedInvalidIDs)
+    }
+}
+```
+
+Red. Three reds, actually — Swift Testing surfaces each parametrized case independently in the Test Navigator, which means **the failure log tells you "zero quantity" failed without you having to read code**. That is the killer feature from [yesterday's post](/learn/field-notes/swift-testing-migration-from-xctest) earning its keep.
+
+The smallest production change to turn this green:
+
+```swift
+@MainActor @Observable
+final class InvoiceEditorViewModel {
+    private(set) var items: [LineItem] = []
+    var canAddItem: Bool { true }
+
+    func add(_ item: LineItem) { items.append(item) }
+
+    var invalidLineIDs: [UUID] {
+        var ids: [UUID] = []
+        for item in items where item.quantity <= 0 || item.unitPrice.amount <= 0 {
+            ids.append(item.id)
+        }
+        if hasMixedCurrencies {
+            ids.append(contentsOf: items.map(\.id))
+        }
+        return Array(Set(ids))
+    }
+
+    var canSend: Bool {
+        !items.isEmpty && invalidLineIDs.isEmpty
+    }
+
+    var totalText: String { format(total) }
+
+    private var hasMixedCurrencies: Bool {
+        Set(items.map(\.unitPrice.currency)).count > 1
+    }
+
+    private var total: Money {
+        guard let first = items.first else { return Money(0, "EUR") }
+        let sum = items.reduce(Decimal(0)) { $0 + $1.unitPrice.amount * Decimal($1.quantity) }
+        return Money(sum, first.unitPrice.currency)
+    }
+
+    private func format(_ money: Money) -> String {
+        String(format: "%.2f %@", NSDecimalNumber(decimal: money.amount).doubleValue, money.currency)
+    }
+}
+```
+
+Green. Three behaviors covered. Nine lines of test code. This is the math from [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) playing out — three XCTest methods worth of coverage, one parametrized `@Test`, named cases in the navigator.
+
+---
+
+## Step 4 — The recovery red (state heals when the invalid line is removed)
+
+The behavior the spec called out: removing the last invalid line should recover the send button. This is the kind of test that real users hit and tutorial code skips.
+
+```swift
+@Test
+func removingLastInvalidLineRecoversSend() {
+    let sut = InvoiceEditorViewModel()
+    let good = LineItem(unitPrice: .init(100, "EUR"), quantity: 1)
+    let bad  = LineItem(unitPrice: .init(50,  "EUR"), quantity: 0)
+    sut.add(good)
+    sut.add(bad)
+    #expect(sut.canSend == false)
+
+    sut.remove(bad.id)
+    #expect(sut.canSend == true)
+    #expect(sut.totalText == "100.00 EUR")
+}
+```
+
+Red. `remove(_:)` does not exist.
+
+```swift
+func remove(_ id: UUID) {
+    items.removeAll { $0.id == id }
+}
+```
+
+Green. Three keystrokes of production code. This is what the refactor step exists for — once green, ask "did I just write the simplest thing that could possibly work?" If yes, move on. If no, refactor under the green bar.
+
+---
+
+## Step 5 — The banner red (mixed currencies show a message)
+
+The last spec point. The banner is a derived string the view will read. Once again, a value on the model — *not* a `Text` view to interrogate.
+
+```swift
+@Test
+func mixedCurrenciesProducesBanner() {
+    let sut = InvoiceEditorViewModel()
+    sut.add(LineItem(unitPrice: .init(100, "EUR"), quantity: 1))
+    sut.add(LineItem(unitPrice: .init(50,  "USD"), quantity: 1))
+    #expect(sut.bannerText == "Pick one currency per invoice.")
+}
+
+@Test
+func singleCurrencyHasNoBanner() {
+    let sut = InvoiceEditorViewModel()
+    sut.add(LineItem(unitPrice: .init(100, "EUR"), quantity: 1))
+    #expect(sut.bannerText == nil)
+}
+```
+
+Two tests, both red on a missing property. The smallest fix:
+
+```swift
+var bannerText: String? {
+    hasMixedCurrencies ? "Pick one currency per invoice." : nil
+}
+```
+
+Green. Now look at the model and the suite together — five behaviors, eight test cases, one parametrized suite. The view that consumes it is going to be embarrassingly thin.
+
+---
+
+## What the SwiftUI view actually looks like
+
+Because every piece of state the screen needs is already a value on the model, the view is a typewriter exercise. Look at it once and notice how *little* logic lives here.
+
+```swift
+import SwiftUI
+
+struct InvoiceEditorView: View {
+    @State private var viewModel = InvoiceEditorViewModel()
+
+    var body: some View {
+        Form {
+            if let banner = viewModel.bannerText {
+                Section { Text(banner).foregroundStyle(.orange) }
+            }
+            Section("Items") {
+                ForEach(viewModel.items) { item in
+                    LineItemRow(
+                        item: item,
+                        isInvalid: viewModel.invalidLineIDs.contains(item.id)
+                    )
+                }
+                Button("Add item") { viewModel.add(.empty(currency: "EUR")) }
+                    .disabled(!viewModel.canAddItem)
+            }
+            Section { Text(viewModel.totalText).font(.headline) }
+        }
+        .toolbar {
+            Button("Send") { /* submit */ }
+                .disabled(!viewModel.canSend)
+        }
+    }
+}
+```
+
+There is no business logic in this view. Every `disabled`, every `Text`, every banner is a property read. **This is the payoff of testing the model, not the view.** When the spec changes — invalid lines now show a tooltip, send becomes "Send draft" when over a threshold — you change the model, the existing tests catch the regressions you forgot, and the view is a search-and-replace.
+
+If you tried to TDD this from the view side, you would either screenshot-test (and fail on a kerning change) or you would `ViewInspector`-test (and find that the third-party library is a sub-version behind whatever Xcode beta you are on). Both are dead ends. The model is the only stable surface.
+
+---
+
+## The honest objection: "but what about state-driven view bugs?"
+
+Real. The model can be perfect and the view can still misuse it — `.disabled(!viewModel.canSend)` typed as `.disabled(viewModel.canSend)`, the inverted condition. Unit tests will not catch that.
+
+The honest answer is **the budget split**. Unit tests on the model are cheap and fast; you write them per behavior, per parametrized case, dozens per feature. UI tests with `XCUITest` are expensive and slow; you write a handful per critical path. The model tests prove the *logic* is right. The UI tests prove the wiring is right.
+
+For Renovise, the line-item editor has the eight unit tests above and *one* `XCUITest`: open the editor, add a valid item, tap send, assert the navigation happens. That single UI test would catch the inverted `.disabled`. The eight unit tests catch every other regression I have shipped this feature against.
+
+Eight unit tests, one UI test. That is the ratio I have landed on after three apps. Your mileage will vary by surface; the principle does not.
+
+---
+
+## The Essential Developer move, refined
+
+The workflow from [yesterday](/learn/field-notes/swift-testing-migration-from-xctest), this time with the muscle on it:
+
+1. **Write the suite name first** — one sentence, the chapter heading.
+2. **Write the smallest test for the smallest behavior** — empty input always wins.
+3. **Make it compile by writing hardcoded production values.** Yes, hardcoded. It earns its keep in the next step.
+4. **Write the next test that forces the hardcode to become a real computation.** This is where the model grows methods and types.
+5. **Group similar behaviors into one parametrized `@Test`.** Three failures with named cases beats three almost-identical methods.
+6. **Refactor under the green bar.** Rename, extract, pull out a value type. The parallel default catches shared-state regressions in milliseconds.
+7. **Leave the view as a one-line projection per piece of state.** If the view starts to grow conditionals, push them onto the model and add a test.
+
+Every line of view logic that lives on the model is a line you can test in a microsecond and refactor without booting the simulator. Every line that lives in the view is a line that requires a human's eyeballs to verify. The TDD math is brutal: a thousand microsecond model tests is still under a second. A thousand human checks is a sprint.
+
+---
+
+## What I do *not* TDD (and why)
+
+The honest carve-out, same shape as [yesterday's](/learn/field-notes/swift-testing-migration-from-xctest):
+
+- **Animations and transitions.** I write the property the animation drives (`isPresenting: Bool`) and TDD that. The animation itself I check in the simulator. There is no useful red light for "does the spring damping feel right."
+- **Layout and adaptive sizing.** Same reason. The model exposes `compactLayout: Bool`; the view consumes it. Whether the breakpoint feels right is a human call.
+- **Localization rendering.** I test the *key* the view will look up. The actual string comes from `Localizable.strings` and is verified visually in each locale. TDD'ing localized strings tests the dictionary, not your code.
+- **First-party framework behavior.** I do not write tests asserting that `URLSession` retries, or that `ForEach` re-renders. Those tests cover Apple, not me.
+
+The model-vs-framework line is where most TDD overreach happens. Stay on the model side. Apple does not need your help.
+
+---
+
+## Where this connects back
+
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) — the parametrized cases here are the discipline you can only afford after Swift Testing makes them one-liners. The `@MainActor` suite rule, the per-test fresh instance, the parallel default — all paid for the workflow above.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) — the view-model here has *zero* external dependencies on purpose, because the feature does not have any yet. The moment we add a `submit()` that calls a network client, we constructor-inject it, and the test grows a `StubInvoiceSubmitter` exactly like the Day 19 `EntitlementChecker`. The DI shape was preparation for today.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) — `@Observable`'s per-property tracking means the view re-renders only when `totalText` or `canSend` actually change. The model design above is also the performance design. One file, two wins.
+- [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) — the `@State` on the view holding the `@Observable` model is the canonical pairing from the mental map. `@State` for value owning, `@Bindable` for child-view writing, `@Environment` for cross-cutting reads.
+- [Day 11](/learn/field-notes/observable-macro-migration-real-app) — the migration from `ObservableObject` to `@Observable` is what made tests like the above pleasant to write. The old `@Published` ceremony bled into every test.
+
+The long-form companions: [SwiftUI Foundations](/learn/swiftui-foundations) is the first TDD lesson for someone who has never written a Swift test. [SwiftUI in Practice](/learn/swiftui-in-practice) is the one I would bookmark today — chapter 15 walks the same red-green-refactor cycle on a Pulse feature, and the chapter that follows extends it to a model with a network dependency injected exactly like Day 19. [SwiftUI at Scale](/learn/swiftui-at-scale) covers what changes when the model lives in a feature SPM module and the test target imports `AppCore` alone — parametrized suites against three apps that share the type.
+
+The sticky-note version: **test the observable model, not the view. Write the smallest test, write the smallest production change, group similar behaviors into one parametrized `@Test`, refactor under green. The view becomes a property-read exercise. The UI test budget shrinks to the critical paths. You stop screenshot-testing kerning changes.**
+
+---
+
+**Tomorrow (Day 22):** custom networking layer in a hundred lines of code. `URLSession` plus `async/await` plus a generic `Endpoint` plus typed errors. No Alamofire, no Moya, no Resolver to register it in. The first half of a two-parter.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companions on [Learn](/learn): [SwiftUI Foundations](/learn/swiftui-foundations) for the first test on a new app, [SwiftUI in Practice](/learn/swiftui-in-practice) for full feature red-green-refactor cycles, [SwiftUI at Scale](/learn/swiftui-at-scale) for TDD across feature modules in a multi-target shared-core project.*
