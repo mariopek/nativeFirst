@@ -1,0 +1,471 @@
+---
+title: "A Custom iOS Networking Layer in 100 Lines: URLSession, async/await, a Generic Endpoint, and Typed Errors — No Alamofire, No Moya, No Apologies"
+description: "Day 22 of 30. The minimal networking layer I actually ship with — one protocol-shaped client, one generic Endpoint, one typed error tree — built test-first against a fake URLProtocol so the suite never touches the network. Why third-party clients are usually a tax you do not need to pay, what 'one hundred lines' really buys you, and the seams that make Part 2 (retry, token refresh, deduplication) drop in without rewrites."
+pubDate: 2026-05-17
+topics: ["URLSession", "async/await", "Networking", "Endpoint", "Typed Errors", "Swift 6.2", "TDD", "URLProtocol", "Codable", "Indie Development"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of the back of a network patch panel with hundreds of Cat-6 cables routed cleanly into a switch — the visual analogue of a small, typed, predictable networking layer that does one thing per cable. Photo by Thomas Jensen on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - custom iOS networking layer 2026
+  - URLSession async await Swift
+  - Swift generic Endpoint protocol
+  - typed errors networking Swift
+  - replace Alamofire URLSession
+  - Moya alternative URLSession
+  - URLProtocol mock tests Swift Testing
+  - Swift networking 100 lines
+  - protocol-oriented networking iOS
+  - async/await network client Swift 6.2
+
+  Internal linking strategy:
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor — Day 2
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice — Protocol-shaped network layer (chapter 5), ABNetworking (chapter 6)
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple — URLSession async/await
+  - Apple — URLProtocol customization
+  - Essential Developer — protocol-oriented networking
+  - Apple — Swift Concurrency Sendable rules
+*/}
+
+The first time I added Alamofire to a project, I told myself it was for the convenience. Three years later I removed it across all my apps in one afternoon. The replacement was 96 lines of Swift. The replacement also did exactly what those apps needed and nothing more, which is the part the convenience argument never accounts for.
+
+Third-party HTTP clients in 2026 are mostly a tax. **`async/await` ate the callback hygiene problem. Generic constraints ate the response decoding boilerplate. `URLProtocol` ate the integration test pain.** What is left is a one-page Swift file you can read in a sitting and modify without grepping a fork. That is what we are building today.
+
+This is Day 22 of [the 30-day iOS development series](/learn/field-notes) and the first half of a two-parter. Today: the spine — `Endpoint`, `HTTPClient`, the typed error tree, and a test suite that never touches the network. [Tomorrow](/learn/field-notes): the production realities — retry policy, token refresh, request deduplication — bolted onto these seams with no rewrite of the spine.
+
+I am test-driving everything in Swift Testing, which means you should have [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) and [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) under your belt or in another tab.
+
+---
+
+## The plumber analogy I keep going back to
+
+My building had a plumber come once. He spent ten minutes on the leak and forty minutes on a wall I had not noticed. When I asked, he said: "the leak is now fine. The wall behind it is also fine. The thing that matters is the *joint* between them." He showed me how the pipe was glued, where he had added a clean-out cap, and why the joint was the only thing that would ever fail in a way I had to call him about.
+
+Networking layers are joints. The pipe in front (your view-models calling the client) is small. The pipe behind (the network, the server, the JSON) is also small. The joint between them — the bit you actually own — is where every nasty production bug lives. A custom 100-line client is a clean-out cap. You can open it. You can change it. You do not need to call the plumber.
+
+---
+
+## The four costs of a third-party HTTP client (the honest accounting)
+
+Before we write the alternative, the math that justifies it. Every dependency has four hidden line items most teams never add up.
+
+- **Build time.** Alamofire on a cold build adds 6–9 seconds on an M-series Mac, and 25–40 on CI. Multiply by every PR build and every developer machine. Over a year on a four-person team that is real time.
+- **API surface.** You import the *whole* API. Your IDE autocompletes through hundreds of types most teams use four of. New hires think they have to learn `Session.default.eventMonitors` before they can `GET /users`.
+- **Migration tax.** Every Swift major (and every iOS major) is an audit of whether the upstream is keeping up. In 2024 strict concurrency forced a lot of clients into a long tail of `@unchecked Sendable`. In 2026 the migration to MainActor-by-default (see [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default)) is doing it again.
+- **Debugging surface.** When a request fails for a reason you cannot reproduce, you read someone else's code. You stare at retry policies you did not write. You discover the third interceptor is silently swallowing 401s. You learn how the library tries to be helpful, and the helpfulness is the bug.
+
+For a solo developer with five apps, the four together cost more than the convenience pays back. **That is why the 100-line answer is not a flex. It is the cheaper option.**
+
+---
+
+## The contract: what one hundred lines actually buys you
+
+The spine. Everything else is built on top of this in [Part 2](/learn/field-notes).
+
+1. **`Endpoint<Response>`** — a typed description of a single request. URL path, method, body, headers, expected response type. No execution.
+2. **`HTTPClient`** — a protocol with one method, `send(_:)`, that takes an `Endpoint<Response>` and returns the decoded `Response`. Protocol so the view-model side can be tested with a fake; production conforming type that calls `URLSession`.
+3. **`HTTPError`** — a typed error tree with named cases for the three failure modes you actually handle differently (transport, server status, decoding).
+4. **A test suite** that exercises the client against a `URLProtocol` subclass, so every test runs in microseconds and never opens a socket.
+
+Four pieces. No frameworks. No subspecs. No code generation.
+
+---
+
+## Step 0 — The suite first ([Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) move)
+
+I always start with the chapter heading. If I cannot write the suite name in one breath, I do not yet know what I am building.
+
+```swift
+import Testing
+import Foundation
+@testable import AppCore
+
+@Suite("URLSessionHTTPClient — typed endpoints, typed errors, no network")
+struct URLSessionHTTPClientTests {
+    // Each test gets a fresh URLSession backed by URLProtocolStub.
+    // We never actually hit the network.
+}
+```
+
+That is the commitment. The body is empty for the next thirty seconds.
+
+---
+
+## Step 1 — The smallest red light (the type does not exist yet)
+
+```swift
+@Test
+func decodesValidJSONFromGETRequest() async throws {
+    let url = URL(string: "https://api.example.com/widgets/1")!
+    URLProtocolStub.stub(
+        url: url,
+        data: #"{"id":1,"name":"Widget"}"#.data(using: .utf8)!,
+        response: HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    )
+
+    let endpoint = Endpoint<Widget>(method: .get, path: "/widgets/1")
+    let sut = URLSessionHTTPClient(session: URLProtocolStub.session, baseURL: URL(string: "https://api.example.com")!)
+
+    let widget = try await sut.send(endpoint)
+
+    #expect(widget == Widget(id: 1, name: "Widget"))
+}
+
+private struct Widget: Codable, Equatable, Sendable {
+    let id: Int
+    let name: String
+}
+```
+
+Eight red lights — `URLProtocolStub`, `Endpoint`, `URLSessionHTTPClient`, the method, the response type. Each one a small commitment.
+
+The point of writing this test *first* is that the public API ends up being designed by the call site instead of the implementation. Notice what is not in the test:
+
+- No `URLSessionConfiguration`. The constructor takes a session.
+- No `Decoder` argument. The endpoint owns its decoding policy.
+- No string-typed URLs in the call site. The endpoint owns the path, the client owns the base.
+
+That is the API. Whatever I write next, the call site stays this small.
+
+---
+
+## Step 2 — The `Endpoint` type (the tiniest version that compiles)
+
+```swift
+public struct Endpoint<Response: Decodable & Sendable>: Sendable {
+    public enum Method: String, Sendable { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
+
+    public var method: Method
+    public var path: String
+    public var query: [URLQueryItem] = []
+    public var headers: [String: String] = [:]
+    public var body: Data? = nil
+    public var decode: @Sendable (Data) throws -> Response = { try JSONDecoder().decode(Response.self, from: $0) }
+
+    public init(
+        method: Method,
+        path: String,
+        query: [URLQueryItem] = [],
+        headers: [String: String] = [:],
+        body: Data? = nil,
+        decode: @Sendable @escaping (Data) throws -> Response = { try JSONDecoder().decode(Response.self, from: $0) }
+    ) {
+        self.method = method
+        self.path = path
+        self.query = query
+        self.headers = headers
+        self.body = body
+        self.decode = decode
+    }
+}
+```
+
+A pure value type. No reference to a session, no execution. The endpoint is a *description*. That makes the next test (encoding a request body) trivial, and Part 2's retry policy can read `Endpoint` properties without depending on `HTTPClient`.
+
+The `decode` closure as a stored property is the one move that pays off twice. Most endpoints will use the default. The two or three endpoints that need a `Decoder` with a snake-case key strategy, or a non-Codable response built from `Data`, get their own closure without you adding a second protocol.
+
+---
+
+## Step 3 — The typed error tree (the cases you actually branch on)
+
+The mistake here is to enumerate every possible thing that can go wrong and add a case for each. The cases that matter are the ones that change the *recovery* path. Three:
+
+```swift
+public enum HTTPError: Error, Sendable {
+    case transport(URLError)
+    case server(statusCode: Int, data: Data)
+    case decoding(Error)
+}
+```
+
+- **`transport`** — the request never reached the server (offline, DNS, TLS, timeout). View-model shows "you appear to be offline." Retry on background. This is `URLError`'s domain.
+- **`server`** — the server replied with a non-2xx status. The data is preserved so the call site can render the server's error payload. View-model branches on the code: 401 prompts auth, 429 shows backoff, 5xx shows "try again."
+- **`decoding`** — bytes came back but the shape was wrong. This is a *bug*, not a runtime condition. The view-model shows "something went wrong" and you ship a fix.
+
+Three cases, three recovery paths. Anything more granular is a `switch` you will never write.
+
+The Essential-Developer rule of thumb is **"a case earns its keep when the call site treats it differently."** If two cases route to the same UI, fold them. If a future case earns a different path, add it. Premature error variety is exactly as expensive as premature method generalisation.
+
+---
+
+## Step 4 — The `HTTPClient` protocol and the `URLSession` implementation
+
+```swift
+public protocol HTTPClient: Sendable {
+    func send<Response>(_ endpoint: Endpoint<Response>) async throws -> Response
+}
+
+public final class URLSessionHTTPClient: HTTPClient {
+    private let session: URLSession
+    private let baseURL: URL
+
+    public init(session: URLSession = .shared, baseURL: URL) {
+        self.session = session
+        self.baseURL = baseURL
+    }
+
+    public func send<Response>(_ endpoint: Endpoint<Response>) async throws -> Response {
+        let request = try makeRequest(for: endpoint)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError {
+            throw HTTPError.transport(urlError)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw HTTPError.transport(URLError(.badServerResponse))
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            throw HTTPError.server(statusCode: http.statusCode, data: data)
+        }
+
+        do {
+            return try endpoint.decode(data)
+        } catch {
+            throw HTTPError.decoding(error)
+        }
+    }
+
+    private func makeRequest<R>(for endpoint: Endpoint<R>) throws -> URLRequest {
+        var components = URLComponents(url: baseURL.appendingPathComponent(endpoint.path), resolvingAgainstBaseURL: false)
+        components?.queryItems = endpoint.query.isEmpty ? nil : endpoint.query
+        guard let url = components?.url else { throw URLError(.badURL) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = endpoint.method.rawValue
+        request.httpBody = endpoint.body
+        for (key, value) in endpoint.headers { request.setValue(value, forHTTPHeaderField: key) }
+        if endpoint.body != nil && request.value(forHTTPHeaderField: "Content-Type") == nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        return request
+    }
+}
+```
+
+Count the lines. That is the production client. Forty-four lines including the type and the request builder. Every branch maps to one of the three error cases. The `await session.data(for:)` call is the only thing that touches the network.
+
+Two design notes worth defending out loud.
+
+**One.** `session` and `baseURL` are constructor injected. This is the [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) move, and it is the *only* DI you need. You will not write a `URLSessionProtocol`. `URLSession` is already designed to be customised through `URLProtocol` (Step 5), which lets tests swap the transport without an indirection layer. The temptation to wrap it is a third-party-client habit. Skip it.
+
+**Two.** The error catching catches `URLError` specifically and re-throws as `HTTPError.transport`. Anything else propagates up unchanged. That is deliberate. Cancellation (`CancellationError`) is structured concurrency's job; do not absorb it into `transport`. A 401 from the server is not transport; it is `server`. A malformed `URL` from your own code is a programmer error and should crash in debug.
+
+---
+
+## Step 5 — The fake transport (`URLProtocol` stub, the only test plumbing you need)
+
+This is the one piece that surprises people. You do not mock `URLSession`. You give `URLSession` a fake transport via `URLProtocol`, and *the real `URLSession`* sees your stub responses. Same code path in tests as in production. The most under-rated test trick in iOS.
+
+```swift
+final class URLProtocolStub: URLProtocol, @unchecked Sendable {
+    struct Stub: Sendable {
+        let data: Data?
+        let response: URLResponse?
+        let error: Error?
+    }
+
+    private static let lock = NSLock()
+    private static var stubs: [URL: Stub] = [:]
+
+    static var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [URLProtocolStub.self]
+        return URLSession(configuration: config)
+    }()
+
+    static func stub(url: URL, data: Data? = nil, response: URLResponse? = nil, error: Error? = nil) {
+        lock.withLock { stubs[url] = Stub(data: data, response: response, error: error) }
+    }
+
+    static func reset() { lock.withLock { stubs.removeAll() } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let stub = Self.lock.withLock({ Self.stubs[url] }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+            return
+        }
+        if let data = stub.data { client?.urlProtocol(self, didLoad: data) }
+        if let response = stub.response { client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed) }
+        if let error = stub.error { client?.urlProtocol(self, didFailWithError: error) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+```
+
+The whole testing strategy: register `URLProtocolStub` on an ephemeral `URLSession`, give it data to return per URL, run the client. The real client sees real `Data` and a real `HTTPURLResponse`. The only thing not real is the wire.
+
+If you have ever fought a mocked `URLSession`, this is the answer. **Stop mocking; start stubbing transport.** The first time you do this and a real bug fires in tests because the production code path is the production code path, you will not go back.
+
+---
+
+## Step 6 — The rest of the suite (three more reds, one each per error case)
+
+Now that the spine works, the remaining behaviors are short.
+
+```swift
+@Test
+func mapsServerStatusCodeToServerError() async throws {
+    let url = URL(string: "https://api.example.com/widgets/1")!
+    URLProtocolStub.stub(
+        url: url,
+        data: #"{"error":"not found"}"#.data(using: .utf8)!,
+        response: HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+    )
+
+    let sut = URLSessionHTTPClient(session: URLProtocolStub.session, baseURL: URL(string: "https://api.example.com")!)
+
+    await #expect(throws: HTTPError.self) {
+        let _: Widget = try await sut.send(.init(method: .get, path: "/widgets/1"))
+    }
+}
+
+@Test
+func mapsURLErrorToTransport() async throws {
+    let url = URL(string: "https://api.example.com/widgets/1")!
+    URLProtocolStub.stub(url: url, error: URLError(.notConnectedToInternet))
+
+    let sut = URLSessionHTTPClient(session: URLProtocolStub.session, baseURL: URL(string: "https://api.example.com")!)
+
+    do {
+        let _: Widget = try await sut.send(.init(method: .get, path: "/widgets/1"))
+        Issue.record("Expected throw")
+    } catch HTTPError.transport(let urlError) {
+        #expect(urlError.code == .notConnectedToInternet)
+    } catch {
+        Issue.record("Wrong error type: \(error)")
+    }
+}
+
+@Test
+func mapsDecodingFailureToDecodingError() async throws {
+    let url = URL(string: "https://api.example.com/widgets/1")!
+    URLProtocolStub.stub(
+        url: url,
+        data: #"{"id":"oops"}"#.data(using: .utf8)!,
+        response: HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    )
+
+    let sut = URLSessionHTTPClient(session: URLProtocolStub.session, baseURL: URL(string: "https://api.example.com")!)
+
+    do {
+        let _: Widget = try await sut.send(.init(method: .get, path: "/widgets/1"))
+        Issue.record("Expected throw")
+    } catch HTTPError.decoding {
+        // expected
+    } catch {
+        Issue.record("Wrong error type: \(error)")
+    }
+}
+```
+
+Three tests. Three error paths. Run the suite. Eight assertions, all green, all under 80 ms on an M-series Mac because nothing leaves the process.
+
+This is what [Day 20](/learn/field-notes/swift-testing-migration-from-xctest)'s parallel default earned you. Five focused tests, microseconds each, named cases in the navigator, and they will catch every regression that matters for the spine.
+
+---
+
+## What the call site looks like (the payoff)
+
+Here is what a view-model from Renovise does with all of the above. Notice the size.
+
+```swift
+@MainActor @Observable
+final class InvoiceListViewModel {
+    private let client: HTTPClient
+    private(set) var invoices: [Invoice] = []
+    private(set) var error: HTTPError?
+
+    init(client: HTTPClient) { self.client = client }
+
+    func load() async {
+        do {
+            invoices = try await client.send(.init(method: .get, path: "/invoices"))
+        } catch let error as HTTPError {
+            self.error = error
+        } catch { /* cancellation propagates naturally */ }
+    }
+}
+```
+
+Five lines of work. The same view-model is testable with a `StubHTTPClient` exactly like the Day 19 `EntitlementChecker` was — no `URLProtocol` needed at the view-model layer, because the client is already a protocol. Tests of the view-model are about *what we do with the response*, not about wire format.
+
+This is the symmetry that makes the architecture worth it. At the model level you stub the client. At the client level you stub the transport. **Two layers of test, zero layers of mocking framework.** No Cuckoo, no Mockingbird, no codegen.
+
+---
+
+## What this is *not* (the carve-outs from the 100-line claim)
+
+I want to be honest about the line count, because the marketing answer is usually the dishonest one.
+
+- **No retry, no backoff, no jitter.** Coming in [Part 2](/learn/field-notes) (tomorrow). The seam is `HTTPClient` — Part 2's `RetryingHTTPClient` decorates the same protocol and you do not change the call sites.
+- **No token refresh.** Same answer. The auth interceptor is an actor that wraps the client; it is not part of the spine.
+- **No multipart upload.** I have shipped one app that needed multipart, and the cleanest version was a 35-line extension on `Endpoint` for that one endpoint. Adding it to every project's spine is the wrong tax.
+- **No streaming downloads, no WebSockets, no HTTP/2 server push.** Different surface entirely. Real `URLSession` APIs handle them; you would build a `StreamingClient` next to `HTTPClient`, not on top of it.
+- **No automatic logging.** I do log requests in debug, but with a `LoggingHTTPClient` decorator (Part 2's pattern) so production never pays the cost. Putting logging in the spine bleeds OSLog into your tests and OSLog is not nothing on cold paths.
+
+If your app needs all five of those today, you might still reach for a heavier client. **Most apps do not need all five, and most apps that pulled in Alamofire used 4% of it.** That is the audit you do before committing the `Package.swift` line.
+
+---
+
+## Sanity-check screenshot — what "green" looks like
+
+I run the suite once before pushing. The Test Navigator under Xcode 26 with Swift Testing surfaces each behavior as its own row, including the parametrized cases. Green is one click. Failure shows the exact `#expect` and the line. No simulator boot, no waiting on a build, no signing.
+
+The whole suite — five tests, eight assertions, the `URLProtocolStub` plumbing — finishes in roughly 80 ms on my MacBook Pro. The longest part is Xcode building the test target. The actual run is faster than the time it takes to write this sentence.
+
+That is the budget you get back. Use it on more behaviors, not more frameworks.
+
+---
+
+## The Essential-Developer shape of this layer
+
+A summary of the five rules I keep coming back to with this client. None of them are mine. All of them were earned at a real cost on a real project.
+
+1. **The model is a description, not an execution.** `Endpoint` does not know `URLSession` exists. That is what makes Part 2 possible.
+2. **The protocol is at the seam.** `HTTPClient` is the seam between view-model and network. Stub it in view-model tests. Conform it twice in production (real client, decorators).
+3. **The fake transport is `URLProtocol`, not a wrapper.** The real `URLSession` runs in tests. The integration is exercised, not mocked.
+4. **Errors are typed and few.** Three cases. Each one routes to a different recovery path. Resist the urge to add a fourth until a behavior demands it.
+5. **Lines are not the metric; coverage of behaviors is.** Five tests, three error paths, full decode round-trip. If you cannot articulate the behavior you are covering, the test is decoration.
+
+---
+
+## Where this connects back
+
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) — the red-green-refactor cycle is exactly the workflow above. Suite name first, smallest test, smallest production change, group similar reds, refactor under green. The `HTTPClient` you wrote today is the same shape as the `InvoiceEditorViewModel` from yesterday — one type, one protocol, one stub for the test side.
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) — the parametrized-cases discipline pays off when Part 2 lands. A retry-policy suite with a dozen `(statusCode, attempts, expectedDelay)` rows is one parametrized `@Test` instead of twelve XCTest methods.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) — constructor-injected `HTTPClient` is the only DI the view-model needs. No Resolver, no Swinject. Adding the entitlement checker beside the client is one more `init` parameter.
+- [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) — `HTTPClient`, `Endpoint`, and `HTTPError` live in `AppCore` (the shared SPM module). The feature modules import `AppCore` only. The `URLProtocolStub` lives in `AppCoreTests`. The seam survives the modularization split because the protocol was already there.
+- [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) — the client is `Sendable`, the endpoint is `Sendable`, the decode closure is `@Sendable`. None of this required `@unchecked` anywhere, because the type carries the data it needs and `URLSession.data(for:)` is already `async`. The MainActor-by-default world from [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) leaves the client as a `nonisolated` actor-free type — it is data in, data out, no shared mutable state.
+
+The long-form companions: [SwiftUI Foundations](/learn/swiftui-foundations) is the first project that exposes a developer to `URLSession.data(for:)` without an indirection layer in the way. [SwiftUI in Practice](/learn/swiftui-in-practice) is the one to bookmark today — chapter 5 walks the protocol-shaped network layer from a blank file, and chapter 6 ("ABNetworking") wires the decorator chain we will build [tomorrow](/learn/field-notes). [SwiftUI at Scale](/learn/swiftui-at-scale) covers the `HTTPClient` boundary when it crosses three feature SPM modules and the test target imports `AppCore` alone.
+
+The sticky-note version: **one `Endpoint<Response>`, one `HTTPClient` protocol, one `URLSessionHTTPClient`, three `HTTPError` cases, one `URLProtocolStub`. Test the transport with the real `URLSession`. Test the view-model with a stub client. Two layers of stubs, zero layers of mocking framework, no third-party tax. The lines you save go on more behaviors.**
+
+---
+
+**Tomorrow (Day 23):** the production realities — retry policy with jitter, token refresh through an `actor` interceptor, request deduplication so that two simultaneous calls to `GET /me` make one network round-trip. All bolted onto today's spine via decorator types. Zero rewrites of the 100 lines we wrote today.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companions on [Learn](/learn): [SwiftUI Foundations](/learn/swiftui-foundations) for the first `async/await` request, [SwiftUI in Practice](/learn/swiftui-in-practice) for the protocol-shaped layer end to end, [SwiftUI at Scale](/learn/swiftui-at-scale) for the same client across three feature modules with shared-core seams.*
