@@ -1,0 +1,592 @@
+---
+title: "Retry, Token Refresh, and Request Deduplication in a Custom Swift Networking Layer — The Decorator Chain That Survives Production"
+description: "Day 23 of 30. The production-grade additions that ship on top of yesterday's 100-line networking spine: a retry decorator with exponential backoff and jitter, an actor-based auth interceptor that refreshes tokens exactly once across concurrent callers, and a dedup decorator that collapses identical in-flight requests into one round-trip. All three are decorators on Day 22's HTTPClient, all three are test-driven, and none of them touch the original spine."
+pubDate: 2026-05-18
+topics: ["URLSession", "async/await", "Retry", "Backoff", "Jitter", "Token Refresh", "Actor", "Request Deduplication", "Decorator Pattern", "Swift 6.2", "TDD", "Networking"]
+level: advanced
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1531750026848-8ada78f641c2?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An overhead shot of a busy industrial conveyor belt with packages being routed through three sorting stations — the visual analogue of decorators on a single HTTPClient, each station doing one job (retry, auth refresh, dedup) and passing the request through. Photo by Bernd Dittrich on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - Swift retry async await
+  - URLSession exponential backoff jitter
+  - Swift token refresh actor
+  - request deduplication Swift
+  - decorator pattern Swift networking
+  - 401 token refresh single-flight Swift
+  - HTTPClient decorator chain
+  - Swift Testing parametrized retry
+  - URLSession network retry policy 2026
+  - production networking layer iOS
+
+  Internal linking strategy:
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22 (spine)
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor — Day 2
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice — chapter 6 (ABNetworking decorator chain)
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple — Swift Concurrency: actors
+  - Apple — URLError codes
+  - AWS architecture blog — exponential backoff and jitter
+  - Essential Developer — composing protocols with decorators
+*/}
+
+A friend of mine works as a barista in a place that pulls about 200 shots before noon. Their espresso machine has three things bolted onto the side that the manufacturer did not ship: a magnetic timer, a knock-box on rails, and a cup warmer cobbled from an old hot plate. None of them changed the machine. All of them changed the shop.
+
+That is what we are doing today. **Yesterday's [100-line networking spine](/learn/field-notes/custom-networking-layer-urlsession-async-await) does not change.** We bolt three things to the side of it: retry with backoff, token refresh, request deduplication. Each one is its own type. Each one conforms to the same `HTTPClient` protocol. Each one is testable in isolation. The view-model still sees one client and one `send` method.
+
+This is Day 23 of [the 30-day iOS development series](/learn/field-notes) and the second half of the networking two-parter. **If you have not read [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await), do that first** — every type in this post is a decorator on the protocol we defined yesterday.
+
+I am still test-driving everything in Swift Testing ([Day 20](/learn/field-notes/swift-testing-migration-from-xctest)), still using constructor injection for the seams ([Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks)), and the actor isolation rules below assume you have read [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) on the `@concurrent` / `nonisolated` / `@MainActor` matrix.
+
+---
+
+## The shape of today: three decorators, one protocol
+
+The reason yesterday's spine is forty-four lines is that production concerns live *outside* it. Today we add three of them. Every one of them is a class that conforms to `HTTPClient`, takes another `HTTPClient` as a constructor parameter, and adds one behavior before or after the inner call.
+
+```swift
+// pseudo-pipeline, top-down request flow
+let realClient   = URLSessionHTTPClient(...)             // from Day 22
+let dedup        = DeduplicatingHTTPClient(wrapping: realClient)
+let auth         = AuthenticatingHTTPClient(wrapping: dedup, tokenStore: ...)
+let retrying     = RetryingHTTPClient(wrapping: auth, policy: .default)
+// view-models hold `retrying` as `HTTPClient`
+```
+
+A request goes top-down through retry → auth → dedup → real. A response comes back bottom-up. Each layer is responsible for one thing. **You can remove any of the three by deleting one line.** That is the point of the protocol seam.
+
+Two things worth saying out loud about this pipeline order, because the order matters and I have rebuilt it the wrong way around at least once:
+
+- **Retry on the outside.** Retry decides whether to call `send` again. It is the loop. It has to wrap everything else so that "one more attempt" goes through auth and dedup like the first one did.
+- **Dedup on the inside.** Dedup keys on the request itself, *after* auth has put the token on it. If you swap the two, two requests with different auth states get collapsed and you ship a security bug.
+
+If you only remember one thing from this post, make it the order. Everything else is implementation.
+
+---
+
+## Decorator 1 — `RetryingHTTPClient` (the loop on the outside)
+
+The piece everyone writes first and breaks first. The wrong version retries everything; the right version retries only the failures that retry can fix.
+
+### The policy is a value
+
+I keep retry behavior out of the client class and in a `RetryPolicy` value type. This is what makes a parametrized test suite ([Day 20](/learn/field-notes/swift-testing-migration-from-xctest)) trivial later.
+
+```swift
+public struct RetryPolicy: Sendable {
+    public var maxAttempts: Int                   // including the first try
+    public var baseDelay: TimeInterval            // seconds for attempt #1's wait
+    public var maxDelay: TimeInterval             // cap on any one wait
+    public var retryableStatusCodes: Set<Int>     // 408, 429, 500, 502, 503, 504
+    public var jitter: ClosedRange<Double>        // multiplicative, e.g. 0.5...1.5
+
+    public static let `default` = RetryPolicy(
+        maxAttempts: 3,
+        baseDelay: 0.3,
+        maxDelay: 8,
+        retryableStatusCodes: [408, 429, 500, 502, 503, 504],
+        jitter: 0.5...1.5
+    )
+}
+```
+
+The thing I never put in this struct is "retry on `.decoding`." A decoding failure is a programmer bug ([Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await)); retrying it just burns battery while a contract drifts further out of sync. Same for 4xx that are not 408 or 429. The default set above is the *responsible* default — additions go in for app-specific reasons, not as a "just in case."
+
+### The test (suite first, behavior next)
+
+```swift
+@Suite("RetryingHTTPClient — exponential backoff, jitter, only retryable failures")
+struct RetryingHTTPClientTests {
+    @Test
+    func returnsImmediatelyOnSuccess() async throws {
+        let inner = StubHTTPClient(plan: [.success(Widget(id: 1, name: "ok"))])
+        let sut = RetryingHTTPClient(wrapping: inner, policy: .default, sleeper: ImmediateSleeper())
+
+        let result: Widget = try await sut.send(.init(method: .get, path: "/w"))
+
+        #expect(result == Widget(id: 1, name: "ok"))
+        #expect(inner.attempts == 1)
+    }
+
+    @Test
+    func retriesOnce503ThenSucceeds() async throws {
+        let inner = StubHTTPClient(plan: [
+            .failure(.server(statusCode: 503, data: Data())),
+            .success(Widget(id: 2, name: "ok"))
+        ])
+        let sleeper = RecordingSleeper()
+        let sut = RetryingHTTPClient(wrapping: inner, policy: .default, sleeper: sleeper)
+
+        let result: Widget = try await sut.send(.init(method: .get, path: "/w"))
+
+        #expect(result == Widget(id: 2, name: "ok"))
+        #expect(inner.attempts == 2)
+        #expect(sleeper.requestedDelays.count == 1)
+        #expect(sleeper.requestedDelays[0] >= 0.15 && sleeper.requestedDelays[0] <= 0.45)
+    }
+
+    @Test
+    func doesNotRetry404() async throws {
+        let inner = StubHTTPClient(plan: [.failure(.server(statusCode: 404, data: Data()))])
+        let sut = RetryingHTTPClient(wrapping: inner, policy: .default, sleeper: ImmediateSleeper())
+
+        await #expect(throws: HTTPError.self) {
+            let _: Widget = try await sut.send(.init(method: .get, path: "/w"))
+        }
+        #expect(inner.attempts == 1)
+    }
+
+    @Test
+    func doesNotRetryDecodingErrors() async throws {
+        let inner = StubHTTPClient(plan: [.failure(.decoding(URLError(.cannotDecodeContentData)))])
+        let sut = RetryingHTTPClient(wrapping: inner, policy: .default, sleeper: ImmediateSleeper())
+
+        await #expect(throws: HTTPError.self) {
+            let _: Widget = try await sut.send(.init(method: .get, path: "/w"))
+        }
+        #expect(inner.attempts == 1)
+    }
+
+    @Test(arguments: [
+        (attempt: 1, range: 0.15...0.45),
+        (attempt: 2, range: 0.30...0.90),
+        (attempt: 3, range: 0.60...1.80)
+    ])
+    func backoffGrowsExponentiallyWithJitter(attempt: Int, range: ClosedRange<TimeInterval>) async throws {
+        let plan: [StubHTTPClient.Step] = .init(repeating: .failure(.server(statusCode: 503, data: Data())), count: attempt) + [.success(Widget(id: 1, name: "ok"))]
+        let sleeper = RecordingSleeper()
+        var policy = RetryPolicy.default
+        policy.maxAttempts = attempt + 1
+        let sut = RetryingHTTPClient(wrapping: StubHTTPClient(plan: plan), policy: policy, sleeper: sleeper)
+
+        _ = try await sut.send(Endpoint<Widget>(method: .get, path: "/w"))
+
+        #expect(range.contains(sleeper.requestedDelays.last!))
+    }
+}
+```
+
+Five tests, one of them parametrized across three attempts. Notice what is *not* in the test: there is no `Task.sleep(for: .seconds(0.5))`. Time is injected as a `Sleeper` protocol. The recording sleeper captures the requested delay so we can assert against the math. The immediate sleeper returns straight away. **Tests that block on real time are tests that are flaky on CI.** This is the single biggest mistake I see in retry code.
+
+### The production type
+
+```swift
+public protocol Sleeper: Sendable {
+    func sleep(seconds: TimeInterval) async throws
+}
+
+public struct RealSleeper: Sleeper {
+    public init() {}
+    public func sleep(seconds: TimeInterval) async throws {
+        try await Task.sleep(for: .seconds(seconds))
+    }
+}
+
+public final class RetryingHTTPClient: HTTPClient {
+    private let inner: HTTPClient
+    private let policy: RetryPolicy
+    private let sleeper: Sleeper
+
+    public init(wrapping inner: HTTPClient, policy: RetryPolicy, sleeper: Sleeper = RealSleeper()) {
+        self.inner = inner
+        self.policy = policy
+        self.sleeper = sleeper
+    }
+
+    public func send<Response>(_ endpoint: Endpoint<Response>) async throws -> Response {
+        var attempt = 1
+        while true {
+            do {
+                return try await inner.send(endpoint)
+            } catch let error as HTTPError where shouldRetry(error) && attempt < policy.maxAttempts {
+                try Task.checkCancellation()
+                let delay = delayFor(attempt: attempt)
+                try await sleeper.sleep(seconds: delay)
+                attempt += 1
+            }
+        }
+    }
+
+    private func shouldRetry(_ error: HTTPError) -> Bool {
+        switch error {
+        case .transport: return true
+        case .server(let code, _): return policy.retryableStatusCodes.contains(code)
+        case .decoding: return false
+        }
+    }
+
+    private func delayFor(attempt: Int) -> TimeInterval {
+        let exponential = policy.baseDelay * pow(2.0, Double(attempt - 1))
+        let capped = min(exponential, policy.maxDelay)
+        let jitterMultiplier = Double.random(in: policy.jitter)
+        return capped * jitterMultiplier
+    }
+}
+```
+
+Three notes:
+
+**Cancellation.** The `try Task.checkCancellation()` between attempts is the only reason this loop is well-behaved when the user backs out of the screen. Without it you can keep retrying after the view-model is gone.
+
+**Decimal jitter.** The `0.5...1.5` range is the multiplicative jitter from the AWS architecture blog. It is the simplest variant that prevents a thundering-herd retry storm without making the math hard to reason about. Median delay is `baseDelay * 2^(attempt-1)`. The spread is wide enough to spread reconnect requests across a window, narrow enough that the user does not stare at a spinner for nine seconds.
+
+**No "retry the same error forever."** `attempt < policy.maxAttempts` is checked inside the `where` clause. The compiler will not let you forget. The original `while true` is bounded by either a success, a non-retryable error, or the maximum attempts.
+
+---
+
+## Decorator 2 — `AuthenticatingHTTPClient` (the actor with the single-flight refresh)
+
+This is the one decorator that is *not* a `final class`. It owns mutable state — the current token, and the in-flight refresh task — and the rule of [Swift 6.2 concurrency](/learn/field-notes/swift-6-2-mainactor-by-default) is "mutable state lives in an actor."
+
+The job is twofold:
+
+1. **Inject the current token into every outgoing request.** Read-only path; cheap.
+2. **On a 401, refresh the token *once across concurrent callers*, and replay the failed request.** Write path; the tricky bit.
+
+If two view-models simultaneously hit 401 — and they will, because phones go to sleep and wake up to expired tokens — you do not want two refresh requests racing. The "single-flight" pattern: the first 401 starts a refresh `Task`; every other 401 awaits the same `Task`; whoever wins replays their original request with the new token.
+
+### The token store
+
+A small actor that the auth client reads from and writes to. The store is separate so it can be backed by Keychain, an in-memory cache for tests, or a custom secure enclave wrapper. Constructor-inject it ([Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks)).
+
+```swift
+public protocol TokenStore: Sendable {
+    func current() async -> AuthTokens?
+    func update(_ tokens: AuthTokens?) async
+}
+
+public struct AuthTokens: Sendable, Equatable {
+    public let access: String
+    public let refresh: String
+    public let expiresAt: Date
+}
+```
+
+### The refresher
+
+A function-shaped protocol that knows how to mint a new access token from a refresh token. Keeping this out of the client means it does not depend on `URLSession`, which means tests can supply a closure.
+
+```swift
+public protocol TokenRefresher: Sendable {
+    func refresh(using refreshToken: String) async throws -> AuthTokens
+}
+```
+
+### The decorator
+
+```swift
+public actor AuthenticatingHTTPClient: HTTPClient {
+    private let inner: HTTPClient
+    private let store: TokenStore
+    private let refresher: TokenRefresher
+    private var inFlightRefresh: Task<AuthTokens, Error>?
+
+    public init(wrapping inner: HTTPClient, store: TokenStore, refresher: TokenRefresher) {
+        self.inner = inner
+        self.store = store
+        self.refresher = refresher
+    }
+
+    public nonisolated func send<Response>(_ endpoint: Endpoint<Response>) async throws -> Response {
+        let authed = await self.attach(endpoint: endpoint)
+        do {
+            return try await inner.send(authed)
+        } catch HTTPError.server(statusCode: 401, _) {
+            let newTokens = try await self.refreshOnce()
+            let retried = endpoint.with(header: "Authorization", value: "Bearer \(newTokens.access)")
+            return try await inner.send(retried)
+        }
+    }
+
+    private func attach<R>(endpoint: Endpoint<R>) async -> Endpoint<R> {
+        guard let token = await store.current()?.access else { return endpoint }
+        return endpoint.with(header: "Authorization", value: "Bearer \(token)")
+    }
+
+    private func refreshOnce() async throws -> AuthTokens {
+        if let existing = inFlightRefresh { return try await existing.value }
+
+        let task = Task<AuthTokens, Error> {
+            guard let current = await store.current() else { throw HTTPError.server(statusCode: 401, data: Data()) }
+            let new = try await refresher.refresh(using: current.refresh)
+            await store.update(new)
+            return new
+        }
+        inFlightRefresh = task
+
+        defer { inFlightRefresh = nil }
+        return try await task.value
+    }
+}
+
+extension Endpoint {
+    func with(header key: String, value: String) -> Endpoint<Response> {
+        var copy = self
+        copy.headers[key] = value
+        return copy
+    }
+}
+```
+
+A handful of things to defend here:
+
+**The class is an `actor`.** `inFlightRefresh` is mutable state that two callers can race on. Actors serialize the mutation for free. The `send` method is `nonisolated` because the *isolated* portions of the work — reading the token and consulting `inFlightRefresh` — are small `await` points; we do not want to serialize the inner network call too.
+
+**`refreshOnce` is the single-flight.** The first caller into a 401 storm creates the `Task`, every subsequent caller sees `inFlightRefresh` set and awaits the same future. Only one network round-trip happens. The `defer` block clears the slot regardless of success or failure so the next 401 starts fresh.
+
+**One retry, not two.** If the *replayed* request also 401s, we throw. That means the refresh token itself is invalid, the user needs to sign in again, and looping would only delay the inevitable. View-models catch this and route to the sign-in screen.
+
+### The test (one parametrized 401 storm, two focused single-shots)
+
+```swift
+@Suite("AuthenticatingHTTPClient — single-flight refresh, header injection, replay once")
+struct AuthenticatingHTTPClientTests {
+    @Test
+    func attachesBearerHeaderOnRequest() async throws {
+        let store = InMemoryTokenStore(initial: .fixture(access: "access-1"))
+        let inner = RecordingHTTPClient(plan: [.success(Widget(id: 1, name: "ok"))])
+        let sut = AuthenticatingHTTPClient(wrapping: inner, store: store, refresher: FailingRefresher())
+
+        _ = try await sut.send(Endpoint<Widget>(method: .get, path: "/me"))
+
+        #expect(inner.receivedEndpoints.first?.headers["Authorization"] == "Bearer access-1")
+    }
+
+    @Test
+    func refreshesOnceForTwoConcurrent401s() async throws {
+        let store = InMemoryTokenStore(initial: .fixture(access: "expired"))
+        let inner = RecordingHTTPClient(plan: [
+            .failure(.server(statusCode: 401, data: Data())),
+            .failure(.server(statusCode: 401, data: Data())),
+            .success(Widget(id: 1, name: "ok")),
+            .success(Widget(id: 2, name: "ok"))
+        ])
+        let refresher = CountingRefresher(returning: .fixture(access: "fresh"))
+        let sut = AuthenticatingHTTPClient(wrapping: inner, store: store, refresher: refresher)
+
+        async let a: Widget = sut.send(.init(method: .get, path: "/one"))
+        async let b: Widget = sut.send(.init(method: .get, path: "/two"))
+        _ = try await (a, b)
+
+        #expect(refresher.callCount == 1)
+        let authorizationHeaders = inner.receivedEndpoints.suffix(2).map { $0.headers["Authorization"] }
+        #expect(authorizationHeaders.allSatisfy { $0 == "Bearer fresh" })
+    }
+
+    @Test
+    func surfacesSecond401AfterRefresh() async throws {
+        let store = InMemoryTokenStore(initial: .fixture(access: "expired"))
+        let inner = RecordingHTTPClient(plan: [
+            .failure(.server(statusCode: 401, data: Data())),
+            .failure(.server(statusCode: 401, data: Data()))
+        ])
+        let sut = AuthenticatingHTTPClient(wrapping: inner, store: store, refresher: CountingRefresher(returning: .fixture(access: "fresh")))
+
+        await #expect(throws: HTTPError.self) {
+            let _: Widget = try await sut.send(.init(method: .get, path: "/me"))
+        }
+    }
+}
+```
+
+Three tests. The middle one is the only test that mattered when I shipped this in Renovise — every storm of 401s after a wake-from-sleep used to mint two refresh tokens, and the second invalidated the first. The single-flight assertion (`refresher.callCount == 1`) is the contract that ended that whole class of bug.
+
+---
+
+## Decorator 3 — `DeduplicatingHTTPClient` (one network round-trip for N identical concurrent calls)
+
+The smallest of the three. The most common one to *not* need. But when you do need it — feed screens that fetch the same `GET /me` from three view-models on first launch, or a tab bar that prefetches the same resource on a tap — the savings are real.
+
+The contract: while a request for the same `(method, URL, body)` is in flight, additional `send` calls return the same task's result instead of starting a new request. Once the request completes, the entry is evicted.
+
+### What "the same request" means
+
+The cache key is the *fully-resolved* request, not the endpoint. That is why this decorator sits *below* auth in the pipeline — by the time the request reaches dedup it has the right `Authorization` header. Two requests from two users will have different headers and will not collide.
+
+```swift
+struct DedupKey: Hashable, Sendable {
+    let method: String
+    let url: URL
+    let bodyHash: Int  // hash of httpBody; nil-body is hash of empty Data
+}
+```
+
+We hash the body rather than storing it, because the only thing we use the key for is identity. The hash collision rate at this scale is irrelevant; if two genuinely different POSTs collide on the same URL with the same body hash in the same millisecond, they were almost certainly the same intent.
+
+### The actor
+
+```swift
+public actor DeduplicatingHTTPClient: HTTPClient {
+    private let inner: HTTPClient
+    private var inFlight: [DedupKey: Task<Any, Error>] = [:]
+
+    public init(wrapping inner: HTTPClient) { self.inner = inner }
+
+    public nonisolated func send<Response>(_ endpoint: Endpoint<Response>) async throws -> Response {
+        // Only GET is safe to dedup. Mutating verbs run as-is.
+        guard endpoint.method == .get else { return try await inner.send(endpoint) }
+
+        let key = await self.key(for: endpoint)
+        if let existing: Response = try await self.awaitExisting(key: key) { return existing }
+
+        let task = Task<Any, Error> {
+            let value: Response = try await self.inner.send(endpoint)
+            return value as Any
+        }
+        await self.register(task: task, for: key)
+
+        defer { Task { await self.evict(key: key) } }
+        let value = try await task.value
+        return value as! Response
+    }
+
+    private func key<R>(for endpoint: Endpoint<R>) -> DedupKey {
+        // The real URL is constructed by the inner URLSessionHTTPClient.
+        // For the key we approximate from path + query + body.
+        var components = URLComponents()
+        components.path = endpoint.path
+        components.queryItems = endpoint.query.isEmpty ? nil : endpoint.query
+        let url = components.url ?? URL(string: "about:blank")!
+        return DedupKey(method: endpoint.method.rawValue, url: url, bodyHash: (endpoint.body ?? Data()).hashValue)
+    }
+
+    private func awaitExisting<Response>(key: DedupKey) async throws -> Response? {
+        guard let task = inFlight[key] else { return nil }
+        let value = try await task.value
+        return value as? Response
+    }
+
+    private func register(task: Task<Any, Error>, for key: DedupKey) {
+        inFlight[key] = task
+    }
+
+    private func evict(key: DedupKey) {
+        inFlight[key] = nil
+    }
+}
+```
+
+The thing this decorator deliberately does *not* do:
+
+- **It does not dedup POST / PUT / DELETE.** Two posts that look identical are still two posts; the server should idempotency-key those, not the client. We just punch them through.
+- **It does not persist anything.** Once the request finishes, the entry is gone. This is not a cache. Caching is `URLSession`'s job.
+- **It does not collapse across cancellation boundaries.** If the original caller cancels their `Task`, the in-flight `Task` continues — the second waiter still gets the value. Whether that is the right behavior depends on your app; in the apps I ship, the second caller usually does want the result.
+
+### The test (one happy path, one negative)
+
+```swift
+@Suite("DeduplicatingHTTPClient — GET coalescing, mutating verbs untouched")
+struct DeduplicatingHTTPClientTests {
+    @Test
+    func collapsesConcurrentGetsToOneInnerCall() async throws {
+        let inner = RecordingHTTPClient(plan: [.success(Widget(id: 1, name: "ok"))])
+        let sut = DeduplicatingHTTPClient(wrapping: inner)
+        let endpoint = Endpoint<Widget>(method: .get, path: "/me")
+
+        async let a: Widget = sut.send(endpoint)
+        async let b: Widget = sut.send(endpoint)
+        async let c: Widget = sut.send(endpoint)
+        let results = try await [a, b, c]
+
+        #expect(results.count == 3)
+        #expect(inner.receivedEndpoints.count == 1)
+    }
+
+    @Test
+    func doesNotCollapsePosts() async throws {
+        let inner = RecordingHTTPClient(plan: [
+            .success(Widget(id: 1, name: "a")),
+            .success(Widget(id: 2, name: "b"))
+        ])
+        let sut = DeduplicatingHTTPClient(wrapping: inner)
+        let endpoint = Endpoint<Widget>(method: .post, path: "/w", body: Data("hello".utf8))
+
+        async let a: Widget = sut.send(endpoint)
+        async let b: Widget = sut.send(endpoint)
+        _ = try await (a, b)
+
+        #expect(inner.receivedEndpoints.count == 2)
+    }
+}
+```
+
+Two tests. The whole feature. If you ever doubted that decorators justify their existence on testability alone, look at how small that suite is. Behavior under concurrency is hard to assert; the actor model and the recording inner client make it routine.
+
+---
+
+## Composing the chain (the assembly the app actually uses)
+
+Now that all three exist, the composition is one function. I put it in a tiny factory inside `AppCore` and let every app target call it.
+
+```swift
+public enum HTTPClientFactory {
+    public static func make(
+        baseURL: URL,
+        store: TokenStore,
+        refresher: TokenRefresher,
+        retryPolicy: RetryPolicy = .default
+    ) -> HTTPClient {
+        let real = URLSessionHTTPClient(session: .shared, baseURL: baseURL)
+        let dedup = DeduplicatingHTTPClient(wrapping: real)
+        let auth = AuthenticatingHTTPClient(wrapping: dedup, store: store, refresher: refresher)
+        let retrying = RetryingHTTPClient(wrapping: auth, policy: retryPolicy)
+        return retrying
+    }
+}
+```
+
+The view-model takes an `HTTPClient`. It never knows that retry, auth, or dedup exist. **That is the seam paying off.** If you decide tomorrow that you do not want dedup, you drop one line. If you decide that you want a `LoggingHTTPClient` decorator in debug builds, you wrap one more layer.
+
+This is the exact same architectural move that the [Essential Developer "ABNetworking"](/learn/swiftui-in-practice) module covers in chapter 6 of *SwiftUI in Practice* — the protocol stays small, the implementations multiply, the call site does not change.
+
+---
+
+## A short story about the bug that taught me to put dedup *below* auth
+
+The first time I built this chain in Renovise, I had auth on the inside. The order was retry → dedup → auth → real. It looked cleaner. Dedup keyed on the *unauthenticated* endpoint, which is a smaller surface.
+
+It also collapsed two requests from two signed-in users into one network call when their endpoints were identical. The first user's view-model got back their own data, fine. The second user's view-model got back the *first* user's data. In the test harness I noticed the second `Authorization` header was wrong, swapped the order, and never had the bug again.
+
+**The lesson is not "test more harder."** The lesson is that the right pipeline order is the one where each layer cannot accidentally subvert the layer below it. Auth-on-the-outside, dedup-on-the-inside, retry-on-the-very-outside — those constraints encode a property: each request that dedup sees is a "fully addressed envelope," and the cache key is the address.
+
+---
+
+## What this gives you over Alamofire / Moya (the honest score)
+
+I am the same person who tore Alamofire out of every app in an afternoon ([Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await)). I am also not pretending the libraries do nothing. Here is what I gave up and what I gained:
+
+- **I gave up:** a `RequestRetrier` protocol I can configure with a fluent DSL, a session-level event monitor, multipart helpers, request adapters with response handlers, fancy `RequestModifier` chains, and an actively maintained matrix of advanced features I do not use.
+- **I gained:** a 6-file SPM module I read in a sitting, a test suite that runs in 200 ms, three decorators that compose linearly, full Swift 6.2 strict-concurrency conformance without one `@unchecked`, and a debugging experience where every retry, every refresh, and every dedup is in my own code.
+
+For one of the apps in my portfolio that profile matches the use case exactly. For another, an HTTP/2 streaming requirement would push me back to a heavier library — but for the streaming surface, not for the regular CRUD. That is the right unit of decision: the surface, not the project.
+
+---
+
+## Connecting back
+
+- [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) is the spine. Today's decorators do not exist without it. If you have not internalized why `HTTPClient` is a protocol, today reads like ceremony.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) is the workflow. The retry suite started with a name, grew one red light at a time, and converged on a parametrized table. The auth suite did the same. The dedup suite has two tests because the surface only has two behaviors. The number of tests is the number of behaviors, not the number of methods.
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) is the test framework. `@Test(arguments:)` on the backoff math is a one-liner that would have been twelve XCTest methods. The `Issue.record` on unexpected throws replaces XCTest's `XCTFail` clutter.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) is the wiring. `HTTPClientFactory.make` is a composition root. The view-model never sees a concrete type. No framework, no property wrapper magic.
+- [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) is the concurrency law. The auth and dedup decorators are `actor`s because they hold mutable state across awaits. The retry decorator is a `final class` because all its state is per-call. None of the three reach for `@unchecked`. None of them need to.
+- [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) explains why the view-model is `@MainActor @Observable` and why the client passes through it untouched — the client never asserts a thread, the actors do their own serialization, and the view-model owns the UI side.
+
+The long-form companions: [SwiftUI Foundations](/learn/swiftui-foundations) introduces the first `URLSession.data(for:)` call; [SwiftUI in Practice](/learn/swiftui-in-practice) — *especially* chapter 6 — walks the entire decorator chain from a blank file with the same TDD shape; [SwiftUI at Scale](/learn/swiftui-at-scale) covers how this layer survives a split across three feature SPM modules with shared `AppCore`. If today felt dense, those are the pace you can read it at over a week.
+
+The sticky-note version: **retry on the outside, auth in the middle, dedup on the inside.** Each one is a decorator on the `HTTPClient` protocol from Day 22. Each one has its own actor or class, its own tiny test suite, and zero awareness of the others. Production realities are bolts on the side of the spine, not rewrites of it.
+
+---
+
+**Tomorrow (Day 24):** SOLID in Swift, with a before/after from an early invoice form in Renovise that violated four of the five letters at once. The fix is small, but the conversation around *why* a single-responsibility shape pays for itself is the bit most "SOLID in Swift" posts skip.
+
+*Part of the [30-day iOS development series](/learn/field-notes). Long-form companions on [Learn](/learn): [SwiftUI Foundations](/learn/swiftui-foundations) for the entry-level networking call, [SwiftUI in Practice](/learn/swiftui-in-practice) for the entire decorator chain end to end, [SwiftUI at Scale](/learn/swiftui-at-scale) for the same client surface across three feature modules.*
