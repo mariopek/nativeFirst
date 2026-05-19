@@ -1,0 +1,585 @@
+---
+title: "SOLID in Swift Without the Theory Dump — A Real Renovise Invoice Form, Refactored One Letter at a Time"
+description: "Day 24 of 30. SOLID, but not the version where someone explains the Liskov Substitution Principle with shapes and birds. One real screen from Renovise — an invoice form that violated four of the five letters in 320 lines — refactored letter by letter, each step justified by a concrete bug, a concrete test, or a concrete future change the old shape would have made painful."
+pubDate: 2026-05-19
+topics: ["SOLID", "Single Responsibility", "Open/Closed", "Liskov", "Interface Segregation", "Dependency Inversion", "Refactoring", "Swift 6.2", "SwiftUI", "Architecture", "Protocol-Oriented", "Renovise", "Code Review"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A neatly organized workbench with hand tools arranged by purpose on a pegboard — the visual analogue of small, single-purpose types replacing one giant class that did everything. Photo by Barn Images on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - SOLID principles Swift
+  - SOLID Swift example
+  - single responsibility Swift
+  - open closed principle SwiftUI
+  - dependency inversion Swift
+  - interface segregation Swift protocol
+  - refactor Swift view model
+  - SwiftUI MVVM SOLID
+  - protocol oriented Swift refactor
+  - Swift 6.2 architecture
+
+  Internal linking strategy:
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Robert C. Martin — original SOLID papers
+  - Essential Developer — protocol composition modules
+*/}
+
+A friend of mine renovated their kitchen last summer. The first cabinet they hung was perfect. The second one was perfect. The third one — and this is the cabinet I want you to picture — was the one where they decided to drill a hole for the under-cabinet light strip *into the same piece* that was holding up the shelf for the bread bin. When they swapped the bread bin for a wider stand mixer two months later, the light cable was in the way and the bracket had to come down. The whole shelf came down with it.
+
+That cabinet is most early-career code I write. Not bad — just *everything in the same piece of wood.* Today is the day we hang it back up with the light cable in its own channel, the bracket on its own rail, and the shelf where the shelf goes.
+
+This is Day 24 of [the 30-day iOS development series](/learn/field-notes). I am going to write about **SOLID** without doing the thing where the post becomes five pages of Robert Martin paraphrased with `class Bird` and `class Penguin`. We are going to take one real screen from [Renovise](/) — an invoice form I shipped in 2024, regretted within a month, and refactored across three sessions — and rebuild it one letter at a time. Every step has a bug or a future change that justifies the move. Nothing here is "because the principle says so."
+
+If you have read [Day 19 on dependency injection](/learn/field-notes/dependency-injection-swift-without-frameworks), [Day 22 on the networking spine](/learn/field-notes/custom-networking-layer-urlsession-async-await), and [Day 23 on the decorator chain](/learn/field-notes/networking-retry-token-refresh-deduplication), you already have most of the muscles. Today is the workout where we use all of them on a single screen.
+
+---
+
+## The crime scene
+
+This is the actual shape (lightly disguised — type names are simplified, business rules trimmed, lengths preserved) of the first `InvoiceFormView` I shipped in Renovise. It is one file. It is 320 lines in production. The version below is the cut down to the load-bearing parts.
+
+```swift
+@MainActor
+@Observable
+final class InvoiceFormViewModel {
+    var clientName = ""
+    var lineItems: [LineItem] = []
+    var currencyCode = "EUR"
+    var dueDate = Date().addingTimeInterval(60 * 60 * 24 * 14)
+    var notes = ""
+    var template: InvoiceTemplate = .standard
+    var validationErrors: [String] = []
+    var isSaving = false
+    var savedInvoiceID: UUID?
+    var lastError: String?
+
+    func save() async {
+        validationErrors = []
+        if clientName.trimmingCharacters(in: .whitespaces).isEmpty {
+            validationErrors.append("Client name is required.")
+        }
+        if lineItems.isEmpty {
+            validationErrors.append("Add at least one line item.")
+        }
+        for item in lineItems {
+            if item.quantity <= 0 { validationErrors.append("Quantity must be positive.") }
+            if item.unitPrice < 0 { validationErrors.append("Unit price cannot be negative.") }
+        }
+        guard validationErrors.isEmpty else { return }
+
+        isSaving = true
+        defer { isSaving = false }
+
+        let total = lineItems.reduce(Decimal(0)) { acc, item in
+            acc + (item.unitPrice * Decimal(item.quantity))
+        }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = currencyCode
+        let totalString = formatter.string(from: total as NSDecimalNumber) ?? "\(total)"
+
+        let pdfData: Data
+        switch template {
+        case .standard:
+            pdfData = StandardInvoicePDFRenderer().render(
+                clientName: clientName,
+                lineItems: lineItems,
+                totalString: totalString,
+                dueDate: dueDate,
+                notes: notes
+            )
+        case .compact:
+            pdfData = CompactInvoicePDFRenderer().render(
+                clientName: clientName,
+                lineItems: lineItems,
+                totalString: totalString,
+                dueDate: dueDate
+            )
+        case .creative:
+            pdfData = CreativeInvoicePDFRenderer().render(
+                clientName: clientName,
+                lineItems: lineItems,
+                totalString: totalString,
+                dueDate: dueDate,
+                notes: notes,
+                accentColor: .orange
+            )
+        }
+
+        let invoice = Invoice(
+            id: UUID(),
+            clientName: clientName,
+            lineItems: lineItems,
+            currencyCode: currencyCode,
+            dueDate: dueDate,
+            template: template,
+            pdfData: pdfData
+        )
+
+        let documentsURL = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first!
+        let invoiceURL = documentsURL
+            .appendingPathComponent("invoices/\(invoice.id.uuidString).pdf")
+        do {
+            try FileManager.default.createDirectory(
+                at: invoiceURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try pdfData.write(to: invoiceURL)
+        } catch {
+            lastError = "Could not save PDF: \(error.localizedDescription)"
+            return
+        }
+
+        do {
+            var request = URLRequest(url: URL(string: "https://api.renovise.app/v1/invoices")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(invoice)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                lastError = "Server rejected invoice."
+                return
+            }
+            let saved = try JSONDecoder().decode(Invoice.self, from: data)
+            savedInvoiceID = saved.id
+        } catch {
+            lastError = "Could not upload invoice: \(error.localizedDescription)"
+        }
+    }
+}
+```
+
+It works. Renovise customers were *paying* with this code on day one. So why is it a problem?
+
+Read the method one more time and ask "**what reasons would I have to change this file?**"
+
+- A designer changes the validation copy.
+- An accountant changes the currency rounding rules.
+- A new PDF template needs to be added.
+- The API endpoint moves.
+- The auth scheme changes (it did — see [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication)).
+- The PDFs need to land in iCloud Drive instead of `Documents`.
+- We want to test that "missing client name" actually blocks submission.
+
+Seven reasons. One file. Every change is a Russian roulette spin where the unrelated bits — formatter, file path, network call, template switch — all sit in the firing chamber. **This is the practical definition of a SOLID problem.** Not "violates a principle" — *too many reasons to change a single thing*.
+
+---
+
+## Letter 1 — **S** is for "this thing does one job"
+
+The first move is the cheapest and the highest-leverage one in the whole post: pull the validator out.
+
+### Why this one first
+
+Because it has no dependencies. The validator does not need a network, a file system, a PDF renderer, a clock, or `@MainActor`. It is a function. Functions are easy to test in [Swift Testing](/learn/field-notes/swift-testing-migration-from-xctest) and trivial to call from anywhere else that needs the same rules. (And we *will* need the same rules from anywhere else — Renovise has a "duplicate invoice" action that builds an `Invoice` from scratch and skips the form entirely. The old code path could not reuse the rules because they were locked inside a view-model method.)
+
+### The before/after
+
+```swift
+public struct InvoiceDraft: Sendable, Equatable {
+    public var clientName: String
+    public var lineItems: [LineItem]
+    public var currencyCode: String
+    public var dueDate: Date
+    public var notes: String
+    public var template: InvoiceTemplate
+}
+
+public enum InvoiceValidationError: Equatable, Sendable {
+    case clientNameRequired
+    case noLineItems
+    case nonPositiveQuantity(itemID: UUID)
+    case negativeUnitPrice(itemID: UUID)
+}
+
+public struct InvoiceValidator: Sendable {
+    public init() {}
+
+    public func validate(_ draft: InvoiceDraft) -> [InvoiceValidationError] {
+        var errors: [InvoiceValidationError] = []
+        if draft.clientName.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append(.clientNameRequired)
+        }
+        if draft.lineItems.isEmpty {
+            errors.append(.noLineItems)
+        }
+        for item in draft.lineItems {
+            if item.quantity <= 0 {
+                errors.append(.nonPositiveQuantity(itemID: item.id))
+            }
+            if item.unitPrice < 0 {
+                errors.append(.negativeUnitPrice(itemID: item.id))
+            }
+        }
+        return errors
+    }
+}
+```
+
+Two notes worth their weight in regret:
+
+**Errors as values, not strings.** The old code shipped `["Client name is required."]` from inside the view-model. That means the test asserts string equality, which means a typo in the copy file silently breaks the test or — much worse — silently changes user-facing messaging without breaking the test because the test owns the same typo. With `InvoiceValidationError` as an `enum`, the validator owns the *what*, and the localization layer owns the *how it reads*. The test asserts on cases. The string lives in `Localizable.strings`. Two reasons to change, two places to change them.
+
+**`InvoiceDraft` is the contract.** This little struct is the most underrated part of the refactor. The view-model used to expose seven `@Observable` properties; now it exposes a `draft: InvoiceDraft` that gets mutated and validated as one unit. Five different callers can hand the validator a draft built any way they want.
+
+### The test
+
+```swift
+@Suite("InvoiceValidator — pure, no IO, parametrized")
+struct InvoiceValidatorTests {
+    private func draft(
+        clientName: String = "Acme",
+        lineItems: [LineItem] = [.init(id: .init(), quantity: 1, unitPrice: 10)]
+    ) -> InvoiceDraft {
+        InvoiceDraft(
+            clientName: clientName,
+            lineItems: lineItems,
+            currencyCode: "EUR",
+            dueDate: .now,
+            notes: "",
+            template: .standard
+        )
+    }
+
+    @Test
+    func happyPathReturnsNoErrors() {
+        #expect(InvoiceValidator().validate(draft()).isEmpty)
+    }
+
+    @Test
+    func blankClientNameIsReported() {
+        let errors = InvoiceValidator().validate(draft(clientName: "   "))
+        #expect(errors == [.clientNameRequired])
+    }
+
+    @Test(arguments: [
+        (qty: 0,  expected: InvoiceValidationError.nonPositiveQuantity),
+        (qty: -3, expected: InvoiceValidationError.nonPositiveQuantity)
+    ])
+    func quantitiesAreReported(qty: Int, expected: (UUID) -> InvoiceValidationError) {
+        let id = UUID()
+        let errors = InvoiceValidator().validate(
+            draft(lineItems: [.init(id: id, quantity: qty, unitPrice: 10)])
+        )
+        #expect(errors == [expected(id)])
+    }
+}
+```
+
+The test runs in milliseconds and never touches a `URLSession`, a `FileManager`, or a `@MainActor`. **That is the cash value of single responsibility.** Not "the principle says one job per class" — *the test for this job runs in milliseconds because the job has no neighbors.*
+
+The view-model now has one line for validation, and the validator is reachable from anywhere else in the app.
+
+```swift
+let errors = InvoiceValidator().validate(draft)
+```
+
+---
+
+## Letter 2 — **O** is for "stop editing this file every time a new template ships"
+
+The PDF template switch is the next worst neighbor in the original method. Look at it again:
+
+```swift
+switch template {
+case .standard:  pdfData = StandardInvoicePDFRenderer().render(...)
+case .compact:   pdfData = CompactInvoicePDFRenderer().render(...)
+case .creative:  pdfData = CreativeInvoicePDFRenderer().render(...)
+}
+```
+
+Every new template means: a new enum case, a new `case` in the switch, a new set of arguments (the original `creative` block had an extra `accentColor:`), a new compile, and — this is the part that bit me — a new round of "did you remember to handle the new case in the *other* three places we switch on `template`?" The exhaustivity warning is helpful until the switches outnumber the cases, and then it becomes a checklist.
+
+This is the principle [Bertrand Meyer named in 1988](https://en.wikipedia.org/wiki/Open%E2%80%93closed_principle): **open for extension, closed for modification.** "Closed" in the literal sense — you do not crack open the calling code every time the world adds a new variant.
+
+### The shape
+
+```swift
+public protocol InvoicePDFRenderer: Sendable {
+    func render(_ invoice: Invoice) throws -> Data
+}
+
+public struct StandardInvoicePDFRenderer: InvoicePDFRenderer {
+    public init() {}
+    public func render(_ invoice: Invoice) throws -> Data { /* ... */ }
+}
+
+public struct CompactInvoicePDFRenderer: InvoicePDFRenderer {
+    public init() {}
+    public func render(_ invoice: Invoice) throws -> Data { /* ... */ }
+}
+
+public struct CreativeInvoicePDFRenderer: InvoicePDFRenderer {
+    public let accentColor: Color
+    public init(accentColor: Color = .orange) { self.accentColor = accentColor }
+    public func render(_ invoice: Invoice) throws -> Data { /* ... */ }
+}
+
+public struct InvoicePDFRendererRegistry: Sendable {
+    private let renderers: [InvoiceTemplate: InvoicePDFRenderer]
+
+    public init(renderers: [InvoiceTemplate: InvoicePDFRenderer]) {
+        self.renderers = renderers
+    }
+
+    public func renderer(for template: InvoiceTemplate) -> InvoicePDFRenderer {
+        renderers[template] ?? StandardInvoicePDFRenderer()
+    }
+}
+```
+
+The view-model now calls one line:
+
+```swift
+let pdfData = try registry.renderer(for: draft.template).render(invoice)
+```
+
+The renderers all take the same `Invoice` and return `Data`. The renderer-specific parameters (`accentColor`) live on the renderer's `init`, not on a per-call argument list that the switch had to fan out by hand. Adding a `MinimalInvoicePDFRenderer` is one new type and one entry in the `renderers` dictionary — usually inside the app target's composition root, not inside the form's view-model module.
+
+### The honest caveat
+
+Open/Closed is the principle most likely to be misapplied. The trap is "make everything a protocol *in case* it needs to vary." For two years Renovise had exactly one PDF template. If I had built the registry on day one, it would have been pure overhead. **The trigger is the second variant.** When you copy a switch from one place to another and add a third case, the next refactor pass should pull it apart. Before that, the switch is fine.
+
+If you skipped [Day 18 on SPM modularization](/learn/field-notes/spm-modular-architecture-when-to-split), the same heuristic applies there: the threshold for splitting is not "we have files," it is "we have files that change for the same reason in lockstep." Open/Closed is the per-file version of the same intuition.
+
+---
+
+## Letter 3 — **L** is for "the time the placeholder renderer crashed the share sheet"
+
+Liskov is the principle every blog post explains with `class Square: Rectangle`. I am going to explain it with a bug I shipped, because the abstract example is a lie — nobody in iOS subclasses concrete model types.
+
+I had a `PreviewInvoicePDFRenderer` in Renovise's debug build. It returned a tiny one-page placeholder PDF for screenshot scaffolding. It conformed to `InvoicePDFRenderer`. The `render(_:)` method, when handed an `Invoice` with zero line items, threw a `PreviewRendererError.empty` because the placeholder PDF needed at least one line to draw a row.
+
+Production renderers tolerated the empty case (you cannot save an empty invoice through the form, but the share-sheet preview *could* hand us one during a state restoration race). When the QA build was used during a customer demo and the preview path hit an empty invoice, the share sheet got a thrown error from a renderer whose contract — by every other implementation in the system — was "I always return data for any well-formed `Invoice`." The share sheet did not handle a thrown error from its renderer because no renderer ever threw. App froze, demo died, I bought a coffee.
+
+**That is a Liskov violation.** `PreviewInvoicePDFRenderer` was substitutable for `InvoicePDFRenderer` in the type system but not in *behavior*. Callers were written against the production renderers' implicit guarantees. Swapping in the preview one broke them.
+
+### Two ways to fix it
+
+You either tighten the protocol's contract so the preview renderer cannot lie about it, or you split the protocol so the preview type does not conform to the same one.
+
+I picked the second route, because the preview case was genuinely different and trying to write it into the contract felt like documentation that someone would skim past.
+
+```swift
+public protocol InvoicePDFRenderer: Sendable {
+    /// Returns rendered PDF data for any well-formed `Invoice`.
+    /// Implementations MUST NOT throw for an `Invoice` that passes
+    /// `InvoiceValidator` — that path is the production guarantee
+    /// every caller relies on.
+    func render(_ invoice: Invoice) throws -> Data
+}
+
+public protocol InvoicePDFPreviewRenderer: Sendable {
+    /// Returns a best-effort placeholder for design tooling.
+    /// May return `nil` for any invoice it does not want to render.
+    /// Never propagates errors — preview is non-essential.
+    func preview(_ invoice: Invoice) -> Data?
+}
+```
+
+The share sheet now takes `InvoicePDFPreviewRenderer?`. The production save path still takes `InvoicePDFRenderer`. **The compiler enforces that the two cannot be confused.** The preview renderer cannot be passed where the production one is expected. The bug stays caught.
+
+The Liskov heuristic I run now: *if I cannot replace one conforming type with another and still believe every caller's assumptions, I have either undocumented the contract or I have one protocol where I needed two.*
+
+---
+
+## Letter 4 — **I** is for "stop forcing the view-model to depend on methods it never calls"
+
+The original view-model also did the save-to-disk-then-POST-to-server dance. Someone (me, in retrospect) factored it once into a "service" type:
+
+```swift
+// the version I am NOT happy with
+public protocol InvoiceServicing: Sendable {
+    func validate(_ draft: InvoiceDraft) -> [InvoiceValidationError]
+    func render(_ invoice: Invoice) throws -> Data
+    func saveLocally(_ invoice: Invoice) throws -> URL
+    func upload(_ invoice: Invoice) async throws -> Invoice
+    func deleteLocal(_ id: UUID) throws
+    func loadLocal(_ id: UUID) throws -> Invoice
+    func share(_ invoice: Invoice, from view: UIView) -> Bool
+}
+```
+
+Seven methods. The form view-model calls four of them. The "duplicate invoice" flow calls two. The detail screen calls three. The share-sheet preview calls one. Every caller has to satisfy a mock that implements all seven, every test fixture has empty `fatalError("unused")` methods, and every new requirement adds a method that some callers are forced to compile against and ignore.
+
+**This is the Interface Segregation Principle made concrete.** "Clients should not be forced to depend on methods they do not use." The version I ship today has four protocols, each one named after the *capability* a caller wants:
+
+```swift
+public protocol InvoiceValidating: Sendable {
+    func validate(_ draft: InvoiceDraft) -> [InvoiceValidationError]
+}
+
+public protocol InvoiceRendering: Sendable {
+    func render(_ invoice: Invoice) throws -> Data
+}
+
+public protocol InvoiceLocalStoring: Sendable {
+    func saveLocally(_ invoice: Invoice, data: Data) async throws -> URL
+    func loadLocally(_ id: UUID) async throws -> Invoice
+    func deleteLocally(_ id: UUID) async throws
+}
+
+public protocol InvoiceUploading: Sendable {
+    func upload(_ invoice: Invoice) async throws -> Invoice
+}
+```
+
+The form view-model now requires exactly the three it uses:
+
+```swift
+@MainActor
+@Observable
+final class InvoiceFormViewModel {
+    var draft = InvoiceDraft.empty
+    var validationErrors: [InvoiceValidationError] = []
+    var isSaving = false
+    var savedInvoiceID: UUID?
+    var lastError: String?
+
+    private let validator: InvoiceValidating
+    private let renderer: InvoiceRendering
+    private let store: InvoiceLocalStoring
+    private let uploader: InvoiceUploading
+
+    init(
+        validator: InvoiceValidating,
+        renderer: InvoiceRendering,
+        store: InvoiceLocalStoring,
+        uploader: InvoiceUploading
+    ) {
+        self.validator = validator
+        self.renderer = renderer
+        self.store = store
+        self.uploader = uploader
+    }
+
+    func save() async {
+        validationErrors = validator.validate(draft)
+        guard validationErrors.isEmpty else { return }
+
+        isSaving = true
+        defer { isSaving = false }
+
+        do {
+            let invoice = Invoice(draft: draft)
+            let data = try renderer.render(invoice)
+            _ = try await store.saveLocally(invoice, data: data)
+            let uploaded = try await uploader.upload(invoice)
+            savedInvoiceID = uploaded.id
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+}
+```
+
+Eighteen lines. No `URLSession`. No `FileManager`. No `NumberFormatter` allocated inside a hot path. No `switch` on templates. The duplicate-invoice flow takes the same `InvoiceValidating` and `InvoiceUploading` — and *none* of the others — without being forced to compile against a `share(_:from:)` it cannot use because it does not have a `UIView`.
+
+The bonus payoff: when a flow only needs `InvoiceValidating`, the test only needs to mock `InvoiceValidating`. The other three protocols never appear in the test file. **That is the kind of thing that compounds across a year of test writing.**
+
+---
+
+## Letter 5 — **D** is for "the view-model never sees a `URLSession`"
+
+The fifth letter is the one I have already been doing for five days running — across [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks), [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await), and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication). Dependency Inversion is the principle that says high-level modules (the view-model) should not depend on low-level modules (`URLSession`, `FileManager`); both should depend on abstractions.
+
+The view-model above already obeys it. It takes four protocols, not four concrete types. The composition root — a single `make` function in the app target — wires the concretes together.
+
+```swift
+public enum InvoiceFormFactory {
+    @MainActor
+    public static func make(httpClient: HTTPClient, fileManager: FileManager = .default) -> InvoiceFormViewModel {
+        let validator = InvoiceValidator()
+        let registry = InvoicePDFRendererRegistry(renderers: [
+            .standard: StandardInvoicePDFRenderer(),
+            .compact: CompactInvoicePDFRenderer(),
+            .creative: CreativeInvoicePDFRenderer(accentColor: .orange)
+        ])
+        let renderer = TemplateRoutingRenderer(registry: registry)
+        let store = FileSystemInvoiceStore(fileManager: fileManager)
+        let uploader = APIInvoiceUploader(client: httpClient)
+
+        return InvoiceFormViewModel(
+            validator: validator,
+            renderer: renderer,
+            store: store,
+            uploader: uploader
+        )
+    }
+}
+```
+
+The `httpClient: HTTPClient` is the one we built across the last two days — the decorator chain with retry, auth, and dedup. The view-model has no idea any of that exists. **That is the seam paying off twice.** Once today (the form), once two days ago (the network).
+
+If tomorrow we decide to back the local store with iCloud Drive, we ship one new `InvoiceLocalStoring` implementation and change one line in `make`. The view-model file does not move. The validator file does not move. The renderers do not move. The blast radius of the change is exactly the size of the change.
+
+The shorthand I use when I am reviewing my own code: *if the type I am writing imports `URLSession`, `FileManager`, `Keychain`, or `UNUserNotificationCenter`, it is a leaf. If it imports another leaf, I am about to make a problem for myself in six months.*
+
+---
+
+## A scoreboard of "what got better"
+
+Before I shipped the refactor, the form was 320 lines in one file with one method that did seven things. After:
+
+- `InvoiceValidator` — 22 lines, no IO, no dependencies. Reused from the duplicate-invoice flow.
+- `InvoicePDFRenderer` + 3 implementations + registry — ~120 lines total across five files. New template = one file + one map entry.
+- `FileSystemInvoiceStore` — 38 lines. Swapped to iCloud once already. Took an afternoon.
+- `APIInvoiceUploader` — 17 lines. Takes the `HTTPClient` protocol from [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await).
+- `InvoiceFormViewModel` — 47 lines. The `save()` method is the one in the section above.
+
+Total lines of code went *up*, by maybe 60 lines after counting the protocols and the factory. That is the part nobody mentions in a SOLID post. **You will write more code, not less.** What you get back is:
+
+- Tests for the validator that run in milliseconds and never had a chance to flake.
+- A renderer registry where a new template is a one-line PR.
+- A file-store swap that did not touch the view-model.
+- A network swap (the [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) decorator chain) that did not touch the view-model.
+- A view-model whose entire test setup is "construct four fakes, set a draft, await `save()`."
+
+That last bullet is the kind of thing you do not notice the first time, but you feel a year later when you are still shipping features instead of unpicking a 320-line method on a Friday afternoon.
+
+---
+
+## The "but my codebase is not Renovise" objection
+
+This is the part where someone in the replies points out that *their* app is a single-screen utility and SOLID is overkill. Probably right. I do not refactor my throwaway weekend projects into four protocols. I do not write `protocol UserDefaultsBacking` for a one-screen pomodoro timer. Engineering is the discipline of applying the right amount of structure to the size of the problem.
+
+The rough threshold I use: **if I have shipped a screen and I am about to write the second one, the first one is now a sample size of two and I am allowed to start naming the patterns.** Before that, every "principle" is fiction. After that, the patterns are usually obvious in hindsight and the refactor is the cheap part.
+
+If you are not sure where the threshold sits for your project, [SwiftUI in Practice](/learn/swiftui-in-practice) walks the entire arc — from a single screen to a three-module composition — with the same TDD-style I used [yesterday](/learn/field-notes/networking-retry-token-refresh-deduplication) and the [day before that](/learn/field-notes/custom-networking-layer-urlsession-async-await). It is the long-form version of every "but how do I structure this in *my* app" question I get on Twitter.
+
+---
+
+## Connecting back
+
+- [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) ended on "the view-model never knows that retry, auth, or dedup exist." Today is the *form* version of the same payoff: the view-model never knows that templates, the file system, or the API exist. The Dependency Inversion letter is the seam in both cases.
+- [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) is where the `HTTPClient` protocol came from. The uploader in today's factory is a `URLSession`-free type that takes that protocol and posts a JSON body.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) is the workflow that produces the small types in this post. The validator test was the first one I wrote, before the validator existed. The renderer registry tests were written by feeding two stubs and asserting the right one ran. TDD shapes SOLID by accident.
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) is the framework. Every `@Test` in this post is in Swift Testing. The parametrized arguments on the validator suite would have been three XCTest methods.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) is the wiring. `InvoiceFormFactory.make` is a composition root. No `@Inject`, no `@Dependency`, no `Resolver`, no `Swinject`.
+- [Day 11](/learn/field-notes/observable-macro-migration-real-app) and [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map) explain why the form's view-model is `@Observable` and why the four dependencies are stored as `let`s, not as wrapped properties.
+
+The long-form companions: [SwiftUI Foundations](/learn/swiftui-foundations) builds toward this from the very first `@State` and `@Binding`. [SwiftUI in Practice](/learn/swiftui-in-practice) is where the protocol-and-decorator habit becomes default. [SwiftUI at Scale](/learn/swiftui-at-scale) covers how to keep these tidy little protocols tidy when the app has five feature modules sharing an `AppCore`.
+
+The sticky-note version: **SOLID is the answer to "how many reasons does this thing have to change?"** Pull jobs apart when they have different reasons. Open the seam when the second variant arrives. Honor the contract you wrote, or split the protocol. Stop forcing callers to depend on what they do not use. Push the concrete types to the edges and let the middle of your app trade in abstractions. None of it is theory. All of it is paid back in the Friday afternoon when you can ship a feature without holding your breath.
+
+---
+
+**Tomorrow (Day 25):** WidgetKit + App Intents — interactive widgets that actually talk to the app. I am going to use BetFree as the example, because a one-tap "reset streak" widget is the kind of feature that is so much smaller than the tutorial article would have you believe, and so much more satisfying to ship.
