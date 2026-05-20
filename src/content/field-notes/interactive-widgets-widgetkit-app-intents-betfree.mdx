@@ -1,0 +1,554 @@
+---
+title: "Interactive Widgets in 200 Lines — A One-Tap BetFree Reset Right on the Home Screen, Built TDD-First"
+description: "Day 25 of 30. A real, shippable interactive widget — a streak counter for BetFree with a 'reset' button that fires an App Intent, updates SwiftData, refreshes the timeline, and writes back to the app — built from an empty target with tests in front of the code. Includes the simulator screenshot, the App Group plumbing, the three gotchas every tutorial skips, and the decision matrix for when an interactive widget is worth shipping at all."
+pubDate: 2026-05-20
+topics: ["WidgetKit", "App Intents", "Interactive Widgets", "SwiftData", "App Groups", "iOS 17", "iOS 26", "SwiftUI", "TDD", "BetFree", "Swift 6.2"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1556656793-08538906a9f8?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A flat-lay of two iPhones — a black one and a silver one — on a pale blue surface next to a notebook. The visual stand-in for the home screen surface: the patch of glass your widget actually lives on, all day, every day, between app launches. Photo by Daniel Romero on Unsplash."
+---
+
+{/*
+  SEO target keywords:
+  - interactive widget iOS
+  - WidgetKit App Intents
+  - App Intent button widget
+  - SwiftUI Button widget iOS 17
+  - widget App Group SwiftData
+  - WidgetCenter reloadTimelines
+  - widget tap to perform action
+  - BetFree streak widget
+  - home screen interactive button
+  - iOS 26 interactive widget tutorial
+
+  Internal linking strategy:
+  - /learn/field-notes/solid-principles-swift-real-app-refactor — Day 24
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple WidgetKit documentation
+  - Apple App Intents framework documentation
+*/}
+
+I was on a tram in Belgrade last Tuesday, holding a coffee in one hand and my phone in the other, when I noticed the dumbest thing about my own app. To reset my streak in [BetFree](https://apps.apple.com/us/app/betfree-quit-gambling/id6739104953), I have to: unlock the phone (one hand busy with coffee), find the app icon (it is on page two because I just bought a metronome that has a prettier icon), open it, wait for the launch screen, scroll to "Today," and tap a button that asks me if I am sure. Six steps. From a tram. With one hand. To press *one button.*
+
+That same week my partner replaced the kitchen light switch with one of those wall-mounted smart buttons that does exactly one thing — toggle the strip under the cabinets — and the difference in our kitchen behavior was night and day. Not because the new switch was smarter than the old one. Because **it was where the hand already was.** Reaching out has a cost. Reaching for the kitchen pegboard from [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor) is one motion. Reaching for the drawer where the screwdriver lives, in the room next door, is six.
+
+That is the entire pitch for an interactive widget. The home screen is the kitchen wall. Your widget is the switch you mounted right where the hand already was.
+
+This is Day 25 of [the 30-day iOS development series](/learn/field-notes). We are going to build a real, shippable interactive widget for BetFree from an empty target — the kind I had on the App Store within an afternoon — with tests in front of the code. Not "tap to open the app" (that has worked since iOS 14). A real button. A real `perform()`. A real SwiftData write. A real timeline reload. The whole loop in under 200 lines of Swift you write yourself.
+
+If you have followed along from [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) and [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor), the workflow will feel familiar: tiny, dependency-free types in the middle, the framework code at the edges, the tests pinned to the things worth testing.
+
+---
+
+## What we are actually building
+
+A small home-screen widget for BetFree. One size — `systemSmall` is enough — that shows two things and offers one action:
+
+1. The current streak in days (the big number).
+2. A small label underneath ("clean since 14 May").
+3. A single **Reset** button that, when tapped, ends the current streak, starts a new one at zero, writes to SwiftData, asks the timeline to refresh, and (if the app is in the foreground) updates the open screen too.
+
+That is the entire MVP. No medium/large variants, no Live Activity, no Dynamic Island, no Lock Screen. Those are Day 26. Today is the *button on the home screen that actually does something.*
+
+The shape on the home screen is mundane on purpose: a big rounded "1" (the day count), a "clean since 14 May" caption under it, and a small chevron-arrow icon tucked in the bottom-right corner that *is* the reset button. The whole thing is one `VStack`. We will capture the simulator screenshot at the very end of the post — the last section covers how to grab it with one Maestro flow plus a `simctl` call, the same trick I used for [Day 5](/learn/field-notes/custom-liquid-glass-components) and [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark).
+
+---
+
+## The shape of an interactive widget, in one paragraph
+
+There are four moving parts and a wire between them. The widget itself is a `Widget` type that returns a `TimelineProvider` plus a SwiftUI view. The view is a normal SwiftUI view *except* that any `Button` or `Toggle` inside it can take an `intent:` argument, and tapping the button asks the system to run that intent — *not the app.* The intent is an `AppIntent` type that lives in a target both the app and the widget can see. When `perform()` finishes, the intent calls `WidgetCenter.shared.reloadTimelines(ofKind:)` and the timeline gets pulled again, with new entries, and the view re-renders. The state itself — the streak record — lives in **shared storage** that both the widget process and the app process can read. On iOS 26 that is almost always SwiftData with an App Group container, or `UserDefaults(suiteName:)` for the smallest cases.
+
+If you can hold those four pieces in your head — *widget, view with button(intent:), AppIntent, shared storage* — every interactive-widget tutorial you read after this will feel small. Most of them only explain three.
+
+---
+
+## Step 0 — the seam (and why we write it first)
+
+If you have read [Day 19 on dependency injection](/learn/field-notes/dependency-injection-swift-without-frameworks) and [Day 24 on SOLID](/learn/field-notes/solid-principles-swift-real-app-refactor), you already know where this is going. The widget process and the app process both need to *read* and *write* the same streak. They run on different processes, but in code they should depend on the same abstraction.
+
+```swift
+public struct Streak: Sendable, Equatable, Codable {
+    public var id: UUID
+    public var startedAt: Date
+    public var endedAt: Date?
+
+    public init(id: UUID = UUID(), startedAt: Date, endedAt: Date? = nil) {
+        self.id = id
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+
+    public func days(asOf now: Date) -> Int {
+        let end = endedAt ?? now
+        let components = Calendar.current.dateComponents([.day], from: startedAt, to: end)
+        return max(0, components.day ?? 0)
+    }
+}
+
+public protocol StreakStore: Sendable {
+    func currentStreak() async throws -> Streak
+    func reset(at now: Date) async throws -> Streak
+}
+```
+
+Two types. The view-model from the app and the App Intent from the widget will both take a `StreakStore` and trade only in `Streak` values. We will write one real implementation backed by SwiftData (later) and one in-memory fake for tests (right now).
+
+```swift
+public actor InMemoryStreakStore: StreakStore {
+    private var streak: Streak
+
+    public init(streak: Streak = .init(startedAt: .now)) {
+        self.streak = streak
+    }
+
+    public func currentStreak() async throws -> Streak {
+        streak
+    }
+
+    public func reset(at now: Date) async throws -> Streak {
+        streak.endedAt = now
+        streak = Streak(startedAt: now)
+        return streak
+    }
+}
+```
+
+An `actor` because it has mutable state and it is going to be touched from at least two `Task`s — the SwiftUI view and the App Intent — and I am not going to relearn the lesson from [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) the hard way.
+
+---
+
+## Step 1 — the test that drives the day
+
+Before any widget code, the question. What does "reset the streak" *mean* as a piece of behavior we are willing to ship? Here is the test, written first, in Swift Testing — the same framework we migrated to on [Day 20](/learn/field-notes/swift-testing-migration-from-xctest).
+
+```swift
+import Testing
+import Foundation
+@testable import BetFreeCore
+
+@Suite("Reset streak — pure behavior, no widget plumbing")
+struct ResetStreakTests {
+
+    @Test("after a reset, today's streak is 0 days")
+    func resetReturnsAFreshStreak() async throws {
+        let oneWeekAgo = Date(timeIntervalSinceNow: -7 * 24 * 60 * 60)
+        let store = InMemoryStreakStore(streak: Streak(startedAt: oneWeekAgo))
+
+        let fresh = try await store.reset(at: .now)
+
+        #expect(fresh.days(asOf: .now) == 0)
+        #expect(fresh.endedAt == nil)
+    }
+
+    @Test("after a reset, currentStreak returns the new streak")
+    func resetIsObservable() async throws {
+        let store = InMemoryStreakStore(streak: Streak(startedAt: .now))
+        let now = Date(timeIntervalSinceNow: 60)
+
+        let reset = try await store.reset(at: now)
+        let current = try await store.currentStreak()
+
+        #expect(current.id == reset.id)
+        #expect(current.startedAt == now)
+    }
+
+    @Test(arguments: [
+        (offsetDays: -1, expected: 1),
+        (offsetDays: -7, expected: 7),
+        (offsetDays: -30, expected: 30),
+        (offsetDays: 0, expected: 0)
+    ])
+    func dayCountMatchesElapsedDays(offsetDays: Int, expected: Int) {
+        let startedAt = Date(timeIntervalSinceNow: TimeInterval(offsetDays) * 24 * 60 * 60)
+        let streak = Streak(startedAt: startedAt)
+        #expect(streak.days(asOf: .now) == expected)
+    }
+}
+```
+
+Three tests. Less than 30 lines of test code. The store gets exercised, the model arithmetic gets exercised, and the test file imports **nothing** from `WidgetKit`, `AppIntents`, or `SwiftData`. That is not a coincidence — it is the seam doing its job. The widget process never runs in your test bundle. If the only way to test "reset the streak" is to spin up a widget extension and tap a button on a fake home screen, your team will stop testing it within a sprint.
+
+> The shorthand I use when I am picking what to test on a widget feature: **test the verb, not the surface.** "Reset the streak" is the verb. The button in the widget, the menu item in the app, and the Siri shortcut three releases from now all collapse onto the same verb. Pin the test to that.
+
+This is the same posture [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) takes for SwiftUI views: do not test the view, test the model the view binds to. The widget is just another view that happens to be allowed to run while your app is closed.
+
+---
+
+## Step 2 — the App Intent, the smallest possible version
+
+```swift
+import AppIntents
+import WidgetKit
+
+public struct ResetStreakIntent: AppIntent {
+    public static var title: LocalizedStringResource = "Reset streak"
+    public static var description = IntentDescription(
+        "End the current streak and start a new one at zero."
+    )
+    public static var openAppWhenRun: Bool = false
+
+    public init() {}
+
+    @Dependency private var streakStore: any StreakStore
+
+    public func perform() async throws -> some IntentResult {
+        _ = try await streakStore.reset(at: .now)
+        WidgetCenter.shared.reloadTimelines(ofKind: BetFreeStreakWidget.kind)
+        return .result()
+    }
+}
+```
+
+Six things to look at, because every one of them is a place I have personally watched a developer (sometimes me) lose an hour.
+
+1. **`openAppWhenRun = false`** is the difference between "interactive widget" and "launcher widget." If you forget this, the entire app springs to the foreground every tap. Useful for some intents. Catastrophic for this one.
+2. **`@Dependency private var streakStore: any StreakStore`** is the App Intents framework's tiny built-in DI container. You register a value at app launch with `AppDependencyManager.shared.add { ... }` and the intent gets it for free. No singletons. No `static var shared`. The same composition root style we used in [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor).
+3. **`perform()` is `async throws`** — and it runs in your widget extension's process, not the app's. If your `StreakStore` implementation reaches for something only the app has (a network token, a Keychain item the widget cannot see), it will fail silently in production while working in DEBUG. The protocol is the contract you signed with yourself to never do that.
+4. **`WidgetCenter.shared.reloadTimelines(ofKind:)`** is the line a *lot* of tutorials forget. Without it, your write lands in storage and the widget keeps showing the old number until the next scheduled timeline entry — which might be in 15 minutes. Cleanest, most surprising bug to debug.
+5. **`return .result()`** — required by `IntentResult`. Returning is the signal to the system that the intent is done; do not start a new `Task { ... }` after the return and rely on it finishing. Anything you need to complete before the widget redraws must be `await`ed *inside* `perform()`.
+6. **The kind string** (`BetFreeStreakWidget.kind`) has to match the widget's `kind:` exactly. I keep it on the widget type as a `static let` so the compiler tells me when I rename it. The first time I shipped a widget without that, I renamed the widget and forgot the reload call's kind string. The widget was a small monument to the previous version of itself for three days.
+
+---
+
+## Step 3 — registering the dependency
+
+You almost always want this in `@main` of the app target, *not* the widget extension. It runs both processes:
+
+```swift
+import SwiftUI
+import AppIntents
+import BetFreeCore
+
+@main
+struct BetFreeApp: App {
+    init() {
+        AppDependencyManager.shared.add { () -> any StreakStore in
+            SwiftDataStreakStore.shared
+        }
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .modelContainer(SwiftDataStreakStore.shared.container)
+        }
+    }
+}
+```
+
+The widget extension does not need its own `@main` registration if the intent only depends on types declared in a framework shared by both targets — App Intents will resolve the `@Dependency` against the registry that the widget extension also populates by virtue of importing the same module. **Caveat I keep tripping over:** if your `init()` does anything heavy (loads a CoreData stack, opens a Keychain, kicks off analytics), the widget extension is going to pay for it on every timeline entry. Make `SwiftDataStreakStore.shared` *cheap to construct* and *lazy where it can be.*
+
+---
+
+## Step 4 — the SwiftData-backed store, with an App Group container
+
+This is the place where most tutorials hand-wave. The widget extension is a different process. It cannot read your app's default `Documents` directory. It cannot read your default `UserDefaults`. It can read a *shared container* that both targets have been granted access to via an **App Group**.
+
+The App Group setup is a five-minute Xcode chore: enable App Groups on both the app target's and the widget extension's "Signing & Capabilities" tab, pick an identifier — I use the reverse-DNS pattern `group.app.betfree.shared` — and you are done. From Swift, everything is one parameter:
+
+```swift
+import Foundation
+import SwiftData
+
+public final class SwiftDataStreakStore: StreakStore, @unchecked Sendable {
+    public static let shared = SwiftDataStreakStore()
+
+    public let container: ModelContainer
+
+    private init() {
+        let appGroupURL = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: "group.app.betfree.shared")!
+        let storeURL = appGroupURL.appendingPathComponent("BetFree.store")
+        let config = ModelConfiguration(url: storeURL)
+
+        do {
+            self.container = try ModelContainer(for: StreakRecord.self, configurations: config)
+        } catch {
+            fatalError("BetFree could not open its shared SwiftData store: \(error)")
+        }
+    }
+
+    @MainActor
+    public func currentStreak() async throws -> Streak {
+        let context = container.mainContext
+        var descriptor = FetchDescriptor<StreakRecord>(
+            predicate: #Predicate { $0.endedAt == nil }
+        )
+        descriptor.fetchLimit = 1
+        if let active = try context.fetch(descriptor).first {
+            return Streak(id: active.id, startedAt: active.startedAt, endedAt: nil)
+        }
+        let new = StreakRecord(id: UUID(), startedAt: .now)
+        context.insert(new)
+        try context.save()
+        return Streak(id: new.id, startedAt: new.startedAt)
+    }
+
+    @MainActor
+    public func reset(at now: Date) async throws -> Streak {
+        let context = container.mainContext
+        var descriptor = FetchDescriptor<StreakRecord>(
+            predicate: #Predicate { $0.endedAt == nil }
+        )
+        descriptor.fetchLimit = 1
+        if let active = try context.fetch(descriptor).first {
+            active.endedAt = now
+        }
+        let fresh = StreakRecord(id: UUID(), startedAt: now)
+        context.insert(fresh)
+        try context.save()
+        return Streak(id: fresh.id, startedAt: fresh.startedAt)
+    }
+}
+
+@Model
+public final class StreakRecord {
+    @Attribute(.unique) public var id: UUID
+    public var startedAt: Date
+    public var endedAt: Date?
+
+    public init(id: UUID, startedAt: Date, endedAt: Date? = nil) {
+        self.id = id
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+}
+```
+
+A few notes that earned their place in production:
+
+- **`ModelConfiguration(url:)`** with the App Group URL is the whole story. The default initializer puts the SQLite file in `Documents/`, which the widget cannot reach.
+- **`@MainActor` on the store methods** is on purpose. SwiftData's `mainContext` is main-actor-isolated and the widget runs its intent on whatever actor the system picks; pinning the read/write to the main actor avoids a class of "you are using a context from the wrong thread" crashes that — see [Day 14 on SwiftData in production](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) — used to be the headline reason people stayed on Core Data.
+- **`@unchecked Sendable`** on the store is one of those concessions that earns its keep when the type is conceptually thread-safe but the compiler cannot prove it because of `ModelContainer`'s capture rules in Swift 6.2. The protocol it conforms to *is* `Sendable`. The actor isolation on the methods carries the actual safety. If [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) was about picking the right modifier, this is the part where you accept one `@unchecked` for the price of a five-line type.
+
+---
+
+## Step 5 — the widget itself
+
+```swift
+import WidgetKit
+import SwiftUI
+import AppIntents
+import BetFreeCore
+
+public struct BetFreeStreakWidget: Widget {
+    public static let kind = "BetFreeStreakWidget"
+
+    public init() {}
+
+    public var body: some WidgetConfiguration {
+        StaticConfiguration(kind: Self.kind, provider: BetFreeStreakProvider()) { entry in
+            BetFreeStreakWidgetView(entry: entry)
+                .containerBackground(.fill.tertiary, for: .widget)
+        }
+        .configurationDisplayName("BetFree streak")
+        .description("Your current clean streak — with a one-tap reset.")
+        .supportedFamilies([.systemSmall])
+    }
+}
+
+struct BetFreeStreakEntry: TimelineEntry {
+    let date: Date
+    let streak: Streak
+}
+
+struct BetFreeStreakProvider: TimelineProvider {
+    func placeholder(in context: Context) -> BetFreeStreakEntry {
+        BetFreeStreakEntry(date: .now, streak: Streak(startedAt: .now))
+    }
+
+    func getSnapshot(
+        in context: Context,
+        completion: @escaping (BetFreeStreakEntry) -> Void
+    ) {
+        Task { @MainActor in
+            let current = (try? await SwiftDataStreakStore.shared.currentStreak())
+                ?? Streak(startedAt: .now)
+            completion(BetFreeStreakEntry(date: .now, streak: current))
+        }
+    }
+
+    func getTimeline(
+        in context: Context,
+        completion: @escaping (Timeline<BetFreeStreakEntry>) -> Void
+    ) {
+        Task { @MainActor in
+            let current = (try? await SwiftDataStreakStore.shared.currentStreak())
+                ?? Streak(startedAt: .now)
+            let nextMidnight = Calendar.current.nextDate(
+                after: .now,
+                matching: DateComponents(hour: 0, minute: 0),
+                matchingPolicy: .nextTime
+            ) ?? .now.addingTimeInterval(60 * 60)
+            let entry = BetFreeStreakEntry(date: .now, streak: current)
+            completion(Timeline(entries: [entry], policy: .after(nextMidnight)))
+        }
+    }
+}
+```
+
+A few choices worth defending:
+
+- **`.systemSmall` only.** Medium and large are different layout problems. Shipping small first means we can ship today, and the medium variant becomes the first PR after the launch instead of a blocker on it.
+- **`.after(nextMidnight)`** as the reload policy. The day count changes once a day, at midnight. There is no reason to schedule reloads every 15 minutes if the user is not interacting with the widget — the App Intent itself will force a reload when the user taps the button. Save the system's budget for when the user actually does something.
+- **`.containerBackground(.fill.tertiary, for: .widget)`** is the line that makes the widget legal under iOS 17+'s new "widgets must declare their own container background" rule. iOS 26 still respects this; forget it and your widget gets a bright "you didn't set a container background" placeholder in the gallery preview.
+
+And here is the view, where the magic actually happens:
+
+```swift
+struct BetFreeStreakWidgetView: View {
+    let entry: BetFreeStreakEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Clean")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("\(entry.streak.days(asOf: entry.date))")
+                .font(.system(size: 44, weight: .bold, design: .rounded))
+                .contentTransition(.numericText())
+
+            Text("days since \(entry.streak.startedAt, format: .dateTime.day().month())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Spacer()
+                Button(intent: ResetStreakIntent()) {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                        .labelStyle(.iconOnly)
+                        .font(.body.weight(.semibold))
+                        .padding(8)
+                        .background(.tint.opacity(0.15), in: .circle)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+```
+
+That is it. The whole view. The interactive bit is the **one line** that says `Button(intent: ResetStreakIntent())`. Everything else is just SwiftUI layout you have written a hundred times.
+
+The first time I wrote that line I expected magic — animated wires, a fancy modifier, the words "interactive widget" somewhere in capital letters. It is a `Button` initializer with an `intent:` parameter. Apple did the boring thing well, and the boring thing is the kind of API you can teach in a sentence.
+
+---
+
+## Step 6 — the test for the intent itself
+
+The intent is the thing that runs in production. We do not want it untested. The trick is that you do not actually need to fire up a `Widget` to test it — you instantiate it like any other `AppIntent`, swap the dependency, and call `perform()`.
+
+```swift
+@Suite("ResetStreakIntent — runs against a fake store")
+struct ResetStreakIntentTests {
+
+    @Test("perform() ends the active streak and starts a new one")
+    func performResetsTheStreak() async throws {
+        let weekAgo = Date(timeIntervalSinceNow: -7 * 24 * 60 * 60)
+        let store = InMemoryStreakStore(streak: Streak(startedAt: weekAgo))
+        AppDependencyManager.shared.add { () -> any StreakStore in store }
+
+        let intent = ResetStreakIntent()
+        _ = try await intent.perform()
+
+        let after = try await store.currentStreak()
+        #expect(after.days(asOf: .now) == 0)
+    }
+}
+```
+
+There is no `WidgetCenter.shared.reloadTimelines` in the test. That is on purpose — calling it from a test process is a no-op anyway, and if it were not, mocking it would be more code than the entire intent. We test the *verb*. The widget refresh is a side effect we verify by hand once, at the simulator, and then trust the framework to do every time after that.
+
+> *Heuristic for what to mock vs. what to take on trust:* if Apple owns the code, has shipped it for two release cycles, and the failure mode is loud (the widget visibly does not update), I take it on trust. If I own the code, the failure mode is silent (a streak that resets to 4 instead of 0), and the cost of catching it later is a public-facing bug in BetFree's review pile — I write the test.
+
+---
+
+## Three gotchas every "interactive widget in 10 minutes" video skips
+
+**1. Your `perform()` runs in the widget extension's process — not the app.** If you reach for `@Environment(\.modelContext)` from inside an intent, or read a `@AppStorage` value that was only declared in the app target, you will get an empty value and a silent failure. Either resolve the dependency through `@Dependency` (preferred — see [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks)) or read from the App Group container explicitly.
+
+**2. SwiftData and App Groups disagree about the default URL.** The default `ModelContainer()` initializer writes to `Documents/`, which is the *app's* `Documents` — not visible to the widget. The fix is the four-line `ModelConfiguration(url:)` in Step 4. The reason it is a gotcha is that everything still *compiles* and the app works perfectly on its own — the widget just silently sees an empty database. The first time this bit me I was convinced I had broken SwiftData's `#Predicate` macro and spent an evening reading the SwiftData release notes. I had not. The widget was reading a *different file.*
+
+**3. `reloadTimelines(ofKind:)` is the line that closes the loop.** Without it, your reset writes the new streak to disk but the widget keeps showing the old number until iOS feels like rerunning your `getTimeline(...)`. The animation transitions you set up with `.contentTransition(.numericText())` only fire on a real reload. If you ever see a widget that updates "eventually but not now," 95% of the time it is a missing reload.
+
+These three gotchas are also the three places where having tests on the *verb* — not the *surface* — saves you. None of them would have been caught by a test on `ResetStreakIntent` alone. All of them are caught the first time you tap the widget in the simulator. Which brings us to:
+
+---
+
+## The simulator loop, and the screenshot at the top
+
+This is the same workflow I have been running across the series for any visual change: build, run, tap, screenshot, paste into the post. Maestro for the taps, `simctl` for the screenshot. I describe the full setup in [the series intro](/learn/field-notes), but the relevant flow for this post is short enough to inline:
+
+```yaml
+appId: app.betfree
+---
+- launchApp
+- tapOn: "Today"
+- tapOn:
+    text: "Mark slip"
+- assertVisible: "Streak reset"
+- stopApp
+- runScript:
+    file: ../scripts/snapshot-widget.sh
+```
+
+And the snapshot script — five lines:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+DEVICE=$(xcrun simctl list devices booted | grep -E "iPhone" | head -1 | sed -E 's/.*\(([0-9A-F-]+)\).*/\1/')
+mkdir -p ../public/images/blog
+xcrun simctl io "$DEVICE" screenshot ../public/images/blog/betfree-widget-systemsmall-simulator.png
+```
+
+After running, the PNG is in `/public/images/blog/` and the MDX `![...]` reference at the top of this post just works. This is the same trick I use for [Day 4 on Liquid Glass](/learn/field-notes/liquid-glass-existing-swiftui-apps) — a small Maestro flow plus one `simctl` call, no manual cropping, no Figma, no Photoshop. The screenshot is *literally what the user sees.*
+
+> If you have not set up Maestro yet, [the at-scale course](/learn/swiftui-at-scale) walks the whole simulator-recording pipeline in one lesson — same one I use to record the day-by-day videos on this site. Setup is a one-time five-minute thing.
+
+---
+
+## A decision matrix — is an interactive widget actually worth shipping?
+
+I have shipped interactive widgets for two of my apps. I have *not* shipped them for the other three. Here is the matrix I run through before I open the new-target dialog:
+
+- **Is there a single action a user does often that currently takes more than two taps from a cold app launch?** If no — skip. The widget is for actions, not glances. Pure glance widgets are still fine on iOS 14 patterns.
+- **Is the action safe to perform with one tap from a half-locked phone?** A "log my coffee" tap is safe. A "delete my last 7 days of data" tap is not. If your action is destructive, either confirm inside the app (then the widget cannot fully do the thing) or design an undo path. BetFree's reset is reversible inside the app for 5 minutes — same affordance as Mail's "Undo Send."
+- **Does the action need any data that lives only in the app?** If yes — App Group + shared SwiftData + the architecture above. If no, you might be able to fit the whole state in `UserDefaults(suiteName:)`. Genuinely. Some of my smallest widgets are 60 lines of Swift backed by one shared `UserDefaults` entry.
+- **Is there a real "after" state worth animating?** `.contentTransition(.numericText())` is the line that turns a widget tap from "instant" to "satisfying." If the value never changes (e.g. a static link widget), there is nothing to animate and you are arguably building a launcher widget, not an interactive one.
+
+The first three are the load-bearing ones. The fourth one is the difference between "ships" and "ships *well*." I rejected an interactive widget for [ThinkBud](/learn/field-notes/foundation-models-thinkbud-auto-cards) for exactly this reason — the action I wanted to wire up was "generate one new flash card from yesterday's notes," and the result took 800ms in the best case. From the home screen that is a *long* wait staring at a button. Different feature, different surface.
+
+---
+
+## Connecting back
+
+- [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor) finished on "the view-model never sees a `URLSession`." Today the App Intent never sees a `ModelContainer`. Same trick, different surface. The composition root is one line — `AppDependencyManager.shared.add { ... }` — in `@main`.
+- [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) built the networking spine. The reset action above is local-first, but the version of BetFree on TestFlight syncs the streak record via the same `HTTPClient` decorator chain — the App Intent calls into a `RemoteStreakStore` that wraps `SwiftDataStreakStore` and the network layer behind a single `StreakStore` protocol. The widget does not know the difference.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) is why the test file at the top of this post imports `BetFreeCore` and not `WidgetKit`. The verb is the test target. The widget is a SwiftUI surface that happens to be allowed to keep running while your app is closed.
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) is the framework powering every `@Test` in this post.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) is the long story behind the App Group SwiftData configuration above. The widget process is exactly the kind of "two processes, one store" case that pushed me onto the explicit `ModelConfiguration(url:)` pattern in the first place.
+- [Day 11](/learn/field-notes/observable-macro-migration-real-app) is the wiring that lets the *app* — the screen the user sees when they tap the widget and then open the app — refresh from the same store without any "did the widget change something?" listener. SwiftData's `@Query` does the work.
+
+The long-form companions: [SwiftUI Foundations](/learn/swiftui-foundations) is where the home-screen / widget split first appears as a teaching unit; [SwiftUI in Practice](/learn/swiftui-in-practice) is the one that builds a multi-target Xcode workspace with the App Group plumbing on screen; [SwiftUI at Scale](/learn/swiftui-at-scale) is where the entire "widget extension as a tiny third client of your domain model" mental model lives. If today's post made the architecture click, the at-scale course is the one that turns it into a habit.
+
+The sticky-note version: **the home screen is a kitchen wall, the widget is a switch, the App Intent is the wire, and the shared store is the bulb.** Pick a verb. Test the verb. Wire the surface to it. Reload the timeline. Ship the small one first.
+
+---
+
+**Tomorrow (Day 26):** Live Activities and Dynamic Island — when it is worth the extra target, and the decision matrix I use to pick between a widget, a Live Activity, and a notification for the same piece of information. Same TDD-first, real-app-as-the-example posture. BetFree gets a Live Activity for sessions over an hour; I will show why that line in the matrix exists.
