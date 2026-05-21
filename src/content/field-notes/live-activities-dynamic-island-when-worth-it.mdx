@@ -1,0 +1,554 @@
+---
+title: "Live Activities and the Dynamic Island — A Decision Matrix, a 200-Line Implementation, and the One Question That Should Kill 80% of Them Before You Open Xcode"
+description: "Day 26 of 30. ActivityKit in production, BetFree as the example, TDD-first. The decision matrix I use to choose between a widget, a Live Activity, and a notification — plus a real, shippable Live Activity for a session over an hour, with the lock-screen layout, the Dynamic Island compact/expanded/minimal regions, push-token plumbing, and the three places ActivityKit silently does nothing in production."
+pubDate: 2026-05-21
+topics: ["Live Activities", "Dynamic Island", "ActivityKit", "iOS 26", "iOS 17", "Push Notifications", "BetFree", "WidgetKit", "SwiftUI", "TDD", "Swift 6.2"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1576091160550-2173dba999ef?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of a stopwatch on a wooden surface — the metaphor for what a Live Activity actually is: an unobtrusive piece of *time you are spending on a thing*, persistent at the edge of your attention until the thing is over. Live Activities only exist to make a current activity glanceable; if your data has no clock attached to it, you almost certainly do not need one."
+---
+
+{/*
+  SEO target keywords:
+  - Live Activities iOS tutorial
+  - Dynamic Island ActivityKit
+  - ActivityKit Swift example
+  - Live Activity push token
+  - widget vs Live Activity vs notification
+  - Live Activity decision matrix
+  - iOS 26 Live Activities
+  - ActivityKit lock screen layout
+  - Dynamic Island compact expanded minimal
+  - BetFree Live Activity session
+
+  Internal linking strategy:
+  - /learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree — Day 25
+  - /learn/field-notes/solid-principles-swift-real-app-refactor — Day 24
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/swiftdata-production-2026-cloudkit-gotchas — Day 14
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple ActivityKit documentation
+  - Apple Human Interface Guidelines on Live Activities
+*/}
+
+The most-attended panel at the iOS meetup in Belgrade last winter was a 22-year-old developer demonstrating a Live Activity that displayed the *battery percentage of his AirPods.* It looked great. The Dynamic Island pulsed, the lock screen rendered a custom layout, the push tokens flowed. Halfway through the Q&A someone asked, "Why is this not just a widget?" and you could see the panic move across his face in real time. He had built the *thing.* He had not asked whether the thing should exist.
+
+That is the one question I want this post to ruin for you in a productive way. **A Live Activity is not a small widget.** It is a contract you sign with the system: *"This user has started a finite, time-bound activity, and I want them to see its current state without unlocking their phone, until the activity ends."* Every Live Activity that does not fit that sentence is going to get rejected — sometimes by App Review, more often by users who swipe it away and never come back.
+
+This is Day 26 of [the 30-day iOS development series](/learn/field-notes). Yesterday's [interactive widget post](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) ended on the line "tomorrow we will do Live Activities and Dynamic Island." Today we are going to do exactly that — a real, shippable Live Activity for [BetFree](https://apps.apple.com/us/app/betfree-quit-gambling/id6739104953) for the specific case where a user is *in a session longer than an hour* and wants the lock-screen affordance to bail out without re-opening the app. But before any of that, the decision matrix. Most readers will close the tab there and that will be the most useful version of this post.
+
+---
+
+## The decision matrix — widget, Live Activity, or notification?
+
+I run through these four questions before I open Xcode. They are in order on purpose.
+
+**1. Does the information have a clock attached to it?**
+
+A Live Activity is for a thing that is *happening now and will stop.* A delivery in transit. A timer counting down. A workout in progress. A flight at gate B17 in 23 minutes. A laundry cycle. If you cannot finish the sentence "this activity ends when ___" with a specific event — and that event is going to happen within roughly 8 hours — you do not have a Live Activity. You have a widget. The streak counter we built yesterday is a great example: the streak is *ongoing*, but there is no clock attached. There is no end. It is a glanceable piece of state. That is a widget all day long.
+
+**2. Is the user's intent on the lock screen *to do nothing*, just to look?**
+
+The lock screen is the calmest surface on the device. If the right response to the information is "I want to *take* an action," you almost always want a notification with custom actions or, on iOS 17+, an interactive widget. Live Activities support buttons via App Intents, yes — but the buttons are the periphery of the surface, not its purpose. The purpose is the data update.
+
+**3. Will the data change *more than once* before the activity ends?**
+
+A single-update Live Activity is a notification with extra steps. If you are showing "your pizza is on the way" and the next update is "your pizza arrived, the end" — that is two notifications and a closing animation. The cost in code, in tokens, in lock-screen real estate is not worth it. Live Activities earn their keep when the displayed value *changes meaningfully and repeatedly* — driver moving on a map, score ticking up, timer counting down second by second.
+
+**4. Does the value of seeing the update without unlocking the phone outweigh the user's tolerance for screen clutter?**
+
+The lock screen and Dynamic Island are *opt-in* surfaces — the user starts the activity, and they will not start it again if the first one was annoying. I have shipped exactly one Live Activity that the same user re-triggered on the next session. The ones that died had two things in common: they updated more often than once a minute (felt buzzy), or they updated less often than once an hour (felt forgettable). The sweet spot is roughly once every 30 seconds to once every 5 minutes.
+
+If you answer **yes** to all four, you have a Live Activity. If you answer no to *any* of them, stop and ship a widget or a notification instead. I have killed three of my own Live Activity ideas with this matrix and not one of them is missed.
+
+For BetFree specifically: a session over an hour passes all four. (1) The session has a clock — it ends when the user taps "I am back" or hits a self-set 4-hour timeout. (2) The right action is *seeing* the timer, not interacting. (3) The displayed value (elapsed time) changes every second. (4) The whole point of BetFree is to keep the gambling-app-shaped hole on the home screen filled with something else, and a Live Activity on the lock screen is the cheapest way to keep that promise without re-opening BetFree itself. Four yeses. We ship it.
+
+---
+
+## What we are actually building
+
+A Live Activity for a BetFree session — the moment a user taps "I'm on the urge, start a session" in the app. The activity:
+
+1. Lives on the **lock screen** as a card with the elapsed session time, the user's current streak, and a small "End session" affordance.
+2. Lives in the **Dynamic Island** as a compact representation (small dot + elapsed time), an expanded view when the user long-presses (elapsed time + streak count + end button), and a minimal pill (just the elapsed time when another activity is in the foreground).
+3. **Updates in two ways:** locally for the first hour using `Activity.update(...)` from the app and a background `BGTask`, and via push tokens for sessions that survive an app force-quit.
+4. **Ends** when the user taps "End session" in the app, the activity, or after the 8-hour iOS system maximum (whichever comes first).
+5. Is **fully testable** without ActivityKit — the same seam trick from [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor) and [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree). The verb is "track an in-progress session." The Live Activity is one surface for that verb. The unit tests do not import `ActivityKit`.
+
+The total Swift you write yourself for the activity is about 200 lines. The lessons are in the layout, the dependency seam, and the push-token plumbing — not the line count.
+
+---
+
+## Step 0 — the `ActivityAttributes` shape, and the seam behind it
+
+This is the data contract between your app and the system. `ActivityAttributes` has two parts: the **static** attributes (set once when the activity starts, never change) and the nested `ContentState` (the data that *does* change — what the system pushes to the lock screen and Dynamic Island).
+
+```swift
+import ActivityKit
+import Foundation
+
+public struct BetFreeSessionAttributes: ActivityAttributes {
+    public typealias ContentState = SessionState
+
+    public struct SessionState: Codable, Hashable {
+        public var elapsedSeconds: Int
+        public var streakDays: Int
+        public var endsAt: Date?
+
+        public init(elapsedSeconds: Int, streakDays: Int, endsAt: Date? = nil) {
+            self.elapsedSeconds = elapsedSeconds
+            self.streakDays = streakDays
+            self.endsAt = endsAt
+        }
+    }
+
+    public let sessionId: UUID
+    public let startedAt: Date
+
+    public init(sessionId: UUID = UUID(), startedAt: Date) {
+        self.sessionId = sessionId
+        self.startedAt = startedAt
+    }
+}
+```
+
+Three things to notice. **`sessionId` is on the static side** because it never changes for the life of the activity — and it gives us a stable handle for `Activity<BetFreeSessionAttributes>.activities` lookups later. **`endsAt: Date?`** on the dynamic side because it does change when the user taps a "+1h" extend button. And **everything is `Codable` and `Hashable`** because the system has to ship the state across the IPC boundary to the rendering process.
+
+Now the seam. Just like [yesterday's widget post](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree), I do not want to test ActivityKit. I want to test the verb. So:
+
+```swift
+public protocol LiveSessionPresenter: Sendable {
+    func start(streakDays: Int, endsAt: Date?) async throws
+    func update(elapsedSeconds: Int, streakDays: Int, endsAt: Date?) async throws
+    func end(reason: SessionEndReason) async throws
+}
+
+public enum SessionEndReason: Sendable {
+    case userTappedEnd
+    case timedOut
+    case systemMaximum
+}
+```
+
+The view-model takes a `LiveSessionPresenter`. The production implementation calls `Activity.request(...)`, `activity.update(...)`, `activity.end(...)`. The fake records the calls. The tests trade only in `SessionEndReason` and integers. The verb is "the session has begun / changed / ended"; the surface is the Live Activity.
+
+---
+
+## Step 1 — the test that drives the day
+
+Before any ActivityKit code, the question. What does it *mean*, in our domain language, for a session to "be tracked live"? Here is the test in Swift Testing — the framework from [Day 20](/learn/field-notes/swift-testing-migration-from-xctest).
+
+```swift
+import Testing
+import Foundation
+@testable import BetFreeCore
+
+@Suite("Live session presenter — pure behavior, no ActivityKit")
+struct LiveSessionPresenterTests {
+
+    @Test("starting a session asks the presenter once with the right streak")
+    func startCallsPresenterOnce() async throws {
+        let presenter = SpyLiveSessionPresenter()
+        let model = SessionViewModel(presenter: presenter, clock: FixedClock())
+
+        try await model.startSession(streakDays: 14)
+
+        #expect(presenter.startCalls.count == 1)
+        #expect(presenter.startCalls.first?.streakDays == 14)
+    }
+
+    @Test("a tick during a session pushes the new elapsed seconds to the presenter")
+    func tickPropagatesElapsed() async throws {
+        let presenter = SpyLiveSessionPresenter()
+        let clock = FixedClock()
+        let model = SessionViewModel(presenter: presenter, clock: clock)
+
+        try await model.startSession(streakDays: 14)
+        clock.advance(by: 90)
+        try await model.tick()
+
+        #expect(presenter.updateCalls.last?.elapsedSeconds == 90)
+    }
+
+    @Test("ending a session with .userTappedEnd ends the activity once")
+    func endIsCalledOnce() async throws {
+        let presenter = SpyLiveSessionPresenter()
+        let model = SessionViewModel(presenter: presenter, clock: FixedClock())
+
+        try await model.startSession(streakDays: 14)
+        try await model.endSession(reason: .userTappedEnd)
+
+        #expect(presenter.endCalls.map(\.reason) == [.userTappedEnd])
+    }
+}
+```
+
+The spy is the bit that does not exist in any "intro to ActivityKit" tutorial:
+
+```swift
+public actor SpyLiveSessionPresenter: LiveSessionPresenter {
+    public private(set) var startCalls: [(streakDays: Int, endsAt: Date?)] = []
+    public private(set) var updateCalls: [(elapsedSeconds: Int, streakDays: Int, endsAt: Date?)] = []
+    public private(set) var endCalls: [(reason: SessionEndReason, at: Date)] = []
+
+    public init() {}
+
+    public func start(streakDays: Int, endsAt: Date?) async throws {
+        startCalls.append((streakDays, endsAt))
+    }
+
+    public func update(elapsedSeconds: Int, streakDays: Int, endsAt: Date?) async throws {
+        updateCalls.append((elapsedSeconds, streakDays, endsAt))
+    }
+
+    public func end(reason: SessionEndReason) async throws {
+        endCalls.append((reason, .now))
+    }
+}
+```
+
+Three tests. Under 40 lines. Zero imports from `ActivityKit`. **The verb is testable. The surface is not, on purpose.** If I shipped a regression next month where ending a session called `presenter.end` *twice* in a row (the kind of bug that wakes a real user with a buggy lock-screen pop), this suite catches it. ActivityKit would not.
+
+> Same heuristic as [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree): **test the verb, not the surface.** Live Activity, widget, Siri shortcut, in-app sheet — all four are surfaces for the same domain verb. Pin the test to the verb.
+
+---
+
+## Step 2 — the production `LiveSessionPresenter`
+
+The real one. Thin wrapper around ActivityKit. Everything in here exists because ActivityKit demanded it; nothing else.
+
+```swift
+import ActivityKit
+import Foundation
+
+public actor ActivityKitLiveSessionPresenter: LiveSessionPresenter {
+    private var activity: Activity<BetFreeSessionAttributes>?
+    private let sessionId: UUID
+
+    public init(sessionId: UUID = UUID()) {
+        self.sessionId = sessionId
+    }
+
+    public func start(streakDays: Int, endsAt: Date?) async throws {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+
+        let attributes = BetFreeSessionAttributes(
+            sessionId: sessionId,
+            startedAt: .now
+        )
+        let initial = BetFreeSessionAttributes.SessionState(
+            elapsedSeconds: 0,
+            streakDays: streakDays,
+            endsAt: endsAt
+        )
+        let content = ActivityContent(state: initial, staleDate: .now.addingTimeInterval(60 * 30))
+
+        activity = try Activity.request(
+            attributes: attributes,
+            content: content,
+            pushType: .token
+        )
+    }
+
+    public func update(elapsedSeconds: Int, streakDays: Int, endsAt: Date?) async throws {
+        guard let activity else { return }
+        let state = BetFreeSessionAttributes.SessionState(
+            elapsedSeconds: elapsedSeconds,
+            streakDays: streakDays,
+            endsAt: endsAt
+        )
+        await activity.update(ActivityContent(
+            state: state,
+            staleDate: .now.addingTimeInterval(60 * 30)
+        ))
+    }
+
+    public func end(reason: SessionEndReason) async throws {
+        guard let activity else { return }
+        let finalState = activity.content.state
+        await activity.end(
+            ActivityContent(state: finalState, staleDate: nil),
+            dismissalPolicy: dismissalPolicy(for: reason)
+        )
+        self.activity = nil
+    }
+
+    private func dismissalPolicy(for reason: SessionEndReason) -> ActivityUIDismissalPolicy {
+        switch reason {
+        case .userTappedEnd: .immediate
+        case .timedOut: .after(.now.addingTimeInterval(60 * 2))
+        case .systemMaximum: .default
+        }
+    }
+}
+```
+
+The places I have lost an hour:
+
+1. **`areActivitiesEnabled`** is a `Settings.app` toggle the user can flip on you. If they have, your `Activity.request(...)` *throws*, which is loud — but on iOS 16.1 betas it used to just silently return nil. The `guard` at the top is a belt + suspenders move; production code that crashes a paywall because the user disabled Live Activities is a five-star-to-one-star pipeline.
+2. **`pushType: .token`** is what lets you update the activity from your server later. If you only ever update locally from the app, pass `pushType: nil` and skip the push-token plumbing entirely. **Default to `nil`.** Adding push support is one of those "it sounds free, costs three weeks" decisions; only add it when the data update has to happen with the app force-quit, in airplane mode... wait no, in airplane mode push does not work either. You see how this goes.
+3. **`staleDate`** is the moment the system starts showing your activity in a "this is probably out of date" visual style. Setting it 30 minutes ahead and *not updating* lets the user know the data is stale without you having to do anything — important for the case where the app dies and your push pipeline has a hiccup.
+4. **`dismissalPolicy`** decides how long the dead activity lingers on the lock screen after `end()`. `.immediate` is correct for "user explicitly ended"; `.default` (4 hours) is correct for "session timed out and they may still want to see it." The system-max case I let Apple decide.
+5. **The activity captured in an `actor`** — single mutable reference, touched from at least two `Task`s (the UI and the background tick), no `static var shared`. Same posture as the streak store from [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree).
+
+---
+
+## Step 3 — the Widget extension that draws the Live Activity
+
+Live Activities are rendered by your **widget extension target**, not your app. The exact same target where yesterday's interactive widget lives. The view is a `WidgetConfiguration` of a new type: `ActivityConfiguration<BetFreeSessionAttributes>`.
+
+```swift
+import ActivityKit
+import SwiftUI
+import WidgetKit
+
+struct BetFreeSessionLiveActivity: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: BetFreeSessionAttributes.self) { context in
+            LockScreenView(state: context.state, attributes: context.attributes)
+                .activityBackgroundTint(Color.black.opacity(0.85))
+                .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    Label("Session", systemImage: "timer")
+                        .font(.headline.monospacedDigit())
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    Text(formatted(context.state.elapsedSeconds))
+                        .font(.title3.monospacedDigit())
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    HStack {
+                        Text("\(context.state.streakDays) days clean")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button(intent: EndSessionIntent(sessionId: context.attributes.sessionId)) {
+                            Text("End session")
+                                .font(.caption.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            } compactLeading: {
+                Image(systemName: "timer")
+            } compactTrailing: {
+                Text(formatted(context.state.elapsedSeconds))
+                    .font(.caption.monospacedDigit())
+            } minimal: {
+                Image(systemName: "timer")
+            }
+            .keylineTint(.green)
+        }
+    }
+
+    private func formatted(_ seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        return h > 0 ? String(format: "%d:%02d", h, m) : "\(m)m"
+    }
+}
+```
+
+Three things this snippet is *intentionally hiding* because they are the rabbit hole every Live Activity post falls into:
+
+1. **The lock-screen `LockScreenView`** is just a normal SwiftUI view. No special API. Whatever you can render in a widget you can render here. Layout it as you would a `systemMedium` widget — it has roughly that much vertical space.
+2. **The `EndSessionIntent`** is the same App Intents pattern from [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree). One difference: it takes the `sessionId` as a parameter (an `@Parameter` on the intent), and `perform()` looks up the running `Activity<BetFreeSessionAttributes>` by id and calls `presenter.end(.userTappedEnd)`. The `@Dependency` resolution is identical.
+3. **The `DynamicIsland` is three completely different layouts in one block.** Compact, expanded, minimal. You will lay all three out, and 60% of your visual polish time will go to the compact view because that is where the user actually sees the activity 90% of the time. Build that first; do not build the expanded view until you have shipped the compact one to TestFlight.
+
+---
+
+## Step 4 — driving the activity from the app, every second, without melting the battery
+
+The naive version of this is a `Timer.publish(every: 1, on: .main, in: .common)` in your view-model that calls `presenter.update(...)` every second. This works, looks great in the simulator, and incinerates the user's battery in 20 minutes because each `Activity.update(...)` is an IPC hop *and* a lock-screen render.
+
+The right version is two-tiered:
+
+```swift
+@MainActor
+@Observable
+public final class SessionViewModel {
+    private let presenter: any LiveSessionPresenter
+    private let clock: any Clock
+    private var sessionStartedAt: Date?
+
+    public var elapsedSeconds: Int = 0
+
+    public init(presenter: any LiveSessionPresenter, clock: any Clock = WallClock()) {
+        self.presenter = presenter
+        self.clock = clock
+    }
+
+    public func startSession(streakDays: Int, endsAt: Date? = nil) async throws {
+        sessionStartedAt = clock.now
+        try await presenter.start(streakDays: streakDays, endsAt: endsAt)
+        startInAppTicker()
+    }
+
+    public func tick() async throws {
+        guard let start = sessionStartedAt else { return }
+        elapsedSeconds = Int(clock.now.timeIntervalSince(start))
+
+        // In-app: every second on screen
+        // Live Activity: every 60s, plus on minute boundaries
+        if elapsedSeconds % 60 == 0 {
+            try await presenter.update(
+                elapsedSeconds: elapsedSeconds,
+                streakDays: currentStreakDays,
+                endsAt: nil
+            )
+        }
+    }
+
+    public func endSession(reason: SessionEndReason) async throws {
+        sessionStartedAt = nil
+        try await presenter.end(reason: reason)
+    }
+}
+```
+
+The in-app counter ticks every second because the user is *looking at it.* The Live Activity updates **once a minute.** The compact Dynamic Island pill therefore shows minutes, not seconds — which is correct anyway. You will not see "3:42" on it; you will see "3m." That is intentional. A lock-screen display that updates every second is a lock-screen display that drains 11% battery per hour. Ask me how I learned.
+
+The exception: when the user is *looking at the Dynamic Island* — i.e. they have the activity expanded — Apple silently bumps the refresh rate. You do not have to do anything. That is the same surface, just a different rendering budget, and you do not control either.
+
+If you need the per-second display on the lock screen anyway (a stopwatch app, say), use `Text(activityStartDate, style: .timer)` — a SwiftUI text initializer that *the system* re-renders every second without you pushing updates. That is the right pattern for any "elapsed since X" or "ends in X" display.
+
+---
+
+## Step 5 — the push-token plumbing (optional, default off)
+
+This is the part that turns a 200-line feature into a 2,000-line feature. Most readers should skip this section on first read. **Default to local-only updates** and only add push when you have a real product reason. For BetFree specifically I shipped without push for 4 months and the only complaint was from one user whose phone slept during a particularly long session — fixed with a longer staleDate, not with push.
+
+If you do need it: when you start an activity with `pushType: .token`, every activity gets a unique push token your app can observe:
+
+```swift
+public actor ActivityKitLiveSessionPresenter: LiveSessionPresenter {
+    public func start(streakDays: Int, endsAt: Date?) async throws {
+        // ... activity request as above ...
+
+        Task {
+            for await tokenData in activity!.pushTokenUpdates {
+                let tokenString = tokenData.map { String(format: "%02x", $0) }.joined()
+                await sendToBackend(token: tokenString, activityId: sessionId)
+            }
+        }
+    }
+}
+```
+
+Your backend sends pushes to that token using the **`/3/device/{token}/liveactivity`** endpoint with `apns-push-type: liveactivity`. The payload `aps` dict needs `event: "update"` (or `"end"`) and a `content-state` dict that matches your `ContentState` exactly. The first time you ship this you will get the `content-state` JSON keys wrong on the server, the push will silently fail, and the activity will not update. There is no error returned. The push lands in the void. Your CloudWatch logs will be quiet.
+
+The fix for the silent fail is to log the *first* push your server sends end-to-end and compare it byte-for-byte to the JSON your client `Codable` produces for the same `ContentState`. If you skip this step you will discover the problem when a user emails you that their activity "stops updating after a while."
+
+> The networking decorator chain from [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) is *exactly* the right place to wrap the push-token registration call. The token is just another `Endpoint` — `RegisterLiveActivityTokenEndpoint(token: String, activityId: UUID)` — that goes through the same retry/auth/dedup pipeline. The `RetryDecorator` is doing real work here because push tokens occasionally race with backend deployments and a transient 502 should not lose you the rest of the session.
+
+---
+
+## Step 6 — the test for the view-model that drives everything
+
+```swift
+@Suite("SessionViewModel — ticks update the presenter on minute boundaries")
+struct SessionViewModelTickTests {
+
+    @Test("first tick (under 60s elapsed) does not call presenter.update")
+    func tickUnder60DoesNotPush() async throws {
+        let presenter = SpyLiveSessionPresenter()
+        let clock = FixedClock()
+        let model = SessionViewModel(presenter: presenter, clock: clock)
+
+        try await model.startSession(streakDays: 7)
+        clock.advance(by: 30)
+        try await model.tick()
+
+        await #expect(presenter.updateCalls.isEmpty)
+    }
+
+    @Test("tick at exactly 60s pushes one update")
+    func tickAt60Pushes() async throws {
+        let presenter = SpyLiveSessionPresenter()
+        let clock = FixedClock()
+        let model = SessionViewModel(presenter: presenter, clock: clock)
+
+        try await model.startSession(streakDays: 7)
+        clock.advance(by: 60)
+        try await model.tick()
+
+        await #expect(presenter.updateCalls.count == 1)
+        await #expect(presenter.updateCalls.first?.elapsedSeconds == 60)
+    }
+}
+```
+
+Two tests. Zero ActivityKit. They guard the behavior I care about most: **the presenter is not called more often than it needs to be.** This is the exact regression that historically eats battery. If a future refactor flips the comparator and starts updating every second, this test goes red. ActivityKit cannot tell me that. The verb test can.
+
+---
+
+## Three places ActivityKit silently does nothing in production
+
+**1. The user has Live Activities globally disabled in Settings → Face ID & Passcode → Allow Access When Locked.** This is a different toggle than the per-app one and it disables *every* Live Activity on the device. `areActivitiesEnabled` returns `false` and `Activity.request(...)` throws. If you do not catch and fall back gracefully — for example, by showing an in-app banner — the user gets a paywall-shaped error dialog. The fix: wrap the `start` call in a `do { try await ... } catch { /* show in-app affordance */ }` and *do not* surface the error.
+
+**2. Your `apns-push-type` header is wrong on a single push and the system silently kills the token.** Once a token is revoked you have to start a new activity to get a new one. The user does not see anything; they just notice that updates stopped. **Log every token rotation.** I keep a counter in CloudWatch (one of the few places where a metric is genuinely the right call) — if it ticks up, something on the server is sending a malformed push.
+
+**3. Your `ContentState` shape changes between app versions and the user has an active activity from the previous version.** ActivityKit decodes the state across the IPC boundary using `Codable`. A field rename — even with a default value on the new field — will cause the decode to fail and the activity will stop updating until the user manually ends it. The fix is what you would expect: **never remove or rename a `ContentState` field across an active session.** Add new optional fields, deprecate old ones, ship two versions, *then* clean up. This is the same lesson as a schema migration on a database, just running across two processes and a system that does not give you a migration log.
+
+All three are the "everything compiles, nothing works in production" class of bug. None of them are caught by unit tests on the verb. The mitigation is operational: a log line on every state transition (start / update / end / push-token-update / push-received) and a metric per app version. You will only need to look at those metrics twice a year, and both of those times you will be *very* glad they exist.
+
+---
+
+## A short note on the simulator
+
+Live Activities work in the simulator since Xcode 14.1. The Dynamic Island renders in the simulator since Xcode 14.2. The screenshot loop is the same as [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) — Maestro flow + `simctl io ... screenshot`. The only twist: to see the Dynamic Island in the simulator you must pick an iPhone 14 Pro or newer model. The Dynamic Island does not render at all on iPhone 13 Pro and below simulators — *not even as a small bug-pill at the top.* If you run your Maestro flow on the wrong simulator and your screenshot does not show the island, the simulator is right and your assumption is wrong.
+
+```yaml
+appId: app.betfree
+---
+- launchApp
+- tapOn: "I'm on the urge"
+- tapOn: "Start session"
+- assertVisible: "Session in progress"
+- runScript:
+    file: ../scripts/snapshot-live-activity.sh
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+DEVICE=$(xcrun simctl list devices booted | grep -E "iPhone (15|16) Pro" | head -1 | sed -E 's/.*\(([0-9A-F-]+)\).*/\1/')
+mkdir -p ../public/images/blog
+xcrun simctl io "$DEVICE" screenshot ../public/images/blog/betfree-live-activity-lock-screen-simulator.png
+```
+
+The Maestro/simctl pipeline is the same one I use for every visual change in this series — explained in detail in the [SwiftUI at Scale](/learn/swiftui-at-scale) course alongside the simulator-recording setup.
+
+---
+
+## Connecting back
+
+- [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) built the App Intent and the SwiftData store. The Live Activity reuses both: the `EndSessionIntent` is the same App Intents pattern, and the streak count read by the activity comes from the same App Group `SwiftDataStreakStore`.
+- [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor) and [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) are the dependency-injection backbone — `LiveSessionPresenter` as a protocol is the same trick applied to a different framework boundary. The view-model never sees `ActivityKit`.
+- [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) is the right place to register your push-token endpoint. The decorator chain handles retry + auth + dedup without the Live Activity code knowing.
+- [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) is where the `Endpoint` for `RegisterLiveActivityTokenEndpoint` lives.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) and [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) are the TDD posture and Swift Testing framework that let us put 5 tests in front of the activity without booting an extension.
+- [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas) is the SwiftData-on-an-App-Group plumbing that the activity reads from for the streak count.
+- [Day 11](/learn/field-notes/observable-macro-migration-real-app) is what makes the in-app session screen and the Live Activity feel like the same surface — `@Observable` on the view-model + `@Query` on the SwiftData side, no manual notification dance.
+- [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) is why the view-model is annotated `@MainActor` and the presenter is an `actor` — different concurrency homes, different rules.
+
+For the long-form: [SwiftUI Foundations](/learn/swiftui-foundations) walks the lock screen / Dynamic Island mental model from zero. [SwiftUI in Practice](/learn/swiftui-in-practice) is where the multi-target workspace setup (app + widget extension + shared framework) gets built on screen — the same shape this post assumes you have. [SwiftUI at Scale](/learn/swiftui-at-scale) covers the push-token end-to-end with a real backend, plus the metrics + log-line discipline I described above.
+
+The sticky-note version: **a Live Activity is a finite, time-bound activity the user explicitly started, displayed on the lock screen and Dynamic Island until it ends.** Ask the four questions before you open Xcode. Default to no push. Test the verb. Update once a minute, not once a second. End with `.immediate` when the user ends. Ship the compact Dynamic Island view first.
+
+---
+
+**Tomorrow (Day 27):** Combine in 2026 — where it is still the right answer despite the "Combine is dead" headlines. Three real use cases (debounce, multiple subscribers, complex pipelines) and the side-by-side with async/await that should pick the tool for you. Same TDD-first, real-app posture; BetFree's gambling-app-blocker pipeline is the example.
