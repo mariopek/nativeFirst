@@ -1,0 +1,368 @@
+---
+title: "Combine in 2026 — Three Pipelines async/await Still Can't Touch, Built TDD-First in a Real Gambling-Blocker App"
+description: "Day 27 of 30. Combine is not dead. It just stopped being the default. This post is a 1500-word answer to the question 'should I delete the Combine code I wrote in 2020?' — with three concrete production pipelines (search-bar debounce, multiple subscribers to one upstream, complex multi-stream merging) where async/await is the wrong tool, the side-by-side rewrite that proves it, and the TDD test that pins the behavior on the verb instead of the framework."
+pubDate: 2026-05-23
+topics: ["Combine", "async/await", "Swift Concurrency", "AsyncSequence", "AsyncStream", "Debounce", "Reactive", "SwiftUI", "BetFree", "TDD", "Swift 6.2"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1530841377377-3ff06c0ca713?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An overhead shot of pipes converging into a single junction on a concrete wall. The metaphor for what Combine still does best: many streams of values arriving at different rates, merged into one, with backpressure and timing handled by the plumbing — not by you. async/await is a great hammer; this is a post about the screws."
+---
+
+{/*
+  SEO target keywords:
+  - Combine vs async/await 2026
+  - is Combine dead Swift
+  - Combine still useful
+  - debounce search bar SwiftUI Combine
+  - Combine debounce async/await alternative
+  - AsyncSequence debounce
+  - Combine multiple subscribers
+  - Combine complex pipelines
+  - Combine 2026 production
+  - Combine BetFree example
+
+  Internal linking strategy:
+  - /learn/field-notes/live-activities-dynamic-island-when-worth-it — Day 26
+  - /learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree — Day 25
+  - /learn/field-notes/solid-principles-swift-real-app-refactor — Day 24
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor — Day 2
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple Combine documentation
+  - Swift Evolution SE-0314 AsyncSequence
+  - AsyncAlgorithms package
+*/}
+
+A friend who runs the iOS team at a fintech in Belgrade messaged me last week with one of those screenshots-of-Slack moments. A junior on his team had opened a PR titled "Remove all Combine — modernize to async/await." Eighty files changed. Forty-three subscribers ripped out. Three search bars now firing a network request *per keystroke* because somebody had heard "Combine is dead" on a podcast and decided the search-bar debounce was probably "legacy stuff." My friend's question was, "How do I tell him to put it back without sounding like the boomer who refuses to upgrade?"
+
+This post is the long answer. **Combine is not dead. It stopped being the default.** Those are two different things. The thing that died was the assumption that every reactive problem needs a `PassthroughSubject` and a chain of `.map.filter.flatMap` — most of them do not, async/await is now correct for those, and your view-models should look like Day 21. But the assumption that nothing needs Combine anymore is also wrong, and the cost of acting on it is the kind of bug that lands in user reviews as "the app makes my keyboard lag."
+
+This is Day 27 of [the 30-day iOS development series](/learn/field-notes). Yesterday we shipped a [Live Activity for BetFree](/learn/field-notes/live-activities-dynamic-island-when-worth-it) with the question "does this thing have a clock attached to it?" as the gate. Today the gate question is: **does this stream of values have backpressure, multiple consumers, or non-trivial timing?** Three yes, you want Combine. Anything else, async/await wins on readability and you should not write a Combine line. We will walk three real BetFree pipelines that pass the gate, with the side-by-side and the test that pins each one to the verb.
+
+---
+
+## The gate — when async/await wins, when Combine wins
+
+I run through three questions before I pick. They are in order on purpose.
+
+**1. Does the consumer want the value *immediately every time it changes*, or only on a *cadence* the consumer controls?**
+
+A `for await` loop pulls. The consumer is in charge — it asks for the next value when it is ready. That is async/await. A `.sink` pushes. The producer decides when to fire and the consumer just shows up. That is Combine. For something like "I want to await the next URLSession response," async/await is the right shape — there is one request, one response, the consumer pulls. For something like "I want my view-model to react to every keystroke the user makes, debounced," Combine fits the actual control flow.
+
+**2. How many consumers does this stream have?**
+
+`AsyncSequence` is an iterator. One consumer. You can wrap it in an `AsyncStream` and broadcast, but the broadcasting machinery you end up writing is roughly the surface area of Combine's `.share()` operator and is one line in Combine. Multiple consumers on one upstream — analytics + UI + persistence all listening to the same "session changed" event — is Combine's home turf.
+
+**3. Are you composing multiple streams with non-trivial timing — debounce, throttle, merge with `latestOf`, retry-when, deferred-replay?**
+
+Apple has been polite about this for three years and the polite version is: the standard library has `AsyncSequence` and a small set of operators, the `swift-async-algorithms` package adds more, but the operator surface is still narrower than Combine's. Anything involving "the last value from A combined with the most recent value from B *within the last 200ms*" is going to be three pages of `Task` glue in async/await and one Combine line. If you have ever read someone's hand-rolled `AsyncStream.combineLatest`, you know.
+
+**Three nos and async/await wins.** A network call, a SwiftData fetch, a one-shot user action — all three are async/await. The verb is "do a thing and give me the result." That is a coroutine.
+
+**One yes is enough for Combine.** A search bar (timing). A streak observer with 4 listeners (multiplicity). A merged state pipeline (composition). The verb is "wire up a continuous flow of values across components." That is a stream graph.
+
+---
+
+## Use case 1 — search-bar debounce, the one your junior will rip out
+
+BetFree has a search field on the "find a sponsor" screen. The user types, the app queries a small Vapor backend (the one from [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication)) for matching sponsors. Naive code fires one request per keystroke. The user types "anna" and the app hits the server four times. With debounce you wait until the user stops typing for 300ms and send one request. This is the single most common reason Combine still lives in production codebases.
+
+The Combine version is six lines and you have read it before:
+
+```swift
+import Combine
+import Foundation
+
+@MainActor
+@Observable
+public final class SponsorSearchViewModel {
+    public var query: String = ""
+    public var results: [Sponsor] = []
+
+    private let api: any SponsorSearching
+    private var cancellables = Set<AnyCancellable>()
+    private let queryChanges = PassthroughSubject<String, Never>()
+
+    public init(api: any SponsorSearching) {
+        self.api = api
+
+        queryChanges
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .removeDuplicates()
+            .map { [api] term -> AnyPublisher<[Sponsor], Never> in
+                guard term.count >= 2 else {
+                    return Just([]).eraseToAnyPublisher()
+                }
+                return Future { promise in
+                    Task {
+                        let hits = (try? await api.search(term: term)) ?? []
+                        promise(.success(hits))
+                    }
+                }
+                .eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.results = $0 }
+            .store(in: &cancellables)
+    }
+
+    public func queryChanged(_ new: String) {
+        query = new
+        queryChanges.send(new)
+    }
+}
+```
+
+The async/await rewrite that a "modernization PR" wants to ship looks like this and is *wrong*:
+
+```swift
+@MainActor
+@Observable
+public final class SponsorSearchViewModel {
+    public var query: String = ""
+    public var results: [Sponsor] = []
+    private let api: any SponsorSearching
+
+    public init(api: any SponsorSearching) { self.api = api }
+
+    public func queryChanged(_ new: String) async {
+        query = new
+        guard new.count >= 2 else { results = []; return }
+        results = (try? await api.search(term: new)) ?? []
+    }
+}
+```
+
+Looks shorter, doesn't it. It fires a request *per keystroke.* It does not cancel in-flight requests when a new one starts, so a slow "an" can land after a fast "anna" and overwrite the right result with the wrong one. The user types "anna," sees "Anna" come up, and a half-second later the screen flips to four sponsors named "An." That is the bug.
+
+The closest async/await version that *is* correct is significantly longer than the Combine one:
+
+```swift
+@MainActor
+@Observable
+public final class SponsorSearchViewModel {
+    public var query: String = ""
+    public var results: [Sponsor] = []
+
+    private let api: any SponsorSearching
+    private var searchTask: Task<Void, Never>?
+
+    public init(api: any SponsorSearching) { self.api = api }
+
+    public func queryChanged(_ new: String) {
+        query = new
+        searchTask?.cancel()
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            guard new.count >= 2 else { results = []; return }
+            do {
+                let hits = try await api.search(term: new)
+                guard !Task.isCancelled else { return }
+                results = hits
+            } catch { /* ignore */ }
+        }
+    }
+}
+```
+
+This works. It is also a hand-rolled `debounce + switchToLatest` and you wrote it. Every reader of your code now has to verify that *your* hand-rolled debounce is correct — the cancellation order, the sleep interruption, the duplicate-suppression. Combine's operators have been verified by Apple, on every iOS since 13, against thousands of apps in production. The 6-line version is one you read; the 20-line version is one you *audit.*
+
+The TDD test pins the behavior on the verb — same posture as [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models):
+
+```swift
+import Testing
+import Foundation
+@testable import BetFreeCore
+
+@Suite("Sponsor search debounce — three rapid keystrokes fire one request")
+struct SponsorSearchDebounceTests {
+
+    @Test("typing 'a', 'an', 'ann' within 300ms triggers exactly one search")
+    func threeKeystrokesOneSearch() async throws {
+        let api = CountingSponsorSearchAPI()
+        let model = SponsorSearchViewModel(api: api)
+
+        model.queryChanged("a")
+        model.queryChanged("an")
+        model.queryChanged("ann")
+
+        try await Task.sleep(for: .milliseconds(500))
+
+        #expect(api.searchCalls == 1)
+        #expect(api.lastTerm == "ann")
+    }
+}
+```
+
+The test does not care which implementation is underneath. It cares about the *behavior at the verb*: three keystrokes, one request. Switch from Combine to async/await and back, the test still runs. **That is the test you want.** The "Combine vs async/await" tabs-vs-spaces argument disappears as long as your verb test is green.
+
+> Bottom line on use case 1: keep Combine for search debounce. Six lines that have been correct since 2019 beat twenty lines you have to verify yourself. The "modernization" of this code is a regression with extra steps.
+
+---
+
+## Use case 2 — one upstream, three consumers (the BetFree streak event)
+
+When a user resets their streak in BetFree (yesterday's [interactive widget](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) is one way they can; the in-app sheet is another), three different parts of the app need to know:
+
+1. **The UI** — to refresh the streak label on the home tab.
+2. **The widget timeline** — to call `WidgetCenter.shared.reloadAllTimelines()`.
+3. **Analytics** — to log a "streak reset" event so we can correlate resets with re-engagement.
+
+This is the classic "broadcast" pattern. One thing happened, three places care. With Combine it is one publisher and three subscribers and you are done:
+
+```swift
+public protocol StreakEvents: Sendable {
+    var resets: AnyPublisher<StreakResetEvent, Never> { get }
+    func sendReset(_ event: StreakResetEvent) async
+}
+
+public final class StreakEventsBus: StreakEvents {
+    private let subject = PassthroughSubject<StreakResetEvent, Never>()
+    public var resets: AnyPublisher<StreakResetEvent, Never> {
+        subject.eraseToAnyPublisher()
+    }
+    public func sendReset(_ event: StreakResetEvent) async {
+        subject.send(event)
+    }
+}
+```
+
+Each subscriber wires up once and never thinks about it again:
+
+```swift
+streakEvents.resets
+    .receive(on: DispatchQueue.main)
+    .sink { [weak self] _ in self?.refreshStreakLabel() }
+    .store(in: &cancellables)
+
+streakEvents.resets
+    .sink { _ in WidgetCenter.shared.reloadAllTimelines() }
+    .store(in: &cancellables)
+
+streakEvents.resets
+    .sink { event in analytics.log(.streakReset(event)) }
+    .store(in: &cancellables)
+```
+
+Three lines per subscriber. Add a fourth subscriber tomorrow (a Live Activity ender, say — see [Day 26](/learn/field-notes/live-activities-dynamic-island-when-worth-it)), it is three more lines. The bus does not know or care how many subscribers there are. That is the *point.*
+
+The "modern" `AsyncStream` version of the same idea is where the wheels start to wobble. An `AsyncStream` is single-consumer. To broadcast to three you have to either store the consumers and fan-out manually, use `AsyncChannel` from `swift-async-algorithms`, or build a `MulticastAsyncSequence` wrapper. All three options exist, all three add code that your reader has to understand. A `PassthroughSubject` is a one-line concept that ships in the standard library.
+
+I am not opposed to `swift-async-algorithms` — for new code I reach for it. But "we have three Combine subscribers wired up to one publisher and it has worked since 2020" is *not* a candidate for replacement. It is doing exactly the right thing.
+
+> The verb-level test for this pattern is "sending one reset causes all three consumers to observe it once." That test is identical whether the bus is Combine or `AsyncStream`. **If the test is green, you are not allowed to refactor the implementation just because it looks unfashionable.** That is yak-shaving and it adds risk for no user-facing value.
+
+---
+
+## Use case 3 — complex pipelines (the BetFree paywall eligibility check)
+
+Here is one I shipped six months ago and would write the same way today. BetFree's paywall eligibility is computed from four upstreams:
+
+1. The user's current **streak** (longer streaks unlock a free-trial extension promo).
+2. The user's **session count today** (a heavy-use signal — higher counts open a "support BetFree" CTA).
+3. The current **App Store subscription state** from StoreKit 2 ([Day 16](/learn/field-notes/storekit-2-free-trials-intro-offers-winback-promo-codes)).
+4. The **server-side experiment flag** for which paywall variant to show.
+
+We need to recompute eligibility whenever *any* of those four change, but only *after* all four have a value (no eligibility decision can be made on partial data), and we want to debounce the result by 250ms because in the first half-second of app launch all four flip at once and we do not want to render the paywall four times. This is `combineLatest + filter + debounce`. In Combine:
+
+```swift
+public struct PaywallInputs: Sendable {
+    public let streak: Int
+    public let sessionsToday: Int
+    public let subscription: SubscriptionState
+    public let variant: PaywallVariant
+}
+
+public final class PaywallEligibilityViewModel {
+    private let streakStore: any StreakStore
+    private let sessionStore: any SessionStore
+    private let storeKit: any StoreKitObserver
+    private let experiments: any ExperimentClient
+
+    private var cancellables = Set<AnyCancellable>()
+    @Published public private(set) var eligibility: PaywallEligibility = .pending
+
+    public init(/* ... */) {
+        Publishers.CombineLatest4(
+            streakStore.streakPublisher,
+            sessionStore.sessionsTodayPublisher,
+            storeKit.subscriptionStatePublisher,
+            experiments.paywallVariantPublisher
+        )
+        .map(PaywallInputs.init)
+        .debounce(for: .milliseconds(250), scheduler: DispatchQueue.main)
+        .map { PaywallEligibilityEngine.decide(from: $0) }
+        .removeDuplicates()
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] in self?.eligibility = $0 }
+        .store(in: &cancellables)
+    }
+}
+```
+
+Ten lines, *and the engine that does the actual deciding is a pure function over `PaywallInputs`.* You can unit-test the engine without booting any of the four upstreams. You can unit-test the *pipeline* by sending fake values through fake publishers and asserting on `eligibility`. The TDD posture from [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) and [Day 24](/learn/field-notes/solid-principles-swift-real-app-refactor) lands cleanly here.
+
+The async/await rewrite, again, *is doable.* It involves an `actor` holding four optionals, four `Task` loops each pulling from one `AsyncSequence`, a "did any of them just change?" debouncer, and a "do they all have values yet?" gate. The first version I wrote was 80 lines. The version with cancellation handling correct was 110. The Combine version is 10 and has been right since the day I wrote it.
+
+**That is the single best reason to keep Combine in 2026:** operators are *value-dense*. `combineLatest4 + debounce + removeDuplicates` is a 35-character chain that describes a pipeline you would otherwise hand-roll in 100 lines. Every line you do not write is one you cannot get wrong.
+
+---
+
+## What I would still rewrite from Combine to async/await
+
+To be fair, in the same codebase as the three pipelines above, I have ripped out *more* Combine than I kept. The patterns that should die:
+
+1. **`@Published` on a view-model property when nothing else subscribes to it.** With [`@Observable`](/learn/field-notes/observable-macro-migration-real-app), the property *is* the observation. There is no remaining reason to wrap it. (See [Day 11](/learn/field-notes/observable-macro-migration-real-app), [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map), [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark) for the full reason.)
+2. **`Future { promise in Task { ... } }` wrappers.** If the producer is already async, just `await` it. No `Future`, no `eraseToAnyPublisher`, no `receive(on:)`. The single-shot async API is `async throws`.
+3. **`URLSession.shared.dataTaskPublisher(for:)`** — `URLSession.shared.data(from:)` does the same thing in async/await with less ceremony.
+4. **Any `.sink` that consumes a stream that never has more than one value.** That is a coroutine wearing a Subject costume.
+
+The rule of thumb: **Combine for streams. async/await for values.** A stream is a thing with more than one event over time, often with timing constraints. A value is "do a thing, give me the result." If the answer to "how many events?" is "one," delete the Combine.
+
+---
+
+## A short word on `swift-async-algorithms`
+
+The package is great. It has `debounce`, `throttle`, `combineLatest`, `merge`, `chain`, and friends. For new code in 2026 I reach for it before Combine for anything that does not already touch Combine. It is the future. The reason this post is not "use `swift-async-algorithms` instead" is that the package adds a dependency to your `Package.swift`, the operator coverage is still narrower than Combine's, and — most importantly — the post in your friend's Slack does not say "rewrite Combine to `swift-async-algorithms`," it says "rewrite Combine to async/await." If your team is genuinely ready to take the dependency and migrate, that is a good migration. If they are not, *keep the Combine.* It is not the obstacle.
+
+---
+
+## The test that survives the framework choice
+
+The whole point of the TDD posture across this series is that the *test* outlives the *framework.* The search-debounce test does not import Combine. The streak-bus test does not import Combine. The paywall-eligibility test does not import Combine — it tests the pure-function engine that decides eligibility, with the pipeline as integration. If you migrate from Combine to `swift-async-algorithms` to whatever Apple ships at WWDC 2027 (`@Observable`-flavored streams, probably), the tests do not change. **The verb is the asset. The framework is the surface.** Same drum, different room.
+
+> The single most useful version of this post: pin a `// FIXME(combine-2026)` comment on every `.sink` that touches a single-shot value and replace those over a quiet sprint. Leave the debounce, the multicast bus, and the multi-stream pipelines alone. Re-run your test suite. If it is green, the migration is done.
+
+---
+
+## Connecting back
+
+- [Day 26](/learn/field-notes/live-activities-dynamic-island-when-worth-it) — the Live Activity presenter is `async`/`actor`, not Combine. Single-shot verbs (`start`, `update`, `end`) want coroutines. Same logic applies in reverse here.
+- [Day 25](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) — the App Intent's `perform()` is `async throws`, not a publisher. Different verb, different tool.
+- [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) and [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) — the networking stack is async/await front to back. The retry/dedup decorators are coroutines. *Because there is one request and one response.* Verb is a value, not a stream.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) is the TDD posture. The verb-level test is what makes the framework swap *safe* — without it, you cannot tell whether you broke the search bar.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark), [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map), [Day 11](/learn/field-notes/observable-macro-migration-real-app) are the `@Observable` story. Most of what `@Published` used to do is now the property itself.
+- [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor) and [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) are why your view-model is `@MainActor` and your `StreakEventsBus` is not — different concurrency homes for different shapes of work.
+
+For long-form: [SwiftUI Foundations](/learn/swiftui-foundations) walks the property-wrapper and observation model from the ground up — the right place to start if "what is `@Published` even for now?" is the live question. [SwiftUI in Practice](/learn/swiftui-in-practice) builds the multi-target workspace where the streak bus, the paywall pipeline, and the search debounce live in separate modules talking through protocols — the dependency-injection backbone from [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) applied to streams. [SwiftUI at Scale](/learn/swiftui-at-scale) covers the migration playbook end-to-end: how to spot the Combine that needs to stay, the Combine that should go, and the order to do it in so the test suite stays green at every commit.
+
+The sticky-note version: **Combine is not dead — it stopped being the default.** Three questions: cadence vs. immediacy, single vs. multi-consumer, simple vs. composed timing. Three yeses and you keep Combine. Three nos and async/await wins. Search-bar debounce, broadcast buses, and multi-stream pipelines are still Combine's home turf, and the rewrite-everything PR is the bug, not the existing code. Pin the test to the verb and your friend's junior engineer can have either answer — as long as the tests stay green.
+
+---
+
+**Tomorrow (Day 28):** UIKit tricks SwiftUI still cannot do — five places where I have realistically had to drop to `UIViewRepresentable` in 2026 (custom keyboards, advanced gestures, performant scrollviews, PDF rendering, complex collection layouts). The decision matrix, the wrappers, and the BetFree screen where I gave up and reached for `UIPageViewController` after two days of fighting SwiftUI.
