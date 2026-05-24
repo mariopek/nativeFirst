@@ -1,0 +1,447 @@
+---
+title: "UIKit Tricks SwiftUI Still Can't Do in 2026 — Five Places I Have Honestly Reached for UIViewRepresentable (and the BetFree Screen Where I Gave Up)"
+description: "Day 28 of 30. SwiftUI in iOS 27 is finally adult enough to ship most screens with — but not all of them. This is a 1700-word, TDD-first walk through the five places I have actually dropped to UIKit in production this year: a custom number-pad keyboard, a two-finger pinch-and-rotate gesture, a 10,000-row infinite scroll, a PDF receipt renderer for Renovise, and a BetFree onboarding pager where I finally surrendered after two days of fighting TabView. Decision matrix, the UIViewRepresentable wrappers, and the verb-level tests that pin the behavior so swapping back to SwiftUI later costs zero."
+pubDate: 2026-05-24
+topics: ["SwiftUI", "UIKit", "UIViewRepresentable", "UIViewControllerRepresentable", "iOS 27", "Custom Keyboard", "Gestures", "UICollectionView", "PDFKit", "UIPageViewController", "TDD", "Swift Testing", "BetFree", "Renovise"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of a green printed circuit board, copper traces and surface-mount components catching a single point of light. The metaphor for this post: SwiftUI is the case, UIKit is the board underneath, and once a year you still have to take the case off to fix something the case cannot reach."
+---
+
+{/*
+  SEO target keywords:
+  - SwiftUI UIKit interop 2026
+  - UIViewRepresentable real example
+  - UIViewControllerRepresentable best practices
+  - SwiftUI custom keyboard
+  - SwiftUI advanced gestures UIKit
+  - SwiftUI performant scrollview UICollectionView
+  - SwiftUI PDF rendering PDFKit
+  - SwiftUI page view controller alternative
+  - when to drop down to UIKit SwiftUI
+  - UIKit still needed 2026
+
+  Internal linking strategy:
+  - /learn/field-notes/combine-in-2026-where-its-still-irreplaceable — Day 27
+  - /learn/field-notes/live-activities-dynamic-island-when-worth-it — Day 26
+  - /learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree — Day 25
+  - /learn/field-notes/solid-principles-swift-real-app-refactor — Day 24
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/observable-vs-observableobject-performance-benchmark — Day 13
+  - /learn/field-notes/swiftui-property-wrapper-mental-map — Day 12
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple UIViewRepresentable documentation
+  - Apple UIViewControllerRepresentable documentation
+  - PDFKit documentation
+  - UICollectionViewCompositionalLayout
+*/}
+
+Tuesday afternoon, BetFree onboarding. I am rebuilding the four-screen "tell me about your goals" intro that I wrote in UIKit in 2021. SwiftUI's `TabView(.page)` exists, it has worked since iOS 14, and I have used it on a dozen marketing screens. I open a fresh file, twenty lines later I have a pager — and the indicator dots are too pale, the swipe is mushy compared to the old `UIPageViewController` I am replacing, the bounce on the first and last page is wrong by some number of pixels that I cannot fix without `UIScrollView`, and I cannot intercept the willTransition event to trigger the analytics hit at the right moment. I spend Tuesday evening googling. I spend Wednesday morning trying every blog post's recommended workaround. Wednesday afternoon I delete the SwiftUI version, write a 30-line `UIViewControllerRepresentable` wrapper around the old `UIPageViewController`, and ship before lunch on Thursday.
+
+That is the post. **SwiftUI in 2026 is finally adult enough for most screens — but not all of them.** There are five places I keep needing to drop to UIKit, and pretending otherwise costs days. This is Day 28 of [the 30-day iOS development series](/learn/field-notes). Yesterday's [Combine post](/learn/field-notes/combine-in-2026-where-its-still-irreplaceable) made the same argument from a different angle: the right tool is the one that takes less code to be correct, not the newest one in the marketing slide. Today the verb is the same — pick what fits the shape of the problem — and the answer is sometimes "UIKit, wrapped behind a 30-line `Representable` that nobody else on the team ever has to touch."
+
+The format is the one from [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models): for each scenario I write a test against the *verb* first, then the smallest wrapper that makes the test green. That way the wrapper is a *seam*, not a precious artifact. If SwiftUI gets the missing API in iOS 28, the test stays the same, the implementation changes, no caller notices.
+
+---
+
+## The decision matrix — when SwiftUI is not enough
+
+I run a four-question gate. One yes is enough to consider UIKit. Two yeses and I stop fighting and write the wrapper.
+
+**1. Does SwiftUI's API surface miss a hook the design requires?**
+
+Examples: the `willTransition` callback on a pager. The `inputAccessoryView` on a text field. The `scrollViewDidEndDecelerating` event with the final content offset. SwiftUI either does not expose these or exposes a half-version that fires at the wrong moment. UIKit has shipped them since iOS 5.
+
+**2. Is the performance budget tight enough that the SwiftUI overhead shows up in Instruments?**
+
+A list of 200 cells with images is fine. A list of 10,000 rows where the user expects 120 FPS scroll is not — `UICollectionView` with prefetching and a compositional layout still beats `List` by a measurable margin in 2026, especially when the cells are complex.
+
+**3. Is there a system component you are not allowed to reimplement?**
+
+Apple Pencil drawing canvas. `PDFView`. `MFMailComposeViewController`. `PKAddPassButton`. `AVPlayerViewController`. SwiftUI either has no wrapper or has a wrapper that lags the UIKit API by a year. The right move is the UIKit one wrapped.
+
+**4. Is the gesture system more complex than `.gesture(MagnificationGesture())`?**
+
+Simultaneous pinch-and-rotate-and-pan with conflict resolution against a parent scroll view's pan. Long-press-then-drag with an interactive transition. Multi-touch where you need to know individual touch IDs. SwiftUI gesture composition is improving every year and I am rooting for it, but in 2026 the answer for "more than three gestures interacting" is still `UIGestureRecognizer` subclasses.
+
+**One yes — write the wrapper. Two yeses — stop debating and write it now.** The wrapper is small, it is hidden behind a protocol, your tests do not import UIKit, and the cost of being wrong is one file you delete in a year when SwiftUI catches up.
+
+---
+
+## Trick 1 — Custom number-pad keyboard with a "Done" accessory bar
+
+Renovise has an invoice amount field. It is decimal-only, the user should not see the QWERTY layout, and there needs to be a "Done" button above the keyboard so the user can dismiss without hunting for the return key. SwiftUI's `.keyboardType(.decimalPad)` gets you halves of one and zero of the other. The `inputAccessoryView` story in SwiftUI is "use `.toolbar(content:)` with `ToolbarItem(placement: .keyboard)`" — which works for the toolbar, but only when the keyboard belongs to a `TextField` SwiftUI rendered. The moment you need a `UITextField` for a different reason (for example, the formatter behavior you actually want), the bridging gets weird fast.
+
+The verb test pins the requirement, not the framework:
+
+```swift
+import Testing
+@testable import RenoviseCore
+
+@Suite("Invoice amount input — decimal pad with Done accessory")
+struct InvoiceAmountFieldTests {
+
+    @Test("typing 1, 2, 3, ., 4, 5 produces 123.45 in the bound value")
+    func decimalTypingBindsCorrectly() async {
+        let model = InvoiceAmountModel()
+        model.simulateInput("123.45")
+        #expect(model.amount == Decimal(string: "123.45"))
+    }
+
+    @Test("tapping Done resigns first responder and fires onCommit once")
+    func doneResignsAndCommits() async {
+        let model = InvoiceAmountModel()
+        var commits = 0
+        model.onCommit = { commits += 1 }
+        model.simulateInput("99")
+        model.simulateDoneTap()
+        #expect(commits == 1)
+        #expect(model.isFirstResponder == false)
+    }
+}
+```
+
+The `InvoiceAmountModel` is a plain `@Observable` class — Day 11 / Day 12 / Day 13 territory. The test does not know whether the underlying view is `UITextField` or `TextField`. The wrapper is a `UIViewRepresentable` around `UITextField`:
+
+```swift
+struct DecimalPadField: UIViewRepresentable {
+    @Bindable var model: InvoiceAmountModel
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.keyboardType = .decimalPad
+        field.delegate = context.coordinator
+
+        let bar = UIToolbar(frame: .init(x: 0, y: 0, width: 0, height: 44))
+        let flex = UIBarButtonItem(systemItem: .flexibleSpace)
+        let done = UIBarButtonItem(
+            title: "Done",
+            primaryAction: UIAction { [weak field] _ in
+                field?.resignFirstResponder()
+                context.coordinator.commit()
+            }
+        )
+        bar.items = [flex, done]
+        bar.sizeToFit()
+        field.inputAccessoryView = bar
+        return field
+    }
+
+    func updateUIView(_ field: UITextField, context: Context) {
+        let formatted = model.formattedAmount
+        if field.text != formatted { field.text = formatted }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
+    @MainActor
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        let model: InvoiceAmountModel
+        init(model: InvoiceAmountModel) { self.model = model }
+
+        func textField(
+            _ textField: UITextField,
+            shouldChangeCharactersIn range: NSRange,
+            replacementString string: String
+        ) -> Bool {
+            let current = textField.text ?? ""
+            let next = (current as NSString).replacingCharacters(in: range, with: string)
+            model.updateRaw(next)
+            return true
+        }
+
+        func commit() { model.commit() }
+    }
+}
+```
+
+Thirty-five lines. The `inputAccessoryView` is one line. The `decimalPad` is one line. The delegate routes everything through the testable model. Nothing in the test imports UIKit.
+
+> The pattern: **the wrapper is dumb, the model is smart.** Everything the test cares about lives on the model. The `UIViewRepresentable` is a transport between the model and a `UIKit` component you do not feel like reimplementing.
+
+---
+
+## Trick 2 — Pinch + rotate + pan, all at once, with a host scroll view that should not steal the pan
+
+BetFree has a "share your milestone" screen that lets the user resize, rotate, and reposition a celebratory card before sharing. Three gestures, all active simultaneously, all needing to win over the enclosing `ScrollView` which would otherwise grab the pan after the first 10 points of movement.
+
+SwiftUI's gesture composition (`.simultaneously(with:)`, `.exclusively(before:)`, `.gesture(... including: .gesture)`) gets you most of the way for two gestures. For three, with priority over a parent scroll view, I have lost two evenings before just writing a `UIView` host. The win is the `UIGestureRecognizerDelegate.gestureRecognizer(_:shouldRecognizeSimultaneouslyWith:)` callback — it is the right tool for "yes, both at once" and SwiftUI does not expose a clean equivalent in 2026.
+
+The verb test:
+
+```swift
+@Suite("Milestone card — pinch, rotate, pan compose without stealing scroll")
+struct MilestoneCardGestureTests {
+
+    @Test("pinching by 2x and rotating by 90deg in parallel updates both transforms")
+    func parallelPinchAndRotate() {
+        let model = MilestoneCardModel()
+        model.simulatePinch(scale: 2.0)
+        model.simulateRotate(radians: .pi / 2)
+        #expect(model.scale == 2.0)
+        #expect(model.rotation == .pi / 2)
+    }
+
+    @Test("a 10pt pan on the card does not deliver a pan to the host scroll view")
+    func panDoesNotEscape() {
+        let model = MilestoneCardModel()
+        let scrollSpy = ScrollSpy()
+        model.hostScrollView = scrollSpy
+        model.simulatePan(dx: 10, dy: 0)
+        #expect(scrollSpy.panEvents == 0)
+    }
+}
+```
+
+The wrapper is a `UIViewRepresentable` around a `UIView` that owns three `UIGestureRecognizer`s and a single delegate that returns `true` from `shouldRecognizeSimultaneouslyWith`. That delegate is the line of code SwiftUI has not surfaced in seven years. I did not include the wrapper inline because it is shape-identical to Trick 1 — the meaningful thing is that the model owns the transforms (`scale`, `rotation`, `offset`) and the wrapper just forwards gesture deltas. Same drum as Trick 1: dumb wrapper, smart model, test against the model.
+
+---
+
+## Trick 3 — A 10,000-row infinite scroll that has to feel native
+
+This is the one most people get wrong by default. `List` is fine. `LazyVStack` inside `ScrollView` is fine. Both of them, in 2026, are *almost* as fast as `UICollectionView` for normal sizes. The moment the row count crosses ~5,000 and the cells contain images, the difference shows up in a profiler. The dropped frames during fast scroll are not a guess — they are a number you can read in the Time Profiler.
+
+If you have a 10k+ row screen — chat history, transaction list for a power user, fitness app's lifetime workout log — and the design says "no shimmer, no spinner, just buttery scroll," `UICollectionViewCompositionalLayout` with prefetching is still the answer.
+
+The wrapper is a `UIViewControllerRepresentable` around a `UICollectionViewController`. I will not paste 80 lines of `UICollectionViewDataSource` here because the post you actually want for that lives in [SwiftUI in Practice](/learn/swiftui-in-practice). The pattern that matters is the same: the data layer is a `@Observable` model behind a protocol (the Day 19 [DI pattern](/learn/field-notes/dependency-injection-swift-without-frameworks)), the cells are SwiftUI views hosted inside `UICollectionViewCell` via `UIHostingConfiguration` (since iOS 16 you do not have to give up SwiftUI inside the cells, only at the collection level), and the test asserts on the verb: "scrolling triggers prefetch on the data layer for rows 200-300 when row 150 is on screen."
+
+```swift
+@Test("scrolling to row 150 triggers prefetch for rows 200-300")
+func prefetchTriggers() {
+    let data = PrefetchSpyDataSource(count: 10_000)
+    let controller = TransactionListViewModel(data: data)
+    controller.simulateScrollTo(row: 150)
+    #expect(data.prefetchedRanges.contains(200..<300))
+}
+```
+
+> Side benefit of the wrapper: if Apple ships a true `LazyList` with prefetching hooks in iOS 28 — and the rumor mill says they are working on it — you swap the wrapper for the new SwiftUI primitive and your tests stay green. **The seam is the asset.** Day 24's [SOLID post](/learn/field-notes/solid-principles-swift-real-app-refactor) is the long version of why.
+
+---
+
+## Trick 4 — Rendering a PDF receipt for Renovise (PDFKit + PDFView)
+
+Renovise emails customers a receipt at the end of each job. The PDF is rendered on-device, signed, and attached to the email. SwiftUI does not render PDFs. It does not display PDFs. Everything you need lives in `PDFKit`, and the right move is to embrace it via a thin `UIViewRepresentable` around `PDFView`:
+
+```swift
+import PDFKit
+import SwiftUI
+
+struct PDFReceiptView: UIViewRepresentable {
+    let document: PDFDocument
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = .systemBackground
+        return view
+    }
+
+    func updateUIView(_ view: PDFView, context: Context) {
+        if view.document !== document { view.document = document }
+    }
+}
+```
+
+Eight lines of view, and the verb-level test is on the *generator* — the thing that turns a `Receipt` model into a `PDFDocument`. The display is a transport, the generator is the asset:
+
+```swift
+@Test("a receipt with three line items renders a single-page PDF with the totals row")
+func threeLineItemsRenderOnePage() {
+    let receipt = Receipt.fixture(lineItems: 3, total: 250.00)
+    let document = PDFReceiptRenderer().render(receipt)
+    #expect(document.pageCount == 1)
+    let text = document.string ?? ""
+    #expect(text.contains("Total"))
+    #expect(text.contains("250"))
+}
+```
+
+The renderer is a pure function over `Receipt`. The PDF view is a 9-line transport. Nothing else in the app knows or cares.
+
+> This is one of those rare places where the UIKit/Apple-framework dependency is permanent — there is no SwiftUI PDF API on the horizon. Embrace it, hide it behind a `Representable` and a generator, move on. **Not every UIKit wrapper is a placeholder for a future SwiftUI version.** Some are just the right answer.
+
+---
+
+## Trick 5 — The BetFree onboarding pager (where I gave up)
+
+This is the screen from the intro. Four onboarding cards, swipe between them, page-control indicator, fires an analytics event when the user lands on a page, supports "back" via a button as well as a swipe, has to call a "onboarding completed" closure when the user advances past the last card.
+
+The SwiftUI version is `TabView { ... }.tabViewStyle(.page)`. It works. It also: has an indicator color you cannot quite get right because it is the system tinted gray, fires the index change *after* the gesture has finished animating (you need *before* for the analytics hit so the event timing matches your funnel), bounces at the edges in a way that competes visually with the card animation, and gives you no clean callback for "user swiped past the last page." Each of those is solvable. Each solution is a workaround. Sum the workarounds and you have written a worse `UIPageViewController` in SwiftUI.
+
+After Tuesday, the wrapper:
+
+```swift
+import SwiftUI
+import UIKit
+
+struct OnboardingPager<Page: View>: UIViewControllerRepresentable {
+    let pages: [Page]
+    @Binding var currentIndex: Int
+    let onWillTransition: (Int) -> Void
+    let onCompleted: () -> Void
+
+    func makeUIViewController(context: Context) -> UIPageViewController {
+        let controller = UIPageViewController(
+            transitionStyle: .scroll,
+            navigationOrientation: .horizontal
+        )
+        controller.dataSource = context.coordinator
+        controller.delegate = context.coordinator
+        context.coordinator.controllers = pages.map {
+            UIHostingController(rootView: $0)
+        }
+        if let first = context.coordinator.controllers.first {
+            controller.setViewControllers([first], direction: .forward, animated: false)
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIPageViewController, context: Context) {
+        let coordinator = context.coordinator
+        guard currentIndex < coordinator.controllers.count else {
+            onCompleted()
+            return
+        }
+        let target = coordinator.controllers[currentIndex]
+        if controller.viewControllers?.first !== target {
+            let direction: UIPageViewController.NavigationDirection =
+                currentIndex >= (coordinator.lastReportedIndex) ? .forward : .reverse
+            controller.setViewControllers([target], direction: direction, animated: true)
+            coordinator.lastReportedIndex = currentIndex
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            currentIndex: $currentIndex,
+            onWillTransition: onWillTransition
+        )
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+        var controllers: [UIHostingController<Page>] = []
+        var lastReportedIndex = 0
+        @Binding var currentIndex: Int
+        let onWillTransition: (Int) -> Void
+
+        init(currentIndex: Binding<Int>, onWillTransition: @escaping (Int) -> Void) {
+            self._currentIndex = currentIndex
+            self.onWillTransition = onWillTransition
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            viewControllerBefore viewController: UIViewController
+        ) -> UIViewController? {
+            guard let index = controllers.firstIndex(where: { $0 === viewController }),
+                  index > 0 else { return nil }
+            return controllers[index - 1]
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            viewControllerAfter viewController: UIViewController
+        ) -> UIViewController? {
+            guard let index = controllers.firstIndex(where: { $0 === viewController }),
+                  index + 1 < controllers.count else { return nil }
+            return controllers[index + 1]
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            willTransitionTo pendingViewControllers: [UIViewController]
+        ) {
+            guard let target = pendingViewControllers.first,
+                  let index = controllers.firstIndex(where: { $0 === target }) else { return }
+            onWillTransition(index)
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            didFinishAnimating finished: Bool,
+            previousViewControllers: [UIViewController],
+            transitionCompleted completed: Bool
+        ) {
+            guard completed,
+                  let current = pageViewController.viewControllers?.first,
+                  let index = controllers.firstIndex(where: { $0 === current }) else { return }
+            currentIndex = index
+            lastReportedIndex = index
+        }
+    }
+}
+```
+
+Sixty-eight lines, every one of them paying for the four things SwiftUI's `TabView(.page)` cannot give me. Used from the call site like any other SwiftUI view:
+
+```swift
+OnboardingPager(
+    pages: cards,
+    currentIndex: $model.currentIndex,
+    onWillTransition: { model.willLandOn($0) },
+    onCompleted: { model.completeOnboarding() }
+)
+```
+
+The verb-level tests live on `OnboardingModel`. Swipes call `willLandOn`, the analytics spy records the event, the test asserts on count and timing. The wrapper does not have a test — it has a *contract*, written down in the closures, and the contract has tests. Same posture as everywhere else in this series.
+
+> The screen has been in BetFree production for four months now. Two App Store reviews specifically called out "the onboarding feels smooth." Nobody on the App Review team cares whether it is SwiftUI underneath. **Your users do not give you Yelp stars for using new frameworks.** They give them for the swipe feeling right.
+
+---
+
+## What does NOT belong in UIKit anymore
+
+To balance the post: the list of things I used to wrap and have happily deleted in 2025/2026.
+
+- **`UITextView` wrappers for multi-line text.** SwiftUI's `TextField(axis: .vertical)` is genuinely good now. The wrapper I wrote in 2021 is gone.
+- **`UIImagePickerController` for picking photos.** `PhotosPicker` since iOS 16 covers 95% of cases and is the right choice for new code.
+- **`UIRefreshControl` for pull-to-refresh.** `.refreshable { ... }` is the answer. Was buggy in iOS 15. Has been fine since iOS 16.
+- **`UISearchController` wrappers.** `.searchable(text:)` covers nearly everything. The one corner case is search scopes with very custom UI, and even that has SwiftUI APIs in iOS 27.
+- **Date pickers, color pickers, sheets, action sheets.** All native SwiftUI for years. If you still have a `UIDatePicker` wrapper, delete it.
+
+The point: the UIKit-wrapper inventory should *shrink* every year. The pieces that are still there in 2026 are the ones with no SwiftUI equivalent on the horizon — and those are the ones the wrappers in this post target.
+
+---
+
+## The cost of writing the wrapper
+
+Be honest about it. Every `UIViewRepresentable` adds: one file your team has to maintain, one mental context switch when reading the codebase, one place where the SwiftUI `@State` / UIKit mutation impedance mismatch can bite, and a Coordinator that has to be `@MainActor`-correct in Swift 6.2 (see [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) and [Day 2](/learn/field-notes/swift-6-2-concurrent-nonisolated-mainactor)).
+
+The break-even: if writing the wrapper costs you a day and the SwiftUI workaround costs you two, write the wrapper. If the SwiftUI workaround is twenty minutes of fiddling and a Stack Overflow answer, do not write the wrapper. The five tricks in this post all cleared the bar — the wrappers paid back their cost within the first sprint they shipped in.
+
+> The TDD posture is what makes this even close to free in maintenance terms. Because the test is against the verb, and the verb lives on the `@Observable` model, the wrapper is replaceable without breaking anything. **The day SwiftUI ships a real page controller with a `willTransition` callback, I delete 68 lines and gain back four months of "do not touch this file."** That is the contract.
+
+---
+
+## Connecting back
+
+- [Day 27](/learn/field-notes/combine-in-2026-where-its-still-irreplaceable) — same argument from the other side. Combine is the right tool for streams; UIKit is the right tool for the five things SwiftUI does not expose. Both posts argue for *the verb*, not the framework.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) — the TDD pattern that makes the UIKit wrapper a *seam* instead of a wart. Every wrapper in this post follows it.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) — the DI pattern that keeps the wrapper out of the call site's import list. The view depends on a protocol; the wrapper is the implementation.
+- [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) — the right place to put these wrappers is in a separate SPM module (`BetFreeUIKitBridge`, `RenoviseUIKitBridge`) so the rest of the app does not pick up the UIKit symbols by accident.
+- [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark), [Day 12](/learn/field-notes/swiftui-property-wrapper-mental-map), [Day 11](/learn/field-notes/observable-macro-migration-real-app) — the `@Observable` story. The model layer the wrapper talks to is `@Observable`-shaped, not `@Published`.
+- [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) — the reason your Coordinator needs `@MainActor` and your delegate methods are not free-threaded.
+
+For the long-form path: [SwiftUI Foundations](/learn/swiftui-foundations) covers the SwiftUI side that you should default to first — the right starting point before you reach for any wrapper. [SwiftUI in Practice](/learn/swiftui-in-practice) is where the multi-module setup for `*UIKitBridge` packages lives, alongside the `UIHostingConfiguration` patterns for putting SwiftUI cells inside `UICollectionView`. [SwiftUI at Scale](/learn/swiftui-at-scale) walks the team-level story: how to write the wrappers so a junior engineer can replace them when SwiftUI catches up without breaking the test suite — the same seam-as-asset posture this post lives on.
+
+The sticky-note version: **UIKit is not legacy. It is the basement.** Most of your app does not need it. Five rooms still do — custom keyboards with accessory bars, multi-finger gesture choreography, 10k-row scrolls, PDF rendering, and any pager more demanding than the default `TabView`. Wrap each one in a `UIViewRepresentable` behind a protocol, test the verb on the model, and the wrapper becomes a 30-to-70-line transport you swap out when SwiftUI grows up. Stop fighting `TabView(.page)`. Write the 68-line `UIPageViewController` wrapper. Ship before lunch.
+
+---
+
+**Tomorrow (Day 29):** Custom Swift Macros — when they are actually worth the trouble, the `@freestanding` vs `@attached` decision tree, the over-engineering trap that costs you a week, and a real `#URL(...)` macro that validates URLs at *compile time* so you cannot ship a broken `URL(string:)` ever again.
