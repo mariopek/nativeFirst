@@ -1,0 +1,349 @@
+---
+title: "Custom Swift Macros in 2026 — When They Are Actually Worth the Trouble (and a #URL Macro That Validates Links at Compile Time)"
+description: "Day 29 of 30. Swift macros are the most over-recommended feature of the last three years. This post is the honest one: what @freestanding vs @attached actually means in practice, the four-question gate I run before writing one, the over-engineering trap that cost me a week on Renovise, and a real #URL(_:) macro that turns URL(string:)! into a compile-time error instead of a runtime crash — with TDD-first tests that pin the behavior, not the implementation."
+pubDate: 2026-05-25
+topics: ["Swift Macros", "Swift 6.2", "Compile-Time Validation", "@freestanding", "@attached", "SwiftSyntax", "MacroPlugin", "Renovise", "BetFree", "TDD", "Swift Testing", "Code Generation"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a printed circuit board with intricate copper traces, surface-mount components, and a single LED catching the light. The metaphor for this post: macros are compile-time circuitry — invisible at runtime, but if you etch them wrong, the whole board fails before the user ever turns the device on."
+---
+
+{/*
+  SEO target keywords:
+  - Swift macros when worth it 2026
+  - @freestanding vs @attached macro
+  - compile time URL validation Swift
+  - Swift macro tutorial production
+  - SwiftSyntax macro real example
+  - #URL macro Swift compile time
+  - Swift macro over-engineering trap
+  - custom Swift macro TDD
+  - Swift 6.2 macros migration
+  - when not to write a Swift macro
+
+  Internal linking strategy:
+  - /learn/field-notes/uikit-tricks-swiftui-cannot-do-uiviewrepresentable-2026 — Day 28
+  - /learn/field-notes/combine-in-2026-where-its-still-irreplaceable — Day 27
+  - /learn/field-notes/live-activities-dynamic-island-when-worth-it — Day 26
+  - /learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree — Day 25
+  - /learn/field-notes/solid-principles-swift-real-app-refactor — Day 24
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/observable-macro-migration-real-app — Day 11
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple Swift Macros documentation
+  - swift-syntax repository
+  - SE-0397 (Freestanding Expression Macros)
+  - SE-0389 (Attached Macros)
+*/}
+
+Last winter, Renovise crashed on launch for one specific user. One. The crash log pointed at line 47 of `APIRoutes.swift`. The line read:
+
+```swift
+static let invoices = URL(string: "https:/renovise.app/v1/invoices")!
+```
+
+Spot the bug. Take your time. I had stared at that line in code review three weeks earlier and *missed it*. The reviewer missed it. The CI lint missed it. The `URL(string:)` constructor accepted it, returned a non-nil value, and the `URLSession` request fired off into the void with a malformed scheme. The forced unwrap was fine. The string was the bomb. **One missing slash. One user. One angry App Store review.** That was the week I finally sat down with Swift macros and wrote `#URL(...)`.
+
+That is also the post. Swift macros are *the* most over-recommended feature of the last three years. Every conference talk, every newsletter, every "look what you can do with `@attached(memberAttribute)`" demo. Almost none of them are honest about the cost. This is Day 29 of [the 30-day iOS development series](/learn/field-notes), and after [yesterday's UIKit post](/learn/field-notes/uikit-tricks-swiftui-cannot-do-uiviewrepresentable-2026) which argued for picking the verb over the framework, today's verb is **catching a class of bug at compile time that would otherwise ship**. Macros are the right tool for that exact verb. They are the wrong tool for almost everything else people use them for.
+
+I am going to walk you through the four-question gate I now run before writing any macro, the `#URL` macro that ended the Renovise saga (test-first, of course), and the over-engineering trap on BetFree that cost me a week before I deleted the macro and went back to a function. The cover image is a circuit board for a reason: macros are *compile-time circuitry*. Invisible when the app runs, but if you etch a trace wrong, the whole board is dead before the user touches it.
+
+---
+
+## What macros actually are (the one-paragraph version)
+
+A Swift macro is code that runs *during compilation* and produces more Swift code that gets compiled. The Swift compiler hands the macro a [SwiftSyntax](https://github.com/swiftlang/swift-syntax) tree representing the source at the macro call site. The macro inspects that tree, performs whatever logic it wants, and returns more syntax. The compiler splices the returned syntax into the program before type-checking. **If the macro emits invalid code, you get a compile error at the call site.** If the macro emits code that does not type-check, you also get a compile error at the call site. This is the entire reason macros are interesting — they fail loudly, early, and in your editor.
+
+Two flavors matter in practice. **Freestanding macros** are called like a function or a literal: `#URL("...")`, `#stringify(x)`, `#warning("...")`. They expand into expressions or statements. **Attached macros** sit on top of a declaration: `@Observable`, `@Codable`, `@MyMacro`. They expand by adding members, properties, accessors, or conformances to the thing they are attached to. The famous ones from Apple — `@Observable` (see [Day 11](/learn/field-notes/observable-macro-migration-real-app)), `@Model` for SwiftData (see [Day 14](/learn/field-notes/swiftdata-production-2026-cloudkit-gotchas)), `@Generable` for Foundation Models (see [Day 9](/learn/field-notes/foundation-models-generable-structured-output-patterns)) — are all `@attached`.
+
+That is the whole mental model. Everything else is detail.
+
+---
+
+## The four-question gate
+
+Before I write a macro, I make myself answer four questions. If I cannot get a yes on at least three of them, I write a function, a protocol extension, or a regular code-generation script instead. That gate has saved me from publishing at least three macros that would have looked clever in a conference talk and embarrassed me in maintenance.
+
+**1. Is this catching a class of bug at compile time that I cannot catch any other way?**
+
+The `#URL` macro is a *yes*. There is no runtime trick that catches malformed URL strings before the build is shipped, short of "have a CI test that constructs every URL at runtime," which is exactly the kind of brittle thing nobody maintains. The macro lifts the check from "test pass at runtime" to "won't compile."
+
+A macro that "logs every function entry with `os_signpost`" is a *no*. You can do that with a property wrapper. Or with `@autoclosure`. Or, in 2026, with a custom `Logger` actor.
+
+**2. Is the syntactic shape of the call site materially better than a function?**
+
+`#URL("https://renovise.app")` reads like a URL literal. Beautiful. If the user has to write `Macro.url("https://renovise.app")` and the only difference between that and a function is "macro, technically," you have written a worse function.
+
+**3. Do I expect more than one team to consume this?**
+
+Macros have a build-time cost. They require an SPM target with a `MacroPlugin`, a separate library target, and they introduce a build-server-side dependency on SwiftSyntax. If exactly one feature in one app uses this, write the function. If three apps in the family will reach for it, the macro is paying for the SwiftSyntax dependency every build for a long time — make sure it is worth it. [Day 18's modularization math](/learn/field-notes/spm-modular-architecture-when-to-split) is the same shape: not everything that *could* be its own module *should* be.
+
+**4. Can I write a TDD-style test for the macro itself?**
+
+The answer should be yes — `swift-syntax` ships an `assertMacroExpansion` helper that lets you write tests like "given this source, the expansion is exactly this other source." If you cannot articulate what good expansion looks like in a test, you do not yet understand the macro well enough to write it. Stop. Write the test first. (Yes — TDD on macros. Same posture as everywhere else in this series, from [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) onward.)
+
+Three yeses minimum. The Renovise `#URL` macro scored four. The BetFree macro I deleted scored two-and-a-half.
+
+---
+
+## The Renovise `#URL` macro — TDD-first
+
+Start with the test. Always. The thing we want to pin: `#URL("...")` must produce a `URL` value if the string is a valid URL, and must refuse to compile if it is not.
+
+```swift
+import SwiftSyntaxMacros
+import SwiftSyntaxMacrosTestSupport
+import Testing
+@testable import URLMacroMacros
+
+@Suite("#URL macro — compile-time URL validation")
+struct URLMacroTests {
+
+    let testMacros: [String: any Macro.Type] = ["URL": URLMacro.self]
+
+    @Test("a valid https URL expands to URL(string:)!")
+    func validHTTPSExpands() {
+        assertMacroExpansion(
+            #"#URL("https://renovise.app/v1/invoices")"#,
+            expandedSource: #"URL(string: "https://renovise.app/v1/invoices")!"#,
+            macros: testMacros
+        )
+    }
+
+    @Test("a URL missing the second slash in https:// fails to compile with a clear diagnostic")
+    func malformedSchemeFailsCompile() {
+        assertMacroExpansion(
+            #"#URL("https:/renovise.app/v1/invoices")"#,
+            expandedSource: #"#URL("https:/renovise.app/v1/invoices")"#,
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "'https:/renovise.app/v1/invoices' is not a valid URL",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+
+    @Test("a non-literal argument fails to compile because the macro needs a string literal")
+    func nonLiteralArgumentFailsCompile() {
+        assertMacroExpansion(
+            #"#URL(someVariable)"#,
+            expandedSource: #"#URL(someVariable)"#,
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "#URL requires a static string literal so it can be validated at compile time",
+                    line: 1,
+                    column: 1
+                )
+            ],
+            macros: testMacros
+        )
+    }
+}
+```
+
+Three tests, three verbs: *expand a valid URL*, *reject the malformed one with a useful error*, *reject the dynamic argument with a different useful error*. The tests live in their own target and import `SwiftSyntaxMacrosTestSupport` — they do not import UIKit, they do not import the app, they pin the macro on its own.
+
+Now the implementation. The freestanding expression macro:
+
+```swift
+import SwiftCompilerPlugin
+import SwiftSyntax
+import SwiftSyntaxMacros
+
+public struct URLMacro: ExpressionMacro {
+    public static func expansion(
+        of node: some FreestandingMacroExpansionSyntax,
+        in context: some MacroExpansionContext
+    ) throws -> ExprSyntax {
+
+        guard let argument = node.arguments.first?.expression,
+              let segments = argument.as(StringLiteralExprSyntax.self)?.segments,
+              segments.count == 1,
+              case let .stringSegment(literal) = segments.first
+        else {
+            context.diagnose(
+                Diagnostic(
+                    node: Syntax(node),
+                    message: SimpleMessage(
+                        id: "url-not-literal",
+                        message: "#URL requires a static string literal so it can be validated at compile time",
+                        severity: .error
+                    )
+                )
+            )
+            return ExprSyntax(node)
+        }
+
+        let raw = literal.content.text
+        guard let url = URL(string: raw),
+              let scheme = url.scheme,
+              ["http", "https"].contains(scheme.lowercased()),
+              let host = url.host,
+              !host.isEmpty
+        else {
+            context.diagnose(
+                Diagnostic(
+                    node: Syntax(argument),
+                    message: SimpleMessage(
+                        id: "url-invalid",
+                        message: "'\(raw)' is not a valid URL",
+                        severity: .error
+                    )
+                )
+            )
+            return ExprSyntax(node)
+        }
+
+        return "URL(string: \(literal: raw))!"
+    }
+}
+
+private struct SimpleMessage: DiagnosticMessage {
+    let id: String
+    let message: String
+    let severity: DiagnosticSeverity
+    var diagnosticID: MessageID { MessageID(domain: "URLMacro", id: id) }
+}
+
+@main
+struct URLMacroPlugin: CompilerPlugin {
+    let providingMacros: [Macro.Type] = [URLMacro.self]
+}
+```
+
+Forty lines. Most of them are the diagnostic boilerplate that `swift-syntax` requires. The actual logic is: pull the string literal out of the call, check it parses as an `URL` with a real scheme and host, return the unwrapped expansion. Anything else, emit a diagnostic and refuse.
+
+Three things worth pointing at:
+
+- **The forced unwrap in the expansion is safe.** The macro has already proven the string parses. The bang is mechanical — it tells the type checker "this is `URL`, not `URL?`," and the proof lives in the macro logic.
+- **The `URL(string:)` check is permissive — that is on purpose.** I do not want this macro to second-guess Foundation. If Foundation accepts it, I accept it. The host/scheme check above is a thin layer of "did the developer forget a slash" that catches the Renovise bug specifically.
+- **The fallback `return ExprSyntax(node)` on the error path is required.** Macros that emit diagnostics still have to return *some* syntax — returning the original call expression means the compiler will report the error in your IDE without a confusing secondary "cannot expand macro" error.
+
+The call site, from the actual Renovise codebase after the migration:
+
+```swift
+enum APIRoutes {
+    static let invoices = #URL("https://renovise.app/v1/invoices")
+    static let jobs     = #URL("https://renovise.app/v1/jobs")
+    static let receipts = #URL("https://renovise.app/v1/receipts")
+}
+```
+
+The 2024 version of that file had eighteen `URL(string: "...")!` calls. After the migration there are eighteen `#URL("...")` calls. Three of them flagged typos I had been shipping for months. The fourth one would have been the next Renovise launch crash. **The macro paid for itself before the build was green.**
+
+---
+
+## The BetFree macro I deleted (the over-engineering trap)
+
+To balance the post, the failure story. Last spring on BetFree I wrote an `@AnalyticsTracked` attached macro. The idea was: stick it on any `View` and it would auto-generate a `.onAppear { Analytics.track(.viewed(...)) }` modifier with the view's name. Sounded clever in the Notion doc. Felt very Apple-talk-friendly.
+
+I scored it against the gate:
+
+- **Q1 — catches a class of bug at compile time?** No. The bug it was solving — "forgetting to track a view" — is a runtime detection problem at best. A linter would have done it.
+- **Q2 — syntax materially better?** Marginal. `@AnalyticsTracked View` vs. `.onAppear { Analytics.track(...) }` is two tokens shorter. Not a win.
+- **Q3 — multiple consumers?** Only BetFree.
+- **Q4 — can I write the expansion test?** Yes, but the expansion was three lines and the test was three pages.
+
+That is one-and-a-half yeses. I wrote the macro anyway because the conference talk was loud in my ears. **One week later**, after debugging two SwiftSyntax version mismatches on the CI box, an Xcode 26 beta that did not pick up the `MacroPlugin` target, and a perf hit on the type-checker for the view bodies it expanded into, I deleted the macro. Replaced it with a `viewModifier` named `.trackedAppear(_:)`. Six lines. Zero macros. Same behavior at the call site. Same analytics events.
+
+The over-engineering trap is not the macro itself — it is **the asymmetry of cost**. The macro looks cheap because the expansion is tiny. The cost shows up at the package boundary: every team member rebuilding swift-syntax, every CI worker setting up the `MacroPlugin` target, every Xcode upgrade that breaks the macro for two days while the swift-syntax version catches up. **If the runtime equivalent is six lines, the macro is almost never worth it.**
+
+> The rule I now write on the back of a notebook before reaching for a macro: **if a function or modifier would solve this in under ten lines, the macro is showing off, not solving.** Save macros for the verbs no function can express: compile-time checks, syntactic sugar that genuinely changes the shape of the call site, conformance synthesis that the compiler cannot do automatically. Same shape as [Day 28's UIKit-wrapper rule](/learn/field-notes/uikit-tricks-swiftui-cannot-do-uiviewrepresentable-2026) — the wrapper is the asset; the rest is decoration.
+
+---
+
+## `@freestanding` vs `@attached` — the decision tree
+
+The naming hides the question. Re-frame it like this:
+
+**Does the macro call site replace an expression or statement?** Freestanding. Examples: `#URL("...")`, `#stringify(x)`, `#warning("...")`. You write the macro at a position where a value or a directive can go, and the macro emits the value or the directive.
+
+**Does the macro add to a declaration that is already there?** Attached. Examples: `@Observable`, `@Generable`, `@Codable`. The macro reads the declaration it is on (a class, struct, enum, function, property) and adds members, conformances, accessors, or peers.
+
+A second axis on `@attached`: the role. `@attached(member)` adds members. `@attached(accessor)` synthesizes a property's `get`/`set`. `@attached(extension)` adds conformances and extension methods. `@attached(peer)` produces sibling declarations. **Most attached macros need more than one role.** `@Observable` uses `member`, `accessor`, *and* `extension` — you can read this in the public SwiftSyntax source. The macro declaration says `@attached(member, names: ...) @attached(extension, conformances: ..., names: ...)`. The roles compose.
+
+If you cannot articulate which role(s) you need before you start writing, you do not yet have a design. Stop and draw the expansion on paper first.
+
+---
+
+## Other macros I have kept (small inventory, 2026)
+
+- **`#URL(...)`** — the post. Compile-time URL literals across all five apps in the family. Has caught seven bugs in a year.
+- **`@TestSubject`** — a tiny `@attached(peer)` macro on the model under test that generates a `TestSubject` typealias and a `makeSUT()` factory. Reduces boilerplate in the [Day 21 TDD pattern](/learn/field-notes/tdd-swiftui-real-workflow-view-models). Used in three of the apps, scored four-out-of-four on the gate.
+- **`#preview` extensions** (Apple's own) — I add small wrappers around the `#Preview` macro for theming. Tiny, freestanding, paid back instantly.
+
+Every other macro idea I have had in the last two years has either failed the gate or been deleted within a month. That ratio is the real story.
+
+---
+
+## The build setup, briefly
+
+If you are writing your first macro, the SPM `Package.swift` shape that matters is:
+
+```swift
+// Package.swift
+let package = Package(
+    name: "URLMacro",
+    platforms: [.iOS(.v17), .macOS(.v14)],
+    products: [
+        .library(name: "URLMacro", targets: ["URLMacro"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax", from: "510.0.0"),
+    ],
+    targets: [
+        .macro(
+            name: "URLMacroMacros",
+            dependencies: [
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+            ]
+        ),
+        .target(name: "URLMacro", dependencies: ["URLMacroMacros"]),
+        .testTarget(
+            name: "URLMacroTests",
+            dependencies: [
+                "URLMacroMacros",
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+            ]
+        ),
+    ]
+)
+```
+
+The `.macro` target is the compiler plugin. The `.target(name: "URLMacro", ...)` is the consumer library that exports the user-facing `@freestanding(expression) public macro URL(_ literal: StaticString) -> URL = #externalMacro(...)` declaration. The test target uses `SwiftSyntaxMacrosTestSupport` for `assertMacroExpansion`. Put this package in `Local Swift Packages` for any of the apps and you can `import URLMacro` and call `#URL(...)` from anywhere.
+
+The boring part is keeping swift-syntax versions in sync with Xcode. Xcode 26 ships with a specific swift-syntax version that the plugin loads — if your `Package.swift` pins something newer, the macro fails to load with a cryptic error. Pin to the version Xcode ships and update with Xcode, not ahead of it. [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) has the long version of "the SPM dependency graph is part of your build, treat it like infrastructure."
+
+---
+
+## Connecting back
+
+- [Day 28](/learn/field-notes/uikit-tricks-swiftui-cannot-do-uiviewrepresentable-2026) — same posture as today: the tool is justified by *the verb*, not by the conference-talk popularity contest. UIKit wrappers and Swift macros both pay back when they catch something nothing else catches.
+- [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) — the TDD posture extended to macros via `assertMacroExpansion`. Test the expansion, not the implementation.
+- [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) — `@Suite` / `@Test` / `#expect` is the framework the macro tests use.
+- [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) — where the macro package fits in the module graph, and why pinning swift-syntax matters.
+- [Day 11](/learn/field-notes/observable-macro-migration-real-app) — the canonical attached macro, `@Observable`. Same compiler-plugin mechanism; Apple just did the work for you.
+- [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) — note that macros do not interact with actor isolation directly, but the code the macro emits absolutely does. Test the expansion under Swift 6.2 strict concurrency before shipping.
+
+For the long-form path: [SwiftUI Foundations](/learn/swiftui-foundations) does not cover macros directly — and on purpose. They are an intermediate-to-advanced topic and the foundations work is about getting the SwiftUI mental model right first. [SwiftUI in Practice](/learn/swiftui-in-practice) introduces the `@Observable` macro as the most common attached macro you will use day-to-day, and shows when *not* to reach for `@Observable` (yes, even Apple's). [SwiftUI at Scale](/learn/swiftui-at-scale) is where the macro-as-shared-asset story lives: writing one macro that pays for itself across five apps and a CI pipeline, with the build-server discipline that keeps swift-syntax versions sane across the family.
+
+The sticky-note version: **Swift macros are a serious feature with a serious cost.** They are the right tool for compile-time validation that nothing else gives you — `#URL`, custom literal types, conformance synthesis, the rare DSL. They are the wrong tool for "wouldn't it be neat if..." Run the four-question gate. Score three yeses or write a function instead. Test the expansion with `assertMacroExpansion`. Pin swift-syntax to the Xcode version. Ship the `#URL` macro. **One missing slash. One angry App Store review. One compile error in the IDE next time, before the user ever sees it.** That is the verb the macro is for.
+
+---
+
+**Tomorrow (Day 30, the finale):** Build-time optimization for a solo developer with 5+ apps in the family — module isolation, prebuilt binaries, derived-data sanity, Xcode 26's build improvements, and the actual numbers from my setup before and after.
