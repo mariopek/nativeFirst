@@ -1,0 +1,220 @@
+---
+title: "Build-Time Optimization for a Solo Developer with Five Apps — The Numbers, the Setup, and the Habits That Cut My Cold Build From 142s to 38s"
+description: "Day 30 of 30. The series finale. One developer, five shipping apps, one Mac Studio. This is the honest tour of my build-time setup in 2026: module isolation across SPM, prebuilt binary frameworks, derived-data hygiene, the Xcode 26 build-system improvements that actually moved the needle, and the four habits I had to break to stop shipping a slow build. Concrete numbers before and after, on real apps — Invoize, Renovise, ThinkBud, BetFree, and Reset — not synthetic benchmarks."
+pubDate: 2026-05-26
+topics: ["Xcode 26", "Build Times", "SPM", "Modular Architecture", "Prebuilt Binaries", "Derived Data", "Swift 6.2", "Invoize", "Renovise", "ThinkBud", "BetFree", "Solo Developer", "Performance"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a printed circuit board with traces fanning out from a dense central package. The metaphor for this post: a build pipeline is a board — most of the time is spent on a few hot traces, and the only way to make it faster is to find them, isolate them, and stop running current through everything else at the same time."
+---
+
+{/*
+  SEO target keywords:
+  - Xcode 26 build time optimization
+  - Swift solo developer multiple apps build setup
+  - SPM prebuilt binary framework 2026
+  - Derived data Xcode 26 cleanup
+  - Module isolation Swift Package Manager
+  - Xcode 26 explicit modules build improvements
+  - Swift incremental build optimization
+  - Solo developer five apps Xcode setup
+  - Reduce iOS build time 2026
+  - Indie app developer build performance
+
+  Internal linking strategy:
+  - /learn/field-notes/custom-swift-macros-when-worth-it-compile-time-url — Day 29
+  - /learn/field-notes/uikit-tricks-swiftui-cannot-do-uiviewrepresentable-2026 — Day 28
+  - /learn/field-notes/combine-in-2026-where-its-still-irreplaceable — Day 27
+  - /learn/field-notes/networking-retry-token-refresh-deduplication — Day 23
+  - /learn/field-notes/custom-networking-layer-urlsession-async-await — Day 22
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19
+  - /learn/field-notes/spm-modular-architecture-when-to-split — Day 18
+  - /learn/field-notes/swift-6-2-strict-concurrency-migration-real-project — Day 3
+  - /learn/field-notes/swift-6-2-mainactor-by-default — Day 1
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Xcode 26 release notes — explicitly built modules
+  - WWDC 2025 "Demystify explicitly built modules"
+  - SE-0387 (Swift Package Manager prebuilt binary targets)
+  - Swift forums discussion on incremental compilation
+*/}
+
+The first build of the day used to take long enough that I'd walk to the kitchen, make coffee, come back, and Xcode would still be at "Compiling SwiftUI views (47 of 312)." This was Renovise, after a year of feature work, on a Mac Studio M2 Ultra that has no business being slow at anything. I told myself it was fine. Then I started shipping five apps in parallel, and "fine" stopped being a position I could hold with a straight face. Three weeks ago, I sat down with a stopwatch and decided to make build time a feature I would ship to *myself*.
+
+This is Day 30. The finale of [the 30-day iOS development series](/learn/field-notes). Yesterday I wrote about [Swift macros and the cost they hide at the package boundary](/learn/field-notes/custom-swift-macros-when-worth-it-compile-time-url), which is a perfect on-ramp to this post: **the cost of every modern Swift feature is paid by the build, and the build is paid for by you, every time you press Cmd-B.** I will not pretend I have a silver bullet. I have a setup. It is opinionated. It works for *my shape of work* — one developer, five shipping apps, shared design system, no team. I will tell you what moved the needle, what I tried that did nothing, and the numbers.
+
+Before any of this, the rule: **measure first.** Every recommendation in this post is downstream of a stopwatch. If you start optimizing without numbers, you will spend a week on the wrong thing. Ask me how I know.
+
+---
+
+## The baseline
+
+Five apps live in the family. Three are mature and ship to the App Store: **Invoize** (invoicing for tradespeople, ~85k lines), **Renovise** (renovation project tracker, ~62k lines), **BetFree** (sobriety streak tracker, ~28k lines). Two are newer: **ThinkBud** (on-device AI journaling, ~21k lines), and **Reset** (a small sleep aid I shipped after the Foundation Models post from [Day 9](/learn/field-notes/foundation-models-generable-structured-output-patterns), ~14k lines). They share a single **DesignSystem** SPM package, a **NetworkingCore** package from [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await), a **PaywallKit** package built around the StoreKit 2 work from Days 15–17, and a **MacroSupport** package that hosts the `#URL` macro from yesterday.
+
+All numbers below are from the same Mac Studio M2 Ultra, 64GB, on Xcode 26.2, Swift 6.2, against the **Invoize** project — it is the largest of the five and the one I rebuild the most. Times are wall-clock, taken three times each, median reported. Clean derived data between cold builds. Same network conditions. Same set of indexing caches.
+
+| Configuration | Cold build | Warm incremental (one-line edit in a leaf view) | Test build |
+|---|---:|---:|---:|
+| Baseline — January 2026, one giant app target | 142s | 18s | 96s |
+| After SPM modularization (Day 18 work) | 121s | 11s | 71s |
+| After explicit prebuilt binaries for DesignSystem + PaywallKit | 86s | 9s | 54s |
+| After derived-data hygiene + Xcode 26 explicit modules on | 51s | 6s | 38s |
+| Plus the four habits below | **38s** | **4s** | **29s** |
+
+That is **3.7× cold and 4.5× incremental** end-to-end. Nothing in this post is a secret. Most of it is in the Xcode 26 release notes. The thing nobody tells you is *the order to do them in*, and which ones are worth your weekend and which are not.
+
+Let me walk through it.
+
+---
+
+## Step 1 — modularize, but only where the math works
+
+The first big win was the modularization work from [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split). I will not re-litigate that post here. The short version: when you split a leaf feature into an SPM module that does *not* depend on the rest of the app, every time you edit only that module, only that module rebuilds. The compiler boundary becomes the cache boundary.
+
+The trap is that modularization has a fixed overhead. Every package adds linker work, dependency-graph resolution time, and a new chunk for the build system to schedule. **If you split a 200-line view that nobody else depends on, you have made the build slower, not faster.**
+
+The Day 18 threshold I gave was: a module needs to be a *target of edit volume*. If you are editing it twice a week, splitting helps. If you touch it once a quarter, splitting hurts the cold build and helps nothing on warm.
+
+In Invoize, the splits that paid off:
+
+- **DesignSystem** — shared across all five apps. Edits are infrequent but each one ripples. As a module, it builds once per app version and is cached the rest of the time. Massive win.
+- **NetworkingCore** — same shape. The work from [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication). Build once, link many times.
+- **PaywallKit** — built around the [StoreKit 2 paywall](/learn/field-notes/storekit-2-paywall-from-scratch-1-of-3) — heavy on enums, transactions, and async sequences. The compiler spends real time on it; sandboxing it kept that cost out of the incremental loop.
+- **InvoizeReporting** — the PDF generation and chart rendering for the monthly report. Heavy compile, low edit frequency, never touched on a normal feature day. Perfect module candidate.
+
+The splits I tried and **rolled back**:
+
+- An `InvoizeOnboarding` module. Edited too often during launch prep, and depended on DesignSystem + Settings + Analytics. The dependency graph cost more than the isolation paid back.
+- A `BetFreeStreakMath` module that wrapped six small functions. Net zero. Functions are not worth modularizing. Modules are for *thick* surfaces.
+
+The discipline is: a module should have a *thick* public API and a *thin* edit frequency from the host app's perspective. Anything else is shuffling deck chairs.
+
+---
+
+## Step 2 — prebuilt binary targets where you actually can
+
+This is the Xcode 26 win I almost missed. SPM has supported binary targets via `.binaryTarget(name:url:checksum:)` for years, but the workflow was a pain — you had to host the `.xcframework` somewhere, manage checksums, and the local dev story was rough. Xcode 26 made this a first-class citizen with `prebuiltBinaryTarget`, and crucially, made it easy to **build locally** and consume the prebuilt artifact from cache without going through a remote URL for development.
+
+The mental model: a prebuilt binary target is **DesignSystem, frozen as compiled code**. The host app does not recompile DesignSystem on a clean build. It links against the prebuilt artifact. This is exactly the workflow Apple uses internally for system frameworks — `UIKit` does not recompile every time you build your app, and there is no reason your DesignSystem should either.
+
+For Invoize, the rule I now follow: **any module that has not changed in the last 30 days is a candidate for the prebuilt cache.** That covers DesignSystem, NetworkingCore, PaywallKit, and MacroSupport. They each rebuild from source maybe twice a quarter. Every other build pulls the prebuilt artifact.
+
+The setup, simplified, in the consuming app's `Package.swift`:
+
+```swift
+.package(
+    url: "https://github.com/nativefirst/design-system",
+    from: "4.2.0"
+),
+```
+
+And in DesignSystem's own `Package.swift`:
+
+```swift
+let package = Package(
+    name: "DesignSystem",
+    platforms: [.iOS(.v17)],
+    products: [
+        .library(name: "DesignSystem", targets: ["DesignSystem"]),
+    ],
+    targets: [
+        .target(
+            name: "DesignSystem",
+            dependencies: [],
+            settings: [
+                .swiftLanguageMode(.v6),
+                .enableExperimentalFeature("StrictConcurrency"),
+            ]
+        ),
+    ]
+)
+```
+
+The Xcode 26 magic happens at the consumer side: with **Build Phases → Prebuilt Module Cache** enabled (the toggle that did not exist a year ago), Xcode caches the *compiled module* for the version-pinned dependency on first build and reuses it across every subsequent clean build until the version changes. The first cold build after pinning a new version takes the hit. Every cold build after that — including a `Clean Build Folder` — picks up the cached binary. **That single setting saved me 35 seconds on Invoize's cold build.**
+
+A reality check that surprised me: prebuilt caches do *not* survive across Xcode betas. Every time Xcode 26.x goes 26.x+1, the module signature changes and the cache invalidates. Plan a slow first-build day after every Xcode update. Three minutes of pain, then you are back at 38 seconds.
+
+> **Build-time tip nobody talks about:** the `swift-syntax` dependency that your macro packages (Day 29) pull in is one of the heaviest sources in the entire dependency graph. If you have a macro package and you are not opting into the Xcode 26 prebuilt cache for it, you are paying 12–18 seconds of swift-syntax compilation on every clean build. Pin the version, cache the build. This is the single most expensive line item I found, and the cheapest to fix.
+
+---
+
+## Step 3 — derived-data hygiene, and the Xcode 26 explicit-module flag
+
+This one is half plumbing, half religion.
+
+**Derived data** is Xcode's cache of compiled modules, indexed symbols, and intermediate build artifacts. Conventional wisdom is "nuke it when builds get weird." Conventional wisdom is wrong about half the time and right about the other half. Here is the corrected version:
+
+- **Nuke derived data when:** Xcode reports a "module is corrupted" error, when SPM dependency resolution loops, when a clean build mysteriously fails after upgrading a library, or when build phase scripts misbehave in a way you cannot explain.
+- **Do not nuke derived data when:** the build is slow but produces a correct binary. Nuking it makes the *next* build slower without speeding anything up. The cache was working.
+
+I now keep a tiny shell function aliased to `nuke-dd`:
+
+```sh
+nuke-dd() {
+  rm -rf ~/Library/Developer/Xcode/DerivedData/*
+  echo "Derived data nuked."
+}
+```
+
+I run it maybe once a week. Less, after I started using the prebuilt cache from Step 2, because the things I used to nuke for (corrupted module of a third-party SPM dep) are no longer rebuilt from source.
+
+The Xcode 26 build-system flag that *actually* moved cold builds: **Explicitly Built Modules**. This is the C++ modules and Clang/Swift module work Apple has been doing for three years. Conceptually, it means the build system has a full directed-graph view of every module's interface signature and can rebuild *only* the modules whose signatures changed when you edit a file — instead of conservatively rebuilding any module that transitively imports the file's module.
+
+On Invoize, switching `EXPLICITLY_BUILT_MODULES = YES` (Project → Build Settings → search "Explicitly Built Modules") cut cold builds by ~28% and incremental builds by ~40%. Apple's [WWDC 2025 talk](https://developer.apple.com/videos/play/wwdc2025/) on this is worth its 30 minutes if you have not watched it.
+
+The catch: **a small percentage of projects break with this on.** Mostly older Objective-C bridging headers and some legacy CocoaPods setups. If you flip the switch and the build starts emitting strange "module map" errors, you have hit the edge case. Mine did not, but a friend's app at a payments company did, and he kept it off for now. The flag is opt-in for a reason.
+
+---
+
+## Step 4 — the four habits I had to break
+
+The setup got me most of the way. The last lap was behavioral. These are four habits I caught myself doing and had to retrain.
+
+**1. Stop pressing Cmd-Shift-K out of frustration.** Clean build folder is the iOS-developer equivalent of restarting your Mac when the WiFi is slow. It almost never helps and it always costs. If a build is misbehaving, *read the error message first*. Eight times out of ten the answer is in the diagnostic and a clean build will hide it, not fix it. The remaining two times, run `nuke-dd` once and then re-read the diagnostic. If you find yourself cleaning more than once a day, your dependency setup is unstable and the problem is upstream of the build button.
+
+**2. Stop running tests at the project root.** When I edit a file in `PaywallKit`, I do not run the entire Invoize test suite. I run `PaywallKitTests`. With [Swift Testing's `@Suite`](/learn/field-notes/swift-testing-migration-from-xctest), this is a five-second feedback loop instead of a thirty-eight-second one. The TDD posture from [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models) and the test framework from [Day 20](/learn/field-notes/swift-testing-migration-from-xctest) are designed for this exact kind of scoped iteration. **The whole point of modularization is that you can test a slice.** If you are running the whole suite every time, the modules are decoration.
+
+**3. Stop letting "just one more import" creep into shared modules.** DesignSystem started as a pure-Swift package with zero dependencies. Then I added `import Foundation` somewhere, then `import OSLog`, then someone (me) added `import SwiftData` for a "tiny helper" — and overnight the prebuilt cache started invalidating on every Foundation Models build because SwiftData was changing across betas. Pure modules cache better. **The discipline of dependency hygiene compounds.** I now keep DesignSystem on `import SwiftUI` only. Anything that needs more than SwiftUI is not a design-system component; it is an application feature wearing a hat.
+
+**4. Stop optimizing what you have not measured.** I lost a weekend trying to "speed up SwiftUI previews" before I realized previews were not on the critical path of my actual work. I edit, I build, I run, I iterate. Previews are a nice-to-have. The thirty seconds I saved on preview rendering was thirty seconds I could have spent on a cold build that runs ten times a day. **Measure, then cut from the top of the cost curve, always.**
+
+---
+
+## What did not move the needle
+
+To balance the wins, the misses. I tried these and they did approximately nothing.
+
+- **Disabling code coverage in Debug.** Saved 1.2 seconds on the test build. Negligible.
+- **Removing unused dependencies.** I found and removed three. Saved 0.8 seconds on cold. The dependencies were not the cost; my own code was.
+- **Switching the Swift compiler to `-O` for Debug.** Slower compilation, marginally faster runtime, *much* slower edit-build cycle. Anti-pattern. Keep Debug at `-Onone`.
+- **Splitting a giant Color extension across files.** Felt good. Did not measurably help. The compiler was not actually struggling on that file.
+- **Renaming a 600-line view file to "ContentView" so I could find it faster.** Not a build optimization, but I tried it. Builds were not faster. My laughter at the desk *was* faster, so I left it.
+
+---
+
+## Connecting back, and where the series goes next
+
+This is the last post in the series. Twenty-nine before it, all connected:
+
+- [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default) and [Day 3](/learn/field-notes/swift-6-2-strict-concurrency-migration-real-project) — Swift 6.2 strict concurrency turned out to be a build-time story as much as a runtime story. The compiler now does more analysis on every file. Modularization isolates that analysis.
+- [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split) — modularization with discipline, which is the foundation of everything in this post.
+- [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks) — DI without a framework keeps your modules light. A heavy DI library would have re-invalidated the prebuilt cache every time it bumped.
+- [Day 22](/learn/field-notes/custom-networking-layer-urlsession-async-await) and [Day 23](/learn/field-notes/networking-retry-token-refresh-deduplication) — the homemade NetworkingCore module is the thickest "stable" surface in my graph. It almost never changes. Perfect prebuilt candidate.
+- [Day 29](/learn/field-notes/custom-swift-macros-when-worth-it-compile-time-url) — the macro package whose swift-syntax dependency was the heaviest hidden cost in my build, and the easiest to cache.
+
+For the long-form path: this post sits at the back end of [SwiftUI at Scale](/learn/swiftui-at-scale). The course covers the *whole* loop — how to structure a shared design system across multiple apps, how to set up the SPM graph, how to write the build-server discipline that keeps the prebuilt cache warm, and how to make tests fast enough that the TDD loop from [SwiftUI in Practice](/learn/swiftui-in-practice) actually survives contact with a real production app. If you are coming in fresh, start with [SwiftUI Foundations](/learn/swiftui-foundations) — it teaches the SwiftUI mental model first, and the build-discipline parts of "at scale" are much easier to internalize once that foundation is solid.
+
+The thirty-day version of all of this in one sticky-note line: **the only build-time optimization that lasts is the one you can measure, repeat, and explain.** Modularize where the edit frequency is high. Cache where the edit frequency is low. Turn on explicit modules. Keep DesignSystem pure. Stop pressing Cmd-Shift-K out of frustration. And measure, then cut, then measure again. **Five apps, one developer, 38 seconds.** That is a tractable life. That is the whole point.
+
+---
+
+**The series is done.** Thirty posts. Thirty mornings. If you read all of them, you should have a complete model of how I build iOS apps in 2026 — the language, the framework, the architecture, the tests, the monetization, the build pipeline, the tradeoffs, and the failures. Most importantly: you have seen me change my mind a few times, delete things, and walk back claims. That is the only honest way to ship for ten years and not burn out. Thank you for following along. The next series is already in the drafts.
+
+If you are new here and want a single starting point: read [Day 1](/learn/field-notes/swift-6-2-mainactor-by-default), then [Day 11](/learn/field-notes/observable-macro-migration-real-app), then [Day 18](/learn/field-notes/spm-modular-architecture-when-to-split), then [Day 21](/learn/field-notes/tdd-swiftui-real-workflow-view-models), then come back to this one. That five-post path is the spine of the series. The other twenty-five are the limbs.
+
+See you in the next one.
