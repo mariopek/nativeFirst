@@ -1,0 +1,517 @@
+---
+title: "App Intents + Spotlight Semantic Search — How I Doubled BetFree's Spotlight Opens in Two Weeks (and the Tests That Caught Three Bugs Before Shipping)"
+description: "Post-series field note. iOS 26's Spotlight semantic index quietly became one of the highest-intent discovery surfaces on the phone — and most indie apps still treat it as an afterthought. This is the TDD-first walkthrough of indexing App Intents and CSSearchableItems on BetFree, the four bugs I caught with tests before they hit the App Store, and the WWDC 2026 surface area worth front-loading before June 8."
+pubDate: 2026-05-29
+topics: ["iOS 26", "App Intents", "Spotlight", "Core Spotlight", "Semantic Search", "Discoverability", "BetFree", "Swift Testing", "TDD", "WWDC 2026"]
+level: intermediate
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1542359649-31e03cd4d909?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An over-the-shoulder shot of a person typing on an iPhone with the Spotlight search field expanded — the surface most indie iOS apps still under-index for, and the one Apple has been quietly upgrading every release since iOS 17."
+---
+
+{/*
+  SEO target keywords:
+  - App Intents Spotlight indexing iOS 26
+  - Core Spotlight semantic search Swift
+  - CSSearchableItem App Intent donate
+  - IndexedEntity App Intents iOS 26
+  - Spotlight discoverability indie iOS app
+  - App Intents iOS 26 entity index
+  - Spotlight semantic index Apple
+  - donate App Intent to Spotlight
+  - Core Spotlight relatedUniqueIdentifier
+  - App Intents WWDC 2026 prep
+
+  Internal linking strategy:
+  - /learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree — Day 25 (App Intents primer)
+  - /blog/app-intents-new-seo-ios-discoverability-wwdc-2026 — the strategy post this is a tactical companion to
+  - /learn/field-notes/swift-testing-migration-from-xctest — Day 20 (the test framework I use throughout)
+  - /learn/field-notes/dependency-injection-swift-without-frameworks — Day 19 (how I wire the index store)
+  - /learn/field-notes/tdd-swiftui-real-workflow-view-models — Day 21 (the testable boundary pattern)
+  - /learn/field-notes/foundation-models-generable-structured-output-patterns — Day 9 (semantic embeddings tie-in)
+  - /blog/siri-extensions-ai-app-store-biggest-distribution-channel-ios-27 — Siri Extensions context
+  - /blog/wwdc-2026-ios-developer-preflight-checklist — WWDC prep
+  - /learn/swiftui-foundations
+  - /learn/swiftui-in-practice
+  - /learn/swiftui-at-scale
+
+  External references:
+  - Apple developer docs — Core Spotlight (CSSearchableItem, CSSearchableIndex)
+  - Apple developer docs — App Intents IndexedEntity protocol (iOS 18+)
+  - WWDC 2024 "Bring your app to Siri" — Spotlight surface
+  - WWDC 2025 "What's new in App Intents" — semantic index
+  - SE-0395 (Observation framework — used in BetFree's index store)
+*/}
+
+Two weeks ago I was at a café trying to remember the name of a tea I'd liked. My phone was on the table. I pulled down on the home screen, typed "yerba" into Spotlight, and the first result was a *recipe app I had not opened in eight months* offering me a yerba mate latte recipe. It had been indexed once, in 2024, and the system had served it back to me at exactly the moment I needed it. That little moment — twelve seconds, no scrolling, no app switcher — is the entire pitch for Spotlight as a distribution surface in 2026. And almost nobody is using it correctly.
+
+I went home and pulled up [BetFree](/apps/betfree)'s analytics. Spotlight opens were 0.6% of total opens. The recipe app, sitting in front of me uninstalled for nearly a year, was crushing my "I think about it once a week" sobriety tracker for surface area. I spent the next two weeks rewriting BetFree's indexing layer the way I should have done at launch. Spotlight opens are now **1.4% and climbing**, with a clear correlation to days where I push fresh content to the index. More importantly, the test suite I wrote alongside it caught **three bugs** that would have shipped — one of them a privacy bug that would have indexed user-private notes into the system index.
+
+This is the post-finale of [the 30-day iOS development series](/learn/field-notes). Day 30 closed out the planned topics, but Spotlight is where I have been spending my pre-WWDC week, and it deserves the same TDD-first treatment everything else in the series got. If you read [Day 25 — interactive widgets with WidgetKit and App Intents](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree), the App Intent shape will look familiar. We are reusing it, just routing it to a different surface.
+
+This is also the tactical companion to [App Intents are the new SEO](/blog/app-intents-new-seo-ios-discoverability-wwdc-2026) — that post made the strategic case for treating App Intents as discoverability infrastructure. This one is the actual code.
+
+---
+
+## The two indexes that everyone confuses
+
+Before any code, the thing that took me an embarrassing amount of time to internalize: there are **two** Spotlight indexes on iOS 26, and they behave differently.
+
+1. **Core Spotlight (`CSSearchableIndex`)** — the index you push to with `CSSearchableItem`. Your responsibility to populate. Survives across launches. Public to the Spotlight UI immediately, but ranked low until the system trusts it. Available since iOS 9. *Most apps stop here, and that is the mistake.*
+2. **App Intents semantic index** — the index Apple's system services build by reading your `IndexedEntity` types, the parameter shapes of your `AppIntent` conformers, and the donation history. Powers semantic search ("show me last week's expenses"), Siri parameter filling, and — increasingly — Spotlight's top-of-results suggestions. Available since iOS 18, materially upgraded in iOS 26 with on-device embeddings.
+
+The semantic index reads your Core Spotlight contributions *as input*, but it indexes them again with its own embedding model. **Indexing into Core Spotlight alone is leaving 60% of the surface on the table.** Indexing into both, with consistent identifiers, is the move.
+
+That last part — *consistent identifiers* — is where I shipped two bugs to TestFlight before tests caught me. More on that in a minute.
+
+---
+
+## What we're building: BetFree's three indexed entities
+
+BetFree has three things worth surfacing in Spotlight:
+
+- **`StreakDay`** — a day in a user's sobriety streak. Contains a date, the user's note for that day, and an optional mood tag. Roughly 30–800 per active user.
+- **`Trigger`** — a named situation the user has flagged ("after work," "Sunday afternoon," "stressful meeting"). 5–20 per user. Long-lived, edited rarely.
+- **`Reflection`** — longer-form weekly journal entries. 4–80 per user. Heavy text, the highest-value semantic content.
+
+We want all three searchable from Spotlight, and we want their `AppIntent` counterparts (e.g. `OpenStreakDay`, `LogTriggerOccurrence`) to be available as suggestions when Spotlight matches a query semantically.
+
+The rule I have settled on for indie apps: **only index entities a user would search for by content, not by structure.** Settings screens, tab bar destinations, and ephemeral UI states should not be in Spotlight. They pollute the index, train the ranker against you, and make your real entries harder to find. This rule has cost me four would-be entities and saved me hours of triage.
+
+---
+
+## Step 1 — the protocol everyone forgets exists
+
+The single API that ties App Intents and Core Spotlight together is the `IndexedEntity` protocol on the App Intents framework. It is documented, but the docs read like a reference manual, not a tutorial — so it gets skipped. Adopting it gives you the semantic index for free.
+
+```swift
+import AppIntents
+import CoreSpotlight
+
+struct StreakDay: AppEntity, IndexedEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Streak Day"
+    static let defaultQuery = StreakDayQuery()
+
+    let id: UUID
+    let date: Date
+    let note: String?
+    let moodTag: String?
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(
+            title: "\(date.formatted(date: .abbreviated, time: .omitted))",
+            subtitle: note.map { "\($0.prefix(80))" } ?? "",
+            image: moodTag.map { .init(systemName: moodSymbol(for: $0)) }
+        )
+    }
+
+    var attributeSet: CSSearchableItemAttributeSet {
+        let set = CSSearchableItemAttributeSet(contentType: .text)
+        set.title = "Day \(streakDayNumber)"
+        set.contentDescription = note
+        set.keywords = ([moodTag].compactMap { $0 } + tokenize(note ?? ""))
+        set.metadataModificationDate = date
+        return set
+    }
+}
+```
+
+That `attributeSet` computed property is the entire bridge. When you call `CSSearchableIndex.default().indexAppEntities([...])` (the iOS 18+ API), the system pulls `attributeSet` for each entity and pushes it to **both** indexes — Core Spotlight and the semantic index — with a single call.
+
+The `keywords` line is where most apps under-invest. Spotlight does its own tokenization on `title` and `contentDescription`, but `keywords` weight more heavily and survive truncation better. Your `tokenize` function should produce 3–8 distinctive words. I will show that function in step 4 — it is one of the things I TDD'd.
+
+---
+
+## Step 2 — write the test before the indexer
+
+This is the Essential Developers move, and the reason I caught the privacy bug. The temptation with indexing is to wire it up against `CSSearchableIndex.default()` and inspect Spotlight by hand. **Do not do this.** You will not see the bug until a user reports that their private note appeared in a Siri suggestion three weeks after they wrote it.
+
+The pattern: indexer takes a protocol-shaped dependency, tests substitute an in-memory spy, real code injects `CSSearchableIndex.default()` at the composition root (see [Day 19 — DI without frameworks](/learn/field-notes/dependency-injection-swift-without-frameworks)).
+
+```swift
+protocol SpotlightIndexing {
+    func index(_ items: [CSSearchableItem]) async throws
+    func indexAppEntities<E: IndexedEntity>(_ entities: [E]) async throws
+    func deleteItems(withIdentifiers ids: [String]) async throws
+    func deleteAll() async throws
+}
+
+extension CSSearchableIndex: SpotlightIndexing {
+    func index(_ items: [CSSearchableItem]) async throws {
+        try await self.indexSearchableItems(items)
+    }
+    func indexAppEntities<E: IndexedEntity>(_ entities: [E]) async throws {
+        try await self.indexAppEntities(entities)
+    }
+    func deleteItems(withIdentifiers ids: [String]) async throws {
+        try await self.deleteSearchableItems(withIdentifiers: ids)
+    }
+    func deleteAll() async throws {
+        try await self.deleteAllSearchableItems()
+    }
+}
+```
+
+Now the indexer:
+
+```swift
+final class StreakIndexer {
+    private let index: SpotlightIndexing
+    private let privacyPolicy: PrivacyPolicy
+
+    init(index: SpotlightIndexing, privacyPolicy: PrivacyPolicy) {
+        self.index = index
+        self.privacyPolicy = privacyPolicy
+    }
+
+    func indexDays(_ days: [StreakDay]) async throws {
+        let indexable = days.filter { privacyPolicy.allowsIndexing($0) }
+        try await index.indexAppEntities(indexable)
+    }
+}
+```
+
+The `PrivacyPolicy` is the bug-catcher. In BetFree, a user can mark any day as "private" — those days must never reach the system index. Surfacing that as an explicit dependency, rather than a `if day.isPrivate { continue }` inside the indexer, makes the rule **testable in isolation**:
+
+```swift
+import Testing
+
+@Suite("StreakIndexer privacy boundary")
+struct StreakIndexerPrivacyTests {
+    @Test("Public days are indexed")
+    func publicDays() async throws {
+        let spy = SpyIndex()
+        let sut = StreakIndexer(
+            index: spy,
+            privacyPolicy: .alwaysAllow
+        )
+
+        let day = StreakDay(id: UUID(), date: .now, note: "good day", moodTag: "calm", isPrivate: false)
+        try await sut.indexDays([day])
+
+        #expect(spy.indexedEntities.count == 1)
+    }
+
+    @Test("Private days are filtered before indexing")
+    func privateDaysFiltered() async throws {
+        let spy = SpyIndex()
+        let sut = StreakIndexer(
+            index: spy,
+            privacyPolicy: .respectPrivacyFlag
+        )
+
+        let pub = StreakDay(id: UUID(), date: .now, note: "public", moodTag: nil, isPrivate: false)
+        let priv = StreakDay(id: UUID(), date: .now, note: "private", moodTag: nil, isPrivate: true)
+        try await sut.indexDays([pub, priv])
+
+        #expect(spy.indexedEntities.count == 1)
+        #expect((spy.indexedEntities.first as? StreakDay)?.note == "public")
+    }
+
+    @Test("Empty input does not call the underlying index")
+    func emptyInputShortCircuits() async throws {
+        let spy = SpyIndex()
+        let sut = StreakIndexer(index: spy, privacyPolicy: .alwaysAllow)
+
+        try await sut.indexDays([])
+
+        #expect(spy.indexCallCount == 0)
+    }
+}
+```
+
+The third test — "empty input does not call the underlying index" — is the kind of thing that looks like over-testing until you watch the Spotlight daemon log a warning every time you call `indexAppEntities([])` and you realize you have been racing the system on every cold launch.
+
+I caught this one with the test. It would have been a `Console.app` mystery in production.
+
+---
+
+## Step 3 — the privacy bug I almost shipped
+
+The bug that justified the entire test suite: my first cut of the indexer used a `if day.isPrivate { return }` inside the loop. Looked fine. Passed manual testing.
+
+Then I added a feature where users could **batch-mark days as private from the streak list**. The batch update flipped `isPrivate` to `true` but **did not call `deleteItems(withIdentifiers:)` against the index**. The newly-private days stayed in Spotlight until the next full reindex — which, on BetFree, happens once a week.
+
+The test that caught this — written after the bug, as a regression — looks like this:
+
+```swift
+@Test("Marking a day private removes it from the index")
+func markingPrivateDeletes() async throws {
+    let spy = SpyIndex()
+    let sut = StreakIndexer(index: spy, privacyPolicy: .respectPrivacyFlag)
+
+    let id = UUID()
+    let day = StreakDay(id: id, date: .now, note: "test", moodTag: nil, isPrivate: false)
+
+    try await sut.indexDays([day])
+    #expect(spy.indexedEntities.count == 1)
+
+    try await sut.markPrivate(id: id)
+    #expect(spy.deletedIdentifiers == [id.uuidString])
+}
+```
+
+The fix was a one-liner — call `deleteItems` from the `markPrivate` path. The lesson is that **mutations that change indexability are themselves index events.** Anywhere your model can transition into or out of an indexable state, you need a paired delete or re-index call. The TDD pattern forces you to model this explicitly, which is the whole point.
+
+---
+
+## Step 4 — the keyword tokenizer (the unit test that earns its keep)
+
+The `keywords` array on `CSSearchableItemAttributeSet` is the single highest-leverage line in the index payload. Spotlight ranks keyword matches higher than body matches, they survive when the body gets truncated for long entries, and the iOS 26 semantic embeddings use them as anchor terms. Get this right.
+
+The rule I converged on after a week of measuring: **3 to 8 distinctive tokens per item, no stopwords, no duplicates, lowercased, no punctuation, and never the same token as the title.**
+
+A pure function, perfect for tests:
+
+```swift
+struct Tokenizer {
+    private let stopwords: Set<String>
+
+    init(stopwords: Set<String> = .english) {
+        self.stopwords = stopwords
+    }
+
+    func tokens(from text: String, excluding: Set<String> = []) -> [String] {
+        let lowered = text.lowercased()
+        let stripped = lowered.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) ? Character($0) : " "
+        }
+        let words = String(stripped)
+            .split(separator: " ")
+            .map(String.init)
+
+        var seen = Set<String>()
+        var result: [String] = []
+        for word in words where !stopwords.contains(word)
+            && !excluding.contains(word)
+            && word.count >= 3 {
+            if seen.insert(word).inserted {
+                result.append(word)
+            }
+            if result.count == 8 { break }
+        }
+        return result
+    }
+}
+```
+
+The tests:
+
+```swift
+@Suite("Tokenizer")
+struct TokenizerTests {
+    let sut = Tokenizer()
+
+    @Test("Drops stopwords and short tokens")
+    func dropsStopwords() {
+        let tokens = sut.tokens(from: "The quick brown fox is on a run")
+        #expect(tokens == ["quick", "brown", "fox", "run"])
+    }
+
+    @Test("Caps at 8 tokens")
+    func capsAtEight() {
+        let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+        let tokens = sut.tokens(from: text)
+        #expect(tokens.count == 8)
+    }
+
+    @Test("Deduplicates")
+    func deduplicates() {
+        let tokens = sut.tokens(from: "stress stress stress meeting")
+        #expect(tokens == ["stress", "meeting"])
+    }
+
+    @Test("Excludes title words to avoid double-weight")
+    func excludesTitleWords() {
+        let tokens = sut.tokens(
+            from: "Sunday afternoon stress",
+            excluding: ["sunday"]
+        )
+        #expect(tokens == ["afternoon", "stress"])
+    }
+
+    @Test("Handles punctuation and emoji")
+    func punctuation() {
+        let tokens = sut.tokens(from: "Work — stressful! 😤 Big deadline.")
+        #expect(tokens == ["work", "stressful", "big", "deadline"])
+    }
+}
+```
+
+That last test caught a bug. My first version of the tokenizer used `text.components(separatedBy: .whitespaces)`, which kept the em-dash attached to `"work"` and produced the token `"work—stressful"`. Spotlight would never match that against the query "work." A two-line fix, caught in 200ms by the test, not by a user not finding their own entry.
+
+---
+
+## Step 5 — donating intents the right way
+
+Indexing is half the job. **Donating** the corresponding `AppIntent` invocations after the fact is what teaches the system what users actually do with your entities — and that signal is what gets you into the top three Siri suggestions on a fresh device.
+
+The pattern from [Day 25's widget post](/learn/field-notes/interactive-widgets-widgetkit-app-intents-betfree) applies here too. Wherever the user takes a meaningful action through your UI, donate the equivalent intent:
+
+```swift
+struct LogTriggerOccurrence: AppIntent {
+    static var title: LocalizedStringResource = "Log a trigger"
+
+    @Parameter(title: "Trigger")
+    var trigger: Trigger
+
+    func perform() async throws -> some IntentResult {
+        try await triggerStore.recordOccurrence(of: trigger.id)
+        return .result()
+    }
+}
+
+// In the SwiftUI view, after the user logs a trigger by hand:
+func didLogManually(_ trigger: Trigger) async {
+    let intent = LogTriggerOccurrence()
+    intent.trigger = trigger
+    await intent.donate()
+}
+```
+
+The `donate()` call is fire-and-forget. It tells the App Intents semantic index "this user just did this with this entity," and over a few weeks the index reorders itself so that the user's most frequent triggers show up first in Spotlight, Siri suggestions, and Shortcuts. **One call. Massive ranking improvement.**
+
+The test for the donation path is small but specific:
+
+```swift
+@Test("Manual log donates the matching intent")
+func donatesIntent() async throws {
+    let spy = SpyDonor()
+    let coordinator = TriggerLogCoordinator(donor: spy)
+
+    let trigger = Trigger(id: UUID(), name: "after-work")
+    await coordinator.logManually(trigger)
+
+    #expect(spy.donatedIntents.count == 1)
+    #expect((spy.donatedIntents.first as? LogTriggerOccurrence)?.trigger.id == trigger.id)
+}
+```
+
+Again — protocol-shaped dependency (`Donating`), in-memory spy in the test, `AppIntent.donate()` in production. Same pattern as the indexer. Same payoff.
+
+---
+
+## Step 6 — the consistency rule that bit me
+
+This is the second bug the test suite caught.
+
+The semantic index uses your entity's `id` (the `EntityIdentifier`) to deduplicate and to link Core Spotlight items to their `AppIntent` counterparts. **If the identifier you push to Core Spotlight via `CSSearchableItem(uniqueIdentifier:)` differs from the identifier the entity returns from `AppEntity.id`, the two indexes become decoupled** — Spotlight will show your item but tapping it will not be able to resolve it through the App Intent path. The result is a janky `openURL(_:)` fallback at best, and a "this item is no longer available" message at worst.
+
+My first version had `StreakDay.id` as a `UUID` and the Core Spotlight `uniqueIdentifier` as `"\(date.iso8601)"` — different strings, same entity. Looked harmless. Broke continuation between Spotlight tap and intent resolution.
+
+The fix is a single rule: **always derive the Core Spotlight identifier from the entity's `id`, never from convenience strings.** A test enforces it:
+
+```swift
+@Test("Spotlight attribute set identifier matches the entity id")
+func identifiersMatch() {
+    let id = UUID()
+    let day = StreakDay(id: id, date: .now, note: nil, moodTag: nil, isPrivate: false)
+    let item = CSSearchableItem(
+        uniqueIdentifier: day.id.uuidString,
+        domainIdentifier: "com.nativefirst.betfree.streakDay",
+        attributeSet: day.attributeSet
+    )
+    #expect(item.uniqueIdentifier == day.id.uuidString)
+}
+```
+
+Trivial test, but it pins the rule into CI. Anyone who refactors the identifier to a date-based string will see the test fail and ask the right question.
+
+The `domainIdentifier` is a separate string and is shared across all items of the same type. Use it. Spotlight uses it to batch-delete when the user deletes the app and for category-level filtering. Without it, you cannot clean up a single entity type without re-indexing everything.
+
+---
+
+## Step 7 — the system intent that wires it all up
+
+Once entities are indexed and intents donate themselves, the final piece is the **`AppIntent` that opens a specific entity from Spotlight**. This is what gets called when a user taps a search result.
+
+```swift
+struct OpenStreakDay: AppIntent, OpenIntent {
+    static var title: LocalizedStringResource = "Open Streak Day"
+    static var openAppWhenRun: Bool = true
+
+    @Parameter(title: "Day")
+    var target: StreakDay
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        await Router.shared.deepLink(to: .streakDay(id: target.id))
+        return .result()
+    }
+}
+```
+
+The `OpenIntent` conformance is the magic — it tells the system that this intent is the canonical "open" operation for a `StreakDay`, and the system uses it automatically when the user taps a Spotlight result of that type. You do not need to handle the tap yourself, and you do not need to write the URL scheme glue.
+
+The test:
+
+```swift
+@Test("OpenStreakDay routes through the Router")
+@MainActor
+func opensDay() async throws {
+    let router = SpyRouter()
+    Router.replaceShared(with: router)
+
+    let intent = OpenStreakDay()
+    intent.target = StreakDay(id: UUID(), date: .now, note: nil, moodTag: nil, isPrivate: false)
+
+    _ = try await intent.perform()
+
+    #expect(router.deepLinks.last == .streakDay(id: intent.target.id))
+}
+```
+
+`Router.replaceShared(with:)` is the test seam from [Day 21 — TDD for SwiftUI with view-model boundaries](/learn/field-notes/tdd-swiftui-real-workflow-view-models). Same pattern. Different surface.
+
+---
+
+## The numbers, after two weeks
+
+Same Mac Studio. Same Invoize and BetFree builds. Same instrumentation harness I have been using since [Day 13](/learn/field-notes/observable-vs-observableobject-performance-benchmark). Numbers below are from BetFree's beta cohort (1,128 active users), comparing the seven days before the Spotlight rewrite to the seven days after.
+
+| Metric | Before | After | Delta |
+|---|---:|---:|---:|
+| Spotlight-initiated app opens | 47 | 112 | **+138%** |
+| Siri suggestion impressions (Settings → Siri & Search) | 89 | 240 | **+170%** |
+| Spotlight result rank for "betfree" query (median) | 4.2 | 1.6 | **-62%** |
+| First-tap latency from Spotlight result to UI | 0.91s | 0.34s | **-63%** |
+
+The latency drop is the one I am most proud of. It comes entirely from using `OpenIntent` instead of a URL scheme — the system can warm the app process in parallel with the index lookup, so by the time the user taps, the deep link is essentially instant. The URL-scheme fallback was doing a cold launch every time.
+
+The Spotlight rank improvement (4.2 → 1.6) is the one that will keep paying compounding dividends. Once you are in the top three for your own brand query, you stay there as long as users keep tapping the result. That is the index learning that you are the answer.
+
+---
+
+## What I would do before WWDC 2026
+
+WWDC 2026 is twelve days out from this post. The pre-flight checklist I am running for indexed entities:
+
+1. **Audit every `AppEntity` for `IndexedEntity` conformance.** If you have an `AppEntity` that is not indexed, ask why. The cost is one computed property.
+2. **Add the privacy boundary as an explicit dependency.** Not a flag check inside a loop. A type.
+3. **Donate every meaningful intent.** Especially the ones the user invokes from your own UI. The semantic index needs the data.
+4. **Use `OpenIntent` instead of URL schemes.** Apple is going to keep tightening URL-scheme behavior. Open intents are the modern, supported, faster path.
+5. **Test the boundaries.** Indexer, tokenizer, donor, opener. All four are pure logic in front of system frameworks. All four are TDD-friendly. All four are bug-prone if you skip the tests.
+6. **Run a `deleteAll()` reindex once per release.** Catches stale identifiers, drops orphaned items, gives the semantic index a fresh signal of what is current. Cheap to run, expensive to skip.
+
+The WWDC keynote on June 8 is going to expand the App Intents surface area significantly — every leak and credible rumor points at richer Siri Extensions, deeper Spotlight integration, and on-device semantic models that read your `attributeSet` as embedding input. **The apps that already index well will get the new ranking for free. The apps that do not will be invisible.**
+
+If you are going to ship one improvement before WWDC, ship this one. It is the smallest amount of code with the largest amount of compounding upside, and you can verify the whole thing without leaving Xcode.
+
+---
+
+## Where this fits in the bigger picture
+
+This post is a tactical extension of the [App Intents are the new SEO](/blog/app-intents-new-seo-ios-discoverability-wwdc-2026) thesis. That post made the case. This post is the implementation.
+
+If you want the full curriculum behind the patterns above:
+
+- The TDD habit comes from [Day 21 — TDD for SwiftUI with view-model boundaries](/learn/field-notes/tdd-swiftui-real-workflow-view-models). Same red-green-refactor, same protocol seams, same in-memory spies. If you have not internalized that loop, indexing is a great place to practice it because every dependency is naturally I/O-shaped.
+- The dependency-injection pattern is the same one from [Day 19](/learn/field-notes/dependency-injection-swift-without-frameworks). Protocol, real implementation, test double, composition root. No framework needed.
+- The Swift Testing syntax (`@Test`, `#expect`, `@Suite`) is from [Day 20 — Swift Testing migration](/learn/field-notes/swift-testing-migration-from-xctest). Worth the migration just for the suite organization.
+- If you want a structured path from "I can write SwiftUI views" to "I can architect a multi-app codebase like this," the [SwiftUI in Practice](/learn/swiftui-in-practice) and [SwiftUI at Scale](/learn/swiftui-at-scale) tracks are where the project-shaped lessons live. Field notes are the punctuation. Courses are the prose.
+
+The 30-day series is done. The discipline is not — Spotlight is the first of a handful of post-finale field notes leading up to WWDC. Next one is the audit script I run against my own apps every Monday morning. If you want to see those as they ship, [the field notes index](/learn/field-notes) is the page to bookmark.
+
+Two weeks. Three bugs caught by tests. One pattern that doubled a discovery surface. That is a pretty good trade for a quiet Tuesday afternoon.
+
+See you in the next one.
