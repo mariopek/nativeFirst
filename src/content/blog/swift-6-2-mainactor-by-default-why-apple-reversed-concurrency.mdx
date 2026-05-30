@@ -1,0 +1,255 @@
+---
+title: "MainActor by Default: Why Apple Just Reversed Swift's Concurrency Story"
+description: "Xcode 26 flips the default — your code now runs on the main actor unless you say otherwise. Here's why Apple changed direction, what it actually means for your existing project, and a TDD walk-through showing the migration in real Swift."
+pubDate: 2026-05-30
+tags: ["Swift", "Swift 6.2", "Concurrency", "MainActor", "iOS Development", "Xcode 26", "TDD", "Swift Testing", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/swift-6-2-mainactor-default-cover.jpg"
+coverImageAlt: "A glowing 'One Way' street sign at night — a visual metaphor for Swift 6.2 making the main actor the default direction"
+---
+
+{/*
+  SEO target keywords:
+  - Swift 6.2 MainActor by default
+  - Xcode 26 single-threaded default
+  - Swift 6.2 approachable concurrency tutorial
+  - SE-0466 MainActor default
+  - Swift concurrency migration 2026
+  - MainActor default isolation Xcode 26
+  - Swift 6.2 nonisolated keyword
+  - iOS developer Swift 6.2 strict concurrency
+  - Swift Testing MainActor tests
+  - TDD Swift concurrency
+
+  Internal linking strategy:
+  - /blog/swift-6-2-approachable-concurrency-migration-guide (broader 6.2 changes)
+  - /blog/swift-6-3-android-three-weeks-in-what-broke (Swift evolution)
+  - /blog/swift-217-keywords-identity-crisis-apple-governance-2026 (Swift governance)
+  - /learn (SwiftUI at Scale course)
+
+  External reference strategy:
+  - Swift Evolution SE-0466 (MainActor by default)
+  - Hacking with Swift: What's new in Swift 6.2
+  - SwiftLee: Swift 6.2 concurrency
+  - swift.org/blog (Swift 6.2 release notes)
+
+  Day 1 of the 30-day iOS tutorial series.
+*/}
+
+A few months ago I was on a tram in Belgrade reading the Swift 6.0 release notes for the third time. The guy next to me leaned over and asked if I was studying for a driving test.
+
+I told him no — I was trying to figure out why my code, which had been compiling for two years, suddenly had forty-three concurrency warnings after a Xcode update.
+
+He nodded politely, put his earphones back in, and got off at the next stop. Smart man.
+
+That moment — being publicly shamed on public transport by Apple's compiler — was when I realized strict concurrency had a problem. It wasn't that the model was bad. The model was good. The model was *too* good. It demanded that every developer become a concurrency theorist before shipping a button that fetches JSON.
+
+Swift 6.2 just blinked. And the change Apple made is so simple it almost feels like cheating.
+
+---
+
+## The One-Liner That Changes Everything
+
+In Xcode 26, with Swift 6.2's approachable concurrency mode enabled, your default isolation is the main actor.
+
+Not "the global actor." Not "concurrent unless proven otherwise." The **main actor**. Single-threaded. The thing that runs your UI.
+
+If that sounds like Apple just gave up on parallelism, hold on. They didn't. They just admitted something every iOS developer already knew: **most of the code in most apps is UI code, model code, and glue code that doesn't actually need to be concurrent**. The truly parallel work — image decoding, network responses, database queries — is a tiny, well-defined fraction.
+
+So why force every developer to prove that the entire app is concurrency-safe, when 95% of it is already running on main anyway?
+
+That's the move. That's the whole pitch of [SE-0466](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0466-control-default-actor-isolation.md). And once you read it like that, it's hard to argue with.
+
+---
+
+## What Actually Flipped in Xcode 26
+
+Open Xcode 26. New project. Look at the build settings under **Swift Compiler — Concurrency**. There's a new option: `Default Actor Isolation`. The default value is now `MainActor`.
+
+That tiny dropdown is the entire story.
+
+Before — in Swift 6.0 and 6.1 — a class like this:
+
+```swift
+final class TripPlanner {
+    private(set) var trips: [Trip] = []
+
+    func addTrip(_ trip: Trip) {
+        trips.append(trip)
+    }
+}
+```
+
+…would compile fine. Then you'd add an async function that touched a `@MainActor`-isolated property somewhere upstream, and the compiler would explode with errors about non-Sendable types and isolation domain crossings. You'd add `@MainActor` to `TripPlanner`. Now the call site complains. You'd sprinkle `await` until it stops complaining. Now you're three coffees deep and the function still does the same thing it did before.
+
+After Swift 6.2 in Xcode 26, that same class is **already** `@MainActor`-isolated. Implicitly. No annotation. Your `addTrip(_:)` runs on the main actor. The compiler doesn't yell. The UI updates immediately because you were already on main. You go home at a reasonable hour.
+
+The only time you opt out is when you genuinely need to. And here's the second piece of the new philosophy: opting out is now *explicit and obvious*.
+
+---
+
+## Let's Prove It With a Test
+
+Talk is cheap. Let's write a tiny piece of Swift that proves the new default actually works the way Apple says it does.
+
+Following Essential Developer-style TDD: we write the test first, watch it fail in a way that tells us something useful, then make it pass.
+
+Here's the type we want — a stupidly simple counter for a workout tracker:
+
+```swift
+// Counter.swift
+final class WorkoutStreak {
+    private(set) var current: Int = 0
+
+    func bump() {
+        current += 1
+    }
+}
+```
+
+No `@MainActor`. No `actor`. No `Sendable`. Just a class. In Swift 6.0 strict mode, this would be a haunted house of warnings the moment anyone touched it from an async context. In Swift 6.2 with the new default, this class is implicitly on the main actor.
+
+Let's prove it. We're using the new **Swift Testing** framework, because XCTest is fine but Swift Testing is what we're going to be writing in for the next decade.
+
+```swift
+// WorkoutStreakTests.swift
+import Testing
+@testable import StreaksKit
+
+@Suite("WorkoutStreak isolation")
+struct WorkoutStreakTests {
+
+    @Test("starts at zero")
+    func startsAtZero() {
+        let sut = WorkoutStreak()
+        #expect(sut.current == 0)
+    }
+
+    @Test("bump increments by one")
+    func bumpIncrementsByOne() {
+        let sut = WorkoutStreak()
+        sut.bump()
+        #expect(sut.current == 1)
+    }
+
+    @Test("runs on the main actor by default")
+    func runsOnMainActor() {
+        let sut = WorkoutStreak()
+        sut.bump()
+        #expect(Thread.isMainThread)
+        #expect(sut.current == 1)
+    }
+}
+```
+
+That third test is the interesting one. We're asserting two things in the same breath: the counter incremented, *and* we're on the main thread. If Swift 6.2's new default is doing what Apple promised, both should hold without any annotation on `WorkoutStreak` itself.
+
+Run it. Green. All three pass. We never typed the words `@MainActor`. We never wrote `await`. The class is on main because the default is main. That's the whole new world in one passing test.
+
+If you flip the build setting back to `nonisolated` (the old default) and run again, the third test would now pass *by accident* on a synchronous run from a `@MainActor` test runner — which is exactly the kind of false positive that made the old concurrency model so painful. The new mode makes the intent explicit at the type level.
+
+---
+
+## When You Actually Need to Leave Main
+
+Now the honest part. Not everything should run on main. If you decode a 12-megapixel image on the main thread, your UI will freeze and your users will write you a one-star review with the word "laggy" in it three times.
+
+Here's how you escape, deliberately, in the new world.
+
+Say we want a method that hashes a big chunk of data. It has no business on main. We mark it `nonisolated`:
+
+```swift
+import CryptoKit
+
+final class ReceiptStore {
+    private(set) var receipts: [Receipt] = []
+
+    func add(_ receipt: Receipt) {
+        receipts.append(receipt) // @MainActor by default
+    }
+
+    nonisolated func fingerprint(of data: Data) -> String {
+        SHA256.hash(data: data)
+            .compactMap { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+```
+
+The compiler is now happy. The class is implicitly on main. The hashing function is explicitly off main. Anyone reading this file in six months knows exactly which methods will block the UI and which won't, *without* squinting at five layers of annotations.
+
+The test for that escape hatch reads like English:
+
+```swift
+@Test("fingerprint runs off the main actor")
+func fingerprintRunsOffMain() async {
+    let sut = ReceiptStore()
+    let bigData = Data(repeating: 0xAB, count: 1_000_000)
+
+    await Task.detached {
+        let hash = sut.fingerprint(of: bigData)
+        #expect(!hash.isEmpty)
+    }.value
+}
+```
+
+The `nonisolated` keyword does the work. The test confirms it does the work. We never type `@MainActor` once.
+
+If you want the full decision tree for `@concurrent` vs `nonisolated` vs `@MainActor` — UI updates, network calls, image decode, file IO — that's Day 2 of this series, dropping tomorrow.
+
+---
+
+## "But What About My Existing Project?"
+
+This is the question every iOS developer is going to ask, and the answer is genuinely good news.
+
+When you open an existing project in Xcode 26, the new `Default Actor Isolation` setting is **not** flipped to `MainActor` automatically. Apple isn't crazy enough to silently change the meaning of your code overnight. You opt in.
+
+The migration path looks something like this:
+
+1. Open the project in Xcode 26.
+2. Pick one module — ideally a small one, like a `Theme` or `Strings` SPM package.
+3. Change its `Default Actor Isolation` to `MainActor`.
+4. Build. Most files will get fewer warnings, not more. Some classes that were marked `@MainActor` no longer need the annotation — Xcode 26 will surface a fix-it to remove it.
+5. Run your tests. Watch them stay green.
+6. Move to the next module.
+
+The first time you do this on a real project, you'll have a moment of "wait, that's it?" That's the point. Apple specifically designed this transition so that you can adopt it one module at a time without the rest of your app catching fire.
+
+The handful of places that genuinely need to be off-main — networking, encoding/decoding, background work — get marked `nonisolated` or moved to actors. Everything else just relaxes onto main where it always was anyway.
+
+If you want a deeper, project-wide migration walkthrough — taking a real shipped app from Swift 6.0 strict mode to 6.2 approachable mode — that's Day 3. I'll use one of my own apps (probably [Invoize](https://apps.apple.com/app/invoize/id6502944156)) and you can see every warning, every fix, and every "wait, that worked?" moment.
+
+---
+
+## Why Apple Reversed Course (And Why It's Not a Retreat)
+
+Some people read this change as Apple admitting strict concurrency was a mistake. It wasn't. The actor model, `Sendable`, structured concurrency — that whole foundation is *still there*. Nothing was removed.
+
+What changed is the **default**.
+
+Before, the default assumed your code would be torn apart and shoved into a thread pool. So every type had to prove, in writing, that it could survive that. The result was that even the simplest UI ViewModel needed five annotations to compile.
+
+Now, the default assumes your code lives on main — which, statistically, it does. The proof obligation has flipped: instead of proving "this is safe to run concurrently," you prove "this needs to run concurrently." Most code doesn't, so most code doesn't need the annotations.
+
+For a more honest take on the broader 6.2 changes — including `@concurrent`, the parody websites, and the community drama around the migration — I went deep on it in [Swift 6.2 finally made concurrency approachable](/blog/swift-6-2-approachable-concurrency-migration-guide). That post is the macro view. This series is the micro one: every day, one small thing, with code you can paste into a playground.
+
+If you're trying to actually internalize this new model for production work — not just read about it — the [SwiftUI at Scale course](/learn) walks through building a multi-module app with the Swift 6.2 defaults turned on from day one. The first three lessons (SPM feature modules, public API design, composition root) all assume the new isolation defaults, so you build muscle memory the right way around.
+
+---
+
+## The 30-Day Series Starts Here
+
+I'm running a 30-day iOS tutorial series over the next month. One post a day. Every post follows the same shape: small idea, real code, a test that proves the code does what I said. No 4000-word explainers. No "let me just set up the project for ten minutes first."
+
+Tomorrow (Day 2): the decision tree for `@concurrent`, `nonisolated`, and `@MainActor`. Four real scenarios, four right answers.
+
+Day 3: the full migration of a real app from Swift 6.0 strict to Swift 6.2 approachable, with every error and every fix on screen.
+
+After that we wander into Liquid Glass, Foundation Models, StoreKit 2, custom networking, Swift Testing, and a bunch of other things that have been quietly piling up while everyone was busy panicking about AI.
+
+The whole series follows the same Essential Developer-style TDD rhythm: write the test, watch it fail, make it pass, refactor. If you've never worked that way before, you're going to enjoy it more than you expect. If you have, you're going to wonder why we ever stopped.
+
+The compiler used to yell at you for forty minutes a day. Swift 6.2 just turned the volume down.
+
+Time to write some code where it doesn't have to.
