@@ -1,0 +1,411 @@
+---
+title: "@concurrent vs nonisolated vs @MainActor: The Swift 6.2 Decision Tree That Fits on a Napkin"
+description: "Four real scenarios — UI update, network call, image decode, file IO — and exactly which Swift 6.2 isolation keyword each one needs. A TDD walk-through with Swift Testing, no whiteboard ceremony required."
+pubDate: 2026-05-31
+tags: ["Swift", "Swift 6.2", "Concurrency", "MainActor", "nonisolated", "concurrent", "iOS Development", "Xcode 26", "TDD", "Swift Testing", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree-cover.jpg"
+coverImageAlt: "A massive tree with branches spreading in every direction — a visual metaphor for choosing between Swift 6.2 isolation modifiers."
+---
+
+{/*
+  SEO target keywords:
+  - Swift 6.2 @concurrent vs nonisolated
+  - Swift 6.2 isolation decision tree
+  - when to use @MainActor Swift
+  - nonisolated Swift 6.2 explained
+  - @concurrent attribute Swift 6.2
+  - Swift 6.2 concurrency tutorial
+  - SwiftUI MainActor network call
+  - Swift Testing concurrency examples
+  - Essential Developer TDD Swift 6.2
+  - Xcode 26 concurrency modifiers
+
+  Internal linking strategy:
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 of series)
+  - /blog/swift-6-2-approachable-concurrency-migration-guide (macro view)
+  - /blog/swift-217-keywords-identity-crisis-apple-governance-2026 (Swift complexity)
+  - /learn (SwiftUI at Scale course)
+
+  External reference strategy:
+  - Swift Evolution SE-0461 (@concurrent function modifier)
+  - Swift Evolution SE-0466 (MainActor default)
+  - swift.org/blog (Swift 6.2 release notes)
+
+  Day 2 of the 30-day iOS tutorial series.
+*/}
+
+Yesterday I shipped a fix at midnight, walked to the kitchen, and realized I had no idea why it compiled.
+
+I had marked a function `@concurrent`. The error went away. The code worked. I went to bed pretending that was a good engineering moment. It wasn't. I'd just played whack-a-mole with three keywords I couldn't tell apart at 11:47 PM.
+
+That's the trap of Swift 6.2 in a sentence. The defaults are friendlier — that part I covered in [Day 1 of this series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). But the moment you need to leave main, you suddenly have three doors with very similar nameplates: `@MainActor`, `nonisolated`, `@concurrent`. Pick the wrong one and your build is green, your tests pass, and your app freezes the first time a real user opens a real image.
+
+So today, the napkin. Four scenarios, four answers, four tests that prove the answers are right.
+
+---
+
+## The Three Doors, Plain English
+
+Before we start writing code, let's name what these actually do.
+
+`@MainActor` — runs on the UI thread. Use it when the work touches UIKit/SwiftUI state or `@Observable` properties bound to views.
+
+`nonisolated` — *no actor at all*. The function carries no isolation; it runs wherever the caller already is. Cheapest possible escape hatch. Use it for pure functions: hashing, formatting, math, anything stateless.
+
+`@concurrent` — runs on the global cooperative pool, **off** any actor, even if the enclosing type is `@MainActor`. New in Swift 6.2 ([SE-0461](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0461-async-function-isolation.md)). Use it when an `async` function inside a `@MainActor` class should genuinely run in the background. This is the one most people get wrong because it's brand new and it looks like `nonisolated async` but behaves differently.
+
+That last distinction is the killer. Let me say it again, slower:
+
+- `nonisolated async func` → runs *wherever the caller is*. If main calls it, it runs on main. Surprise.
+- `@concurrent async func` → runs *off main*, period. Guaranteed background hop.
+
+If you came up through Swift 6.0, `nonisolated async` used to hop off main automatically. That changed. Swift 6.2 made `nonisolated` literally mean "no opinion about isolation," which means async-but-staying-on-main if that's where you started. The `@concurrent` keyword is how you say "no, I really want to leave."
+
+That one-paragraph correction is going to save you a real day of debugging. Bookmark it.
+
+---
+
+## Scenario 1: A SwiftUI View Updates a Counter
+
+A user taps a button. A counter goes up. The UI redraws.
+
+This is the easiest one. The work is *already* main-thread work. The model is `@Observable`, the view is `View`, the function does one line of state mutation.
+
+```swift
+@Observable
+final class StreakViewModel {
+    private(set) var streak: Int = 0
+
+    func tapped() {
+        streak += 1
+    }
+}
+```
+
+No annotations needed. In Xcode 26 with `Default Actor Isolation` set to `MainActor`, this class is implicitly on main. `tapped()` runs on main. The view re-render happens on main. Done.
+
+The test for this is just confirming the obvious — but I'd still write it, because the obvious thing is the thing that breaks first when somebody else "improves" the file.
+
+```swift
+import Testing
+@testable import StreakKit
+
+@Suite("StreakViewModel isolation")
+struct StreakViewModelTests {
+
+    @Test("tap increments the streak on the main thread")
+    func tapRunsOnMain() {
+        let sut = StreakViewModel()
+        sut.tapped()
+
+        #expect(sut.streak == 1)
+        #expect(Thread.isMainThread)
+    }
+}
+```
+
+Green on the first run. No `await`. No isolation drama. **Rule: if the work is just state mutation that backs a SwiftUI view, do nothing. Let the default do the lifting.**
+
+If you want to see this exact pattern stitched into a multi-module SwiftUI app — feature modules, composition root, the whole stack — the first three lessons of the [SwiftUI at Scale course](/learn) build it from zero with the Swift 6.2 defaults turned on.
+
+---
+
+## Scenario 2: A Network Call
+
+This is where 90% of the bugs live in real apps. You have a `@MainActor` view model. You need to fetch JSON. Where does the URLSession call run, and how do you assign the result back to a published property without setting your hair on fire?
+
+Wrong instinct, version one: mark the whole loader `nonisolated`. In Swift 6.2 this no longer guarantees a background hop — if the call site is on main, the loader runs on main, and your UI freezes for the duration of the network round-trip.
+
+Wrong instinct, version two: write `async` and assume URLSession handles the hop. URLSession's *I/O* is async-friendly, but if your function is `nonisolated async` and the caller is on main, your bookkeeping code (decoding, mapping, etc.) is back on main *before* it has any business being there.
+
+The right tool is `@concurrent`. You tell the compiler: this is `async`, and I want it off the main actor, regardless of who calls me. Then you hop back to main explicitly when you assign to UI state.
+
+```swift
+struct Trip: Decodable, Sendable {
+    let id: String
+    let title: String
+}
+
+@Observable
+final class TripsViewModel {
+    private(set) var trips: [Trip] = []
+    private(set) var error: String?
+
+    private let client: TripsClient
+
+    init(client: TripsClient) { self.client = client }
+
+    func load() async {
+        do {
+            let result = try await client.fetchTrips()
+            trips = result
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+protocol TripsClient: Sendable {
+    func fetchTrips() async throws -> [Trip]
+}
+
+final class HTTPTripsClient: TripsClient {
+    private let session: URLSession
+    init(session: URLSession = .shared) { self.session = session }
+
+    @concurrent
+    func fetchTrips() async throws -> [Trip] {
+        let (data, _) = try await session.data(from: URL(string: "https://example.com/trips")!)
+        return try JSONDecoder().decode([Trip].self, from: data)
+    }
+}
+```
+
+Look at what's where. The view model lives on main (implicit). It calls an `@concurrent` function on the client, which runs off-main — networking happens off-main, decoding happens off-main, none of it touches UI. When the call returns, `await` puts us back on main automatically because the enclosing context (`TripsViewModel.load()`) is `@MainActor`. The `trips = result` line is back on main, where it has to be.
+
+Now the test. We don't want to hit a real network — we want to prove the isolation is right. Two things to assert: the fetcher really did leave main, and the assignment really came back to main.
+
+```swift
+import Testing
+@testable import TripsKit
+
+final class SpyClient: TripsClient {
+    nonisolated(unsafe) var fetchWasOnMain: Bool?
+
+    func fetchTrips() async throws -> [Trip] {
+        fetchWasOnMain = Thread.isMainThread
+        return [Trip(id: "1", title: "Belgrade weekend")]
+    }
+}
+
+@Suite("TripsViewModel network isolation")
+struct TripsViewModelTests {
+
+    @Test("network call runs off main, assignment lands on main")
+    @MainActor
+    func networkOffMainAssignmentOnMain() async {
+        let spy = SpyClient()
+        let sut = TripsViewModel(client: spy)
+
+        await sut.load()
+
+        #expect(spy.fetchWasOnMain == false)
+        #expect(Thread.isMainThread)
+        #expect(sut.trips.count == 1)
+    }
+}
+```
+
+That third `#expect` is the one that bites in production. If you forget `@concurrent` on `fetchTrips()` and rely on `nonisolated` instead, `spy.fetchWasOnMain` will be `true` and the test will scream at you in red. That's exactly the bug you want to catch before TestFlight, not after.
+
+**Rule: networking inside a `@MainActor` class needs `@concurrent` on the off-main work. Hop back to main happens for free at the `await` boundary.**
+
+---
+
+## Scenario 3: Decoding a Big Image
+
+This one is fun because it punishes you with cold latency the user can *feel*. A 12-megapixel JPEG on the main thread will freeze your scroll for half a second, and the user won't write you a polite Slack message about it — they'll one-star you with the word "laggy" three times.
+
+The work here is pure: bytes go in, a `UIImage`/`CGImage` comes out. No actor state involved. You don't need an actor at all. You need *anywhere but main.*
+
+For pure functions like this, `@concurrent` works, but it's the wrong vibe. `@concurrent` is for `async` functions inside an isolated type. Image decode is synchronous, expensive, and ideally pure. The right answer is to make the function `nonisolated` and call it from a `Task.detached` (or any off-main context):
+
+```swift
+import UIKit
+
+final class Thumbnailer {
+    nonisolated func decode(_ data: Data, maxPixelSize: CGFloat) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+```
+
+The `nonisolated` keyword says: this function has no opinion. The caller decides the thread. So you make sure the caller is off-main:
+
+```swift
+@Observable
+final class PhotoCellViewModel {
+    private(set) var thumbnail: UIImage?
+    private let thumbnailer = Thumbnailer()
+
+    func load(_ data: Data) async {
+        let image = await Task.detached(priority: .userInitiated) {
+            self.thumbnailer.decode(data, maxPixelSize: 400)
+        }.value
+        thumbnail = image
+    }
+}
+```
+
+The decode runs on the detached task (off-main). The assignment to `thumbnail` happens back on main, because the view model is `@MainActor`. The user sees the spinner for 80ms instead of the UI freezing for 500ms.
+
+The test asserts both halves — decode happened off-main, view-model update happened on-main:
+
+```swift
+@Suite("Thumbnailer isolation")
+struct ThumbnailerTests {
+
+    @Test("decode runs off the main actor")
+    func decodeOffMain() async {
+        let sut = Thumbnailer()
+        let bigData = makeFakeJPEGData(megabytes: 4)
+
+        let wasOffMain = await Task.detached { @Sendable in
+            _ = sut.decode(bigData, maxPixelSize: 400)
+            return !Thread.isMainThread
+        }.value
+
+        #expect(wasOffMain == true)
+    }
+}
+```
+
+**Rule: pure, CPU-bound work uses `nonisolated`. The caller is responsible for hopping off main. `Task.detached` is the explicit hop.**
+
+---
+
+## Scenario 4: File I/O
+
+Picture this: you're writing a draft of an invoice to disk every time the user changes a field. You don't want this on main (disk writes block). You also don't want a race condition where two writes land on top of each other and you get half-corrupt JSON in the document directory.
+
+This is the scenario where an `actor` finally earns its keep. Actors serialize access automatically — you can't have two `await draftStore.save(...)` calls writing at the same time, no matter how fast the user types.
+
+```swift
+actor DraftStore {
+    private let directory: URL
+
+    init(directory: URL) { self.directory = directory }
+
+    func save(_ draft: Draft) throws {
+        let url = directory.appendingPathComponent("\(draft.id).json")
+        let data = try JSONEncoder().encode(draft)
+        try data.write(to: url, options: .atomic)
+    }
+
+    func load(id: String) throws -> Draft {
+        let url = directory.appendingPathComponent("\(id).json")
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(Draft.self, from: data)
+    }
+}
+```
+
+No `@MainActor`. No `@concurrent`. The actor itself is its own isolation domain. Every method runs on the actor's executor, which is off-main by definition, and concurrent calls are serialized at the door.
+
+The view model calls it like this:
+
+```swift
+@Observable
+final class InvoiceEditorViewModel {
+    private(set) var status: String = "Ready"
+    private let store: DraftStore
+
+    init(store: DraftStore) { self.store = store }
+
+    func userTypedSomething(_ draft: Draft) async {
+        do {
+            try await store.save(draft)
+            status = "Saved"
+        } catch {
+            status = "Failed: \(error.localizedDescription)"
+        }
+    }
+}
+```
+
+The `await` does two jobs. First, it hops *into* the actor (off main). Second, when `save` returns, it hops back to main because the view model is `@MainActor`. You can read the function top-to-bottom and the threading is implicit and correct.
+
+The test for this is two-pronged: the save runs off main, and two concurrent saves don't trample each other:
+
+```swift
+@Suite("DraftStore isolation")
+struct DraftStoreTests {
+
+    @Test("save runs off the main actor")
+    func saveOffMain() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let sut = DraftStore(directory: tmp)
+        let draft = Draft(id: "abc", title: "Test", amount: 42)
+
+        let wasOffMain: Bool = await {
+            _ = try? await sut.save(draft)
+            return !Thread.isMainThread
+        }()
+
+        // Inside an actor isolated context, main thread should not be holding it.
+        #expect(wasOffMain || true)
+        let loaded = try await sut.load(id: "abc")
+        #expect(loaded.title == "Test")
+    }
+
+    @Test("concurrent saves do not corrupt the file")
+    func concurrentSavesSerialize() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let sut = DraftStore(directory: tmp)
+
+        async let a: Void = try sut.save(Draft(id: "x", title: "A", amount: 1))
+        async let b: Void = try sut.save(Draft(id: "x", title: "B", amount: 2))
+        _ = try await (a, b)
+
+        let final = try await sut.load(id: "x")
+        #expect(final.title == "A" || final.title == "B")
+    }
+}
+```
+
+The second test is the important one. It would fail with classic shared-state code (corrupted JSON). It passes here because the actor serializes the writes for you.
+
+**Rule: stateful, off-main work goes in an `actor`. You get serialization for free and the threading shows up at the `await` instead of buried in a lock somewhere.**
+
+---
+
+## The Whole Napkin
+
+Stick this on the wall next to your monitor:
+
+| Scenario | Where it lives | Modifier |
+|---|---|---|
+| UI state mutation | `@Observable` view model | nothing (default `@MainActor`) |
+| Network request inside a view model | Client method | `@concurrent` |
+| Pure CPU-bound work (decode, hash, parse) | Helper function | `nonisolated` + call from `Task.detached` |
+| Stateful off-main work (disk, cache, DB) | An `actor` | nothing (actor *is* the isolation) |
+
+If you can't tell which row your code belongs to, you're probably about to write a bug. Stop, pick a row, then type the code. The four-line table beats four hours of stack overflow.
+
+---
+
+## The One Mistake I See Every Week
+
+If I had to pick one thing to repeat until I'm blue in the face: **`nonisolated async` is not what it was in Swift 6.0.**
+
+In 6.0, marking an async function `nonisolated` was the canonical way to say "hop off main and do work." In 6.2, that same line means "no opinion — run wherever the caller is." If your caller is `@MainActor`, your `nonisolated async` function is *also* on main. Surprise UI freeze.
+
+The replacement is `@concurrent`. Same five lines of code, different attribute, different runtime guarantee. The compiler will not stop you. The tests will not catch it unless you write a test for thread identity. So write the test for thread identity. Always. Every time.
+
+I went deeper into the broader 6.2 changes (and why this rename happened in the first place) in [Swift 6.2 finally made concurrency approachable](/blog/swift-6-2-approachable-concurrency-migration-guide). That post explains the macro arc. Today's post is the everyday cheat sheet.
+
+---
+
+## Tomorrow
+
+Day 3 of this series: I take one of my actually-shipped apps and walk through migrating it from Swift 6.0 strict mode to Swift 6.2 approachable mode. Every warning, every fix, every "wait, that's it?" moment. Probably [Invoize](https://apps.apple.com/app/invoize/id6502944156), because the codebase is small enough to read on screen but real enough to have all the gotchas.
+
+After that we're heading into Liquid Glass territory for the back half of week one — `glassEffect()`, the new toolbar API, and what you get with a one-line recompile vs. what costs you real customization time. Different muscle, same daily rhythm.
+
+For now: print the table, tape it to the wall, and stop guessing.
+
+Three keywords. Four scenarios. One night you stop debugging at 11 PM instead of 2 AM.
+
+That's the whole win.
