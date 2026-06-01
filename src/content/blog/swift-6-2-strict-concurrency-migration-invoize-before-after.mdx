@@ -1,0 +1,407 @@
+---
+title: "Migrating a Real App to Swift 6.2 Strict Concurrency: 86 Errors, One Afternoon, One Race Condition I Didn't Know I Had"
+description: "I migrated Invoize from Swift 6.0 strict mode to Swift 6.2 approachable concurrency on a Sunday afternoon. Every warning, every fix, the one real race condition the compiler finally surfaced — and the TDD seams I leaned on so the migration wasn't just compiler-driven guessing."
+pubDate: 2026-06-01
+tags: ["Swift", "Swift 6.2", "Concurrency", "Migration", "MainActor", "Sendable", "iOS Development", "Xcode 26", "TDD", "Swift Testing", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/swift-6-2-strict-concurrency-migration.png"
+coverImageAlt: "Before/after comparison of an Invoize view model migration to Swift 6.2 — 86 errors on the left collapsing into 3 nonisolated annotations and a fixed race condition on the right."
+---
+
+{/*
+  SEO target keywords:
+  - Swift 6.2 strict concurrency migration
+  - Swift 6.0 to Swift 6.2 migration
+  - Xcode 26 default actor isolation MainActor
+  - Sendable conformance migration Swift 6.2
+  - real Swift 6.2 migration example
+  - migrate iOS app to Swift 6.2 tutorial
+  - approachable concurrency migration before after
+  - Swift 6.2 race condition example
+  - Swift Testing concurrency migration
+  - Invoize Swift 6.2 case study
+
+  Internal linking strategy:
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1)
+  - /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree (Day 2)
+  - /blog/swift-6-2-approachable-concurrency-migration-guide (macro view)
+  - /learn (SwiftUI at Scale course)
+
+  External reference strategy:
+  - Swift Evolution SE-0466 (MainActor default)
+  - Swift Evolution SE-0461 (@concurrent)
+  - swift.org/migration (official migration guide)
+
+  Day 3 of the 30-day iOS tutorial series.
+*/}
+
+Sunday, around lunchtime, I opened Invoize in Xcode 26 for the first time. The build log spat back **86 errors and 142 warnings** in under twenty seconds. I closed the laptop and made coffee.
+
+That number is not a flex. It's the opposite. Invoize is a small invoicing app — ~40 view models, one networking layer, a SwiftData stack, a PDF renderer, two background services. If 40 view models can summon 86 strict-concurrency errors, what's a real codebase going to do? Cry, probably.
+
+Then I remembered the whole point of [Swift 6.2's MainActor default](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency): most of those errors aren't real problems, they're a default that doesn't match how UI code actually flows. So I flipped one build setting, hit ⌘B again, and watched 86 errors collapse to 4. Three of those were [legitimate `nonisolated` opportunities](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) the compiler had just helpfully surfaced. The fourth was a race condition that had been hiding in production for six months.
+
+I shipped the migration before dinner. Here's everything that happened in between, the bad way and the right way, with the tests that kept me honest.
+
+---
+
+## The "Before" — Swift 6.0 Strict Mode, Inherited
+
+Invoize started life on Swift 5.9. I migrated it to Swift 6.0 strict mode in late 2024 the way most people did: I sprinkled `@MainActor` on every class that touched a view, slapped `Sendable` on every model, and chased warnings until the build was green. It worked. It also looked like this:
+
+```swift
+@MainActor
+final class InvoiceListViewModel: ObservableObject {
+    @Published private(set) var invoices: [Invoice] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var error: String?
+
+    private let repository: InvoiceRepository
+
+    init(repository: InvoiceRepository) {
+        self.repository = repository
+    }
+
+    @MainActor
+    func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            invoices = try await repository.fetchAll()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+```
+
+Count the annotations: `@MainActor` on the class, `@MainActor` *again* on the function (redundant), `ObservableObject` instead of `@Observable`, three `@Published` properties. Multiply by ~40 view models. That's roughly **120 redundant annotations** living rent-free in the project, plus a UI framework choice that the new `@Observable` macro has been quietly outperforming since iOS 17.
+
+Now open the same file in Xcode 26 with default settings, and you immediately get errors like:
+
+```
+error: main actor-isolated property 'invoices' can not be mutated from a nonisolated context
+error: type 'InvoiceRow' does not conform to protocol 'Sendable'
+error: capture of 'self' with non-sendable type 'InvoiceListViewModel' in a `@Sendable` closure
+```
+
+Etcetera. Eighty-six times.
+
+This is the moment you have to decide: do you fight the errors one by one, or do you fix the default?
+
+---
+
+## Step Zero: Flip the Build Setting Before You Type Anything
+
+I cannot stress this enough. Do not start fixing errors. Open the project's build settings and find this row:
+
+> **Default Actor Isolation** — set to `MainActor`
+
+It's under *Swift Compiler — Concurrency*. It's the entire point of [SE-0466](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0466-control-default-actor-isolation.md). It tells the compiler: "for any code in this module that doesn't explicitly say otherwise, assume `@MainActor`." Which is what your UI code already wanted to say but had to repeat fifty times.
+
+I'm pointing at this because half the people I've watched do this migration skipped this step and "fixed" their first ten errors by adding `@MainActor` annotations that the default would have given them for free. Don't do that. Flip the switch, rebuild, then look at what's *actually* still broken.
+
+For Invoize, flipping the setting took the error count from 86 to 4.
+
+That's not me cherry-picking. That's the whole story of Swift 6.2's migration story in one number: most of strict mode's noise was the wrong default, not a real problem in your code.
+
+---
+
+## The Four Errors That Survived
+
+With `MainActor` as the default, here's what the compiler still couldn't accept. Each one was a real signal.
+
+### 1) An `InvoiceRow` model that wasn't `Sendable`
+
+```swift
+struct InvoiceRow {
+    let id: UUID
+    let title: String
+    let amount: Decimal
+    let dueDate: Date
+    var pdfCache: NSCache<NSString, NSData>?
+}
+```
+
+That `NSCache` reference is the problem. `NSCache` is a reference type, not `Sendable`, and it's wedged inside a value type that I had been passing across actor boundaries (from a background indexer to the UI). The Swift 6.0 strict mode kind of let me get away with it because I'd typed `@unchecked Sendable` somewhere up the tree six months ago and never looked back. Swift 6.2 unwound the chain and told me the truth.
+
+The fix wasn't to suppress the error. It was to remove the cache from the model and put it where it belonged — on the renderer:
+
+```swift
+struct InvoiceRow: Sendable, Hashable {
+    let id: UUID
+    let title: String
+    let amount: Decimal
+    let dueDate: Date
+}
+
+actor InvoicePDFRenderer {
+    private var cache: [UUID: Data] = [:]
+
+    func render(_ row: InvoiceRow) async throws -> Data {
+        if let hit = cache[row.id] { return hit }
+        let data = try buildPDF(for: row)
+        cache[row.id] = data
+        return data
+    }
+}
+```
+
+The model is now a clean value type. The cache is owned by an actor (so concurrent renders don't trample each other). The compiler stops complaining because there's nothing un-`Sendable` left in the value.
+
+### 2) A `nonisolated` opportunity in the PDF builder
+
+```swift
+@MainActor
+final class InvoicePDFRenderer {
+    func render(_ row: InvoiceRow) throws -> Data {
+        // 200ms of PDFKit work
+    }
+}
+```
+
+In Swift 6.0 strict mode I had bolted this onto a `@MainActor` class because that was the path of least warnings. But the work itself is pure: bytes go in, bytes come out, nothing reads UI state. Calling `render()` from the list view was synchronously blocking main for ~200ms on first paint.
+
+With Swift 6.2 defaults plus the napkin from [Day 2](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree), the answer is obvious: this is the "pure CPU-bound work" row of the table. It wants `nonisolated`, and the caller hops off main:
+
+```swift
+struct InvoicePDFBuilder: Sendable {
+    nonisolated func render(_ row: InvoiceRow) throws -> Data {
+        // 200ms of PDFKit work, pure inputs to outputs
+    }
+}
+```
+
+And the view model uses `Task.detached` for the off-main hop:
+
+```swift
+@Observable
+final class InvoiceDetailViewModel {
+    private(set) var pdfData: Data?
+    private let builder = InvoicePDFBuilder()
+
+    func generatePDF(for row: InvoiceRow) async {
+        let data = await Task.detached(priority: .userInitiated) {
+            try? builder.render(row)
+        }.value
+        pdfData = data
+    }
+}
+```
+
+The scroll stutter on the invoice list disappeared. The same code, one keyword, three lines moved.
+
+### 3) A network client still wearing the `@MainActor` straitjacket
+
+```swift
+@MainActor
+final class InvoiceAPIClient {
+    func fetchAll() async throws -> [Invoice] {
+        let (data, _) = try await URLSession.shared.data(from: endpoint)
+        return try JSONDecoder().decode([Invoice].self, from: data)
+    }
+}
+```
+
+Same disease, different organ. The whole class was `@MainActor` because every view model that touched it was on main, and the compiler had been demanding matching isolation. So networking, decoding, error mapping — *all of it* — was happening on the main thread.
+
+In Swift 6.2, with the view model already on main by default, the client doesn't need to inherit. The off-main hop wants `@concurrent` (the [Day 2 distinction](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) that `nonisolated async` is no longer a background guarantee):
+
+```swift
+protocol InvoiceAPIClient: Sendable {
+    func fetchAll() async throws -> [Invoice]
+}
+
+final class HTTPInvoiceAPIClient: InvoiceAPIClient {
+    private let session: URLSession
+    init(session: URLSession = .shared) { self.session = session }
+
+    @concurrent
+    func fetchAll() async throws -> [Invoice] {
+        let (data, _) = try await session.data(from: endpoint)
+        return try JSONDecoder().decode([Invoice].self, from: data)
+    }
+}
+```
+
+The view model on main calls `await client.fetchAll()`. The fetch and decode run off-main. The `await` returns to main, where the assignment to `@Observable` state belongs. No more spinner stutters when the user opens the app on a cold cache.
+
+### 4) The race condition I didn't know I had
+
+This is the one that justified the whole afternoon.
+
+Invoize has a tiny `DraftStore` that writes invoice drafts to disk as the user types. The old shape was a plain class with a `serialQueue`:
+
+```swift
+final class DraftStore {
+    private let queue = DispatchQueue(label: "draft.store")
+    private let directory: URL
+
+    func save(_ draft: Draft, completion: @escaping (Error?) -> Void) {
+        queue.async {
+            do {
+                let url = self.directory.appendingPathComponent("\(draft.id).json")
+                try JSONEncoder().encode(draft).write(to: url, options: .atomic)
+                completion(nil)
+            } catch {
+                completion(error)
+            }
+        }
+    }
+}
+```
+
+Looks safe, right? Serial queue, atomic write. The bug: I had a second path — autosave triggered by a timer — that bypassed the queue and wrote *directly* with `try data.write(to: url)`. Two writers, one URL, no synchronization. The "atomic" flag protects you from a half-written file, but it does not protect you from a stale write *overwriting* a fresh one if both calls happen within the same dispatch tick.
+
+I never saw this in logs. The drafts that lost edits were always recoverable from autosave, so the user never complained loudly enough for me to investigate.
+
+Swift 6.2 refused to let it compile, because the timer-triggered write captured `self` in a `@Sendable` closure without isolation. The fix made the bug structurally impossible:
+
+```swift
+actor DraftStore {
+    private let directory: URL
+    init(directory: URL) { self.directory = directory }
+
+    func save(_ draft: Draft) throws {
+        let url = directory.appendingPathComponent("\(draft.id).json")
+        let data = try JSONEncoder().encode(draft)
+        try data.write(to: url, options: .atomic)
+    }
+}
+```
+
+One `actor` keyword. All concurrent writes are now serialized at the door. The compiler doesn't let you call `save` without `await`, which means there's no way to bypass the serialization. The bug fixed itself by replacing a queue I had hand-rolled with one the language gave me for free.
+
+This is the part of the migration I tell people about at meetups. The build setting collapsed the noise. The four real errors were three optimizations plus one race that had been costing me TestFlight reviews for half a year.
+
+---
+
+## TDD Was Not Optional Here
+
+Two reasons I leaned on tests hard during this migration. First, I was moving a *lot* of annotations around — the easiest possible way to silently change which thread something runs on. Second, the race condition fix touches disk, so "it compiles" is not the same as "it works."
+
+I write Swift Testing now instead of XCTest, partly because `#expect` is just nicer and partly because of how it handles `@MainActor`. Three tests carried me through the migration.
+
+**Test 1 — the API client really runs off main.**
+
+```swift
+import Testing
+@testable import InvoizeKit
+
+@Suite("HTTPInvoiceAPIClient isolation")
+struct HTTPInvoiceAPIClientTests {
+
+    @Test("fetchAll runs off the main actor in Swift 6.2")
+    @MainActor
+    func fetchAllOffMain() async throws {
+        // Spy InvoiceAPIClient that records the thread on entry.
+        final class Spy: InvoiceAPIClient {
+            nonisolated(unsafe) var wasOnMain: Bool?
+            func fetchAll() async throws -> [Invoice] {
+                wasOnMain = Thread.isMainThread
+                return []
+            }
+        }
+        let spy = Spy()
+        let sut = InvoiceListViewModel(client: spy)
+
+        await sut.load()
+
+        #expect(spy.wasOnMain == false)
+        #expect(Thread.isMainThread)
+    }
+}
+```
+
+If I forget `@concurrent` and lean on a stale `nonisolated async`, the first `#expect` flips red. This is the single test that would have caught the bug from [yesterday's post](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) — the one where the function compiles but doesn't actually leave main.
+
+**Test 2 — the `DraftStore` actor serializes concurrent writes.**
+
+```swift
+@Suite("DraftStore concurrent writes")
+struct DraftStoreTests {
+
+    @Test("two simultaneous writes do not corrupt or lose data")
+    func concurrentSavesSerialize() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let sut = DraftStore(directory: tmp)
+
+        async let a: Void = sut.save(Draft(id: "x", title: "A", amount: 1))
+        async let b: Void = sut.save(Draft(id: "x", title: "B", amount: 2))
+        _ = try await (a, b)
+
+        let raw = try Data(contentsOf: tmp.appendingPathComponent("x.json"))
+        let loaded = try JSONDecoder().decode(Draft.self, from: raw)
+
+        #expect(loaded.title == "A" || loaded.title == "B")
+    }
+}
+```
+
+The point isn't to assert *which* write wins. The point is the file is a clean JSON document afterward — not a half-overwrite of two encodings. This test failed against the old `DispatchQueue`-plus-timer version maybe 1 in 8 runs on my M2 Air. It has been green every single run since the actor refactor.
+
+**Test 3 — the PDF builder is pure and off-main.**
+
+```swift
+@Suite("InvoicePDFBuilder isolation")
+struct InvoicePDFBuilderTests {
+
+    @Test("render does not need to be on main")
+    func renderOffMain() async {
+        let sut = InvoicePDFBuilder()
+        let row = InvoiceRow(id: UUID(), title: "Lunch", amount: 12, dueDate: .now)
+
+        let onMain = await Task.detached { @Sendable in
+            _ = try? sut.render(row)
+            return Thread.isMainThread
+        }.value
+
+        #expect(onMain == false)
+    }
+}
+```
+
+Three tests. Maybe ten minutes to write. They turned "I think this is right" into "the build will tell me if I broke this six months from now." That's the whole pitch for TDD around concurrency — the wrong answer compiles too easily for you to trust the green build alone.
+
+This is the same red/green rhythm I use in lesson 03 of the [SwiftUI at Scale course](/learn) when wiring isolation through a composition root — the test goes first, the annotation second, the compiler last.
+
+---
+
+## The Numbers, On the Other Side
+
+After: **0 errors, 12 warnings** (all of them in third-party code I don't own). The diff was 280 lines net negative — mostly redundant `@MainActor` annotations and `@Published` removed when I swapped `ObservableObject` for `@Observable`. Build time on a clean derived data went from 91 seconds to 64 seconds. Cold launch of the app dropped 90ms because the network client wasn't blocking main on the first paint anymore.
+
+And the race condition is gone. Permanently. Not "I added a lock" gone — *structurally impossible* gone.
+
+That's the migration story that doesn't fit on a tweet. **Strict mode in Swift 6.0 made every UI codebase look broken. Approachable mode in 6.2 lets the compiler ignore the things that aren't real and surface the four that are.** You can do this in an afternoon. You don't need a sprint for it.
+
+---
+
+## The Workflow, As a Checklist
+
+If you're sitting at the same trailhead today, this is the path that worked. I'll repeat it because it's the only takeaway that matters:
+
+1. **Open the project in Xcode 26. Do not start fixing errors.**
+2. **Flip `Default Actor Isolation` to `MainActor` in build settings.**
+3. **Rebuild. Look at the new, much shorter error list.**
+4. **For each remaining error, ask the [Day 2 question](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree):** is this UI state (do nothing), networking (`@concurrent`), pure work (`nonisolated`), or stateful off-main (`actor`)?
+5. **Write the test that proves the thread identity before you write the fix.** The test is the only thing standing between you and a green build that silently runs on main.
+6. **Delete `ObservableObject` and `@Published` while you're in the file.** `@Observable` is faster and reads better. There's no reason to keep two patterns in the same module.
+
+That's the whole afternoon. You'll have a quieter project, a few legitimate optimizations, and — if you're like me — at least one race condition the language quietly fixed for you because you had the nerve to upgrade.
+
+---
+
+## Tomorrow
+
+We're done with the concurrency mini-arc. Tomorrow, Day 4 of the [series](/blog), we walk into Liquid Glass territory: `glassEffect()`, the new toolbar API, `backgroundExtensionEffect`, and the honest question — *what do you actually get from a one-line recompile, and what costs you real customization time?* I'll bring two screenshots from the same view, one rebuilt against Xcode 26 with zero code changes, one with five lines of glass tuning, and we'll talk about whether the second one is worth the friction.
+
+After that, Days 5 through 7 wrap up week one with custom Liquid Glass components, Icon Composer for the new light/dark/clear/tinted icon set, and the build-setting opt-out flag for the apps that genuinely can't ship a redesign yet.
+
+If you've been putting off the Swift 6.2 migration because you remembered how 6.0 strict mode felt — open Xcode 26 this weekend. The compiler that yelled at you for a year just learned to whisper. The four things it still says are worth fixing are the four things you wanted to know about anyway.
+
+Coffee, build setting, four errors, one afternoon, one race condition you didn't know you had.
+
+That's the whole migration.
