@@ -1,0 +1,328 @@
+---
+title: "Foundation Models: Your First On-Device AI Feature With No Backend, No API Key, No Bill"
+description: "Day 8 of the 30-day iOS series, and the start of AI week. The Foundation Models framework runs a real language model entirely on the phone — free, private, offline. We build the smallest thing that works: summarize a block of text in three lines, handle the availability cases that bite in production, wire it into a real app, and put a TDD seam around the part that isn't the model. Code-along, with tests."
+pubDate: 2026-06-07
+tags: ["Swift", "SwiftUI", "Foundation Models", "Apple Intelligence", "On-Device AI", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "Dependency Injection", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/foundation-models-on-device-summarize-cover.jpg"
+coverImageAlt: "An open notebook with the word 'Notes' handwritten and underlined, a fountain pen resting on the page, reading glasses blurred behind it — the raw input a summarizer turns into one clean line."
+---
+
+{/*
+  SEO target keywords:
+  - Foundation Models framework tutorial
+  - on-device AI iOS no backend
+  - LanguageModelSession respond Swift
+  - SystemLanguageModel availability check
+  - Apple Intelligence summarize text Swift
+  - Foundation Models summarize example
+  - on-device LLM iOS 26 no API key
+  - Foundation Models availability unavailable reason
+  - test on-device AI feature Swift
+  - inject language model protocol Swift TDD
+
+  Internal linking strategy:
+  - /blog/liquid-glass-opt-out-uidesignrequirescompatibility-when-why (Day 7, previous)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root)
+  - /blog/apple-foundation-models-on-device-ai-iphone (the "why you should care" overview)
+  - /blog/icon-composer-app-icon-workflow-light-dark-clear-tinted (Day 6)
+  - /learn (SwiftUI at Scale — protocol-seam / dependency injection lessons)
+
+  External reference strategy:
+  - developer.apple.com — Foundation Models framework
+  - createwithswift.com — Exploring the Foundation Models framework
+  - swiftwithmajid.com — Building AI features using Foundation Models
+
+  Day 8 of the 30-day iOS series. Opens AI week. Series part 1/3 (Foundation Models).
+*/}
+
+Glass week is done. For seven days this series argued about [bars, materials, icons, and one Info.plist escape hatch](/blog/liquid-glass-opt-out-uidesignrequirescompatibility-when-why). Today we change rooms entirely.
+
+Here's the pitch in one breath: **there is a real language model sitting inside the phone right now, and you can call it in three lines of Swift.** No API key. No backend. No per-token invoice that quietly grows until your indie app's "AI feature" costs more than it earns. It runs on the device, offline, and the user's text never leaves the phone.
+
+That's the Foundation Models framework. I wrote a [whole piece on *why* you should care](/blog/apple-foundation-models-on-device-ai-iphone) — this one is about *how*, hands on the keyboard. We're going to build the smallest possible feature that actually works, wire it into a real app, and — because this is a TDD series and I'm not going to suddenly stop testing just because there's an LLM in the room — put a proper seam around it.
+
+Let me show you the three lines first, because they're almost suspiciously short.
+
+---
+
+## The smallest thing that works
+
+```swift
+import FoundationModels
+
+let session = LanguageModelSession()
+let response = try await session.respond(to: "Summarize this in one sentence: \(text)")
+print(response.content)
+```
+
+That's it. That's a working call to an on-device model. `session.respond(to:)` is `async throws`, it returns a `Response`, and `response.content` is the `String` you wanted.
+
+The first time I ran this I genuinely sat there waiting for the part where it asks me to paste an API key. It never came. The model is already on the device — the same one behind Apple Intelligence — and you're just borrowing it.
+
+You can steer it with instructions, which is the on-device equivalent of a system prompt:
+
+```swift
+let session = LanguageModelSession(
+    instructions: """
+    You summarize coffee tasting notes into one short, plain sentence.
+    No marketing words. No emoji. Just what the coffee tasted like.
+    """
+)
+let response = try await session.respond(to: notes)
+```
+
+A `LanguageModelSession` also holds context across turns, so if you keep the same session and ask a follow-up, it remembers the earlier exchange. For a one-shot summary you don't need that — a fresh session per summary is fine.
+
+So far, so magic. Now let me ruin the magic, because the three-line version is a demo, not a feature.
+
+---
+
+## The part the demos skip: availability
+
+Here's the thing nobody puts in the tweet. **The model is not always there.** A user on an older device doesn't have it. A user who turned Apple Intelligence off doesn't have it. A user whose phone is still downloading the model doesn't have it *yet*. If you call `respond` blindly, you ship a feature that throws on a meaningful slice of your users.
+
+So a real feature starts by asking the model if it's even home:
+
+```swift
+import FoundationModels
+
+let model = SystemLanguageModel.default
+
+switch model.availability {
+case .available:
+    // Good to go.
+    break
+case .unavailable(let reason):
+    switch reason {
+    case .deviceNotEligible:
+        // Old hardware. The feature simply doesn't exist for them.
+        break
+    case .appleIntelligenceNotEnabled:
+        // It's there, the user just hasn't switched it on in Settings.
+        break
+    case .modelNotReady:
+        // Capable device, still downloading. Try again later.
+        break
+    @unknown default:
+        break
+    }
+}
+```
+
+This `switch` is the actual product decision, and it's where the difference between a toy and a shipped feature lives. Each branch is a different thing you say to the user:
+
+- **`deviceNotEligible`** — don't tease them. Hide the button. A "Summarize" control that's permanently greyed out is just a daily reminder that they bought the wrong phone.
+- **`appleIntelligenceNotEnabled`** — this one's recoverable. "Turn on Apple Intelligence in Settings to use this." You can win this user back.
+- **`modelNotReady`** — temporary. "Setting up… try again in a minute." Don't show an error; show patience.
+
+Notice what just happened. We haven't written a single line of UI, and we already have a decision tree that *must not get the branches wrong*. That smell — important logic, easy to get subtly wrong, annoying to verify by hand — is exactly the thing this series keeps telling you to pull out of the view and into a function you can test.
+
+---
+
+## Wiring it into a real app
+
+You've met BrewLog in earlier posts — my little coffee-logging guinea pig. Every `Brew` has freeform `notes`:
+
+```swift
+@Model
+final class Brew {
+    var method: BrewMethod
+    var rating: Int
+    var notes: String
+    var date: Date
+}
+```
+
+People write *paragraphs* in there. "Pulled a bit fast, 24s, tasted sharp and a little sour up front but mellowed, next time grind finer and bump the dose to 19g." Great for them, useless for a glanceable list row.
+
+Perfect job for an on-device summary: turn that ramble into one line like *"Sharp and sour; grind finer next time."* The text is personal, it's already on the phone, and it would be faintly insane to ship it to a server and pay per token to compress someone's coffee diary.
+
+The naive version writes the model call straight into the view's button action. Don't. The moment the model call lives inside the view, every rule around it — when to call, what to show while waiting, what to do when it's unavailable — becomes untestable, because you can't unit-test a `Button`. So we put one protocol between the view and the framework.
+
+```swift
+/// Everything our app needs from "a thing that can summarize."
+/// Note what's NOT here: FoundationModels. The app depends on this, not Apple's types.
+protocol Summarizer {
+    func summary(of text: String) async throws -> String
+}
+```
+
+The real implementation is a thin wrapper. It's the *only* file in the whole app that imports `FoundationModels`:
+
+```swift
+import FoundationModels
+
+struct OnDeviceSummarizer: Summarizer {
+    func summary(of text: String) async throws -> String {
+        let session = LanguageModelSession(
+            instructions: "Summarize coffee tasting notes into one short, plain sentence."
+        )
+        let response = try await session.respond(to: text)
+        return response.content
+    }
+}
+```
+
+That's the seam. The view talks to a `Summarizer`. In production it gets an `OnDeviceSummarizer`. In tests it gets a fake. Same trick as classic [protocol-based dependency injection](/learn) — the network layer, the database, the clock, and now the language model all hide behind a protocol so the logic around them is testable. Nothing new under the sun; the LLM is just another collaborator.
+
+---
+
+## "It's an LLM. What do you even test?"
+
+This is the honest question, and the answer is the whole point of the post.
+
+**You do not test the model's output.** You can't. It's non-deterministic, it needs real hardware, it needs Apple Intelligence switched on, and asserting `summary == "Sharp and sour..."` would be a test that fails the day the model gets *better*. That's not a test, that's a trap.
+
+What you test is **everything around the model** — the part that's pure logic and breaks in boring, predictable, user-facing ways:
+
+1. **The guard.** You shouldn't fire up a language model to summarize "ok". Short notes are already a summary. That's a rule, and rules get tested.
+2. **The state machine.** Idle → loading → done/failed. The view just renders whatever state it's handed.
+3. **The fallback.** When the model throws — and on-device, mid-summary, it *will* sometimes throw — what does the user see? Definitely not a crash, and definitely not a blank row.
+
+Let's build the thing that owns those rules. A small `@Observable` model, which — as [Day 1 of this series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency) set up — is `@MainActor` by default in Swift 6.2, so the UI-state mutations are already on the right actor.
+
+```swift
+import Observation
+
+@Observable
+final class NoteSummaryModel {
+    enum State: Equatable {
+        case idle
+        case tooShort          // not worth a model call
+        case summarizing
+        case summarized(String)
+        case failed            // model threw; keep the raw notes
+    }
+
+    private(set) var state: State = .idle
+    private let summarizer: Summarizer
+    private let minimumLength: Int
+
+    init(summarizer: Summarizer, minimumLength: Int = 40) {
+        self.summarizer = summarizer
+        self.minimumLength = minimumLength
+    }
+
+    func summarize(_ notes: String) async {
+        let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // The guard: short notes are already their own summary.
+        guard trimmed.count >= minimumLength else {
+            state = .tooShort
+            return
+        }
+
+        state = .summarizing
+        do {
+            let result = try await summarizer.summary(of: trimmed)
+            state = .summarized(result)
+        } catch {
+            state = .failed
+        }
+    }
+}
+```
+
+Look at how little of this needs a real model. The length guard, the trimming, the three terminal states — all pure logic. The only line that touches Apple's framework is `summarizer.summary(of:)`, and that's behind our protocol. Which means we can drive every branch with a fake.
+
+---
+
+## Red, green, the tests that actually earn their keep
+
+Two tiny fakes — one that always answers, one that always throws:
+
+```swift
+import Testing
+@testable import BrewLog
+
+struct StubSummarizer: Summarizer {
+    let result: String
+    func summary(of text: String) async throws -> String { result }
+}
+
+struct FailingSummarizer: Summarizer {
+    struct Boom: Error {}
+    func summary(of text: String) async throws -> String { throw Boom() }
+}
+```
+
+Now pin down the behavior that real users will hit:
+
+```swift
+@Suite("Note summary behavior")
+struct NoteSummaryModelTests {
+
+    @Test("short notes never bother the model")
+    func shortNotesSkipTheModel() async {
+        let model = NoteSummaryModel(summarizer: StubSummarizer(result: "unused"))
+        await model.summarize("ok")
+        #expect(model.state == .tooShort)
+    }
+
+    @Test("a long enough note gets summarized")
+    func longNoteGetsSummarized() async {
+        let model = NoteSummaryModel(
+            summarizer: StubSummarizer(result: "Sharp and sour; grind finer.")
+        )
+        await model.summarize(String(repeating: "tasting notes ", count: 5))
+        #expect(model.state == .summarized("Sharp and sour; grind finer."))
+    }
+
+    @Test("whitespace doesn't sneak past the length guard")
+    func paddedShortNoteStillTooShort() async {
+        let model = NoteSummaryModel(summarizer: StubSummarizer(result: "unused"))
+        await model.summarize("   ok   \n\n  ")
+        #expect(model.state == .tooShort)
+    }
+
+    @Test("a thrown model error becomes a clean failed state, never a crash")
+    func modelErrorIsHandled() async {
+        let model = NoteSummaryModel(summarizer: FailingSummarizer())
+        await model.summarize(String(repeating: "long enough input ", count: 4))
+        #expect(model.state == .failed)
+    }
+}
+```
+
+That last test is the one I'd fight to keep. The happy path is easy and everyone writes it. The failure path — model throws halfway through, on a real device, in someone's hand on the subway with no warning — is the one that turns into a one-star review if you skipped it. Here it's four lines and it runs in milliseconds, no Apple Intelligence required, on any CI box including the ones that have never heard of a Neural Engine.
+
+And the view becomes gloriously dumb, which is the goal:
+
+```swift
+switch summaryModel.state {
+case .idle:                 EmptyView()
+case .tooShort:             Text(brew.notes)               // already short enough
+case .summarizing:          ProgressView()
+case .summarized(let line): Text(line).font(.subheadline)
+case .failed:               Text(brew.notes).lineLimit(2)  // graceful fallback
+}
+```
+
+No logic. It maps a tested state onto a view and gets out of the way. The brain is in `NoteSummaryModel`, and the brain is fully covered.
+
+---
+
+## The honest limitations (a teaser for the rest of the week)
+
+I'm not going to pretend this thing is GPT-in-your-pocket. It's a small model with a real context window and real edges. Feed it a 5,000-word essay and it'll choke. Ask it for a legal opinion and you'll get confident nonsense. There are tasks where you still want to call a bigger model over the network, and knowing *where that line sits* is a skill in itself — which is precisely [Day 10](/blog), where I bolt this into a shipping app and tell you exactly what worked and what didn't.
+
+And summarizing to a `String` is the easy mode. The genuinely underrated trick is making the model hand you back a **typed Swift value** — a real struct, not a string you have to parse and pray over. That's `@Generable`, it's a sleeper feature most people don't know exists, and it's tomorrow's post.
+
+---
+
+## The takeaway
+
+The Foundation Models framework drops the cost of a first AI feature to basically zero: no key, no server, no bill, and the user's data stays on the user's phone. Three lines and you've got output.
+
+But the three lines are the demo. The *feature* is the availability switch you handle so you don't ship something that throws for half your users, the guard that stops you summarizing "ok", and the failure path that degrades to plain text instead of a crash. None of that needs the model to test — it needs a protocol seam and four tiny fakes. Put Apple's framework behind one wrapper, keep the rules in an `@Observable` you can drive from a test, and the LLM becomes just another injected collaborator. Same discipline as everything else in this series. The model doesn't get a pass on testing just because it's clever.
+
+Want the deeper version of this seam — the one where the whole app is built so every collaborator, from the network to the model, is swappable and tested? That's the spine of the [SwiftUI at Scale course in /learn](/learn).
+
+---
+
+## Tomorrow
+
+Day 9, part 2 of 3: **`@Generable` and tool calling.** We stop accepting strings and make the on-device model return a real, typed Swift struct — `BrewSummary(flavor:, advice:, rating:)` instead of a paragraph you have to regex your way through. It's the feature that turns "AI that writes text" into "AI that fills in your data model," and almost nobody's using it yet.
+
+The model's already in the phone. Might as well make it earn its keep.
