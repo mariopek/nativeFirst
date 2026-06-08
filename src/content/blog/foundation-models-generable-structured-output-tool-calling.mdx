@@ -1,0 +1,334 @@
+---
+title: "@Generable: Make Apple's On-Device Model Hand You a Swift Struct, Not a String to Parse"
+description: "Day 9 of the 30-day iOS series, part 2 of AI week. Yesterday Foundation Models gave us a String. Today we make it give us a typed Swift value — BrewSummary(flavor:, advice:, rating:) instead of a paragraph you regex your way through. @Generable, @Guide constraints, session.respond(to:generating:), and the sleeper-within-the-sleeper: tool calling, where the on-device model calls your own Swift code mid-answer. With the TDD seam, because typed output changes what you test."
+pubDate: 2026-06-08
+tags: ["Swift", "SwiftUI", "Foundation Models", "Apple Intelligence", "On-Device AI", "Generable", "Structured Output", "Tool Calling", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/generable-typed-output-cover.jpg"
+coverImageAlt: "A grid of metal letterpress type blocks set into wooden compartments — each slot a defined, typed character, the analog ancestor of structured output."
+---
+
+{/*
+  SEO target keywords:
+  - Foundation Models @Generable tutorial
+  - structured output Foundation Models Swift
+  - @Guide macro Foundation Models constraints
+  - session respond generating typed struct Swift
+  - Foundation Models tool calling example
+  - get Swift struct from on-device LLM
+  - guided generation Foundation Models iOS 26
+  - @Generable enum constraint Swift
+  - Tool protocol Foundation Models arguments
+  - test structured output on-device AI Swift
+
+  Internal linking strategy:
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (Day 8, previous, the String version)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root, @Observable/@MainActor)
+  - /blog/apple-foundation-models-on-device-ai-iphone (the "why you should care" overview)
+  - /blog (Day 10, teaser — not published yet)
+  - /learn (SwiftUI at Scale — protocol-seam / dependency injection lessons)
+
+  External reference strategy:
+  - developer.apple.com — Generating Swift data structures with guided generation
+  - swiftwithmajid.com — Building AI features using Foundation Models: Structured Content
+  - createwithswift.com — Exploring the Foundation Models framework
+
+  Day 9 of the 30-day iOS series. AI week, part 2/3 (Foundation Models).
+*/}
+
+[Yesterday](/blog/foundation-models-first-on-device-ai-feature-no-backend) I told you the on-device model returns text in three lines of Swift, and that was true. I also slipped in a confession at the very end — that returning a `String` is the easy mode, and the genuinely good trick is making the model hand you a real typed value instead.
+
+Today we cash that in. And once you've seen it, the String version starts to look like a mistake you got away with.
+
+Here's the problem with a String. The model gave us a nice one-line summary of someone's coffee notes — *"Sharp and sour; grind finer next time."* Lovely. Now try to put a number of stars next to it. Or color the row red if the brew was bad. Or sort the list by rating. You can't, because all you have is a sentence. The *rating* is in there somewhere, tangled up in English, and the only way out is the worst code you'll write all week.
+
+---
+
+## The string tax
+
+This is what "just parse it out of the text" actually looks like in real life:
+
+```swift
+// Please don't. This is the cautionary example.
+let text = response.content   // "Sharp and sour. I'd give it a 2 out of 5. Grind finer."
+
+let rating = text
+    .components(separatedBy: " out of 5").first?
+    .components(separatedBy: " ").last
+    .flatMap(Int.init) ?? 3   // and the day the model says "two out of five"? It breaks.
+```
+
+Look at that `?? 3` at the end. That's not a default. That's a prayer. The moment the model phrases it as "two out of five" instead of "2 out of 5", or says "out of five stars", or wraps it in a sentence you didn't anticipate, your parser silently returns a fake 3 and nobody notices until a user emails you asking why their terrible espresso has three stars.
+
+You are doing natural-language processing on the output of a natural-language processor. That's two coin flips where you wanted zero.
+
+The fix isn't a better regex. The fix is to never get a string in the first place.
+
+---
+
+## @Generable: describe the shape, the model fills it in
+
+You define a Swift type, mark it `@Generable`, and the framework does something quietly brilliant: it turns your type's *shape* into a schema, hands that schema to the model as a constraint, and gives you back an instance of your actual type. Parsed. Typed. Done.
+
+```swift
+import FoundationModels
+
+@Generable
+struct BrewSummary {
+    @Guide(description: "One short, plain sentence describing how the coffee tasted. No marketing words.")
+    let flavor: String
+
+    @Guide(description: "One concrete thing to try next time, like 'grind finer' or 'lower the water temperature'.")
+    let advice: String
+
+    @Guide(description: "Honest overall quality, from 1 (undrinkable) to 5 (excellent).", .range(1...5))
+    let rating: Int
+}
+```
+
+Two macros are doing the work. `@Generable` says "the model is allowed to produce this type." `@Guide` is the part that earns its keep — it's a plain-English note attached to each field telling the model what goes there. It's a per-property mini-prompt, and it's where you spend your effort, because the quality of your `@Guide` descriptions is the quality of your output.
+
+That `.range(1...5)` on the rating is the bit people miss. It's not a comment. It's a *constraint the framework enforces on the generation* — the model is steered to produce an integer in that range, not asked nicely in prose and hoped for. Constrained decoding, not vibes.
+
+You can go further and pin a field to a fixed set of choices by making it a `@Generable` enum:
+
+```swift
+@Generable
+enum DominantNote {
+    case fruity, nutty, chocolatey, floral, sour, bitter, balanced
+}
+```
+
+Add `let note: DominantNote` to `BrewSummary` and the model can now *only* pick one of those seven. Not "fruity-ish", not "kind of nutty with hints of caramel", not a paragraph. One of seven. Try enforcing *that* with a regex.
+
+---
+
+## Calling it: one keyword, and the type comes back whole
+
+The call is the same `respond` from yesterday, with one extra argument — `generating:` — that names the type you want:
+
+```swift
+let session = LanguageModelSession(
+    instructions: """
+    You read freeform coffee tasting notes and extract a structured summary.
+    Be honest about the rating. Keep the flavor to one plain sentence.
+    """
+)
+
+let response = try await session.respond(to: notes, generating: BrewSummary.self)
+let summary = response.content   // a real BrewSummary. Not a String.
+
+summary.rating    // Int. It compiles. There is no parsing step.
+summary.note      // DominantNote. An enum. The compiler knows the cases.
+```
+
+`response.content` is a `BrewSummary`. Not text that looks like one. The thing. `summary.rating` is an `Int` you can sort by, compare, and stick straight into a `ForEach`. The string tax is gone — not reduced, *gone* — because there was never a string to tax.
+
+The first time it returned a populated struct I did the same double-take as yesterday with the API key. I kept waiting for the `JSONDecoder` and the `do/catch` around malformed output. There isn't one. The decoding happens inside the framework, against the schema your type generated.
+
+---
+
+## Upgrading yesterday's seam (it gets *smaller*)
+
+Remember the `Summarizer` protocol from [Day 8](/blog/foundation-models-first-on-device-ai-feature-no-backend)? The one that kept `FoundationModels` quarantined in exactly one file? It returned a `String`. We change one line — the return type — and the whole design gets better:
+
+```swift
+protocol Summarizer {
+    func summary(of text: String) async throws -> BrewSummary   // was: -> String
+}
+```
+
+The real implementation stays the only file that imports the framework, and it actually shrinks, because there's nothing to post-process anymore:
+
+```swift
+import FoundationModels
+
+struct OnDeviceSummarizer: Summarizer {
+    func summary(of text: String) async throws -> BrewSummary {
+        let session = LanguageModelSession(
+            instructions: """
+            Read coffee tasting notes and extract a structured summary:
+            the flavor in one plain sentence, one concrete piece of advice,
+            an honest 1–5 rating, and the dominant flavor note.
+            """
+        )
+        return try await session.respond(to: text, generating: BrewSummary.self).content
+    }
+}
+```
+
+Same seam, same dependency injection, same trick we use for [the network layer and the database in the course](/learn). The model is still just another collaborator hiding behind a protocol. The difference is that the collaborator now speaks our domain language — `BrewSummary` — instead of handing us a string and wishing us luck.
+
+---
+
+## Never trust the model, even when it promises
+
+Here's the part that separates a demo from a feature, and it's the same instinct as yesterday's availability switch: **`@Guide` constraints are guidance, not a guarantee.** On-device, mid-generation, on a hot phone, the model can still hand you a rating of `0` or `7`. Rare. Not impossible. And "rare bug that paints 7 stars" is exactly the kind of thing that ships.
+
+So you clamp at the boundary. Defense in depth — the model asks nicely, *and then your code makes sure*:
+
+```swift
+extension BrewSummary {
+    /// @Guide asks for 1...5. "Asks" is not "enforces at runtime on a thermally
+    /// throttled Neural Engine." Clamp so a rogue value can't reach the UI.
+    var safeRating: Int { min(5, max(1, rating)) }
+}
+```
+
+This is a pure function over a typed value. Which means — and this is the whole reason the series keeps harping on typed boundaries — it's trivially testable, no model required.
+
+---
+
+## What typed output does to your tests
+
+Yesterday the honest question was *"it's an LLM, what do you even test?"* and the answer was: everything around it. That answer doesn't change. But typed output **changes what "around it" looks like**, and mostly it deletes work.
+
+The fakes get simpler. No more pretending to be a string parser — a fake just returns a struct:
+
+```swift
+import Testing
+@testable import BrewLog
+
+struct StubSummarizer: Summarizer {
+    let result: BrewSummary
+    func summary(of text: String) async throws -> BrewSummary { result }
+}
+
+struct FailingSummarizer: Summarizer {
+    struct Boom: Error {}
+    func summary(of text: String) async throws -> BrewSummary { throw Boom() }
+}
+```
+
+And the entire category of "did my regex parse the rating correctly" tests — the ones you'd have needed for the string version — simply don't exist. You can't mis-parse an `Int` that arrived as an `Int`. The compiler is your test there, for free.
+
+What's left is the logic that's genuinely yours: the clamp, and the state machine from Day 8 carrying a typed payload now.
+
+```swift
+@Suite("Structured summary behavior")
+struct BrewSummaryTests {
+
+    @Test("a rogue high rating is clamped before it reaches the UI")
+    func clampsAboveFive() {
+        let summary = BrewSummary(flavor: "x", advice: "y", rating: 7, note: .bitter)
+        #expect(summary.safeRating == 5)
+    }
+
+    @Test("a rogue zero rating is clamped up to the floor")
+    func clampsBelowOne() {
+        let summary = BrewSummary(flavor: "x", advice: "y", rating: 0, note: .sour)
+        #expect(summary.safeRating == 1)
+    }
+
+    @Test("a typed summary flows through the model as a value, not a string")
+    func typedSummaryFlowsThrough() async {
+        let expected = BrewSummary(flavor: "Bright and citrusy.", advice: "Try a coarser grind.",
+                                   rating: 4, note: .fruity)
+        let model = NoteSummaryModel(summarizer: StubSummarizer(result: expected))
+        await model.summarize(String(repeating: "tasting notes ", count: 5))
+        #expect(model.state == .summarized(expected))   // BrewSummary is Equatable; compare the whole value
+    }
+}
+```
+
+Notice the last test compares a whole `BrewSummary` for equality. That's only possible because it's a real value type. With the string version you'd have been asserting on substrings and hoping. Typed output didn't just make the feature better — it made the *tests* better, because now you're checking a value instead of inspecting prose.
+
+The `@Observable NoteSummaryModel` is the same one from Day 8 — still `@MainActor` by default thanks to [Swift 6.2](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency), still owning `idle → summarizing → summarized → failed`. The only change is the payload it carries. The view stays gloriously dumb and just renders the typed fields. The brain is still in the model, and the brain is still fully covered.
+
+---
+
+## The sleeper inside the sleeper: tool calling
+
+Structured output is the underrated feature. Tool calling is the one almost nobody's touched, and it's wild: **you can let the on-device model call your own Swift code, mid-answer, and fold the result back into what it generates.**
+
+Concretely. I want the summary to say things like *"sharper than your usual espresso."* But the model has no idea what your usual espresso tastes like — that lives in your app's database, not in the model. So we hand the model a tool that can go look it up:
+
+```swift
+import FoundationModels
+
+struct BrewHistoryTool: Tool {
+    let name = "lookUpAverageRating"
+    let description = "Returns the user's historical average rating (1–5) for a brewing method."
+
+    let store: BrewStore   // your own data, injected — same DI as everything else
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "The brewing method, e.g. 'espresso' or 'V60'.")
+        let method: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        let average = store.averageRating(forMethod: arguments.method)
+        return "The user's average \(arguments.method) rating is \(average) out of 5."
+    }
+}
+```
+
+Then you just hand it to the session:
+
+```swift
+let session = LanguageModelSession(
+    tools: [BrewHistoryTool(store: store)],
+    instructions: "Summarize the brew, and compare it to the user's usual when relevant."
+)
+let response = try await session.respond(to: notes, generating: BrewSummary.self)
+```
+
+Here's the choreography, because it's genuinely clever. The model is generating your summary. It realizes it'd help to know the user's average. It pauses, **generates the `Arguments` itself** — and because `Arguments` is `@Generable`, those arguments are type-safe, not a string it cobbled together — calls your `call` method, gets your real data back, and continues generating with that fact in hand. Your code ran inside the model's reasoning. On the phone. Offline.
+
+Notice `Arguments` uses the exact same `@Generable` + `@Guide` machinery as `BrewSummary`. It's not a second system to learn. Tool inputs are just structured output pointed the other direction.
+
+---
+
+## And — of course — the tool is trivially testable
+
+This is the part I love. A tool's `call(arguments:)` is *pure your-code*. No model. No Apple Intelligence. No Neural Engine. The framework synthesizes the `Arguments` initializer, so you just call it:
+
+```swift
+@Test("the history tool reports the average for a method")
+func toolReportsAverage() async throws {
+    let store = BrewStore(brews: [.espresso(rating: 4), .espresso(rating: 2)])
+    let tool = BrewHistoryTool(store: store)
+
+    let output = try await tool.call(arguments: .init(method: "espresso"))
+
+    #expect(output.contains("3"))   // (4 + 2) / 2
+}
+```
+
+That runs in milliseconds on any CI box. The model decides *when* to call the tool — that part you can't unit-test and shouldn't try. But *what the tool does when called* is ordinary Swift, and ordinary Swift gets ordinary tests. The seam holds even here, in the fanciest corner of the framework.
+
+---
+
+## The honest limitations
+
+Same honesty as yesterday, because the hype around this stuff needs a counterweight.
+
+**Structured generation isn't free.** A deeply nested `@Generable` type with twenty fields is more for the model to fill and more places for it to wobble. Keep your types flat and small — `BrewSummary` has four fields on purpose.
+
+**The model still might not call your tool.** Tool calling is a *capability*, not a command. If the answer matters, validate it; don't assume the tool ran.
+
+**Constraints steer, they don't shackle.** Hence the clamp. On-device, under thermal pressure, a `.range(1...5)` is a strong nudge, not a type system. Treat model output the way you'd treat a network response: typed at the boundary, validated before it touches your UI.
+
+Knowing *where the on-device model stops being the right tool* — and when you should reach for a server and a bigger model instead — is its own skill, and it's exactly [Day 10](/blog), where I bolt all of this into a real shipping app, build-in-public style, and tell you what worked and what embarrassingly didn't.
+
+---
+
+## The takeaway
+
+A `String` from a language model is a liability the moment you want to *do* anything with the answer — sort it, score it, branch on it. `@Generable` removes the liability at the root: you describe a Swift type, the framework constrains the model to produce it, and you get back a real value with real fields the compiler understands. `@Guide` is where you spend your effort, `.range`/enum constraints steer the generation, and `session.respond(to:generating:)` hands you the type whole, no parser, no prayer.
+
+Tool calling takes it one step further and lets the model call into your own code — type-safe arguments, your real data, folded back into the answer, all on-device.
+
+And the discipline doesn't change. Quarantine the framework behind one protocol, clamp the output at the boundary because constraints are guidance not law, and keep the rules in pure functions and an `@Observable` you can drive from a test. Typed output even *deletes* tests — the regex-parsing ones you'd otherwise have needed — while making the ones you keep stronger, because you're asserting on values instead of squinting at prose.
+
+The on-device model went from "writes you a paragraph" to "fills in your data model and calls your functions." That's not a chatbot anymore. That's a collaborator. Want the full version of this seam — every dependency, from the network to the database to the model, swappable and tested — that's the spine of the [SwiftUI at Scale course in /learn](/learn).
+
+---
+
+## Tomorrow
+
+Day 10, part 3 of 3 — the build-in-public one. I take everything from the last two days and wire it into an app I actually ship, not BrewLog the teaching prop. What the on-device model nailed, where it fell on its face, the context-window wall I hit, and the exact moment I gave up and called a server instead.
+
+The model's in the phone, it returns typed structs, and it'll call your code. Now let's find out where it breaks.
