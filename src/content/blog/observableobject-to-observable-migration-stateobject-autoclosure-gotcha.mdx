@@ -1,0 +1,292 @@
+---
+title: "ObservableObject → @Observable: The Migration Guide That Skips the Marketing (and the Autoclosure Gotcha Apple Forgot to Mention)"
+description: "Day 11 of the 30-day iOS series. Apple's migration guide makes ObservableObject → @Observable look like a find-and-replace. It mostly is — except for one quiet behavioral change: @StateObject only ran your initializer once, and @State runs it on every render. Here's the multiple-init bug that causes, why it's worst in exactly the init you were proud of, and how to fix it with a test that turns 'no side effects in init' into a hard, green invariant."
+pubDate: 2026-06-10
+tags: ["Swift", "SwiftUI", "Observable", "ObservableObject", "StateObject", "Migration", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "State Management", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/observable-migration-cover.jpg"
+coverImageAlt: "A person leaning into a coin-operated lookout telescope, observing a savanna in the distance — you keep feeding the machine to keep watching."
+---
+
+{/*
+  SEO target keywords:
+  - ObservableObject to Observable migration
+  - @Observable macro migration guide
+  - @StateObject vs @State autoclosure
+  - @Observable init called every render
+  - SwiftUI @State initializer runs multiple times
+  - @StateObject only initializes once
+  - migrate ObservableObject @Observable Swift
+  - @Observable side effects in init bug
+  - SwiftUI state management migration iOS 26
+  - test no side effects in init Swift Testing
+
+  Internal linking strategy:
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root, @Observable + @MainActor)
+  - /blog/thinkbud-foundation-models-real-case-what-worked-what-didnt (Day 10, the protocol-seam + pure-policy testing habit)
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (Day 8, the @Observable state-machine model + fakes)
+  - /blog/foundation-models-generable-structured-output-tool-calling (Day 9, Swift Testing patterns)
+  - /learn (SwiftUI at Scale — dependency injection / protocol-seam lessons)
+  - /blog (Day 12, teaser — not published yet)
+
+  External reference strategy:
+  - jaredsinclair.com — "Be Careful When You Initialize a State Object" (the autoclosure write-up)
+  - jessesquires.com — "Observable macro is not a drop-in replacement for ObservableObject"
+  - developer.apple.com — "Migrating from the Observable Object protocol to the Observable macro"
+
+  Day 11 of the 30-day iOS series. Opens the @Observable stretch (Days 11–14).
+*/}
+
+AI week is over. We spent three days pushing models to the edge of the app and keeping the rules in the middle. Today we go back to the most boring, most-touched line of code in any SwiftUI app: how a view holds its state.
+
+Apple wants you to migrate `ObservableObject` to the `@Observable` macro. The official guide makes it look like a four-line find-and-replace. And honestly? **Ninety percent of the time, it is.** Delete `: ObservableObject`, stamp `@Observable` on top, drop the `@Published` on every property, and swap `@StateObject` for `@State`. Done. Your re-renders get faster ([that's Day 13's whole post](/blog)) and you wrote less code. Real win.
+
+It's the other ten percent that ruins a Tuesday.
+
+Because there is exactly one behavioral change in that "find and replace" that Apple's guide mentions in passing and never warns you about. It cost me an afternoon. Let me save you the afternoon.
+
+---
+
+## The find-and-replace part (so we agree on the easy 90%)
+
+Here's the before. A bog-standard `ObservableObject` view model — the kind every iOS codebase has forty of.
+
+```swift
+final class ProfileModel: ObservableObject {
+    @Published var name = ""
+    @Published var followers = 0
+    @Published var isLoading = false
+}
+
+struct ProfileView: View {
+    @StateObject private var model = ProfileModel()
+
+    var body: some View {
+        Text(model.name)
+    }
+}
+```
+
+And here's the after. This is the whole migration, and it really is this small:
+
+```swift
+@Observable
+final class ProfileModel {
+    var name = ""
+    var followers = 0
+    var isLoading = false
+}
+
+struct ProfileView: View {
+    @State private var model = ProfileModel()
+
+    var body: some View {
+        Text(model.name)
+    }
+}
+```
+
+`@Published` is gone — `@Observable` tracks every stored property automatically, and only the ones a given view actually *reads*. `@StateObject` became `@State`. `@ObservedObject` becomes a plain `let` or `@Bindable` (that's [Day 12's map](/blog)), and `@EnvironmentObject` becomes `@Environment`. If your model is a dumb bag of properties, you're done. Ship it.
+
+The trap is hiding in the one line that looks identical in both versions: `@StateObject private var model = ProfileModel()` → `@State private var model = ProfileModel()`.
+
+Same `ProfileModel()`. Different rules.
+
+---
+
+## The gotcha: `@StateObject` ran your init once. `@State` runs it every render.
+
+Here's the thing nobody puts on a slide.
+
+`@StateObject` takes its initial value as an **`@autoclosure`**. That's the whole secret. When you write `@StateObject private var model = ProfileModel()`, the compiler doesn't build a `ProfileModel` and hand it over. It wraps `ProfileModel()` in a closure — `{ ProfileModel() }` — stores the closure, and calls it **exactly once**, on the view's first appearance. Every subsequent time SwiftUI re-creates that view struct (which is constantly — a parent re-renders, a sibling's state changes, a scroll happens), the closure is *not* called again. The first object persists.
+
+`@State` does not do this. `@State` takes a plain value. So `@State private var model = ProfileModel()` evaluates `ProfileModel()` **every single time the view struct is initialized** — which, again, is constantly. SwiftUI keeps the first instance and throws the rest in the bin the instant they're born, but the *constructor still ran*.
+
+> A SwiftUI `View` is a value type that gets created and destroyed dozens of times. `@StateObject`'s autoclosure made `ProfileModel()` immune to that churn. `@State` does not — the expression runs on every rebuild, and all but the first result is discarded.
+
+For a model that's a dumb bag of properties, who cares. Allocating three empty strings and throwing them away is free. Nobody will ever notice.
+
+But you don't write the dumb version. You write the proud version — the one with a *helpful* initializer.
+
+---
+
+## Where it actually bites: the init you were proud of
+
+This is the model that breaks. It's also the model every tutorial tells you to write, which is the cruel part.
+
+```swift
+@Observable
+final class FeedModel {
+    var posts: [Post] = []
+    var unreadCount = 0
+
+    private let loader: FeedLoading
+
+    init(loader: FeedLoading) {
+        self.loader = loader
+        // "Nice, I'll just kick off the load right here in init.
+        //  One less .onAppear to remember." — me, being clever
+        Task { await self.refresh() }
+
+        // and while I'm at it, restore the badge and start listening
+        self.unreadCount = UserDefaults.standard.integer(forKey: "unread")
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(didReceivePush),
+            name: .newPost, object: nil
+        )
+    }
+
+    func refresh() async { /* network call */ }
+    @objc func didReceivePush() { unreadCount += 1 }
+}
+```
+
+Under `@StateObject`, that init fired **once**. One network call. One observer registered. One badge read. Perfectly fine. This pattern shipped in a thousand apps and never made a sound.
+
+Now you migrate to `@State`. Read that init again, but this time imagine it running every time the parent view's body recomputes:
+
+- A network refresh fires on **every** rebuild. Open the Network tab and watch your own app DDoS your backend because the user tapped a toggle three screens up.
+- A new `NotificationCenter` observer is registered on **every** rebuild — and never removed. Each discarded `FeedModel` leaks, still subscribed, still incrementing a badge on an object SwiftUI already threw away. Your `unreadCount` is now wrong in a way that's almost impossible to reproduce.
+- The `Task` spins up over and over, racing copies of itself.
+
+None of this throws. Nothing turns red. The app just gets quietly, mysteriously *wrong* — slower, chattier, with a notification badge that drifts and a profiler full of allocations you can't explain. This is the worst kind of bug: the one that works on your machine, on your fast network, on the screen you're testing, and falls apart in the field.
+
+And the punchline: **the more useful your initializer was, the worse the migration hurts.** A lazy `init` survives. A helpful `init` betrays you.
+
+---
+
+## The fix is a rule, not a workaround
+
+You'll find clever workarounds online — wrap it back in a closure, use a custom `init(_:)` on the view that calls `State(initialValue:)`, push the whole thing up to the `App` struct so it's only built once. Some of those are legitimate (the `App`-level one genuinely is, for app-wide singletons). But reaching for a workaround means you've accepted a broken premise.
+
+The real fix is older than `@Observable` and it's just good design:
+
+**An initializer assigns dependencies. It does not perform work.**
+
+No network calls. No timers. No `NotificationCenter` registration. No `UserDefaults` side effects. No `Task {}`. The `init` stores what it's given and returns. That's it. All the *behavior* moves out of `init` and into an explicit method the view calls from `.task` — which SwiftUI guarantees runs once per appearance and cancels on disappear, exactly the lifecycle `@StateObject`'s init used to fake for you.
+
+Here's the same model, made boring on purpose:
+
+```swift
+@Observable
+final class FeedModel {
+    var posts: [Post] = []
+    var unreadCount = 0
+
+    private let loader: FeedLoading
+
+    init(loader: FeedLoading) {
+        self.loader = loader          // assign. that's the entire job.
+    }
+
+    /// All the work that used to hide in init. Now it's callable,
+    /// cancellable, and — the part I care about — testable.
+    func onAppear() async {
+        unreadCount = UserDefaults.standard.integer(forKey: "unread")
+        await refresh()
+    }
+
+    func refresh() async { /* network call */ }
+}
+```
+
+```swift
+struct FeedView: View {
+    @State private var model = FeedModel(loader: LiveFeedLoader())
+
+    var body: some View {
+        List(model.posts) { PostRow($0) }
+            .task { await model.onAppear() }   // once per appearance, auto-cancelled
+    }
+}
+```
+
+Now `@State` can re-run `FeedModel(loader:)` a thousand times and it costs you one pointer assignment and nothing else. The init being called repeatedly stops being a bug because the init stops *doing* anything. You didn't dodge the gotcha — you made it irrelevant.
+
+This is the same instinct as the [routing policy from Day 10](/blog/thinkbud-foundation-models-real-case-what-worked-what-didnt): push the behavior to the edges, keep the construction pure. Boring construction is testable construction. Which is the whole point of today.
+
+---
+
+## The TDD seam: turn "no side effects in init" into a test that fails loud
+
+Here's where this stops being a style opinion and becomes an enforced invariant — the [Essential Developer](/learn) move I drag every one of these posts back to.
+
+"Don't put side effects in `init`" is a rule you'll break the moment you forget it. A code review might catch it. A test catches it *every time, forever*. And the beautiful part: the exact thing that made the bug — a dependency hidden behind a protocol — is the exact thing that makes it testable.
+
+The dependency is `FeedLoading`. Make it a protocol (it already is), then write a **spy** — a fake that records whether anyone called it. Same trick as the `StubSummarizer`/`FailingSummarizer` fakes from [Day 8](/blog/foundation-models-first-on-device-ai-feature-no-backend), just pointed at a new seam.
+
+```swift
+import Testing
+@testable import MyApp
+
+final class LoaderSpy: FeedLoading {
+    private(set) var loadCallCount = 0
+    func load() async throws -> [Post] {
+        loadCallCount += 1
+        return []
+    }
+}
+```
+
+Now the test that pins the invariant. Write it **first** — against the broken `FeedModel` whose init fires a `Task { refresh() }` — and watch it go red:
+
+```swift
+@Suite("FeedModel construction has no side effects")
+struct FeedModelInitTests {
+
+    @Test("constructing the model does not trigger a load")
+    func initDoesNotLoad() {
+        let spy = LoaderSpy()
+
+        _ = FeedModel(loader: spy)     // just build it. touch nothing else.
+
+        #expect(spy.loadCallCount == 0)   // 🔴 fails on the clever init
+    }
+}
+```
+
+That `#expect(spy.loadCallCount == 0)` is the entire gotcha, weaponized. The broken model fails it because its `init` kicks off a load. Move the work into `onAppear()` and it goes green — and now it's **structurally impossible** for a teammate (or future-you, at 2 AM, feeling clever) to sneak a network call back into the initializer without a test screaming. The `@State` re-init churn can never hurt you again, because you've proven construction is inert.
+
+Then you test the behavior where it actually lives — in `onAppear()`, on purpose, once:
+
+```swift
+    @Test("onAppear loads the feed exactly once")
+    func onAppearLoadsOnce() async {
+        let spy = LoaderSpy()
+        let model = FeedModel(loader: spy)
+
+        await model.onAppear()
+
+        #expect(spy.loadCallCount == 1)   // 🟢 work happens — but only when asked
+    }
+```
+
+Two tiny tests. One proves the init does nothing; one proves the work happens exactly when you call it. Between them they encode the entire `@StateObject` → `@State` lesson as something a CI box checks in a millisecond, with no SwiftUI, no simulator, no render loop in sight. You're not testing the view. You're [testing the model the view drives](/learn) — which is the only SwiftUI testing that's ever paid me back.
+
+---
+
+## The honest migration checklist
+
+So, the real `ObservableObject` → `@Observable` checklist — the one that accounts for the 10%:
+
+1. **Stamp `@Observable`, delete `: ObservableObject`, delete every `@Published`.** The macro tracks stored properties for you, per-read.
+2. **`@StateObject` → `@State`. `@ObservedObject` → plain `let` or `@Bindable`. `@EnvironmentObject` → `@Environment`.** Mechanical.
+3. **Now open every initializer and ask: does it *do* anything?** Network call, timer, observer registration, `UserDefaults` read, `Task {}`, analytics ping — anything that isn't `self.x = x`. If yes, you have the bug, whether or not you've noticed it yet.
+4. **Move that work into an explicit `func` and call it from `.task`.** Init assigns; `.task` acts.
+5. **Write the spy test that asserts construction triggers zero side effects.** Red against the old init, green against the new one. That test is the only thing standing between you and a silent regression six months from now.
+
+The migration genuinely is easy. It's just that "easy" and "safe" are different words, and the gap between them is one autoclosure wide.
+
+---
+
+## The takeaway
+
+`@StateObject` did you a favor you never noticed: its autoclosure made a careless initializer safe, by running it exactly once. `@State` takes that favor away and hands you back the responsibility. That's not a regression — it's SwiftUI quietly telling you that your `init` was doing a job it was never supposed to have.
+
+So give the job to `.task`, keep your initializers dumb, and write the one test that makes "dumb initializer" a law instead of a hope. The migration was always going to be four lines. The other line — the one about where your side effects live — is the one that was worth writing a whole post about.
+
+---
+
+## Tomorrow
+
+Day 12 untangles the thing half of us still fumble: `@State` vs `@Bindable` vs `@Environment` in the `@Observable` world. One table, one mental model, and the three specific bugs you hit when you pick the wrong one. We just fixed *when* your model is built. Next we fix *who's allowed to hold it.*
