@@ -1,0 +1,156 @@
+---
+// TikTok OAuth redirect target.
+// This page must exist at exactly /auth/callback and return 200 — the TikTok
+// reviewer visits it directly. Its only job is to forward the OAuth params
+// (code/state) to our Carousel Bot backend, which finishes the connection.
+// Rendered on the server (Cloudflare) so it always responds 200; all logic is
+// client-side so we never need to trust query params on the edge.
+export const prerender = true;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Connecting TikTok — NativeFirst Carousel</title>
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --surface: #111111;
+        --surface-2: #1a1a1a;
+        --border: #222222;
+        --text: #e0e0e0;
+        --text-muted: #888888;
+        --accent: #ff6e00;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        -webkit-font-smoothing: antialiased;
+      }
+      .card {
+        width: 100%;
+        max-width: 420px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 40px 32px;
+        text-align: center;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      }
+      .brand {
+        font-weight: 800;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 28px;
+      }
+      .brand span { color: var(--text); }
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        color: #fff;
+        margin: 0 0 12px;
+        line-height: 1.3;
+      }
+      p {
+        font-size: 15px;
+        line-height: 1.6;
+        color: var(--text-muted);
+        margin: 0 auto;
+        max-width: 320px;
+      }
+      .spinner {
+        width: 40px;
+        height: 40px;
+        margin: 0 auto 24px;
+        border: 3px solid var(--surface-2);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .btn {
+        display: inline-block;
+        margin-top: 28px;
+        padding: 12px 24px;
+        background: var(--accent);
+        color: #0a0a0a;
+        font-weight: 700;
+        font-size: 14px;
+        text-decoration: none;
+        border-radius: 10px;
+        transition: opacity 0.15s ease;
+      }
+      .btn:hover { opacity: 0.9; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">Native<span>First</span> Carousel</div>
+
+      <!-- State: connecting (code + state present) -->
+      <div id="state-connecting" hidden>
+        <div class="spinner" role="status" aria-label="Connecting"></div>
+        <h1>Connecting your TikTok…</h1>
+        <p>Hang tight while we finish linking your account. This only takes a moment.</p>
+      </div>
+
+      <!-- State: error / cancelled -->
+      <div id="state-error" hidden>
+        <h1>TikTok authorization was cancelled.</h1>
+        <p>No account was connected. You can head back and try again whenever you're ready.</p>
+        <a class="btn" href="https://nativefirstapp.com">Back to NativeFirst</a>
+      </div>
+
+      <!-- State: direct visit (no params) -->
+      <div id="state-idle" hidden>
+        <h1>TikTok connection endpoint</h1>
+        <p>This is the TikTok connection endpoint for NativeFirst Carousel. Start the connection from the app.</p>
+      </div>
+    </main>
+
+    <script is:inline>
+      (function () {
+        // The deployed Carousel Bot service. Change this to your live URL.
+        var BACKEND_URL = "https://carousel-bot.up.railway.app";
+
+        var params = new URLSearchParams(window.location.search);
+        var code = params.get("code");
+        var state = params.get("state");
+        var error = params.get("error");
+
+        function show(id) {
+          var el = document.getElementById(id);
+          if (el) el.hidden = false;
+        }
+
+        if (error) {
+          // User denied or TikTok returned an error.
+          show("state-error");
+        } else if (code && state) {
+          // Valid OAuth response — forward the full query string to the backend.
+          show("state-connecting");
+          window.location.replace(
+            BACKEND_URL + "/tiktok/callback" + window.location.search
+          );
+        } else {
+          // Direct visit with no OAuth params.
+          show("state-idle");
+        }
+      })();
+    </script>
+  </body>
+</html>
