@@ -1,0 +1,295 @@
+---
+title: "@State, @Bindable, @Environment: The Complete Map for @Observable (and the Question You're Actually Asking)"
+description: "Day 12 of the 30-day iOS series. With @Observable, SwiftUI lets you slap @State, @Bindable, @Environment, or a plain let on the same class — and compiles all of them. Here's the question that actually decides which one is correct, one map that resolves 95% of the confusion, and three real BrewLog bugs (one silent, one a compile error, one a runtime crash) that come from picking wrong."
+pubDate: 2026-06-11
+tags: ["Swift", "SwiftUI", "Observable", "State Management", "Bindable", "Environment", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/swiftui-state-bindable-environment-cover.jpg"
+coverImageAlt: "A flat lay of overlapping vintage paper maps at different scales — local town plans layered under a wider regional survey of the Isle of Wight."
+---
+
+{/*
+  SEO target keywords:
+  - @State vs @Bindable vs @Environment
+  - SwiftUI @Observable property wrappers explained
+  - when to use @Bindable in SwiftUI
+  - @Environment Observable crash fix
+  - cannot find $ in scope SwiftUI
+  - No Observable object of type found
+  - SwiftUI state management 2026
+  - @Observable plain let vs @State
+  - SwiftUI decision tree state ownership
+  - Swift Testing Observable reference semantics
+
+  Internal linking strategy:
+  - /blog/observableobject-to-observable-migration-stateobject-autoclosure-gotcha (Day 11, sets up @Observable + the wrapper swap, this post is the direct sequel)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root)
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (Day 8, origin of the BrewLog `Brew` SwiftData model used in today's examples)
+  - /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree (Day 2, the "one table on the wall" decision-tree format precedent)
+  - /learn (SwiftUI at Scale — DI / protocol-seam, "test the model not the view")
+  - /blog (Day 13 teaser, not yet published — @Observable performance benchmark)
+
+  External reference strategy:
+  - developer.apple.com — "Migrating from the Observable Object protocol to the Observable macro" (covers @Bindable in passing)
+  - developer.apple.com — Bindable structure documentation
+  - Swift Forums — discussions of the "No Observable object of type X found" runtime crash
+
+  Day 12 of the 30-day iOS series. Opens the back half of the @Observable stretch (Days 11-14).
+*/}
+
+Last week I had three files open in BrewLog, all touching the same `@Observable` class — `BrewLogStore`, the thing that tracks your brewing streak. One file had `@State`. One had `@Bindable`. One had a plain `let`. I wrote all three, on three different days, clearly with three different levels of confidence about what I was doing.
+
+Only one of them was correct for that view's job. SwiftUI compiled all three. Two of them even *ran*, in the sense that nothing crashed. They were just quietly wrong, in ways that would've bitten a teammate — or future me — at the worst possible time.
+
+That's the trap with `@Observable`. The old `ObservableObject` world at least gave you three different *names* — `@StateObject`, `@ObservedObject`, `@EnvironmentObject` — that hinted at three different jobs. The new world hands you `@State`, `@Bindable`, `@Environment`, and a plain `let`, lets you point any of them at a class that conforms to `Observable`, and rarely says no.
+
+So here's the map. One table, a four-question decision tree, and three real bugs ranked by how loudly they fail — from "compiles, runs, lies to you forever" to "crashes the second you open the preview."
+
+---
+
+## The question you're asking is the wrong one
+
+Almost everyone I talk to frames this as: **"which wrapper makes my view update when the model changes?"**
+
+Wrong question. Watch this:
+
+```swift
+@Observable
+final class BrewLogStore {
+    private(set) var streak = 0
+
+    func recordBrew() {
+        streak += 1
+    }
+}
+
+struct StreakBadge: View {
+    let store: BrewLogStore   // not @State. not @Bindable. not @Environment. just `let`.
+
+    var body: some View {
+        Text("\(store.streak)-day streak")
+            .font(.headline)
+    }
+}
+```
+
+No property wrapper at all. Just a stored constant reference. Now somewhere else in the app — a different view, holding the exact same `store` instance — calls `store.recordBrew()`. `StreakBadge` redraws with the new number. Every time.
+
+Why? Because `@Observable` instruments every stored property at the macro level. Any view whose `body` *reads* `store.streak` gets re-invoked when `streak` changes — full stop, regardless of how that view is holding the reference. Observation was never the job of `@State`, `@Bindable`, or `@Environment`. It already works.
+
+So if "will my view update" isn't what these three wrappers decide, what *do* they decide? Three completely different questions:
+
+- **`@State`** answers: *who owns this instance's lifetime?*
+- **`@Bindable`** answers: *who's allowed to hand out a `$binding` into it?*
+- **`@Environment`** answers: *who gets it without anyone explicitly passing it?*
+
+Pick based on the question that actually applies to your view. That's the whole mental model. Everything below is just that idea, stress-tested against real code.
+
+---
+
+## The map
+
+Print this, stick it next to your monitor — same move as [the concurrency table from Day 2](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree).
+
+| Wrapper | The question it answers | Who creates the instance | Use it when |
+|---|---|---|---|
+| plain `let` (no wrapper) | "I just need to read it or call methods on it" | A parent, passed in as a parameter | Read-only display, triggering store actions, list rows that don't edit themselves |
+| `@State` | "This view is the instance's home" | This view, right here, inline | A model whose lifetime *is* this view's lifetime — a form draft, a view-local cache, the app's root store |
+| `@Bindable` | "I need `$model.property` for a control" | A parent, passed in as a parameter | Wiring a `TextField`, `Toggle`, `Stepper`, or `Slider` directly to a property of a passed-in model |
+| `@Environment` | "Give it to me without my parent passing it" | An ancestor, via `.environment(_:)` | App-wide or subtree-wide shared state — the session, the settings, the one true store |
+
+Notice the pattern: three of the four rows describe *how you received the object*, not what it is. The object — `BrewLogStore`, `Brew`, whatever — never changes. Only your relationship to it does.
+
+---
+
+## The four-question decision tree
+
+Run these in order. The first one that fires is your answer.
+
+1. **Are you constructing this object right here, for the first time, in this view?**
+   → `@State`. You're the owner. SwiftUI keeps this instance alive across re-renders for you.
+
+2. **Did a parent hand it to you, and does this view bind one of its properties directly to a control** (`TextField`, `Toggle`, `Stepper`, `Slider`, `Picker`)?
+   → `@Bindable`. You need `$`.
+
+3. **Did a parent hand it to you, and you only read properties or call methods?**
+   → plain `let`. No wrapper. This is the case people forget exists, and it's arguably the *most common* one in a real app — most rows in most lists just display data and tap a button.
+
+4. **Do you need it, but nothing between the app root and here wants to thread it through ten initializers?**
+   → `@Environment` — and go double-check that *something*, somewhere up the chain, actually called `.environment(_:)`. (More on that in Bug 3.)
+
+If you can answer "who created this, and what am I doing with it" in one sentence, the wrapper falls out automatically. If you can't answer that sentence, that's the actual bug — the wrapper was never going to save you.
+
+---
+
+## Three bugs, ranked by how loudly they fail
+
+All three of these are real BrewLog code. I wrote all three. Here they are from worst to best, where "worst" means "the one most likely to ship."
+
+### Bug 1: The Lonely Twin (silent — and the one that ships)
+
+```swift
+struct StreakBadge: View {
+    @State private var store = BrewLogStore()   // 🤫 compiles. runs. lies.
+
+    var body: some View {
+        Text("\(store.streak)-day streak")
+            .font(.headline)
+    }
+}
+```
+
+I copy-pasted this line straight out of `BrewLogApp`, where it's *correct* — the app root really does construct the one true `BrewLogStore` with `@State`. But `StreakBadge` isn't the app root. This `store` is a brand-new, empty `BrewLogStore` that belongs to nobody. It is never the instance that got `.environment(store)`'d at the top of the tree.
+
+The badge always shows **"0-day streak."** Forever. No warning, no crash — `@State` did exactly what it promises, it just promised the wrong thing here. Three sprints later, QA reports "the streak badge is broken," and you'll spend an hour staring at a number that's clearly incrementing *somewhere* while this view insists it's zero.
+
+**Fix:** `@Environment(BrewLogStore.self) private var store` — read the app's store, don't make your own.
+
+### Bug 2: The Missing Dollar Sign (compile-time — and the friendliest one)
+
+```swift
+struct BrewEditView: View {
+    let brew: Brew   // the SwiftData model from Day 8
+
+    var body: some View {
+        Form {
+            TextField("Tasting notes", text: $brew.notes)
+            // 🔴 Cannot find '$brew' in scope
+        }
+    }
+}
+```
+
+`$` is a *projection* — only property wrappers synthesize one. A plain `let` (or `var`) has no `$brew`, so the build fails before you even reach the simulator. This is the bug I'm least worried about, because Xcode points at the exact line and the fix is one word.
+
+**Fix:**
+
+```swift
+struct BrewEditView: View {
+    @Bindable var brew: Brew
+
+    var body: some View {
+        Form {
+            TextField("Tasting notes", text: $brew.notes)   // ✅ $brew exists now
+            Stepper("Rating: \(brew.rating)", value: $brew.rating, in: 1...5)
+        }
+    }
+}
+```
+
+### Bug 3: The Missing Ancestor (runtime crash — the one that hits previews)
+
+```swift
+struct BrewListView: View {
+    @Environment(BrewLogStore.self) private var store   // ✅ compiles fine
+
+    var body: some View {
+        List(store.brews) { brew in
+            BrewRow(brew: brew)
+        }
+    }
+}
+```
+
+This compiles cleanly and runs fine *in the app*, because `BrewLogApp` injects the store at the root. But the moment you write:
+
+```swift
+#Preview {
+    BrewListView()   // 💥
+}
+```
+
+…you get this at runtime, the instant the canvas tries to render:
+
+```
+Fatal error: No Observable object of type BrewLogStore found.
+A View.environment(_:) for BrewLogStore may be missing as an ancestor of this view.
+```
+
+`@Environment(Type.self)` for a custom `Observable` type has no default — if nothing up the chain provided one, it's a crash, not `nil`. This is the single most common reason a SwiftUI preview blows up while the real app works perfectly.
+
+**Fix:** every preview (and every test harness) that reaches a view with `@Environment(BrewLogStore.self)` has to provide one:
+
+```swift
+#Preview {
+    BrewListView()
+        .environment(BrewLogStore())
+}
+```
+
+---
+
+Look at the order again: the bug that fails *loudest* — the compile error — is the cheapest one to fix, because the compiler won't let you forget about it. The bug that fails *silently* is the one that ends up in production. If you only remember one thing from this post, make it this: **a passing build is not the same as a correct wrapper.**
+
+---
+
+## The TDD seam: you're testing ownership, not syntax
+
+Here's the [Essential Developer](/learn) habit this series keeps coming back to: none of the three wrappers above are testable, because none of them are *behavior*. They're SwiftUI's plumbing for exposing something that's already true about Swift reference types — that two variables holding the same class instance are looking at the same object.
+
+You don't test `@State`. You don't test `@Bindable`. You test *that*.
+
+```swift
+import Testing
+@testable import BrewLog
+
+@Suite("BrewLogStore is a reference type — that's the whole trick")
+struct BrewLogStoreTests {
+
+    @Test("two holders of the same instance see the same streak")
+    func sharedReferenceSeesUpdates() {
+        let store = BrewLogStore()
+
+        let listView = store    // stand-in for an @Environment-injected reference
+        let badgeView = store   // a different view, same instance
+
+        listView.recordBrew()
+
+        #expect(badgeView.streak == 1)
+    }
+
+    @Test("a freshly constructed store starts at zero — Bug 1, on the record")
+    func freshStoreStartsEmpty() {
+        let accidentalStore = BrewLogStore()
+
+        #expect(accidentalStore.streak == 0)
+    }
+}
+```
+
+That second test looks almost too dumb to write. That's the point. It's the Lonely Twin bug, captured as a passing test with a name that explains *why* a fresh `BrewLogStore()` is always empty. The next person who's tempted to write `@State private var store = BrewLogStore()` in a random view has, somewhere in the test suite, a green test telling them exactly what that gets them: nothing.
+
+And the `@Bindable` side — the part that makes `TextField` editing work — is just mutation through a reference, which you can prove without SwiftUI in the room at all:
+
+```swift
+@Suite("Brew supports in-place editing")
+struct BrewEditTests {
+
+    @Test("mutating a property is visible to every holder of the reference")
+    func editIsSharedAcrossHolders() {
+        let brew = Brew(rating: 3, notes: "", date: .now)
+        let editView = brew
+        let listRow = brew
+
+        editView.notes = "Bright, blackcurrant, needs more time on the V60"
+
+        #expect(listRow.notes.contains("V60"))
+    }
+}
+```
+
+Zero `import SwiftUI`. Zero mentions of `@State`, `@Bindable`, or `@Environment`. If your model behaves correctly here — and it will, because this is just how classes work — every wrapper SwiftUI builds on top of it inherits that correctness for free. [Test the model, not the view](/learn). The view is just a window onto something that was already right.
+
+---
+
+## The takeaway
+
+`@Observable` quietly removed the one constraint that used to force a decision: with `ObservableObject`, the wrapper name told you the relationship (`@StateObject` = I own it, `@ObservedObject` = I was handed it, `@EnvironmentObject` = it was injected). With `@Observable`, the compiler stopped enforcing that story, so you have to tell it to yourself.
+
+The question was never "will this update." It's **"who owns this, and what am I allowed to do with it here?"** Answer that honestly for every property, and `@State`, `@Bindable`, `@Environment`, and plain `let` stop being four confusing options and become four correct answers to four different questions — one of which is usually obvious the moment you ask it.
+
+---
+
+## Tomorrow
+
+We picked apart the *who* today. Day 13 picks apart the *how much* — a real Instruments benchmark of `@Observable`'s property-level tracking versus the old object-level `ObservableObject` re-renders, on a list of 1,000 items. Numbers, not vibes: how many frames you actually save, and exactly which property reads are responsible.
