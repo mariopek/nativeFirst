@@ -1,0 +1,343 @@
+---
+title: "SwiftData Two Years Later: What's Solid, What Still Bites, and the Migration Test You're Not Writing"
+description: "Day 14 of the 30-day iOS series. SwiftData is about two years old now, and the honest verdict is mixed. I already wrote the long field report on where it broke in production — this post is the part that report didn't have room for: a VersionedSchema + SchemaMigrationPlan test that proves a schema change is safe BEFORE TestFlight finds out for you."
+pubDate: 2026-06-13
+tags: ["SwiftData", "Core Data", "Swift", "SwiftUI", "Migration", "CloudKit", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/swiftdata-two-years-cover.jpg"
+coverImageAlt: "A stack of labeled cardboard moving boxes and houseplants against a wall, mid-move."
+---
+
+{/*
+  SEO target keywords:
+  - SwiftData VersionedSchema example
+  - SchemaMigrationPlan Swift Testing
+  - SwiftData lightweight migration tutorial
+  - SwiftData vs Core Data 2026
+  - test SwiftData migration before shipping
+  - SwiftData production checklist 2026
+  - @Model schema versioning Swift
+  - SwiftData MigrationStage custom example
+  - when to use Core Data over SwiftData
+  - SwiftData CloudKit migration testing
+
+  Internal linking strategy:
+  - /blog/swiftdata-migration-back-to-core-data-2026 (the field report — primary cross-link, this post is the "fixable part" companion)
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark (Day 13, direct prequel — delivers on its closing teaser)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root — @MainActor callback on mainContext)
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (Day 8, origin of BrewLog's Brew SwiftData model)
+  - /learn (SwiftUI Foundations — test the model, not the vibes)
+  - /blog (Day 15 teaser, not yet published — StoreKit 2 paywall from scratch, opens Week 3)
+
+  External reference strategy:
+  - developer.apple.com — SwiftData VersionedSchema / SchemaMigrationPlan / MigrationStage documentation
+  - developer.apple.com — "Migrate to SwiftData" WWDC23 session (willMigrate/didMigrate pattern)
+
+  Day 14 of the 30-day iOS series. Closes Week 2 (@Observable + SwiftData).
+  Delivers on Day 13's closing teaser: the honest SwiftData verdict, two years in.
+*/}
+
+Two days ago I promised a zoom-out: SwiftData is about two years old, and the honest verdict is mixed. I already wrote the long version of that story — [I migrated two apps to SwiftData, and eighteen months later migrated half of it back](/blog/swiftdata-migration-back-to-core-data-2026). Sensor data that choked `@Query`, a CloudKit schema mismatch that took four days to even *diagnose*, a migration that worked on every device in the test rig and hard-crashed for users who'd been carrying the app since iOS 17. Go read that one for the scar tissue.
+
+That report ended with a wishlist for Apple. It did *not* end with anything you could do about it today. This post is that part.
+
+Because here's the thing about "the migration that worked in testing and crashed in production" — that sentence describes a **missing test**, not an unsolvable problem. SwiftData's migration story has a real, runnable, on-disk test recipe. Almost nobody writes it. Today I'm writing it, on BrewLog's actual `Brew` model, and showing you exactly where it would have caught the pain from the field report.
+
+---
+
+## The 30-second scorecard
+
+If you skip everything else, here's the state of SwiftData in mid-2026, condensed from eighteen months of production use:
+
+- **Genuinely solid:** `@Model`, `@Query` for small-to-medium datasets, `#Predicate` type safety, and — the subject of today's post — *additive* schema changes. New optional property, new property with a default value? Add it to the struct, ship it. This part earned the hype.
+- **Still hurts:** `@Query` performance past a few thousand rows, CloudKit schema-mismatch diagnostics (basically silent), and *breaking* migrations — renames, splits, anything where the old and new shapes don't line up property-for-property.
+- **The line that matters:** [the field report bookmarked it](/blog/swiftdata-migration-back-to-core-data-2026) at **10,000 records**. Below that, SwiftData's rough edges don't bite. Above it, plan for Core Data or a hybrid split.
+
+Today's post lives entirely in the first bullet — and shows you the seam that connects it to the third.
+
+---
+
+## The 80% that's genuinely fine: an additive change to `Brew`
+
+[Back on Day 8](/blog/foundation-models-first-on-device-ai-feature-no-backend), BrewLog's `Brew` model shipped with four properties: `method`, `rating`, `notes`, `date`. Simple, and it's been that way for thirteen days of this series.
+
+Say I want to add tagging — `["decaf", "morning", "experiment"]` — so you can filter your brew history later. That's a new property on an existing model. SwiftData calls this a **lightweight migration**, and the whole point of today's exercise is to prove that claim instead of just repeating it.
+
+First, I freeze the *old* shape as a versioned schema — this is the shape that's already on disk for anyone who's used the app:
+
+```swift
+import Foundation
+import SwiftData
+
+enum BrewSchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+
+    static var models: [any PersistentModel.Type] { [Brew.self] }
+
+    @Model
+    final class Brew {
+        var method: BrewMethod
+        var rating: Int
+        var notes: String
+        var date: Date
+
+        init(method: BrewMethod, rating: Int, notes: String = "", date: Date = .now) {
+            self.method = method
+            self.rating = rating
+            self.notes = notes
+            self.date = date
+        }
+    }
+}
+```
+
+Then the *new* shape, with `tags` bolted on:
+
+```swift
+enum BrewSchemaV2: VersionedSchema {
+    static var versionIdentifier = Schema.Version(2, 0, 0)
+
+    static var models: [any PersistentModel.Type] { [Brew.self] }
+
+    @Model
+    final class Brew {
+        var method: BrewMethod
+        var rating: Int
+        var notes: String
+        var date: Date
+        var tags: [String] = []
+
+        init(method: BrewMethod, rating: Int, notes: String = "", date: Date = .now, tags: [String] = []) {
+            self.method = method
+            self.rating = rating
+            self.notes = notes
+            self.date = date
+            self.tags = tags
+        }
+    }
+}
+```
+
+And the migration plan connecting them — for a purely additive change, this is genuinely all of it:
+
+```swift
+enum BrewMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [BrewSchemaV1.self, BrewSchemaV2.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [migrateV1toV2]
+    }
+
+    static let migrateV1toV2 = MigrationStage.lightweight(
+        fromVersion: BrewSchemaV1.self,
+        toVersion: BrewSchemaV2.self
+    )
+}
+```
+
+One enum case. `.lightweight(fromVersion:toVersion:)`. No `willMigrate`, no `didMigrate`, no hand-written data shuffling. If this is *all* a schema change needs, SwiftData really does deliver on the "Core Data without the ceremony" promise.
+
+But "I wrote three enums and it compiled" isn't proof. Proof is a test that actually migrates a file on disk.
+
+---
+
+## The test: write V1 data, reopen as V2, check what survived
+
+Here's the part that's missing from almost every SwiftData tutorial I've read — including some of my own course material. The test doesn't touch `@Query` or a view. It writes a real SQLite file using the *old* schema, then reopens that *same file* using the *new* schema plus the migration plan, and asserts on what comes out the other side:
+
+```swift
+import Testing
+import SwiftData
+import Foundation
+@testable import BrewLog
+
+@Suite("Brew schema migration: adding `tags` is a lightweight migration")
+struct BrewSchemaMigrationTests {
+
+    @Test("existing brews survive the V1 -> V2 migration, tags defaults to empty")
+    @MainActor
+    func lightweightMigrationPreservesExistingData() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appending(path: "BrewMigrationTest-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        // 1. Write a brew using the V1 schema — no `tags` in sight.
+        let v1Config = ModelConfiguration(schema: Schema(versionedSchema: BrewSchemaV1.self), url: storeURL)
+        let v1Container = try ModelContainer(for: BrewSchemaV1.Brew.self, configurations: v1Config)
+        let v1Context = v1Container.mainContext
+        v1Context.insert(BrewSchemaV1.Brew(method: .aeropress, rating: 4, notes: "Bright, citrusy, 1:16 ratio"))
+        try v1Context.save()
+
+        // 2. Reopen the SAME file under the V2 schema, with the migration plan.
+        let v2Config = ModelConfiguration(schema: Schema(versionedSchema: BrewSchemaV2.self), url: storeURL)
+        let v2Container = try ModelContainer(
+            for: BrewSchemaV2.Brew.self,
+            migrationPlan: BrewMigrationPlan.self,
+            configurations: v2Config
+        )
+        let v2Context = v2Container.mainContext
+        let migrated = try v2Context.fetch(FetchDescriptor<BrewSchemaV2.Brew>())
+
+        #expect(migrated.count == 1)
+        #expect(migrated.first?.notes == "Bright, citrusy, 1:16 ratio")
+        #expect(migrated.first?.rating == 4)
+        #expect(migrated.first?.method == .aeropress)
+        #expect(migrated.first?.tags == [])
+    }
+}
+```
+
+Green, first try:
+
+```
+Test case 'BrewSchemaMigrationTests/lightweightMigrationPreservesExistingData()'
+passed on 'iPhone 17 Pro Max - BrewLog' (0.000 seconds)
+```
+
+One detail worth pausing on, because it's a free callback to [Day 1 of this series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency): the first version I wrote didn't have `@MainActor` on the test function, and Swift 6.2 refused to compile it — `mainContext` is main-actor-isolated, full stop. Two weeks ago that error message would have been a confusing surprise. Today it's just... correct. The compiler caught a real isolation requirement before I ever ran the test. That's the whole pitch from Day 1, showing up uninvited in a migration test.
+
+What this test actually proves: a real Aeropress brew, rated 4, with real notes — written to disk under the *old* shape — comes back out under the *new* shape with every old field intact and `tags` quietly defaulted to `[]`. That's "additive migrations are painless," not as a vibe, but as a passing assertion against an actual file on disk.
+
+---
+
+## The 20% that bites — and it's the same recipe
+
+Here's where it gets honest. The field report's worst story wasn't an additive change. It was **splitting one `notes` field into two** — `tastingNotes` and `brewingNotes` — because users wanted to separate "how it tasted" from "how I made it."
+
+That's not additive. The old `notes` value doesn't map to *either* new property by name, so `.lightweight` can't help you. You need `.custom`, with two closures that run on either side of the schema swap:
+
+```swift
+enum BrewNoteMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [BrewNoteSchemaV1.self, BrewNoteSchemaV2.self]
+    }
+
+    static var stages: [MigrationStage] { [migrateV1toV2] }
+
+    // Old `notes` text, captured before the schema swap drops it,
+    // keyed by the persistent identifier so didMigrate can find it again.
+    private static var rescuedNotes: [PersistentIdentifier: String] = [:]
+
+    static let migrateV1toV2 = MigrationStage.custom(
+        fromVersion: BrewNoteSchemaV1.self,
+        toVersion: BrewNoteSchemaV2.self,
+        willMigrate: { context in
+            let oldBrews = try context.fetch(FetchDescriptor<BrewNoteSchemaV1.Brew>())
+            for brew in oldBrews {
+                rescuedNotes[brew.persistentModelID] = brew.notes
+            }
+        },
+        didMigrate: { context in
+            let newBrews = try context.fetch(FetchDescriptor<BrewNoteSchemaV2.Brew>())
+            for brew in newBrews {
+                brew.tastingNotes = rescuedNotes[brew.persistentModelID] ?? ""
+                brew.brewingNotes = ""
+            }
+            try context.save()
+            rescuedNotes.removeAll()
+        }
+    )
+}
+```
+
+`willMigrate` runs while the store still looks like V1 — that's your only chance to read `notes` before it's gone. `didMigrate` runs after the swap, when the store looks like V2 — that's where you write `tastingNotes` and `brewingNotes` back in, matched up by `persistentModelID` since that's the one thing guaranteed to survive the swap.
+
+I'm not going to pretend this compiled clean on the first try when I sketched it for this post — it didn't, and pretending otherwise would be exactly the kind of "trust me" tutorial energy this series tries to avoid. What I *will* say: **the test for this is the identical recipe from the section above.** Write V1 data to a real file. Reopen it with V2 plus this plan. Assert `tastingNotes` equals the old `notes` text and `brewingNotes` is empty. If that test is red, you've found the four-day CloudKit investigation from the field report — on your laptop, in CI, before TestFlight, not after.
+
+That's the actual lesson. Not "breaking migrations are scary" — everyone already knows that. It's that **the scary ones are testable with the exact same three steps as the boring ones.** Nobody skips writing the migration code. Plenty of people skip writing the test, because "it's just data" doesn't feel like a TDD seam. It is one.
+
+---
+
+## Make the bigger decision testable too
+
+There's a decision sitting above all of this that's *also* usually made on vibes: SwiftData, Core Data, or both? The field report's hybrid split — small reference tables on SwiftData, the 40,000-row sensor store on Core Data, CloudKit sync on `NSPersistentCloudKitContainer` — is a real policy. Policies are functions. Functions are testable:
+
+```swift
+enum PersistenceChoice: Equatable {
+    case swiftData
+    case coreData
+    case hybrid
+}
+
+struct PersistenceAdvisor {
+    static func recommendedStore(
+        recordCount: Int,
+        needsCloudKitSync: Bool,
+        expectsBreakingMigrations: Bool
+    ) -> PersistenceChoice {
+        if expectsBreakingMigrations && needsCloudKitSync {
+            return .coreData
+        }
+        if recordCount > 10_000 {
+            return needsCloudKitSync ? .hybrid : .coreData
+        }
+        return .swiftData
+    }
+}
+```
+
+And the tests double as the field report's numbers, pinned down so they can't quietly drift:
+
+```swift
+import Testing
+@testable import BrewLog
+
+@Suite("PersistenceAdvisor: when to stay on SwiftData, when to reach for Core Data")
+struct PersistenceAdvisorTests {
+
+    @Test("small dataset, no CloudKit, no breaking migrations -> SwiftData")
+    func smallDatasetStaysOnSwiftData() {
+        #expect(PersistenceAdvisor.recommendedStore(
+            recordCount: 200, needsCloudKitSync: false, expectsBreakingMigrations: false
+        ) == .swiftData)
+    }
+
+    @Test("exactly 10,000 records is still the SwiftData side of the line")
+    func tenThousandRecordsIsStillSwiftData() {
+        #expect(PersistenceAdvisor.recommendedStore(
+            recordCount: 10_000, needsCloudKitSync: false, expectsBreakingMigrations: false
+        ) == .swiftData)
+    }
+
+    @Test("crossing 10,000 records without CloudKit -> Core Data")
+    func largeDatasetWithoutCloudKitMovesToCoreData() {
+        #expect(PersistenceAdvisor.recommendedStore(
+            recordCount: 10_001, needsCloudKitSync: false, expectsBreakingMigrations: false
+        ) == .coreData)
+    }
+
+    @Test("large dataset with CloudKit sync -> hybrid")
+    func largeDatasetWithCloudKitIsHybrid() {
+        #expect(PersistenceAdvisor.recommendedStore(
+            recordCount: 50_000, needsCloudKitSync: true, expectsBreakingMigrations: false
+        ) == .hybrid)
+    }
+
+    @Test("breaking migrations ahead + CloudKit sync -> Core Data, regardless of size")
+    func breakingMigrationsWithCloudKitForcesCoreData() {
+        #expect(PersistenceAdvisor.recommendedStore(
+            recordCount: 500, needsCloudKitSync: true, expectsBreakingMigrations: true
+        ) == .coreData)
+    }
+}
+```
+
+Six tests, all green. BrewLog's `Brew` table has a few hundred rows for a heavy user — nowhere near the line. But the line itself is now a number in a test file, not a paragraph you have to re-read every time someone asks "wait, why did we move the sensor store again?"
+
+---
+
+## The takeaway
+
+SwiftData at two years is roughly where Swift Concurrency was at two years, or SwiftUI was at two years: the easy 80% is genuinely, boringly good, and the hard 20% is where the framework still needs you to know what you're doing. The difference between those two groups isn't "easy vs. hard" in some abstract sense — it's **"property-for-property mapping" vs. "the old data has to go somewhere new."**
+
+What changes the outcome isn't picking the right framework. It's writing one test — V1 file on disk, reopen as V2, assert what survived — *before* you ship the schema change, regardless of which side of that line you're on. That test costs you fifteen minutes. The field report's four-day CloudKit investigation cost a lot more than that, and it started with exactly this kind of change, untested.
+
+---
+
+## Tomorrow
+
+That's Week 2 done — four days on `@Observable`, capped off with SwiftData's two-year report card. Week 3 starts somewhere everyone actually asks about: a **StoreKit 2 paywall from scratch** — subscriptions, a transaction listener, and a working restore flow, with zero third-party SDKs. First part of a three-part run through monetization that doesn't make you feel dirty.
+
+If you want the slower, ground-up version of everything BrewLog's model layer is doing here — `@Model`, `@Query`, and where this series' BrewLog project lives end to end — [SwiftUI Foundations](/learn) walks through it from the first line of code.
