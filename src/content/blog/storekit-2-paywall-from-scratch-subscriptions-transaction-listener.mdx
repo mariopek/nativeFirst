@@ -1,0 +1,475 @@
+---
+title: "A StoreKit 2 Paywall From Scratch: Subscriptions, a Transaction Listener, and a Restore Button That Works"
+description: "Day 15 of the 30-day iOS series, first of a three-part run on monetization. I built BrewLog's real paywall with StoreKit 2 — two subscription products, a transaction listener, and a restore flow — with zero third-party SDKs. Every number the paywall shows comes from one pure, tested function."
+pubDate: 2026-06-14
+tags: ["StoreKit 2", "Swift", "SwiftUI", "Subscriptions", "In-App Purchases", "Monetization", "iOS 26", "Xcode 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/storekit-2-paywall-cover.jpg"
+coverImageAlt: "A heavy brass padlock fastened through the latch of a teal metal door."
+---
+
+{/*
+  SEO target keywords:
+  - StoreKit 2 paywall tutorial SwiftUI
+  - StoreKit 2 subscription example Swift
+  - Product.products(for:) StoreKit 2 example
+  - Transaction.updates listener Swift
+  - AppStore.sync restore purchases SwiftUI
+  - StoreKit configuration file local testing Xcode
+  - @Observable SubscriptionStore SwiftUI
+  - StoreKit 2 entitlement check Swift Testing
+  - in-app purchase paywall without RevenueCat
+  - SwiftUI paywall gating free tier feature
+
+  Internal linking strategy:
+  - /blog/swiftdata-two-years-later-migration-test (Day 14, direct prequel — delivers on its "opens Week 3" teaser)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root — Task { [weak self] } listener relies on MainActor-by-default)
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark (Day 13 — @Observable, used again for SubscriptionStore)
+  - /learn (SwiftUI Foundations — test the model, not the vibes)
+  - /blog (Day 16 teaser, not yet published — free trials, intro offers, win-back, promo codes, part 2/3)
+
+  External reference strategy:
+  - developer.apple.com/documentation/storekit — Product, Transaction, VerificationResult, AppStore.sync
+  - developer.apple.com — StoreKit configuration file / testing subscriptions locally in Xcode
+
+  Day 15 of the 30-day iOS series. Opens Week 3 (Monetization, architecture, testing).
+  Part 1 of 3 on StoreKit 2 — products, purchase, transaction listener, restore.
+*/}
+
+Yesterday I closed with a promise: Week 3 starts with a **StoreKit 2 paywall**, "monetization that doesn't make you feel dirty." I want to take that seriously, because most paywalls I run into lately feel like they were designed by someone who's annoyed at me personally. Countdown timers that reset every time you background the app. "12 people bought this in the last hour." A "Maybe Later" button rendered in 6pt gray-on-gray, hiding in the corner like it's embarrassed to exist.
+
+None of that is in today's code. What *is* in today's code: two subscription products, a button that buys one, a listener that notices when StoreKit says yes, and a restore button that actually restores. That's the whole feature. If BrewLog's paywall ends up feeling honest, it's because there's nothing to hide behind — every number it shows comes from one small, tested function.
+
+---
+
+## The rule, before any StoreKit
+
+Before writing a single line of `import StoreKit`, I made the actual product decision: **BrewLog's free tier keeps your last 20 brews. Pro removes the cap.** That's it. No "3-day trial that's secretly 3 hours," no feature you can't find, no fake scarcity. Twenty brews is roughly two weeks of daily logging — enough to see if you like the app, not enough to build a real history.
+
+This is the same seam I keep coming back to in this series — [Day 5's `quickAddMethods`](/blog/liquid-glass-custom-components-when-to-leave-defaults), [Day 10's `backend(for:characterCount:)`](/blog/thinkbud-foundation-models-real-case-what-worked-what-didnt), [Day 14's migration plan](/blog/swiftdata-two-years-later-migration-test). The question "does this user get feature X?" is a **policy question**, not a StoreKit question, not a SwiftUI question. So it gets pulled into its own type, with zero imports beyond `Foundation`:
+
+```swift
+enum BrewLogEntitlement: Equatable {
+    case free
+    case pro
+}
+
+enum SubscriptionPolicy {
+    /// Free tier keeps your last 20 brews. Pro removes the cap.
+    static let freeBrewLimit = 20
+
+    static let monthlyProductID = "com.nativefirst.brewlog.pro.monthly"
+    static let yearlyProductID = "com.nativefirst.brewlog.pro.yearly"
+
+    static let proProductIDs: Set<String> = [monthlyProductID, yearlyProductID]
+
+    static func entitlement(for purchasedProductIDs: Set<String>) -> BrewLogEntitlement {
+        purchasedProductIDs.isDisjoint(with: proProductIDs) ? .free : .pro
+    }
+
+    static func canLogNewBrew(currentCount: Int, entitlement: BrewLogEntitlement) -> Bool {
+        switch entitlement {
+        case .pro:
+            true
+        case .free:
+            currentCount < freeBrewLimit
+        }
+    }
+}
+```
+
+Two functions. Neither one has ever heard of `Product` or `Transaction`. `entitlement(for:)` turns "here's the set of product IDs StoreKit says you own" into a yes/no on Pro. `canLogNewBrew` turns "here's your entitlement and your current brew count" into a yes/no on the *next* action. Everything downstream — the paywall copy, the toolbar button, the quick-add menu — asks one of these two questions and does what it's told.
+
+---
+
+## Red: the tests that pin the rule down
+
+With the policy written as plain functions, the tests are almost embarrassingly direct — which is exactly the point. No mocks, no `XCTestExpectation`, no simulated App Store. Just `#expect`:
+
+```swift
+import Testing
+@testable import BrewLog
+
+@Suite("SubscriptionPolicy: free tier limit and what Pro unlocks")
+struct SubscriptionPolicyTests {
+
+    @Test("no purchases -> free")
+    func noPurchasesIsFree() {
+        #expect(SubscriptionPolicy.entitlement(for: []) == .free)
+    }
+
+    @Test("owning the monthly plan -> pro")
+    func monthlyPurchaseIsPro() {
+        let owned: Set<String> = [SubscriptionPolicy.monthlyProductID]
+        #expect(SubscriptionPolicy.entitlement(for: owned) == .pro)
+    }
+
+    @Test("owning the yearly plan -> pro")
+    func yearlyPurchaseIsPro() {
+        let owned: Set<String> = [SubscriptionPolicy.yearlyProductID]
+        #expect(SubscriptionPolicy.entitlement(for: owned) == .pro)
+    }
+
+    @Test("an unrelated product id does not unlock pro")
+    func unrelatedProductStaysFree() {
+        let owned: Set<String> = ["com.nativefirst.brewlog.tip.medium"]
+        #expect(SubscriptionPolicy.entitlement(for: owned) == .free)
+    }
+
+    @Test("free tier allows brews under the limit")
+    func freeTierAllowsBrewsUnderLimit() {
+        #expect(SubscriptionPolicy.canLogNewBrew(currentCount: 19, entitlement: .free))
+    }
+
+    @Test("free tier blocks at exactly the limit")
+    func freeTierBlocksAtLimit() {
+        let blocked = SubscriptionPolicy.canLogNewBrew(
+            currentCount: SubscriptionPolicy.freeBrewLimit,
+            entitlement: .free
+        )
+        #expect(!blocked)
+    }
+
+    @Test("pro has no limit, even past the free cap")
+    func proHasNoLimit() {
+        #expect(SubscriptionPolicy.canLogNewBrew(currentCount: 500, entitlement: .pro))
+    }
+}
+```
+
+That "blocks at exactly the limit" test is the one I'd have skipped two years ago — off-by-one errors in paywalls are how you end up with a free tier that's secretly 19 brews, or 21, and nobody notices until a user emails you confused about which one it is. Writing `currentCount: SubscriptionPolicy.freeBrewLimit` instead of a hardcoded `20` means if I ever change the limit, this test keeps checking the *boundary*, not a stale number.
+
+Seven tests, all green, and not one of them has touched the App Store.
+
+---
+
+## Green: the StoreKit 2 store itself
+
+Here's the part that actually says `import StoreKit`. `SubscriptionStore` is an `@Observable` class — same tool [Day 13's redraw benchmark](/blog/observable-vs-observableobject-1000-row-redraw-benchmark) was about — holding the products StoreKit knows about, the set of product IDs the user has purchased, and a loading/error state for the UI to react to:
+
+```swift
+import Foundation
+import StoreKit
+
+@Observable
+final class SubscriptionStore {
+    private(set) var products: [Product] = []
+    private(set) var purchasedProductIDs: Set<String> = []
+    private(set) var isLoading = false
+    var errorMessage: String?
+
+    private var transactionListener: Task<Void, Never>?
+
+    var entitlement: BrewLogEntitlement {
+        SubscriptionPolicy.entitlement(for: purchasedProductIDs)
+    }
+
+    init() {
+        transactionListener = listenForTransactions()
+    }
+
+    deinit {
+        transactionListener?.cancel()
+    }
+
+    func loadProducts() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let storeProducts = try await Product.products(for: SubscriptionPolicy.proProductIDs)
+            products = storeProducts.sorted { $0.price < $1.price }
+        } catch {
+            errorMessage = "Couldn't load BrewLog Pro plans: \(error.localizedDescription)"
+        }
+    }
+
+    func purchase(_ product: Product) async {
+        do {
+            let result = try await product.purchase()
+            switch result {
+            case .success(let verification):
+                let transaction = try checkVerified(verification)
+                await updatePurchasedProducts()
+                await transaction.finish()
+            case .userCancelled, .pending:
+                break
+            @unknown default:
+                break
+            }
+        } catch {
+            errorMessage = "Purchase failed: \(error.localizedDescription)"
+        }
+    }
+
+    func restorePurchases() async {
+        do {
+            try await AppStore.sync()
+            await updatePurchasedProducts()
+        } catch {
+            errorMessage = "Restore failed: \(error.localizedDescription)"
+        }
+    }
+
+    func updatePurchasedProducts() async {
+        var purchased: Set<String> = []
+        for await result in Transaction.currentEntitlements {
+            if let transaction = try? checkVerified(result), transaction.revocationDate == nil {
+                purchased.insert(transaction.productID)
+            }
+        }
+        purchasedProductIDs = purchased
+    }
+
+    private func listenForTransactions() -> Task<Void, Never> {
+        Task { [weak self] in
+            for await result in Transaction.updates {
+                guard let transaction = try? checkVerified(result) else { continue }
+                await self?.updatePurchasedProducts()
+                await transaction.finish()
+            }
+        }
+    }
+}
+
+private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
+    switch result {
+    case .unverified:
+        throw SubscriptionStoreError.failedVerification
+    case .verified(let safe):
+        return safe
+    }
+}
+
+enum SubscriptionStoreError: Error {
+    case failedVerification
+}
+```
+
+A few things worth slowing down on:
+
+**`entitlement` is computed, not stored.** It's a one-line call into yesterday's pure function. The store's only job is to keep `purchasedProductIDs` accurate — the *meaning* of that set lives entirely in `SubscriptionPolicy`.
+
+**`checkVerified` is a free function, not a method.** StoreKit wraps every transaction in a `VerificationResult` — `.verified` (Apple's cryptographic signature checked out) or `.unverified` (it didn't, which usually means something's wrong, not that you should silently proceed). Unwrapping that is the same operation everywhere it happens, so it's a tiny generic function instead of three copy-pasted switch statements.
+
+**`Transaction.currentEntitlements` vs. `Transaction.updates`.** These look similar and do different jobs. `currentEntitlements` is a snapshot — "what does this user currently own, right now" — and `updatePurchasedProducts()` rebuilds `purchasedProductIDs` from it completely, which makes it safe to call after a purchase, after a restore, or on launch. `Transaction.updates` is a *stream* — it fires when something changes from *outside* the current session: a renewal, a refund, a purchase made on another device. The listener just reacts to that stream by re-running the same snapshot.
+
+**`Task { [weak self] in ... }`, no `@MainActor` anywhere in this file.** This is [Day 1's promise](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency) showing up again, three weeks later. BrewLog's project settings default every type to the main actor under Swift 6.2. That `Task` inherits main-actor isolation from `init()`, so `await self?.updatePurchasedProducts()` mutating `purchasedProductIDs` — an `@Observable` property SwiftUI is watching — is just... fine. No `MainActor.run`, no `@MainActor` annotation, no warning. Eighteen months ago this exact pattern was a textbook data-race footgun. Today the compiler would stop me if I got it wrong, and I didn't have to think about it once while writing it.
+
+---
+
+## Testing it without a real App Store: the `.storekit` file
+
+Here's the anecdote that explains why `restorePurchases()` exists at all. A while back I bought a "remove ads" upgrade in some app, got a new phone a year later, tapped "Restore Purchases," and watched the button just... sit there. Spinning. Forever. I never got the upgrade back, never heard from support, and eventually paid for it again out of sheer guilt-avoidance. **"Restore Purchases" has to actually restore — first time, every time** — or it's worse than not having the button.
+
+You can't test that against the real App Store from a simulator without a sandbox account and a lot of patience. Xcode's answer is a **StoreKit configuration file** — a JSON description of your products that the simulator treats as a fake App Store, no network or App Store Connect required:
+
+```json
+{
+  "identifier" : "8F2A6C10-BREW-4C9A-9B2D-LOGPRO000001",
+  "subscriptionGroups" : [
+    {
+      "id" : "21000000",
+      "name" : "BrewLog Pro",
+      "subscriptions" : [
+        {
+          "displayPrice" : "2.99",
+          "productID" : "com.nativefirst.brewlog.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "BrewLog Pro Monthly",
+          "subscriptionGroupID" : "21000000",
+          "type" : "RecurringSubscription",
+          "localizations" : [
+            {
+              "description" : "Unlimited brew history, billed monthly.",
+              "displayName" : "BrewLog Pro Monthly",
+              "locale" : "en_US"
+            }
+          ]
+        },
+        {
+          "displayPrice" : "19.99",
+          "productID" : "com.nativefirst.brewlog.pro.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "BrewLog Pro Yearly",
+          "subscriptionGroupID" : "21000000",
+          "type" : "RecurringSubscription",
+          "localizations" : [
+            {
+              "description" : "Unlimited brew history, billed yearly. Two months free vs. monthly.",
+              "displayName" : "BrewLog Pro Yearly",
+              "locale" : "en_US"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "version" : { "major" : 3, "minor" : 0 }
+}
+```
+
+Two product IDs, matching `SubscriptionPolicy.monthlyProductID` and `.yearlyProductID` exactly — that's the only coupling between this file and the Swift code, and it's the kind of coupling a typo in either direction will make *very* obvious. With `BrewLog.storekit` attached to the scheme (Edit Scheme → Run → Options → StoreKit Configuration), `Product.products(for:)` returns these two products, `product.purchase()` shows Xcode's fake purchase sheet, and `AppStore.sync()` talks to the local fake store instead of the real one. Same code path, zero dollars, zero waiting for App Store Connect to feel like working.
+
+---
+
+## The paywall screen itself
+
+`PaywallView` is deliberately dumb — every number it shows comes from `SubscriptionPolicy` or `SubscriptionStore`, never hardcoded:
+
+```swift
+struct PaywallView: View {
+    @Environment(SubscriptionStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 28) {
+                    header
+                    featureList
+                    plans
+                    restoreButton
+
+                    if let message = store.errorMessage {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("BrewLog Pro")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Not now") { dismiss() }
+                }
+            }
+            .task {
+                await store.loadProducts()
+                await store.updatePurchasedProducts()
+            }
+        }
+    }
+
+    private var featureList: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            FeatureRow(
+                icon: "infinity",
+                text: "Unlimited brews — the free tier stops at \(SubscriptionPolicy.freeBrewLimit)"
+            )
+            FeatureRow(icon: "tag.fill", text: "Tag and filter your brew history")
+            FeatureRow(icon: "icloud.and.arrow.up.fill", text: "Back up your log automatically")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(.thinMaterial, in: .rect(cornerRadius: 16))
+    }
+
+    private var restoreButton: some View {
+        Button("Restore purchases") {
+            Task { await store.restorePurchases() }
+        }
+        .font(.footnote)
+        .accessibilityIdentifier("RestorePurchasesButton")
+    }
+}
+```
+
+That `"the free tier stops at \(SubscriptionPolicy.freeBrewLimit)"` line is the whole philosophy in one string interpolation. If I ever change the limit to 30, I change one constant, and the paywall copy, the gating logic, and the test suite all move together. There's no second place to remember to update.
+
+---
+
+## Gating the app: two places, one check
+
+The paywall doesn't do much good sitting on its own — something has to *show* it. BrewLog gates new brews in two places, and both ask `canLogNewBrew` and nothing else.
+
+In `HomeTab`, both the quick-add menu and the toolbar "+" check the same computed property before doing anything:
+
+```swift
+private var canLogNewBrew: Bool {
+    SubscriptionPolicy.canLogNewBrew(
+        currentCount: allBrews.count,
+        entitlement: subscriptionStore.entitlement
+    )
+}
+```
+
+```swift
+QuickBrewMenu(methods: quickAddMethods(showMilkBased: prefs.showMilkBased), isExpanded: $quickExpanded) { method in
+    guard canLogNewBrew else {
+        quickExpanded = false
+        showPaywall = true
+        return
+    }
+    let brew = Brew(method: method, rating: prefs.defaultStrength > 5 ? 5 : 4)
+    ctx.insert(brew)
+    try? ctx.save()
+}
+```
+
+```swift
+Button {
+    if canLogNewBrew {
+        isComposing = true
+    } else {
+        showPaywall = true
+    }
+} label: {
+    Label("New brew", systemImage: "plus")
+}
+```
+
+And in Settings, a `ProCard` shows where you stand — free or Pro — with a "View plans" button that only appears if there's somewhere to go:
+
+```swift
+switch subscriptionStore.entitlement {
+case .pro:
+    Text("Unlimited brew history is unlocked. Thanks for supporting BrewLog.")
+        .foregroundStyle(.secondary)
+case .free:
+    Text("Free tier keeps your last \(SubscriptionPolicy.freeBrewLimit) brews (\(allBrews.count) logged). Go Pro for unlimited history.")
+        .foregroundStyle(.secondary)
+
+    Button("View plans") { showPaywall = true }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .accessibilityIdentifier("ViewPlansButton")
+}
+```
+
+Three call sites, one rule, zero duplicated thresholds. If this were spread across three different `if allBrews.count >= 20` checks, the day I change the limit to 25 I'd be grepping the codebase hoping I found all of them. Instead I change `freeBrewLimit` in one enum and every call site, every test, and the paywall copy all agree by construction.
+
+---
+
+## All green
+
+Eight tests — the seven policy tests above, plus one confirming a fresh `SubscriptionStore` starts on the free tier with no purchases before StoreKit has even answered:
+
+```
+Test Suite 'SubscriptionPolicyTests' passed
+Test Suite 'SubscriptionStoreTests' passed
+** TEST SUCCEEDED **
+```
+
+And the whole target builds clean under Swift 6.2's strict concurrency checking — the same default-MainActor setup [from Day 1](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency):
+
+```
+** BUILD SUCCEEDED **
+```
+
+---
+
+## The takeaway
+
+A StoreKit 2 paywall sounds like it should be the scary part — async sequences, verification, transaction listeners, a whole second App Store identity to configure. And it *is* a real chunk of plumbing. But almost none of that plumbing is where the actual product decisions live. "What's free, what's Pro, where's the line" is six lines of `enum SubscriptionPolicy`, fully covered by seven tests that don't import StoreKit at all.
+
+Once that line is drawn and tested, the StoreKit code's job shrinks to one thing: keep `purchasedProductIDs` honest, and tell the truth about it everywhere. That's a much smaller, much less scary problem than "build a paywall."
+
+---
+
+## Tomorrow
+
+Part 2 of 3: **free trials, introductory offers, win-back offers, and promo codes** — the stuff that turns "here are two buttons" into "here's why someone who churned six months ago might come back." Same `SubscriptionStore`, same tested policy underneath, more StoreKit surface area.
+
+If you want the slower, ground-up version — how BrewLog's `@Observable` state, SwiftData model, and now its subscription layer all fit together from the first line of code — [SwiftUI Foundations](/learn) walks through the whole project.
