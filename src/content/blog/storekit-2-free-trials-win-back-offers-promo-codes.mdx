@@ -1,0 +1,423 @@
+---
+title: "StoreKit 2, Part 2: Free Trials, Win-Back Offers, and Promo Codes That Actually Convert"
+description: "Day 16 of the 30-day iOS series. I add a 7-day free trial, a win-back banner for lapsed subscribers, and offer-code redemption to BrewLog's paywall — concrete App Store Connect configuration plus the Swift code, all covered by Swift Testing."
+pubDate: 2026-06-15
+tags: ["StoreKit 2", "Swift", "SwiftUI", "Subscriptions", "In-App Purchases", "Free Trial", "Win-Back Offers", "Promo Codes", "App Store Connect", "iOS 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/storekit-2-winback-trials-cover.jpg"
+coverImageAlt: "A coir doormat reading 'well, hello there.' on a red brick step in front of a blue door with red trim."
+---
+
+{/*
+  SEO target keywords:
+  - StoreKit 2 free trial introductory offer SwiftUI
+  - StoreKit 2 win-back offer example Swift
+  - offerCodeRedemption SwiftUI promo code
+  - isEligibleForIntroOffer StoreKit 2 example
+  - Product.SubscriptionOffer winBackOffers Swift
+  - App Store Connect introductory offer configuration
+  - App Store Connect win-back offer setup
+  - StoreKit configuration file introductory offer freeTrial paymentMode
+  - subscription offer code redemption sheet iOS
+  - SwiftUI paywall win-back banner example
+
+  Internal linking strategy:
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener (Day 15, direct prequel — same SubscriptionStore/PaywallView, part 1 of 3)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root)
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark (Day 13 — @Observable, same SubscriptionStore)
+  - /blog/swiftdata-two-years-later-migration-test (Day 14 — same "policy in a pure type" seam)
+  - /learn (SwiftUI Foundations — test the model, not the vibes)
+  - /blog (Day 17 teaser, not yet published — server-side receipt validation, App Store Server API, part 3/3)
+
+  External reference strategy:
+  - developer.apple.com/documentation/storekit — Product.SubscriptionInfo, introductoryOffer, isEligibleForIntroOffer, winBackOffers, offerCodeRedemption
+  - App Store Connect — Subscriptions > Introductory Offers / Win-Back Offers / Offer Codes
+
+  Day 16 of the 30-day iOS series. Part 2 of 3 on StoreKit 2 — free trials, win-back offers, promo codes.
+*/}
+
+Yesterday's paywall had two buttons and a restore link. Honest, boring, done. Today it gets the three things that turn "here are two buttons" into something that actually moves people: a free trial that lowers the cost of saying yes, a win-back banner for the people who already said no, and a redeem-code button for whoever you want to bribe back personally.
+
+That doormat on the cover is the whole post in one photo, and I didn't even have to look hard for it. Win-back offers aren't for the new user standing at the door for the first time — that's what the free trial is for. Win-back is for the person who already came in, looked around, decided it wasn't for them, and left. The doormat is for the second visit.
+
+Same `SubscriptionStore`, same tested `SubscriptionPolicy` from [Day 15](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener), more StoreKit surface area, more App Store Connect configuration than code — for once, the Swift is the easy part.
+
+---
+
+## Two new questions, same seam
+
+Day 15's whole argument was: "does this user get feature X" is a policy question, not a StoreKit question, so it gets pulled into a plain type with zero framework imports. Today that seam earns its keep twice more.
+
+**Question one:** given an introductory offer StoreKit hands back as a `Product.SubscriptionOffer`, how do I turn `paymentMode: .freeTrial, period: { value: 7, unit: .day }` into "7 days free, then $19.99/year" — and *not* "1 months free" the one time the period happens to be 1?
+
+**Question two:** given a win-back offer exists for this product, should the paywall actually show the banner right now? (Spoiler: only if the user is on the free tier. Showing a "come back!" banner to someone who's already paying you is not a good look.)
+
+Both questions get the same treatment — a small value type, plus an enum of pure functions that have never heard of `Product`:
+
+```swift
+enum BillingPeriodUnit: Equatable {
+    case day, week, month, year
+
+    var name: String {
+        switch self {
+        case .day: "day"
+        case .week: "week"
+        case .month: "month"
+        case .year: "year"
+        }
+    }
+}
+
+struct IntroOffer: Equatable {
+    let periodValue: Int
+    let periodUnit: BillingPeriodUnit
+    let regularPrice: String
+    let regularPeriodUnit: BillingPeriodUnit
+}
+
+enum SubscriptionOfferPolicy {
+    /// "7 days free, then $19.99/year" — and "1 month", never "1 months".
+    static func trialCopy(for offer: IntroOffer) -> String {
+        let trial = periodPhrase(value: offer.periodValue, unit: offer.periodUnit)
+        return "\(trial) free, then \(offer.regularPrice)/\(offer.regularPeriodUnit.name)"
+    }
+
+    static func periodPhrase(value: Int, unit: BillingPeriodUnit) -> String {
+        value == 1 ? "1 \(unit.name)" : "\(value) \(unit.name)s"
+    }
+
+    /// Win-back offers exist for people who already left. Showing the banner
+    /// to a current Pro subscriber would be both pointless and confusing.
+    static func shouldShowWinBackBanner(entitlement: BrewLogEntitlement, hasWinBackOffer: Bool) -> Bool {
+        entitlement == .free && hasWinBackOffer
+    }
+}
+```
+
+`BillingPeriodUnit` is BrewLog's own period type. StoreKit has `Product.SubscriptionPeriod.Unit` — also `.day` / `.week` / `.month` / `.year` — but this file doesn't import StoreKit, and never will. That's not an accident, and it's not duplication for its own sake either. It's the same DIP-flavored boundary as `checkVerified` from Day 15: one small app-owned type, one adapter at the edge (more on that below), and the entire rest of the app — paywall, policy, tests — depends on the small type and nothing else.
+
+Here's the version I'd have written first, three years ago, no test in sight:
+
+```swift
+// What an LLM (or me, on a Friday afternoon) writes first:
+Text("\(offer.periodValue) \(offer.periodUnit.name)s free, then \(offer.regularPrice)/\(offer.regularPeriodUnit.name)")
+```
+
+It works for "7 days" and "2 weeks." It also produces **"1 months free, then $2.99/month"** the one time `periodValue == 1` — which, for BrewLog's yearly plan with a one-week trial, is *never*, but for the monthly plan with a one-month trial would be *every single time*. That's the kind of bug that ships, sits in production for eight months, and gets reported by exactly one (very polite, very confused) user. `periodPhrase` exists to make that branch impossible to forget — and to make it a one-line `#expect` instead of a "trust me, I read it out loud."
+
+---
+
+## Red: the tests that catch "1 months"
+
+Four tests, same `#expect`-only style as Day 15. No StoreKit, no mocks, no simulator:
+
+```swift
+@Suite("SubscriptionOfferPolicy: trial copy and win-back gating")
+struct SubscriptionOfferPolicyTests {
+
+    @Test("a 7-day free trial reads naturally")
+    func sevenDayTrial() {
+        let offer = IntroOffer(periodValue: 7, periodUnit: .day, regularPrice: "$19.99", regularPeriodUnit: .year)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "7 days free, then $19.99/year")
+    }
+
+    @Test("a one-unit period is singular, not '1 months'")
+    func singularPeriodIsNotPlural() {
+        let offer = IntroOffer(periodValue: 1, periodUnit: .month, regularPrice: "$2.99", regularPeriodUnit: .month)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "1 month free, then $2.99/month")
+    }
+
+    @Test("a multi-week trial pluralizes correctly")
+    func multiWeekTrial() {
+        let offer = IntroOffer(periodValue: 2, periodUnit: .week, regularPrice: "$19.99", regularPeriodUnit: .year)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "2 weeks free, then $19.99/year")
+    }
+
+    @Test("win-back banner shows only to free-tier users when an offer exists")
+    func winBackBannerGating() {
+        #expect(SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .free, hasWinBackOffer: true))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .free, hasWinBackOffer: false))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .pro, hasWinBackOffer: true))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .pro, hasWinBackOffer: false))
+    }
+}
+```
+
+`singularPeriodIsNotPlural` is the test that justifies this whole detour. Without it, "1 months free" is a typo waiting for a release. With it, the typo can't survive `xcodebuild test`.
+
+`winBackBannerGating` is four assertions because there are four combinations of (free/pro) × (has offer/doesn't), and a banner-gating bug is the kind of thing that's invisible until a Pro subscriber screenshots it and tweets "uh, BrewLog, I already pay you?" The truth table is short enough to just... write it down.
+
+---
+
+## Configuring the free trial: App Store Connect, then the `.storekit` file
+
+This is the part that's all clicking, no typing. In **App Store Connect → your app → Subscriptions → BrewLog Pro (the subscription group) → BrewLog Pro Yearly**, there's an **Introductory Offers** section. The steps:
+
+1. Click **Create Introductory Offer**.
+2. Offer type: **Free Trial**.
+3. Duration: pick from the dropdown — **1 Week** for BrewLog.
+4. Choose territories (I left it at all territories — BrewLog doesn't have a reason to vary this by country yet).
+5. Save, and submit it. **First-time introductory offers go through App Review** — even though the binary on the device doesn't change. Budget a day or two before it's live in sandbox and production, which is the kind of thing that's obvious once you know it and invisible in the docs until you're staring at a paywall that still says nothing about a trial three hours after you configured one.
+
+The local mirror is the `BrewLog.storekit` file, used for testing in the simulator without waiting on any of the above. The yearly product's `introductoryOffer` went from `null` to:
+
+```json
+"introductoryOffer" : {
+  "internalID" : "21000002-INTRO-7DAY",
+  "paymentMode" : "freeTrial",
+  "subscriptionPeriod" : "P1W"
+},
+```
+
+Two gotchas that cost me a few minutes each, in case they save you the same:
+
+- **`paymentMode` is `"freeTrial"`, not `"free"`.** The other valid values are `"payAsYouGo"` and `"payUpFront"` — both for discounted-but-not-free intro pricing, which BrewLog doesn't use.
+- **`subscriptionPeriod` is ISO 8601 duration syntax** — `"P1W"` for one week, `"P1M"` for one month, `"P3M"` for three months. App Store Connect's UI hides this behind a friendly dropdown; the `.storekit` file (and the App Store Server API, for Day 18) speak ISO 8601 directly.
+
+With that in place, `subscription.introductoryOffer` on the yearly `Product` is non-nil in the simulator, and `SubscriptionOfferPolicy.trialCopy` has something real to format.
+
+---
+
+## The StoreKit boundary grows: eligibility and offer mapping
+
+`SubscriptionStore` gets two new published properties:
+
+```swift
+private(set) var eligibleForIntroOffer = true
+private(set) var winBackOffers: [Product.SubscriptionOffer] = []
+```
+
+and three new methods. First, turning StoreKit's offer into BrewLog's `IntroOffer`:
+
+```swift
+/// Maps StoreKit's `Product.SubscriptionOffer` onto BrewLog's own
+/// `IntroOffer` — `SubscriptionOfferPolicy` formats whatever comes back,
+/// without ever importing StoreKit itself. Only `.freeTrial` offers are
+/// surfaced; BrewLog doesn't currently configure pay-up-front intros.
+func introOffer(for product: Product) -> IntroOffer? {
+    guard let subscription = product.subscription,
+          let offer = subscription.introductoryOffer,
+          offer.paymentMode == .freeTrial else {
+        return nil
+    }
+    return IntroOffer(
+        periodValue: offer.period.value,
+        periodUnit: BillingPeriodUnit(offer.period.unit),
+        regularPrice: product.displayPrice,
+        regularPeriodUnit: BillingPeriodUnit(subscription.subscriptionPeriod.unit)
+    )
+}
+```
+
+Then the per-*user* refresh — this is the one that surprised me the first time I read the docs:
+
+```swift
+/// Refreshes the two things that are per-*user*, not per-product:
+/// whether this customer still gets the free trial (StoreKit hides
+/// `introductoryOffer` once someone's already had one, but
+/// `isEligibleForIntroOffer` is the explicit check), and which win-back
+/// offers exist for a lapsed subscriber on this product.
+func refreshOffers(for product: Product) async {
+    guard let subscription = product.subscription else { return }
+    eligibleForIntroOffer = await subscription.isEligibleForIntroOffer
+    winBackOffers = subscription.winBackOffers
+}
+```
+
+**"Wait, but why is eligibility an `async` StoreKit call instead of a flag I track?"** Because BrewLog tracking it would be *worse* than useless — it'd be wrong the moment someone reinstalls the app, switches devices, or shares family purchases. Apple already knows whether this Apple ID has redeemed an intro offer on *any* of BrewLog's subscriptions, on *any* device, ever. `isEligibleForIntroOffer` asks that question directly. `introductoryOffer` itself even comes back `nil` once someone's used it — `isEligibleForIntroOffer` is there so the UI can distinguish "no trial configured" from "trial configured, but you've had it."
+
+That's also exactly why `eligibleForIntroOffer` *defaults* to `true` and `winBackOffers` defaults to `[]` — a fresh store, before `refreshOffers(for:)` has run, has no idea yet, and "assume the best case" is the safer default for a paywall than "assume the worst."
+
+Now the part that's been waiting since Day 15 — the one place `Product.SubscriptionPeriod.Unit` is allowed to exist:
+
+```swift
+extension BillingPeriodUnit {
+    /// The one place `Product.SubscriptionPeriod.Unit` is allowed to exist.
+    init(_ unit: Product.SubscriptionPeriod.Unit) {
+        switch unit {
+        case .day: self = .day
+        case .week: self = .week
+        case .month: self = .month
+        case .year: self = .year
+        @unknown default: self = .month
+        }
+    }
+}
+```
+
+This is **Dependency Inversion** doing actual work, not academic decoration. `SubscriptionOfferPolicy`, `PaywallView`, and every test in `SubscriptionOfferPolicyTests` depend on `BillingPeriodUnit` — a four-case enum BrewLog owns. None of them depend on `Product.SubscriptionPeriod.Unit`. If Apple ships a fifth unit next year (`.decade`, I don't know, they've surprised me before), exactly **one** `init` needs a new case, the `@unknown default` keeps it compiling today, and every policy function, every test, and the paywall copy are completely unaffected. The alternative — `Product.SubscriptionPeriod.Unit` sprinkled through `SubscriptionOfferPolicy` and `PaywallView` — means that hypothetical fifth case is a compiler error in three files instead of an exhaustiveness warning in one.
+
+Last change to the store: `purchase` now optionally takes a win-back offer, because redeeming one is just... a purchase, with an extra option attached:
+
+```swift
+func purchase(_ product: Product, winBackOffer: Product.SubscriptionOffer? = nil) async {
+    do {
+        var options: Set<Product.PurchaseOption> = []
+        if let winBackOffer {
+            options.insert(.winBackOffer(winBackOffer))
+        }
+        let result = try await product.purchase(options: options)
+        switch result {
+        case .success(let verification):
+            let transaction = try checkVerified(verification)
+            await updatePurchasedProducts()
+            await transaction.finish()
+        case .userCancelled, .pending:
+            break
+        @unknown default:
+            break
+        }
+    } catch {
+        errorMessage = "Purchase failed: \(error.localizedDescription)"
+    }
+}
+```
+
+Same `checkVerified`, same `updatePurchasedProducts()` rebuild from `Transaction.currentEntitlements`, same error handling. The win-back offer doesn't get special-cased anywhere downstream — it's just one more `Product.PurchaseOption` in the set StoreKit already knew how to handle.
+
+---
+
+## Win-back offers: configured for people who already left
+
+A win-back offer is a discount StoreKit will surface *only* to subscribers whose subscription in this group has lapsed — not new users, not active subscribers, specifically people who churned. The configuration lives in **App Store Connect → Subscriptions → BrewLog Pro → BrewLog Pro Yearly → Win-Back Offers**:
+
+1. **Create Win-Back Offer.**
+2. Pick the discount: a percentage off for N billing periods, or a flat reduced price.
+3. Set the **eligibility window** — this is the part the prompt for this post called out as "unknown to many," and it's the whole point: you choose something like "subscription expired between 1 and 365 days ago." Too short a window and you miss most lapsed users; too long and you're discounting someone who churned two years ago and has completely forgotten BrewLog exists (arguably a different problem).
+4. Submit for review. Like introductory offers, this goes through App Review once, then StoreKit starts surfacing it automatically to anyone who qualifies — no server call, no flag, no "is this user eligible" logic on BrewLog's end.
+
+Once it's live, `subscription.winBackOffers` on the yearly `Product` returns the eligible offers for *this* signed-in Apple ID — empty for a brand-new user, populated for someone who churned inside the configured window. `winBackCopy(for:)` turns that into a sentence, reusing `periodPhrase` from earlier:
+
+```swift
+/// Formats a win-back offer for the banner. Lives here, next to the
+/// `BillingPeriodUnit` mapping, so `PaywallView` never has to reach into
+/// `Product.SubscriptionPeriod` directly.
+func winBackCopy(for offer: Product.SubscriptionOffer) -> String {
+    let phrase = SubscriptionOfferPolicy.periodPhrase(value: offer.period.value, unit: BillingPeriodUnit(offer.period.unit))
+    return "\(offer.displayPrice) for your first \(phrase) back"
+}
+```
+
+One honest caveat for the "what changes at scale" file: BrewLog's `shouldShowWinBackBanner` is deliberately simple — "any win-back offer exists, and the user is on the free tier." That's correct for one subscription group with one configured win-back offer, which is BrewLog's entire setup. A larger app running *multiple* win-back offers across multiple products would want to cross-check `Product.SubscriptionInfo.RenewalInfo.eligibleWinBackOfferIDs` (reached via `subscription.status`) to know *which specific offer* this user qualifies for, rather than assuming the first one in the array is the right one. BrewLog doesn't need that yet — but if you're reading this with five win-back offers configured, that's the API you want, not `winBackOffers.first`.
+
+---
+
+## The paywall: trial copy, a banner, and a redeem button
+
+Three additions to `PaywallView`, in order of how often they'll actually render.
+
+**Trial copy**, computed per-product and only shown if both the offer exists *and* the user hasn't burned it:
+
+```swift
+/// "7 days free, then $19.99/year" under the yearly plan — but only if
+/// StoreKit both has an offer to show *and* this customer hasn't used
+/// one already.
+private func trialCopy(for product: Product) -> String? {
+    guard store.eligibleForIntroOffer, let offer = store.introOffer(for: product) else {
+        return nil
+    }
+    return SubscriptionOfferPolicy.trialCopy(for: offer)
+}
+```
+
+`PlanButton` renders it as a small tinted line under the price, only when non-nil:
+
+```swift
+if let trialCopy {
+    Text(trialCopy)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.tint)
+}
+```
+
+**The win-back banner** — the only view in this whole feature with real layout, because it's the one place BrewLog is actively trying to change someone's mind:
+
+```swift
+@ViewBuilder
+private var winBackBanner: some View {
+    if SubscriptionOfferPolicy.shouldShowWinBackBanner(
+        entitlement: store.entitlement,
+        hasWinBackOffer: !store.winBackOffers.isEmpty
+    ),
+       let offer = store.winBackOffers.first,
+       let yearly = store.products.first(where: { $0.id == SubscriptionPolicy.yearlyProductID }) {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Welcome back offer", systemImage: "gift.fill")
+                .font(.subheadline.weight(.semibold))
+            Text(store.winBackCopy(for: offer))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button("Claim offer") {
+                Task { await store.purchase(yearly, winBackOffer: offer) }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.tint.opacity(0.12), in: .rect(cornerRadius: 14))
+        .accessibilityIdentifier("WinBackBanner")
+    }
+}
+```
+
+Every condition in that `if` is doing a job: `shouldShowWinBackBanner` is yesterday's policy check, `store.winBackOffers.first` is "is there actually an offer to describe," and `store.products.first(where:)` is "do we even have the yearly product loaded to purchase." Three `nil`/`false` checks chained with commas, and if any of them fails, the banner simply isn't part of the view tree — no empty card, no placeholder, nothing.
+
+**The redeem-code button** — one button, one modifier, and that's the entire promo code feature:
+
+```swift
+private var redeemCodeButton: some View {
+    Button("Redeem code") {
+        showRedeemCode = true
+    }
+    .font(.footnote)
+    .accessibilityIdentifier("RedeemCodeButton")
+}
+```
+
+```swift
+.offerCodeRedemption(isPresented: $showRedeemCode) { result in
+    if case .failure(let error) = result {
+        store.errorMessage = "Redeem failed: \(error.localizedDescription)"
+    }
+}
+```
+
+`.offerCodeRedemption` presents Apple's own sheet — the user types or scans a code, StoreKit validates it, applies it, and fires the same `Transaction.updates` stream the listener from Day 15 already handles. BrewLog's job is exactly two things: show a button, and turn a `.failure` result into a string for `errorMessage`. The `.success` case needs *zero* code, because the transaction listener was already going to pick up the resulting purchase regardless of where it came from.
+
+The codes themselves come from **App Store Connect → Subscriptions → Offer Codes**: create an offer (a discount or free period, same building blocks as everything else in this post), then generate codes — one-time codes for individual use, or a batch as a CSV for, say, handing to a podcast sponsor or a beta tester or someone whose bug report you feel personally guilty about. This is the same shape of decision as Day 15's restore button: BrewLog could build its own promo-code system — a backend, a database of codes, validation logic, expiry handling — and in doing so would have built a worse, buggier, *second App Store*. One modifier exists so nobody has to.
+
+---
+
+## All green
+
+Thirteen tests now — the seven `SubscriptionPolicy` tests and one `SubscriptionStore` test from Day 15, a second `SubscriptionStore` test for the pre-refresh defaults, and the four new `SubscriptionOfferPolicy` tests above:
+
+```
+Test Suite 'SubscriptionPolicyTests' passed
+Test Suite 'SubscriptionStoreTests' passed
+Test Suite 'SubscriptionOfferPolicyTests' passed
+** TEST SUCCEEDED **
+```
+
+And the target still builds clean under Swift 6.2's strict concurrency checking — same default-`MainActor` setup as [Day 1](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency), still nothing extra to annotate:
+
+```
+** BUILD SUCCEEDED **
+```
+
+---
+
+## The takeaway
+
+Three new StoreKit features — free trials, win-back offers, promo codes — and the amount of *new* Swift in `SubscriptionStore.swift` is two properties, three methods, and one `init`. The amount of *new* App Store Connect configuration is three separate screens, two App Review submissions, and an ISO 8601 duration string that only shows up if you go looking for it.
+
+That ratio isn't an accident, and it isn't really about StoreKit either. It's the same shape as every "policy vs. plumbing" split in this series: the question "what should this offer say, and when should it show" is six small functions in `SubscriptionOfferPolicy`, covered by four tests that don't know what a `Product` is. The question "how do I ask StoreKit for that" is a handful of methods behind one `BillingPeriodUnit` adapter. Configuration changes — a new trial length, a different win-back discount — touch App Store Connect and nothing else. Behavior changes — "1 months" becomes "1 month" — touch one file and get caught by a test before they touch a single user.
+
+---
+
+## Tomorrow
+
+Part 3 of 3: **server-side receipt validation in 2026** — the App Store Server API workflow. Everything in this post and Day 15 happens entirely on-device, which is correct for *most* of what BrewLog needs — but "did this person actually pay, and are they still paying" is a question a server should be able to answer too, especially once webhooks, refunds, and support tickets enter the picture. Same `SubscriptionPolicy`, new boundary, this time on a server instead of in a view.
+
+If you want the slower, ground-up version — how BrewLog's `@Observable` state, SwiftData model, and now its full subscription layer fit together from the first line of code — [SwiftUI Foundations](/learn) walks through the whole project.

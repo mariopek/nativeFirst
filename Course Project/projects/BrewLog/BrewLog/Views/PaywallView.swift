@@ -9,13 +9,17 @@ struct PaywallView: View {
     @Environment(SubscriptionStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
+    @State private var showRedeemCode = false
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 28) {
                     header
+                    winBackBanner
                     featureList
                     plans
+                    redeemCodeButton
                     restoreButton
 
                     if let message = store.errorMessage {
@@ -37,6 +41,14 @@ struct PaywallView: View {
             .task {
                 await store.loadProducts()
                 await store.updatePurchasedProducts()
+                if let yearly = store.products.first(where: { $0.id == SubscriptionPolicy.yearlyProductID }) {
+                    await store.refreshOffers(for: yearly)
+                }
+            }
+            .offerCodeRedemption(isPresented: $showRedeemCode) { result in
+                if case .failure(let error) = result {
+                    store.errorMessage = "Redeem failed: \(error.localizedDescription)"
+                }
             }
             .accessibilityIdentifier("PaywallScreen")
         }
@@ -57,6 +69,33 @@ struct PaywallView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+        }
+    }
+
+    @ViewBuilder
+    private var winBackBanner: some View {
+        if SubscriptionOfferPolicy.shouldShowWinBackBanner(
+            entitlement: store.entitlement,
+            hasWinBackOffer: !store.winBackOffers.isEmpty
+        ),
+           let offer = store.winBackOffers.first,
+           let yearly = store.products.first(where: { $0.id == SubscriptionPolicy.yearlyProductID }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Welcome back offer", systemImage: "gift.fill")
+                    .font(.subheadline.weight(.semibold))
+                Text(store.winBackCopy(for: offer))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Claim offer") {
+                    Task { await store.purchase(yearly, winBackOffer: offer) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(.tint.opacity(0.12), in: .rect(cornerRadius: 14))
+            .accessibilityIdentifier("WinBackBanner")
         }
     }
 
@@ -88,12 +127,30 @@ struct PaywallView: View {
         } else {
             VStack(spacing: 12) {
                 ForEach(store.products) { product in
-                    PlanButton(product: product) {
+                    PlanButton(product: product, trialCopy: trialCopy(for: product)) {
                         Task { await store.purchase(product) }
                     }
                 }
             }
         }
+    }
+
+    /// "7 days free, then $19.99/year" under the yearly plan — but only if
+    /// StoreKit both has an offer to show *and* this customer hasn't used
+    /// one already.
+    private func trialCopy(for product: Product) -> String? {
+        guard store.eligibleForIntroOffer, let offer = store.introOffer(for: product) else {
+            return nil
+        }
+        return SubscriptionOfferPolicy.trialCopy(for: offer)
+    }
+
+    private var redeemCodeButton: some View {
+        Button("Redeem code") {
+            showRedeemCode = true
+        }
+        .font(.footnote)
+        .accessibilityIdentifier("RedeemCodeButton")
     }
 
     private var restoreButton: some View {
@@ -107,21 +164,29 @@ struct PaywallView: View {
 
 private struct PlanButton: View {
     let product: Product
+    let trialCopy: String?
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(product.displayName)
-                        .font(.headline)
-                    Text(product.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(product.displayName)
+                            .font(.headline)
+                        Text(product.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(product.displayPrice)
+                        .font(.headline.monospacedDigit())
                 }
-                Spacer()
-                Text(product.displayPrice)
-                    .font(.headline.monospacedDigit())
+                if let trialCopy {
+                    Text(trialCopy)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
             }
             .padding()
             .background(.thinMaterial, in: .rect(cornerRadius: 12))

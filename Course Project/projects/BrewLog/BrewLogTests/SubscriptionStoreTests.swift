@@ -57,4 +57,42 @@ struct SubscriptionStoreTests {
         #expect(store.purchasedProductIDs.isEmpty)
         #expect(store.entitlement == .free)
     }
+
+    @Test("a fresh store assumes the intro offer is still available and has no win-back offers")
+    @MainActor
+    func freshStoreDefaultsBeforeOffersLoad() {
+        let store = SubscriptionStore()
+        #expect(store.eligibleForIntroOffer)
+        #expect(store.winBackOffers.isEmpty)
+    }
+}
+
+@Suite("SubscriptionOfferPolicy: trial copy and win-back gating")
+struct SubscriptionOfferPolicyTests {
+
+    @Test("a 7-day free trial reads naturally")
+    func sevenDayTrial() {
+        let offer = IntroOffer(periodValue: 7, periodUnit: .day, regularPrice: "$19.99", regularPeriodUnit: .year)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "7 days free, then $19.99/year")
+    }
+
+    @Test("a one-unit period is singular, not '1 months'")
+    func singularPeriodIsNotPlural() {
+        let offer = IntroOffer(periodValue: 1, periodUnit: .month, regularPrice: "$2.99", regularPeriodUnit: .month)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "1 month free, then $2.99/month")
+    }
+
+    @Test("a multi-week trial pluralizes correctly")
+    func multiWeekTrial() {
+        let offer = IntroOffer(periodValue: 2, periodUnit: .week, regularPrice: "$19.99", regularPeriodUnit: .year)
+        #expect(SubscriptionOfferPolicy.trialCopy(for: offer) == "2 weeks free, then $19.99/year")
+    }
+
+    @Test("win-back banner shows only to free-tier users when an offer exists")
+    func winBackBannerGating() {
+        #expect(SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .free, hasWinBackOffer: true))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .free, hasWinBackOffer: false))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .pro, hasWinBackOffer: true))
+        #expect(!SubscriptionOfferPolicy.shouldShowWinBackBanner(entitlement: .pro, hasWinBackOffer: false))
+    }
 }

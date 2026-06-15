@@ -40,6 +40,51 @@ enum SubscriptionPolicy {
     }
 }
 
+// MARK: - Intro offers and win-back offers (still no StoreKit in here)
+//
+// Same seam, two more questions: "how do we describe this trial to the
+// user" and "should the win-back banner show right now". BrewLog defines
+// its own period-unit type so this file never needs `Product.SubscriptionPeriod`
+// — that mapping happens once, at the SubscriptionStore boundary below.
+
+enum BillingPeriodUnit: Equatable {
+    case day, week, month, year
+
+    var name: String {
+        switch self {
+        case .day: "day"
+        case .week: "week"
+        case .month: "month"
+        case .year: "year"
+        }
+    }
+}
+
+struct IntroOffer: Equatable {
+    let periodValue: Int
+    let periodUnit: BillingPeriodUnit
+    let regularPrice: String
+    let regularPeriodUnit: BillingPeriodUnit
+}
+
+enum SubscriptionOfferPolicy {
+    /// "7 days free, then $19.99/year" — and "1 month", never "1 months".
+    static func trialCopy(for offer: IntroOffer) -> String {
+        let trial = periodPhrase(value: offer.periodValue, unit: offer.periodUnit)
+        return "\(trial) free, then \(offer.regularPrice)/\(offer.regularPeriodUnit.name)"
+    }
+
+    static func periodPhrase(value: Int, unit: BillingPeriodUnit) -> String {
+        value == 1 ? "1 \(unit.name)" : "\(value) \(unit.name)s"
+    }
+
+    /// Win-back offers exist for people who already left. Showing the banner
+    /// to a current Pro subscriber would be both pointless and confusing.
+    static func shouldShowWinBackBanner(entitlement: BrewLogEntitlement, hasWinBackOffer: Bool) -> Bool {
+        entitlement == .free && hasWinBackOffer
+    }
+}
+
 // MARK: - The StoreKit 2 store
 
 /// Owns the product catalog and the user's current entitlements. Two jobs:
@@ -52,6 +97,8 @@ final class SubscriptionStore {
     private(set) var products: [Product] = []
     private(set) var purchasedProductIDs: Set<String> = []
     private(set) var isLoading = false
+    private(set) var eligibleForIntroOffer = true
+    private(set) var winBackOffers: [Product.SubscriptionOffer] = []
     var errorMessage: String?
 
     private var transactionListener: Task<Void, Never>?
@@ -79,9 +126,13 @@ final class SubscriptionStore {
         }
     }
 
-    func purchase(_ product: Product) async {
+    func purchase(_ product: Product, winBackOffer: Product.SubscriptionOffer? = nil) async {
         do {
-            let result = try await product.purchase()
+            var options: Set<Product.PurchaseOption> = []
+            if let winBackOffer {
+                options.insert(.winBackOffer(winBackOffer))
+            }
+            let result = try await product.purchase(options: options)
             switch result {
             case .success(let verification):
                 let transaction = try checkVerified(verification)
@@ -95,6 +146,43 @@ final class SubscriptionStore {
         } catch {
             errorMessage = "Purchase failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Maps StoreKit's `Product.SubscriptionOffer` onto BrewLog's own
+    /// `IntroOffer` — `SubscriptionOfferPolicy` formats whatever comes back,
+    /// without ever importing StoreKit itself. Only `.freeTrial` offers are
+    /// surfaced; BrewLog doesn't currently configure pay-up-front intros.
+    func introOffer(for product: Product) -> IntroOffer? {
+        guard let subscription = product.subscription,
+              let offer = subscription.introductoryOffer,
+              offer.paymentMode == .freeTrial else {
+            return nil
+        }
+        return IntroOffer(
+            periodValue: offer.period.value,
+            periodUnit: BillingPeriodUnit(offer.period.unit),
+            regularPrice: product.displayPrice,
+            regularPeriodUnit: BillingPeriodUnit(subscription.subscriptionPeriod.unit)
+        )
+    }
+
+    /// Refreshes the two things that are per-*user*, not per-product:
+    /// whether this customer still gets the free trial (StoreKit hides
+    /// `introductoryOffer` once someone's already had one, but
+    /// `isEligibleForIntroOffer` is the explicit check), and which win-back
+    /// offers exist for a lapsed subscriber on this product.
+    func refreshOffers(for product: Product) async {
+        guard let subscription = product.subscription else { return }
+        eligibleForIntroOffer = await subscription.isEligibleForIntroOffer
+        winBackOffers = subscription.winBackOffers
+    }
+
+    /// Formats a win-back offer for the banner. Lives here, next to the
+    /// `BillingPeriodUnit` mapping, so `PaywallView` never has to reach into
+    /// `Product.SubscriptionPeriod` directly.
+    func winBackCopy(for offer: Product.SubscriptionOffer) -> String {
+        let phrase = SubscriptionOfferPolicy.periodPhrase(value: offer.period.value, unit: BillingPeriodUnit(offer.period.unit))
+        return "\(offer.displayPrice) for your first \(phrase) back"
     }
 
     func restorePurchases() async {
@@ -145,4 +233,17 @@ private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
 
 enum SubscriptionStoreError: Error {
     case failedVerification
+}
+
+extension BillingPeriodUnit {
+    /// The one place `Product.SubscriptionPeriod.Unit` is allowed to exist.
+    init(_ unit: Product.SubscriptionPeriod.Unit) {
+        switch unit {
+        case .day: self = .day
+        case .week: self = .week
+        case .month: self = .month
+        case .year: self = .year
+        @unknown default: self = .month
+        }
+    }
 }
