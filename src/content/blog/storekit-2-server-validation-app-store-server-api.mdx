@@ -1,0 +1,386 @@
+---
+title: "StoreKit 2, Part 3: Server-Side Receipt Validation in 2026 (App Store Server API)"
+description: "Day 17 of the 30-day iOS series, the finale of three on monetization. You can't trust the client — here's the minimal App Store Server API workflow for BrewLog: Server Notifications V2, JWSTransaction decoding, a Cloudflare Worker, and three pure Swift tests that prove the entitlement logic without ever calling Apple."
+pubDate: 2026-06-16
+tags: ["StoreKit 2", "App Store Server API", "Swift", "Receipt Validation", "Server Notifications", "Cloudflare Workers", "Vapor", "Subscriptions", "iOS 26", "TDD", "Swift Testing", "iOS Development", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/storekit-2-server-validation-cover.jpg"
+coverImageAlt: "A security guard in a dark uniform standing alert on a grey floor, arms at their sides."
+---
+
+{/*
+  SEO target keywords:
+  - App Store Server API receipt validation Swift 2026
+  - App Store Server Notifications V2 Cloudflare Worker
+  - JWSTransaction decode Swift
+  - StoreKit 2 server side validation tutorial
+  - App Store refund webhook handler Swift
+  - signedPayload App Store notification decode
+  - subscription entitlement server side check Swift
+  - Vapor App Store Server Notifications
+  - Cloudflare Worker in-app purchase validation
+  - StoreKit 2 receipt validation without backend
+
+  Internal linking strategy:
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener (Day 15, series part 1/3)
+  - /blog/storekit-2-free-trials-win-back-offers-promo-codes (Day 16, series part 2/3)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root)
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark (Day 13, @Observable benchmark)
+  - /learn (SwiftUI Foundations — test the model, not the framework)
+  - /blog (Day 18 teaser — modular architecture with SPM)
+
+  External reference strategy:
+  - developer.apple.com/documentation/appstoreserverapi — App Store Server API reference
+  - developer.apple.com/documentation/appstoreservernotifications — Server Notifications V2
+  - developers.cloudflare.com/workers — Cloudflare Workers docs
+  - docs.vapor.codes — Vapor JWT
+
+  Day 17 of the 30-day iOS series. Part 3 of 3 on StoreKit 2 — server-side validation.
+*/}
+
+The security guard on the cover isn't standing there because they look cool. They're standing there because the system only works if someone in the chain can't be talked out of it.
+
+Days 15 and 16 built BrewLog's entire monetization layer on-device: the paywall, the transaction listener, the free trial, the win-back banner, the promo code sheet. All of it is tight, tested, and honest. But here's the thing: it all depends on what the device tells us. And the device belongs to the user.
+
+Most of the time, that's fine. StoreKit verifies its own transactions cryptographically, `Transaction.currentEntitlements` rebuilds from Apple's signed history on every launch, and short of a jailbreak with the right tweak installed, the on-device layer is hard to beat. But "hard to beat" isn't the same as "authoritative for support tickets, refund workflows, and webhook-driven feature flags." For that, you need something that doesn't run on the user's hardware. You need the guard.
+
+---
+
+## The three threats on-device can't handle
+
+Before writing any server code, it's worth being honest about the actual threat model — because "server-side receipt validation" is one of those topics that sounds like it requires a full backend, and often doesn't.
+
+**Threat one: refunds.** A user buys BrewLog Pro Yearly, gets access, then requests a refund from Apple Support. Apple approves it. The transaction disappears from `Transaction.currentEntitlements` the next time the user opens the app and StoreKit syncs. If the user doesn't open the app for a while — and they have BrewLog data synced across devices — a second device with stale entitlement might still show Pro. Not a common edge case, but it's the one that shows up in App Review feedback and support queues.
+
+**Threat two: subscription lapse without launch.** Someone's annual subscription expires while the app is sitting in the background. StoreKit fires `Transaction.updates` with the lapsed transaction, but only if the app is foregrounded at renewal time or shortly after. A long-dormant install won't self-correct. The server always knows.
+
+**Threat three: support tickets.** Your backend needs to be able to answer "is this user currently subscribed?" without relying on what they tell you, without relying on what their device last reported, and without requiring them to reproduce the problem in front of you. `Transaction.currentEntitlements` on the device is the live truth. The App Store Server API is the live truth from Apple's side. For support, you want the one Apple signs.
+
+BrewLog is a small app, and honestly, threats one and two probably affect fewer than 0.5% of users. But threat three — the "we got a support email, what do I actually do now?" problem — affects every app the moment it has even a handful of paid subscribers.
+
+---
+
+## App Store Server Notifications V2: Apple calls you
+
+The App Store Server API is a pull API: you ask Apple for transaction history on demand. Server Notifications V2 is the push version: Apple calls *you* when something interesting happens.
+
+Interesting things Apple considers worth a notification:
+
+- `SUBSCRIBED` — first-time purchase of a subscription in a group
+- `DID_RENEW` — auto-renewal succeeded
+- `EXPIRED` — subscription expired without renewal
+- `REFUND` — Apple issued a refund (this is the one that matters most)
+- `DID_CHANGE_RENEWAL_STATUS` — user toggled auto-renew off or on
+- `GRACE_PERIOD_EXPIRED` — billing grace period ended (billing retry exhausted)
+- `OFFER_REDEEMED` — user redeemed a promo code (hi, Day 16)
+
+You configure the endpoint in **App Store Connect → your app → App Information → App Store Server Notifications**. There are two slots: production and sandbox. Both should point to the same handler — the notification payload tells you which environment it came from.
+
+Every notification arrives as a POST with a JSON body of one field:
+
+```json
+{ "signedPayload": "eyJhbGciOiJS..." }
+```
+
+That `signedPayload` is a **JWS token** — a JSON Web Signature with three base64url-encoded parts separated by dots: header, payload, signature. The payload is where all the useful data lives. The signature is what makes the whole thing trustworthy.
+
+---
+
+## JWSTransaction: what's in the envelope
+
+Once decoded, the notification payload looks like this (abbreviated — the full schema is in [Apple's docs](https://developer.apple.com/documentation/appstoreservernotifications)):
+
+```json
+{
+  "notificationType": "REFUND",
+  "subtype": null,
+  "data": {
+    "environment": "Production",
+    "bundleId": "com.nativefirst.brewlog",
+    "signedTransactionInfo": "eyJhbGciOiJS...",
+    "signedRenewalInfo": "eyJhbGciOiJS..."
+  }
+}
+```
+
+`signedTransactionInfo` is *another* JWS. Nested JWSes, because one JWS is apparently not enough for a Monday. This inner one decodes to the actual `JWSTransactionDecodedPayload`:
+
+```json
+{
+  "transactionId": "2000000123456789",
+  "originalTransactionId": "2000000012345678",
+  "bundleId": "com.nativefirst.brewlog",
+  "productId": "com.nativefirst.brewlog.pro_yearly",
+  "purchaseDate": 1749000000000,
+  "originalPurchaseDate": 1700000000000,
+  "expiresDate": 1780536000000,
+  "type": "Auto-Renewable Subscription",
+  "revocationDate": 1749500000000,
+  "revocationReason": 0,
+  "environment": "Production"
+}
+```
+
+The two fields your entitlement logic cares about most:
+
+- **`expiresDate`** — if this is in the past, the subscription has lapsed.
+- **`revocationDate` / `revocationReason`** — if these exist, Apple issued a refund. The product is gone. The user does not have Pro access, even if `expiresDate` is in the future.
+
+`originalTransactionId` is your stable identifier for a subscription group. Individual `transactionId` values rotate at every renewal. If you're storing subscription status in a database, key it on `originalTransactionId`, not `transactionId`, or you'll lose the thread every renewal cycle.
+
+---
+
+## Red: three tests that don't call Apple
+
+Before building the server handler, the same seam from Days 15 and 16: the business logic goes into a pure type that doesn't know how it receives the payload.
+
+Three cases, three tests:
+
+```swift
+// In BrewLog's shared module (no Cloudflare, no Vapor, no Apple calls)
+enum ServerEntitlementPolicy {
+    struct TransactionPayload: Equatable {
+        let productId: String
+        let expiresDate: Date?
+        let revocationReason: Int?
+    }
+
+    static func entitlement(
+        from payload: TransactionPayload,
+        at date: Date = .now
+    ) -> BrewLogEntitlement {
+        if payload.revocationReason != nil { return .free }
+        guard let expires = payload.expiresDate else { return .free }
+        return expires > date ? .pro : .free
+    }
+}
+```
+
+```swift
+@Suite("ServerEntitlementPolicy: server-side entitlement from decoded JWS payload")
+struct ServerEntitlementPolicyTests {
+
+    let yearlyProductId = "com.nativefirst.brewlog.pro_yearly"
+
+    @Test("an active subscription grants Pro")
+    func activeSubscriptionGrantsPro() {
+        let payload = ServerEntitlementPolicy.TransactionPayload(
+            productId: yearlyProductId,
+            expiresDate: .distantFuture,
+            revocationReason: nil
+        )
+        #expect(ServerEntitlementPolicy.entitlement(from: payload) == .pro)
+    }
+
+    @Test("an expired subscription returns free")
+    func expiredSubscriptionReturnsFree() {
+        let payload = ServerEntitlementPolicy.TransactionPayload(
+            productId: yearlyProductId,
+            expiresDate: .distantPast,
+            revocationReason: nil
+        )
+        #expect(ServerEntitlementPolicy.entitlement(from: payload) == .free)
+    }
+
+    @Test("a refunded transaction returns free even with a future expiry date")
+    func refundedTransactionReturnsFree() {
+        // expiresDate is still in the future — Apple set it at purchase time
+        // and hasn't zeroed it out. Only revocationReason tells the truth.
+        let payload = ServerEntitlementPolicy.TransactionPayload(
+            productId: yearlyProductId,
+            expiresDate: .distantFuture,
+            revocationReason: 0
+        )
+        #expect(ServerEntitlementPolicy.entitlement(from: payload) == .free)
+    }
+}
+```
+
+The third test is the one that would have bitten me. When Apple issues a refund, the `expiresDate` in the notification payload is often still the *original* expiry — the date the subscription would have run until if nobody requested a refund. The only reliable signal is `revocationReason`, not `expiresDate`. The test makes that invariant impossible to forget.
+
+---
+
+## The Cloudflare Worker: minimal, no cold starts, free tier
+
+For BrewLog, there's no existing backend. The choice is: spin up a server for the sole purpose of receiving these webhooks, or find something cheaper. Cloudflare Workers runs at the edge, has no cold starts, and the free tier allows 100,000 requests per day — which is more than enough for a small subscription app. And it's TypeScript, not Swift, which is an annoying context switch, but the code is short enough that it doesn't matter much.
+
+The minimal handler — decode, verify, respond:
+
+```typescript
+// worker.ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== "POST") {
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    let body: { signedPayload: string };
+    try {
+      body = await request.json();
+    } catch {
+      return new Response("Bad request", { status: 400 });
+    }
+
+    const outer = decodeJWSPayload(body.signedPayload);
+    const transactionJWS = outer?.data?.signedTransactionInfo;
+
+    if (!transactionJWS) {
+      return new Response("Missing transaction", { status: 400 });
+    }
+
+    // ⚠️ In production: verify the JWS signature before trusting this.
+    const tx = decodeJWSPayload(transactionJWS);
+    if (!tx) {
+      return new Response("Invalid transaction JWS", { status: 400 });
+    }
+
+    await updateSubscriptionRecord(tx, env);
+    return new Response("OK", { status: 200 });
+  },
+};
+
+function decodeJWSPayload(jws: string): Record<string, unknown> | null {
+  const parts = jws.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    // JWS uses base64url — pad and swap chars before atob
+    const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(padded);
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+async function updateSubscriptionRecord(
+  tx: Record<string, unknown>,
+  env: Env
+): Promise<void> {
+  // Store the canonical subscription status keyed on originalTransactionId.
+  // Cloudflare KV, D1 database, or a Supabase call all work here.
+  const originalTxId = tx["originalTransactionId"] as string;
+  const isActive =
+    !tx["revocationReason"] &&
+    typeof tx["expiresDate"] === "number" &&
+    tx["expiresDate"] > Date.now();
+
+  await env.SUBSCRIPTION_KV.put(originalTxId, isActive ? "pro" : "free");
+}
+```
+
+The `⚠️` comment is the most important line in the file. Decoding a JWS without verifying its signature is useful for development — you can log what Apple sends, confirm the fields look right, check that your endpoint is reachable — but in production you **must** verify the ES256 signature against Apple's public keys. Otherwise anyone who discovers your endpoint URL can POST a fake `signedPayload` and grant themselves Pro access on your server.
+
+Apple's public keys are at `https://appleid.apple.com/auth/keys`. The full verification path:
+
+1. Decode the JWS header (the first segment, same base64url decode as the payload) to get the key ID.
+2. Fetch the matching key from Apple's JWKS endpoint.
+3. Import it as a Web Crypto `CryptoKey`.
+4. Use `crypto.subtle.verify("ECDSA", key, signature, data)`.
+
+Cloudflare Workers has `crypto.subtle` built in. The `jose` npm package handles all of this in a few lines if you'd rather not implement it by hand, and it works fine in Workers.
+
+---
+
+## If you'd rather stay in Swift: Vapor
+
+For a pure-Swift backend, Vapor's `JWT` package handles the decode-and-verify flow:
+
+```swift
+import Vapor
+import JWTKit
+
+// Routes.swift
+func routes(_ app: Application) throws {
+    app.post("apple", "notifications") { req async throws -> HTTPStatus in
+        let notification = try req.content.decode(AppStoreNotification.self)
+
+        // JWTKit verifies the signature using Apple's JWKS automatically
+        // once you've configured the JWKS URL in the JWTSigners.
+        let outer = try await req.jwt.apple.verify(notification.signedPayload)
+
+        guard let txJWS = outer.data?.signedTransactionInfo else {
+            throw Abort(.badRequest)
+        }
+
+        let tx = try await req.jwt.apple.verify(txJWS, as: JWSTransactionPayload.self)
+        await updateSubscriptionRecord(tx, on: req.db)
+        return .ok
+    }
+}
+
+struct AppStoreNotification: Content {
+    let signedPayload: String
+}
+
+// Your Swift representation of the decoded transaction payload
+struct JWSTransactionPayload: JWTPayload {
+    let originalTransactionId: String
+    let productId: String
+    let expiresDate: Date?
+    let revocationReason: Int?
+
+    func verify(using algorithm: some JWTAlgorithm) async throws {
+        // Apple signs it; JWTKit's JWKS verification handles this.
+    }
+}
+```
+
+Vapor's `jwt.apple.verify` fetches Apple's JWKS and verifies in one call. The `ServerEntitlementPolicy.entitlement(from:)` from the test suite above plugs directly into `JWSTransactionPayload` with a one-line mapping — the same boundary between "what StoreKit/Apple sends" and "what BrewLog's policy decides" that Days 15 and 16 established.
+
+---
+
+## Also: the pull API, when webhooks aren't enough
+
+Server Notifications V2 handles the "Apple tells you something happened" case. The App Store Server API handles the "you need to check right now" case — a support ticket, a feature flag lookup, a new device that hasn't synced yet.
+
+The endpoint you'll use most:
+
+```
+GET https://api.storekit.itunes.apple.com/inApps/v2/history/{originalTransactionId}
+```
+
+This returns all transactions for that subscription group, from day one, signed and paginated. The [signed server JWT](https://developer.apple.com/documentation/appstoreserverapi/generating-json-web-tokens-for-api-requests) you generate yourself — your private key from App Store Connect, signed with ES256, audience `appstoreconnect-v1`, kid from the key ID you downloaded.
+
+For BrewLog's support workflow, the lookup is:
+1. User emails "I paid but the app shows free."
+2. They give me their Apple ID order number (from their purchase confirmation email).
+3. I POST it to the [`/lookupOrder`](https://developer.apple.com/documentation/appstoreserverapi/look-up-order-id) endpoint and get their full transaction history.
+4. `ServerEntitlementPolicy.entitlement(from:)` on the most recent transaction tells me definitively whether they're Pro.
+
+No guessing from `Transaction.currentEntitlements` on their device. No "have you tried restoring purchases?" The server knows.
+
+---
+
+## All green
+
+Sixteen tests now. Thirteen from Days 15 and 16, plus three new `ServerEntitlementPolicyTests`. The third one is the one that earns its keep:
+
+```
+Test Suite 'SubscriptionPolicyTests' passed
+Test Suite 'SubscriptionStoreTests' passed
+Test Suite 'SubscriptionOfferPolicyTests' passed
+Test Suite 'ServerEntitlementPolicyTests' passed
+** TEST SUCCEEDED **
+```
+
+The `ServerEntitlementPolicy` type has no Cloudflare Worker imports, no Vapor imports, no URLSession, no Apple SDK at all. It's three properties, one function, and the fact that `revocationReason != nil` beats `expiresDate > Date.now()`. Everything else in the server stack — JWS decode, JWKS verification, KV storage — is infrastructure wrapping that one rule.
+
+That's the same split the whole series has been building toward: [Day 1's](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency) concurrency annotations live at the edge. [Day 15's](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener) `SubscriptionPolicy` and [Day 16's](/blog/storekit-2-free-trials-win-back-offers-promo-codes) `SubscriptionOfferPolicy` live in the middle. `ServerEntitlementPolicy` lives at the server edge. All of them are tested without touching the things at the other end of the boundary.
+
+---
+
+## The honest answer to "does BrewLog actually need this?"
+
+Probably not yet. BrewLog has a handful of users and no support tickets. I implemented this in two days on Cloudflare Workers using the free tier, and it's running now, but mostly it just logs notification types and confirms that Apple is calling the endpoint. The refund path has never fired in production.
+
+But the support-ticket use case is real even at tiny scale. The first time a user writes to say "I paid, the app says I didn't," I want to be able to give them an answer in under five minutes — not "can you send me a screenshot of your purchase history?" Having the App Store Server API available means I can look up their `originalTransactionId` from their order number and know immediately.
+
+And the Cloudflare Worker is literally 80 lines of TypeScript. The cost of having it is close to zero. The cost of not having it and discovering you need it during a refund dispute is nonzero.
+
+---
+
+## Tomorrow
+
+Week 3 shifts to architecture. Day 18: **modular architecture with SPM** — when splitting into packages actually helps, when it just adds build time, and the rough threshold where the tradeoff changes. I'll use BrewLog's subscription layer as the example, since after three posts it has a real `SubscriptionPolicy` / `SubscriptionStore` / `ServerEntitlementPolicy` boundary that's either an argument for a module or a warning about premature extraction.
+
+If you want the longer version of how BrewLog's architecture decisions fit together — observable models, SwiftData, the full subscription layer — [SwiftUI Foundations](/learn) starts from the first line.
