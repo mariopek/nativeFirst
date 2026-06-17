@@ -1,0 +1,282 @@
+---
+title: "Modular Architecture With SPM: When to Split (And When to Absolutely Not)"
+description: "Day 18 of the 30-day iOS series, opening Week 4 on architecture. Modularization with Swift Package Manager has a real cost in build time, package graph complexity, and maintenance overhead. I show the threshold rule I use across five apps — below which you don't split, above which you must — with a real Package.swift example from BrewLog and a pure Swift Testing suite that proves the point."
+pubDate: 2026-06-17
+tags: ["Swift Package Manager", "SPM", "Modular Architecture", "Swift", "iOS Development", "Tutorial", "TDD", "Swift Testing", "Xcode 26", "Architecture"]
+author: "Mario"
+coverImage: "/images/blog/spm-modular-architecture-cover.jpg"
+coverImageAlt: "Colorful LEGO bricks — yellow, red, blue, and green — scattered on a white surface."
+---
+
+{/*
+  SEO target keywords:
+  - SPM modular architecture Swift 2026
+  - Swift Package Manager local packages tutorial
+  - modular iOS app architecture SPM
+  - Package.swift multi-module Swift app
+  - when to split iOS app into modules
+  - Swift package build time cost monolith
+  - local Swift package BrewLog example
+  - SPM dependency graph complexity
+  - modular iOS architecture solo developer
+  - Swift Testing isolated module unit test
+
+  Internal linking strategy:
+  - /blog/storekit-2-server-validation-app-store-server-api (Day 17 — direct prequel, closes monetization week)
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener (Day 15 — BrewEntitlement first appeared)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1, series root)
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark (Day 13, @Observable + build-time context)
+  - /learn (SwiftUI at Scale — architecture, DI spine, test the model)
+
+  External reference strategy:
+  - developer.apple.com/documentation/packagedescription — Package.swift manifest reference
+  - developer.apple.com/documentation/xcode/distributing-binary-frameworks-as-swift-packages — binary targets
+
+  Day 18 of the 30-day iOS series. Opens Week 4 (Networking, Performance, Advanced).
+  Standalone architecture post — covers SPM modular architecture threshold.
+*/}
+
+Every conference talk about architecture eventually gets to the slide. You know the one. A clean diagram with circles and arrows, each circle a module with a satisfying name like `CoreDomain`, `FeatureAuth`, `FeatureBrewing`, `UIComponents`, `NetworkingKit`. The whole thing looks like the wiring diagram of a space shuttle. The speaker says "this is how we structure our app at [Big Company]" and nine hundred developers in the audience think: *I should do this.*
+
+Then Monday rolls around. You open Xcode. You have fifty Swift files and a widget target. You spend three days splitting things into packages, the build time goes from eight seconds to thirty-two, you introduce a circular dependency that gives you an error message that looks like it was written by someone actively annoyed at you, and by Thursday you're pushing `git revert` while eating cereal directly from the box at 11 PM.
+
+This post is the Monday morning reality check.
+
+---
+
+## What modularization actually costs
+
+Before I give you the threshold rule, you need to feel the cost. Not the abstract "it adds complexity" cost. The *specific, measurable, daily irritation* cost.
+
+**Build time gets worse before it gets better.** Swift Package Manager resolves packages at the start of every build. With a monolith, Xcode compiles your app in whatever order it figures out. With local packages, it first walks the dependency graph, resolves versions (even for local packages), then compiles each package as a separate compilation unit. On a warm build, this overhead is maybe a second or two — annoying but survivable. On a clean build after switching branches? You're going for coffee.
+
+I have one project (not BrewLog — a larger one) that has eight local packages. Clean build: 4 minutes 20 seconds. The equivalent monolith took about 90 seconds. The modular version is "faster in theory" because of incremental compilation — when I change one module, only that module and its dependents recompile. In practice, I'm changing things that touch the `Domain` module roughly three times a week, which invalidates everything downstream anyway.
+
+**The dependency graph will lie to you.** You set up `BrewCore` → `BrewUI` → `BrewFeatures` and it looks clean. Then two weeks later `BrewCore` needs something from `BrewFeatures` for a reason that made total sense at 9 PM. You get a circular dependency error. The error tells you there's a cycle. It does *not* tell you where. You spend 45 minutes with `swift package dump-package` like a detective who lost their magnifying glass.
+
+**Every module is maintenance overhead.** Each local package is another `Package.swift` to keep current. Another `Tests/` directory structure. Another place where you need to remember to add the target dependency when you create a new type. It's not a lot per module — maybe five minutes a week — but eight modules is forty minutes a week of pure overhead. That's a feature every two months.
+
+---
+
+## When it's actually worth it
+
+None of that means "never modularize." It means "be honest about what you're buying and what you're paying."
+
+Here's the threshold I use across my five apps. Not a framework, not a methodology — just the rule I've landed on after burning myself twice.
+
+### You must split when the same code belongs to two different targets
+
+This is the most common real-world case and the clearest yes. BrewLog has a main app target and a widget extension. Both need the `Brew` model. Both need to read `UserDefaults` for the streak. Without a shared module, you either duplicate the type (disaster — you'll eventually have two `Brew` structs that drift apart) or you use some horrifying file-reference trick that Xcode will hate you for.
+
+A local package that both targets depend on is the right call here. It takes about thirty minutes to set up and pays for itself the first time you change `Brew` and both targets update correctly.
+
+### You must split when you have a shared library across multiple apps
+
+Five apps. Invoize, Renovise, BrewLog, and two more. All five need networking. All five need analytics. If that code lives in one app's target, you're copying it to the others. Copying means drift. Drift means the bug you fixed in app one silently lives on in apps two through five.
+
+A shared `NetworkingKit` that lives in its own repository and is referenced by all five apps is the answer. The SPM overhead is real, but the alternative — maintaining five slightly different versions of the same URLSession wrapper — is much worse.
+
+### You should split when you want enforced architectural boundaries
+
+This one is more subjective, but it's the reason the conference talks sound so convincing. If `BrewEntitlement` (the policy logic that decides whether a user can add more brews — we built it in [Day 15's StoreKit post](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener)) lives in a pure Swift package with zero UIKit and zero SwiftData imports, you *cannot* accidentally couple it to the view layer. The compiler enforces the rule. No linter plugin needed, no code review discipline required.
+
+Without the module boundary, that logic could slowly accumulate `import SwiftUI` and before long your "pure domain model" is rendering views. I've seen it happen. I've *done* it.
+
+### You should not split for any other reason
+
+One app, one target, under sixty or so files, no sharing between apps: **stay monolithic**. A well-organized folder structure (`Features/`, `Domain/`, `Services/`, `UI/`) gives you the cognitive clarity of modules with none of the build overhead. Xcode's file navigator with folders is genuinely fine. The discipline of "this folder doesn't import UIKit" is real discipline, but it's the kind that scales with you rather than costing you up front.
+
+---
+
+## A real Package.swift for BrewLog
+
+BrewLog has two cases that qualify: the widget extension shares domain types, and `BrewEntitlement` deserves an enforced boundary. Here's what a `BrewCore` local package looks like that solves both.
+
+The project structure on disk:
+
+```
+BrewLog/
+├── BrewLog.xcodeproj
+├── BrewLog/              ← main app target
+├── BrewLogWidget/        ← widget extension target
+└── Packages/
+    └── BrewCore/
+        ├── Package.swift
+        ├── Sources/
+        │   └── BrewCore/
+        │       ├── Brew.swift
+        │       ├── BrewEntitlement.swift
+        │       └── UserPreferences.swift
+        └── Tests/
+            └── BrewCoreTests/
+                ├── BrewEntitlementTests.swift
+                └── BrewTests.swift
+```
+
+`Package.swift` for `BrewCore`:
+
+```swift
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "BrewCore",
+    platforms: [.iOS(.v17), .watchOS(.v10)],
+    products: [
+        .library(name: "BrewCore", targets: ["BrewCore"]),
+    ],
+    targets: [
+        .target(
+            name: "BrewCore",
+            // No dependencies — this is the domain layer.
+            // If you're tempted to add SwiftData here, stop.
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        .testTarget(
+            name: "BrewCoreTests",
+            dependencies: ["BrewCore"]
+        ),
+    ]
+)
+```
+
+Notice: no external dependencies. No `import SwiftUI`. No `import SwiftData`. This is the boundary. `BrewCore` is pure Swift — value types, protocols, and policy logic.
+
+`BrewEntitlement.swift` inside the package is the same type we've been using since Day 15:
+
+```swift
+public struct BrewEntitlement: Sendable {
+    public enum Tier: Sendable {
+        case free, pro
+    }
+
+    private static let freeTierLimit = 20
+
+    public static func canAddBrew(
+        currentCount: Int,
+        tier: Tier
+    ) -> Bool {
+        switch tier {
+        case .pro:
+            return true
+        case .free:
+            return currentCount < freeTierLimit
+        }
+    }
+
+    public static func brewsRemaining(
+        currentCount: Int,
+        tier: Tier
+    ) -> Int? {
+        guard tier == .free else { return nil }
+        return max(0, freeTierLimit - currentCount)
+    }
+}
+```
+
+`public` everywhere — this is a library target, so public access modifiers are now required. Xcode will remind you if you forget, loudly.
+
+To add `BrewCore` to the main app and the widget extension, drag the `Packages/BrewCore` folder into the Xcode project navigator (Xcode will detect it as a local package), then add `BrewCore` as a framework dependency to both targets in the project's General tab. Done. Both targets share the same compiled `Brew` model, and if you change `BrewEntitlement.freeTierLimit` to 15, both targets update on the next build.
+
+---
+
+## The TDD payoff: testing a module is trivially easy
+
+Here's the reward for the setup cost. Because `BrewCore` has zero UI dependencies, zero database dependencies, and zero network dependencies, its test suite runs in under a second. No simulator needed. No preview. No fixture data. Just Swift.
+
+```swift
+import Testing
+@testable import BrewCore
+
+@Suite("BrewEntitlement")
+struct BrewEntitlementTests {
+
+    // Free tier: counts at and past the limit are both blocked
+    @Test("free tier blocks brew at limit", arguments: [20, 21, 100])
+    func freeTierBlocksAtLimit(count: Int) {
+        #expect(BrewEntitlement.canAddBrew(currentCount: count, tier: .free) == false)
+    }
+
+    // Free tier: one below the limit is fine
+    @Test("free tier allows brew below limit", arguments: [0, 1, 19])
+    func freeTierAllowsBelowLimit(count: Int) {
+        #expect(BrewEntitlement.canAddBrew(currentCount: count, tier: .free) == true)
+    }
+
+    @Test("pro tier always allows brew")
+    func proTierAlwaysAllows() {
+        for count in [0, 20, 21, 10_000] {
+            #expect(BrewEntitlement.canAddBrew(currentCount: count, tier: .pro) == true)
+        }
+    }
+
+    @Test("remaining count returns nil for pro")
+    func proTierReturnsNilForRemaining() {
+        #expect(BrewEntitlement.brewsRemaining(currentCount: 5, tier: .pro) == nil)
+    }
+
+    @Test("remaining count shows correct number for free tier")
+    func freeTierRemainingCount() {
+        #expect(BrewEntitlement.brewsRemaining(currentCount: 15, tier: .free) == 5)
+        #expect(BrewEntitlement.brewsRemaining(currentCount: 20, tier: .free) == 0)
+    }
+}
+```
+
+That's it. No XCTestCase. No `setUp()`. The parametrized `@Test("...", arguments: [...])` from [Swift Testing](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency) runs all three free-tier boundary values in one declaration. The whole suite runs as part of the package — `swift test` from the `BrewCore` directory works before you even open the Xcode project.
+
+This is the Essential Developer principle in practice: you don't test the view, you test the model. And when the model is its own module, the test suite is clean by construction. There's no way to accidentally import `@testable import BrewLog` and pull in StoreKit infrastructure you don't need.
+
+---
+
+## The dependency graph gotcha to avoid
+
+One pattern that looks tempting and turns painful: vertical slices as modules.
+
+```
+// Don't do this
+BrewListFeature → BrewDetailFeature → BrewAddFeature
+```
+
+Each "feature module" owns its own model, views, and logic. Conference-slide-worthy. In practice: the features need to share `Brew` and you get a cycle. So you extract `BrewShared`. Then `BrewShared` needs the entitlement policy and you add that. Then `BrewShared` has grown to include your database access layer and it's just... your old monolith, but harder to navigate.
+
+The pattern that actually works is horizontal layers, not vertical slices:
+
+```
+Domain (BrewCore) — no app framework deps
+    ↑
+Services (BrewServices) — SwiftData, URLSession
+    ↑
+Features (main app target) — SwiftUI, widgets, extensions
+```
+
+Only go down, never sideways. Features import Services and Domain. Services import Domain. Domain imports nothing. The widget extension imports Domain and maybe Services. This is stable because the dependency arrows only ever point in one direction.
+
+You don't need a separate package for Services most of the time — that layer lives fine in the main target until you have a second app that needs the same persistence logic.
+
+---
+
+## The honest summary
+
+| Situation | Split? |
+|---|---|
+| One app, one target, under 60 files | No — folders are fine |
+| Main app + widget/extension sharing types | Yes — local package for domain types |
+| Same code needed in 2+ different apps | Yes — shared package or repo |
+| Want compiler-enforced arch boundaries | Yes — and worth the overhead |
+| "Conference talk looked cool" | No — seriously, no |
+| Team of 5+ working on same codebase | Probably yes — but that's a different post |
+
+The total setup time for `BrewCore` as shown above is about 45 minutes including the dependency wiring in Xcode. The ongoing cost is roughly zero if the boundary stays clean. The payoff is a test suite that runs instantly and a widget that never gets a stale `Brew` model.
+
+If that math works for your situation, split. If it doesn't — if you're a solo dev on one app that's still finding its shape — stay in the monolith, organize with folders, and don't let the conference slides gaslight you.
+
+Day 19 is [dependency injection in Swift without a framework](/blog) — protocol-based DI, `@Environment` as your DI container, and the factory pattern. We'll connect it back to `BrewCore` to show how the module boundary makes DI nearly free.
+
+If you want to go deeper on architecture patterns like this — not just the "what" but the "how do I build a whole app around it" — the [SwiftUI at Scale course](/learn) covers exactly that, with BrewLog as the running example from empty project to production-ready module structure.
+
+---
+
+*Day 18 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday we closed Week 3 with [App Store Server API validation](/blog/storekit-2-server-validation-app-store-server-api) — because you can't trust the client. Today we open Week 4 by questioning a different piece of received wisdom. Tomorrow: DI without magic.*
