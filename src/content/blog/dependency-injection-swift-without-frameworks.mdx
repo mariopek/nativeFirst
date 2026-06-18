@@ -1,0 +1,451 @@
+---
+title: "Dependency Injection in Swift Without a Framework"
+description: "Day 19 of the 30-day iOS series. Protocol-based DI, @Environment as a SwiftUI-native container, and the factory pattern — all without Resolver, Swinject, or any third-party glue. Includes a TDD example that shows why DI and testability are the same conversation."
+pubDate: 2026-06-18
+tags: ["Swift", "Dependency Injection", "SwiftUI", "Architecture", "iOS Development", "Tutorial", "TDD", "Swift Testing", "Protocols"]
+author: "Mario"
+coverImage: "/images/blog/dependency-injection-swift-no-frameworks-cover.jpg"
+coverImageAlt: "Colorful electrical wires and cables neatly arranged — red, yellow, blue, and green — representing connections and dependencies."
+---
+
+{/*
+  SEO target keywords:
+  - dependency injection Swift without framework
+  - SwiftUI dependency injection @Environment
+  - protocol-based DI Swift 2026
+  - Swift DI factory pattern tutorial
+  - Resolver Swinject alternative Swift
+  - inject dependencies SwiftUI @Observable
+  - Swift testing with protocols mock
+  - dependency injection iOS app architecture
+  - @Environment DI container SwiftUI
+  - TDD Swift dependency injection example
+
+  Internal linking strategy:
+  - /blog/spm-modular-architecture-swift-when-to-split (Day 18 — direct prequel, BrewCore module context)
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener (Day 15 — BrewEntitlement context)
+  - /blog/observable-migrating-from-observableobject-swiftui (Day 11 — @Observable migration)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /learn (SwiftUI at Scale — DI, composition root, test-first)
+
+  Day 19 of the 30-day iOS series. Week 4 (Networking, Performance, Advanced).
+*/}
+
+At some point in every iOS developer's life, someone in a code review says "you should inject that dependency" and you nod confidently while having no idea what that means. Then you Google it and land on a Medium post recommending Swinject. You read about containers, graphs, assemblies, and registrations. An hour later you have a new dependency in `Package.swift` that exists solely to help you manage your other dependencies, and something about this feels wrong.
+
+It is wrong. For most iOS apps — and especially for solo developers or small teams — dependency injection frameworks are a solution to a problem you don't have yet. The *concept* of DI is invaluable. The *frameworks* are for a different scale.
+
+Here's how to do it right without them.
+
+---
+
+## What DI actually is (the thirty-second version)
+
+Instead of a type creating its own dependencies:
+
+```swift
+// BrewViewModel creates its own store — hardcoded
+final class BrewViewModel {
+    private let store = BrewStore()  // ← you can't swap this in tests
+    // ...
+}
+```
+
+You hand them in from outside:
+
+```swift
+// BrewViewModel receives its store — injectable
+final class BrewViewModel {
+    private let store: BrewStoring
+    init(store: BrewStoring) { self.store = store }
+}
+```
+
+That's it. The dependency is *injected* rather than *constructed internally*. The type gets what it needs without deciding where it comes from. This matters for two reasons: **testing** (pass a fake store in tests, no SwiftData needed) and **flexibility** (swap the real store for a different implementation without touching the ViewModel).
+
+Everything else in this post is just applying that idea consistently.
+
+---
+
+## Protocol-based DI: the foundation
+
+Yesterday's `BrewCore` module ([Day 18](/blog/spm-modular-architecture-swift-when-to-split)) gave us a clean domain layer with zero UIKit or SwiftData imports. DI fits naturally into that structure.
+
+Define the interface as a protocol:
+
+```swift
+// In BrewCore module
+public protocol BrewStoring: Sendable {
+    func fetchAll() async throws -> [Brew]
+    func save(_ brew: Brew) async throws
+    func delete(_ brew: Brew) async throws
+}
+```
+
+Two concrete implementations: one real, one fake.
+
+```swift
+// In main app target (needs SwiftData — that's why it's NOT in BrewCore)
+@MainActor
+final class SwiftDataBrewStore: BrewStoring {
+    private let context: ModelContext
+
+    init(context: ModelContext) {
+        self.context = context
+    }
+
+    func fetchAll() async throws -> [Brew] {
+        let descriptor = FetchDescriptor<Brew>(
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        return try context.fetch(descriptor)
+    }
+
+    func save(_ brew: Brew) async throws {
+        context.insert(brew)
+        try context.save()
+    }
+
+    func delete(_ brew: Brew) async throws {
+        context.delete(brew)
+        try context.save()
+    }
+}
+```
+
+```swift
+// In BrewCoreTests (or a Testing module)
+final class MockBrewStore: BrewStoring {
+    var brews: [Brew] = []
+    var saveCallCount = 0
+    var deleteCallCount = 0
+
+    func fetchAll() async throws -> [Brew] { brews }
+
+    func save(_ brew: Brew) async throws {
+        brews.append(brew)
+        saveCallCount += 1
+    }
+
+    func delete(_ brew: Brew) async throws {
+        brews.removeAll { $0.id == brew.id }
+        deleteCallCount += 1
+    }
+}
+```
+
+The ViewModel takes the protocol and doesn't care which implementation it gets:
+
+```swift
+@Observable
+final class BrewListViewModel {
+    private(set) var brews: [Brew] = []
+    private(set) var isLoading = false
+    var error: Error?
+
+    private let store: BrewStoring
+
+    init(store: BrewStoring) {
+        self.store = store
+    }
+
+    func loadBrews() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            brews = try await store.fetchAll()
+        } catch {
+            self.error = error
+        }
+    }
+
+    func deleteBrew(_ brew: Brew) async {
+        try? await store.delete(brew)
+        await loadBrews()
+    }
+}
+```
+
+No `@StateObject`. No `@EnvironmentObject`. No framework. Just `init(store:)`.
+
+---
+
+## The TDD payoff
+
+This is where the investment pays back immediately. With a protocol and a mock, testing `BrewListViewModel` is trivial — no simulator, no SwiftData container, no async setup gymnastics.
+
+Red first:
+
+```swift
+import Testing
+@testable import BrewCore
+
+@Suite("BrewListViewModel")
+struct BrewListViewModelTests {
+
+    @Test("loads brews on call")
+    func loadsBrews() async {
+        let store = MockBrewStore()
+        store.brews = [Brew(name: "Ethiopian Yirgacheffe", rating: 5)]
+        let viewModel = BrewListViewModel(store: store)
+
+        await viewModel.loadBrews()
+
+        #expect(viewModel.brews.count == 1)
+        #expect(viewModel.brews.first?.name == "Ethiopian Yirgacheffe")
+    }
+
+    @Test("sets isLoading correctly during fetch")
+    func isLoadingToggle() async {
+        let store = MockBrewStore()
+        let viewModel = BrewListViewModel(store: store)
+
+        // isLoading should be false initially
+        #expect(viewModel.isLoading == false)
+
+        // After load completes it should be false again
+        await viewModel.loadBrews()
+        #expect(viewModel.isLoading == false)
+    }
+
+    @Test("deletes brew and reloads")
+    func deletesBrew() async {
+        let store = MockBrewStore()
+        let brew = Brew(name: "Burundi Natural", rating: 4)
+        store.brews = [brew]
+        let viewModel = BrewListViewModel(store: store)
+
+        await viewModel.deleteBrew(brew)
+
+        #expect(store.deleteCallCount == 1)
+        #expect(viewModel.brews.isEmpty)
+    }
+}
+```
+
+These tests run in milliseconds. No container. No ModelContext. No need to import SwiftData at all in the test target. That's the Essential Developer principle in practice: **test the model, not the view**.
+
+Green: the implementation above passes all three already. Refactor: none needed right now — but next time you change `BrewListViewModel`, the suite tells you immediately if something breaks.
+
+---
+
+## @Environment as a DI container
+
+Protocol-based init injection is perfect for ViewModels. But for SwiftUI views, reaching into the environment is idiomatic and avoids prop-drilling.
+
+Define a custom `EnvironmentKey`:
+
+```swift
+// BrewStoreKey.swift in main app target
+private struct BrewStoreKey: EnvironmentKey {
+    // The default is the real store — but you override it in previews and tests
+    static let defaultValue: any BrewStoring = SwiftDataBrewStore(
+        context: ModelContainer.preview.mainContext
+    )
+}
+
+extension EnvironmentValues {
+    var brewStore: any BrewStoring {
+        get { self[BrewStoreKey.self] }
+        set { self[BrewStoreKey.self] = newValue }
+    }
+}
+```
+
+Inject at the root — one place, one decision:
+
+```swift
+@main
+struct BrewLogApp: App {
+    let container = try! ModelContainer(for: Brew.self)
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environment(\.brewStore, SwiftDataBrewStore(context: container.mainContext))
+        }
+    }
+}
+```
+
+Read it in any view without passing it down manually:
+
+```swift
+struct BrewListView: View {
+    @Environment(\.brewStore) private var store
+    @State private var viewModel: BrewListViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                BrewListContent(viewModel: viewModel)
+            }
+        }
+        .task {
+            if viewModel == nil {
+                viewModel = BrewListViewModel(store: store)
+                await viewModel?.loadBrews()
+            }
+        }
+    }
+}
+```
+
+And in previews, swap the real store for a fake one — three lines:
+
+```swift
+#Preview {
+    let store = MockBrewStore()
+    store.brews = [Brew(name: "Preview Brew", rating: 4)]
+    return BrewListView()
+        .environment(\.brewStore, store)
+}
+```
+
+Your preview never touches a real database. It renders instantly, always. No spinning container setup. If you've ever had a SwiftUI preview crash because it tried to initialize a ModelContainer it couldn't find, you know exactly how good this feels.
+
+---
+
+## The factory pattern: when init injection gets awkward
+
+Sometimes you don't have all the dependencies at the call site. A deep view needs to build a child ViewModel, but it doesn't hold the store reference — it just knows it needs one.
+
+A factory solves this without passing dependencies through layers of views.
+
+```swift
+// A factory protocol for BrewDetailViewModel
+protocol BrewDetailViewModelFactory {
+    func make(brew: Brew) -> BrewDetailViewModel
+}
+
+// The real factory implementation
+struct DefaultBrewDetailViewModelFactory: BrewDetailViewModelFactory {
+    private let store: BrewStoring
+
+    init(store: BrewStoring) { self.store = store }
+
+    func make(brew: Brew) -> BrewDetailViewModel {
+        BrewDetailViewModel(brew: brew, store: store)
+    }
+}
+```
+
+Now the parent view only holds the factory, not every dependency of every child:
+
+```swift
+struct BrewListContent: View {
+    let viewModel: BrewListViewModel
+    let detailFactory: BrewDetailViewModelFactory  // ← factory, not store
+
+    var body: some View {
+        List(viewModel.brews) { brew in
+            NavigationLink(value: brew) {
+                BrewRowView(brew: brew)
+            }
+        }
+        .navigationDestination(for: Brew.self) { brew in
+            BrewDetailView(viewModel: detailFactory.make(brew: brew))
+        }
+    }
+}
+```
+
+In tests, replace the factory with a mock:
+
+```swift
+struct MockBrewDetailViewModelFactory: BrewDetailViewModelFactory {
+    var capturedBrew: Brew?
+    func make(brew: Brew) -> BrewDetailViewModel {
+        capturedBrew = brew
+        return BrewDetailViewModel(brew: brew, store: MockBrewStore())
+    }
+}
+```
+
+You can now test navigation behavior — did tapping the row trigger `make(brew:)` with the right brew? — without the factory knowing anything about SwiftData.
+
+---
+
+## The composition root
+
+All these pieces need to be wired together somewhere. That somewhere is called the **composition root** — ideally, the `App` struct. This is the one place where real implementations get created and injected.
+
+```swift
+@main
+struct BrewLogApp: App {
+    private let container: ModelContainer
+    private let store: SwiftDataBrewStore
+    private let detailFactory: DefaultBrewDetailViewModelFactory
+
+    init() {
+        let container = try! ModelContainer(for: Brew.self)
+        self.container = container
+        self.store = SwiftDataBrewStore(context: container.mainContext)
+        self.detailFactory = DefaultBrewDetailViewModelFactory(store: store)
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environment(\.brewStore, store)
+                .environment(\.detailFactory, detailFactory)
+        }
+    }
+}
+```
+
+The rule: **concrete types are mentioned exactly once** — in the composition root. Everywhere else, you talk to protocols. If you find yourself writing `SwiftDataBrewStore(...)` inside a ViewModel or a View, something has leaked out of the root.
+
+---
+
+## When do you actually need Resolver or Swinject?
+
+Honest answer: probably never, if you're a solo developer with fewer than five apps sharing dependencies.
+
+The frameworks earn their keep when:
+
+1. **You have 50+ injectable types** and wiring them manually in the composition root becomes unreadable. A container with automatic resolution saves real time here.
+2. **You have a team splitting work across features** where each feature team registers its own dependencies independently. Feature-level modules with their own assemblies make organizational sense.
+3. **You need scoped lifetimes** (singleton vs. per-use vs. per-scene) and you're managing enough types that tracking this manually is error-prone.
+
+For a BrewLog-sized app — even one that will eventually have five or six screens — the manual approach shown above is better in every way: faster build times, no extra dependency, trivially readable, and easy to test.
+
+One more reason to stay manual: when something goes wrong at runtime (wrong concrete type injected, missing dependency), a framework gives you a crash with a generic container error at the injection site. Manual wiring gives you a Swift compile error *before you run*. That's a completely different debugging experience.
+
+---
+
+## Putting it together with BrewCore
+
+From [Day 18](/blog/spm-modular-architecture-swift-when-to-split), `BrewCore` is a pure Swift module with zero app framework dependencies. `BrewStoring` lives there too, because it's a protocol that describes behavior in terms of domain types (`Brew`). The concrete `SwiftDataBrewStore` lives in the main app target — it imports SwiftData, which `BrewCore` intentionally doesn't.
+
+This means:
+
+- `BrewCore` + `MockBrewStore` → test suite that runs in under a second, no simulator
+- `BrewCore` + `SwiftDataBrewStore` → production app, wired at the composition root
+- `BrewCore` + some future `CloudKitBrewStore` → you swap one concrete type in `App.swift` and the rest of the app doesn't know or care
+
+The module boundary from yesterday makes the DI structure almost automatic. When your domain layer can't import SwiftData, you're forced to define the interface first and implement it elsewhere — which is exactly how good DI is supposed to work.
+
+---
+
+## The short version
+
+| Question | Answer |
+|---|---|
+| Where do I define the abstraction? | Protocol, in the lowest-level module (e.g., `BrewCore`) |
+| Where do I create the real implementation? | Main app target or a dedicated `Services` module |
+| How do I pass it to views? | `@Environment` + custom `EnvironmentKey` |
+| How do I pass it to ViewModels? | `init(store:)` — plain parameter injection |
+| What about child ViewModels? | Factory protocol injected the same way |
+| Where do I wire everything together? | The `App` struct — one place only |
+| Do I need Resolver/Swinject? | Almost certainly not yet |
+
+Keep the composition root small and the protocol definitions honest and you won't miss a framework. The compiler will tell you when something isn't wired correctly, which is a better guarantee than any runtime container can offer.
+
+Day 20 is [Swift Testing vs XCTest](/blog) — why you should migrate, what the parametrized test story looks like now, and the one API from XCTest that Swift Testing still doesn't have.
+
+If you want the full architecture picture — DI, composition root, module boundaries, CloudKit sync — the [SwiftUI at Scale course](/learn) builds all of it from scratch with Atlas, our tourist journal app.
+
+---
+
+*Day 19 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday we covered [SPM modular architecture and the threshold rule](/blog/spm-modular-architecture-swift-when-to-split) — when to split and when to absolutely not. Today: DI without magic. Tomorrow: Swift Testing vs XCTest.*
