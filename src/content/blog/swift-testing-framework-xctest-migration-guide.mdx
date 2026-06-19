@@ -1,0 +1,373 @@
+---
+title: "Swift Testing Framework: Why You Should Migrate from XCTest"
+description: "Day 20 of the 30-day iOS series. @Test, #expect, parametrized tests, traits, and a side-by-side comparison on a real BrewLog test file. Plus: the one thing XCTest still does that Swift Testing doesn't."
+pubDate: 2026-06-19
+tags: ["Swift", "Swift Testing", "XCTest", "TDD", "Unit Testing", "iOS Development", "Tutorial", "Testing", "iOS"]
+author: "Mario"
+coverImage: "/images/blog/swift-testing-xctest-migration-cover.jpg"
+coverImageAlt: "Developer writing code with testing tools visible — a clean coding environment representing software quality and unit testing."
+---
+
+{/*
+  SEO target keywords:
+  - Swift Testing framework migration XCTest
+  - @Test #expect Swift Testing tutorial
+  - Swift Testing parametrized tests
+  - XCTest vs Swift Testing 2026
+  - Swift Testing traits @Suite
+  - migrate from XCTest Swift Testing
+  - Swift unit testing iOS 2026
+  - Swift Testing #require unwrap
+  - Swift Testing framework tutorial
+  - TDD Swift Testing BrewLog example
+
+  Internal linking strategy:
+  - /blog/dependency-injection-swift-without-frameworks (Day 19 — MockBrewStore used in tests)
+  - /blog/tdd-swiftui-observable-viewmodel-red-green-refactor (Day 21 — TDD follow-up)
+  - /blog/spm-modular-architecture-swift-when-to-split (Day 18 — BrewCore module context)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /learn (SwiftUI at Scale — TDD, testing strategy)
+
+  Day 20 of the 30-day iOS series. Week 3 (Monetization, Architecture, Testing).
+*/}
+
+XCTest shipped in 2013. That means some of your test files are older than your current laptop, written in a framework that predates async/await, @Observable, Swift concurrency, and Swift itself being open source. The API has barely changed in thirteen years. Apple slapped some `async` support on it, fixed a few rough edges, and called it a day.
+
+Swift Testing is Apple's clean-slate answer to what a testing framework should look like *in modern Swift*. And after a year of running both in production, I'm convinced: if you're writing new tests today, write them in Swift Testing. Here's why.
+
+---
+
+## The basics: @Test and #expect
+
+In XCTest, every test is a method starting with `test`. The framework discovers them by naming convention — which means a typo silently skips your test forever.
+
+```swift
+// XCTest — naming convention discovery
+class BrewListViewModelTests: XCTestCase {
+    func testLoadsBrewsOnCall() async throws {
+        // ...
+    }
+
+    func tesLoadBrewsOnCall() async throws { // ← typo — this test never runs
+        // ...
+    }
+}
+```
+
+Swift Testing uses `@Test` macro, so you opt in explicitly. The function name can be anything — descriptive, readable, even with spaces if you use a string label:
+
+```swift
+// Swift Testing — explicit opt-in with @Test
+import Testing
+
+@Suite("BrewListViewModel")
+struct BrewListViewModelTests {
+
+    @Test("loads brews on call")
+    func loadsBrews() async throws {
+        // ...
+    }
+}
+```
+
+No subclassing `XCTestCase`. No `setUp`/`tearDown` lifecycle methods that get called even when you don't need them. Just a struct with a `@Test` attribute.
+
+For assertions, `#expect` replaces the entire `XCTAssert*` family:
+
+```swift
+// XCTest — one assert per concept
+XCTAssertEqual(viewModel.brews.count, 3)
+XCTAssertTrue(viewModel.isLoading == false)
+XCTAssertNil(viewModel.error)
+XCTAssertNotNil(viewModel.brews.first)
+
+// Swift Testing — one expression, natural Swift syntax
+#expect(viewModel.brews.count == 3)
+#expect(viewModel.isLoading == false)
+#expect(viewModel.error == nil)
+#expect(viewModel.brews.first != nil)
+```
+
+When `#expect` fails, it shows you the actual expression and both sides of the comparison — not just "XCTAssertEqual failed: ("2") is not equal to ("3")". The failure output is dramatically better for diagnosing what went wrong.
+
+---
+
+## #require: the test-stopping unwrap
+
+XCTest had `XCTUnwrap` for safely unwrapping optionals and stopping the test if nil. Swift Testing has `#require`, which does the same thing but as a throwing expression:
+
+```swift
+// XCTest
+let brew = try XCTUnwrap(viewModel.brews.first)
+XCTAssertEqual(brew.name, "Ethiopian Yirgacheffe")
+
+// Swift Testing
+let brew = try #require(viewModel.brews.first)
+#expect(brew.name == "Ethiopian Yirgacheffe")
+```
+
+`#require` throws if the optional is nil, which stops the test cleanly. The rest of the test doesn't run with a nil force-unwrap crashing the process — it just reports a failure at that line. It also works for non-optionals: `try #require(someExpression)` fails the test if the expression throws or is false. One macro, multiple use cases.
+
+---
+
+## Parametrized tests: the killer feature
+
+This is the one that made me actually migrate existing tests rather than just writing new ones in Swift Testing.
+
+In XCTest, if you want to test the same logic with multiple inputs, you write a loop or you duplicate the test:
+
+```swift
+// XCTest — loop or duplicated tests
+func testSavesEthiopianYirgacheffe() async throws { ... }
+func testSavesKenyaKaratu() async throws { ... }
+func testSavesBurundiNatural() async throws { ... }
+
+// Or, if you're clever but hiding failures:
+func testSavesMultipleBrews() async throws {
+    let names = ["Ethiopian Yirgacheffe", "Kenya Karatu", "Burundi Natural"]
+    for name in names {
+        let store = MockBrewStore()
+        let brew = Brew(name: name, rating: 4)
+        try await store.save(brew)
+        #expect(store.brews.contains { $0.name == name })
+    }
+}
+```
+
+The loop version has a critical flaw: if the first iteration fails, the rest don't run. You see one failure, fix it, run again, see the next failure. Debugging a loop of assertions is miserable.
+
+Swift Testing's `@Test(arguments:)` runs each value as a completely independent test case:
+
+```swift
+// Swift Testing — true parametrized tests
+@Test("saves brew with valid name", arguments: [
+    "Ethiopian Yirgacheffe",
+    "Kenya Karatu",
+    "Burundi Natural",
+    "Colombia Huila",
+])
+func savesBrew(name: String) async throws {
+    let store = MockBrewStore()
+    let brew = Brew(name: name, rating: 4)
+    try await store.save(brew)
+    #expect(store.brews.contains { $0.name == name })
+}
+```
+
+Xcode runs all four as parallel, independent test cases. If three pass and one fails, you see exactly which input failed and which three were fine. You can re-run just the failing case. You can filter by argument in the test navigator. This is how parametrized tests should work.
+
+You can also zip two argument collections to test combinations:
+
+```swift
+@Test("rating boundary", arguments: zip(
+    [1, 3, 5],
+    [true, true, true]   // all valid
+))
+func ratingIsValid(rating: Int, expectedValid: Bool) {
+    let brew = Brew(name: "Test", rating: rating)
+    #expect(brew.isValidRating == expectedValid)
+}
+```
+
+---
+
+## Traits: skip, disable, tag, and time-limit
+
+XCTest has `XCTSkipIf` and `XCTSkipUnless` for conditional skipping, but they throw mid-test — which means you have to call them inside the test body and can't see "this test is disabled" from the navigator without running it first.
+
+Swift Testing uses **traits** declared in the `@Test` or `@Suite` attribute. The navigator sees them before the test runs:
+
+```swift
+// Skip on specific platform
+@Test("iCloud sync", .enabled(if: ProcessInfo.processInfo.environment["CI"] == nil))
+func iCloudSyncTest() async throws { ... }
+
+// Skip always (known issue)
+@Test("CloudKit import", .disabled("CloudKit sandbox unavailable in CI"))
+func cloudKitImport() async throws { ... }
+
+// Time limit — fail if it takes longer than 5 seconds
+@Test("fetch all brews", .timeLimit(.minutes(0.1)))
+func fetchAllBrewsPerformance() async throws { ... }
+
+// Link to a bug — shows in test report
+@Test("brew list refresh", .bug("https://github.com/yourrepo/issues/42", "Intermittent refresh failure"))
+func brewListRefresh() async throws { ... }
+```
+
+The `.bug` trait is particularly useful. Instead of a comment that nobody reads, the test navigator shows the bug link. When the test fails, the report includes the issue URL. It's small, but it turns "this test fails sometimes, I wonder why" into "this test fails sometimes, here's the ticket."
+
+You can define custom tags to group tests across test files:
+
+```swift
+extension Tag {
+    @Tag static var networking: Self
+    @Tag static var persistence: Self
+    @Tag static var viewModel: Self
+}
+
+@Test("saves brew", .tags(.persistence))
+func savesBrew() async throws { ... }
+
+@Test("fetches remote brews", .tags(.networking))
+func fetchesRemoteBrews() async throws { ... }
+```
+
+Then filter by tag in Xcode or run `swift test --filter .tags(.networking)` from the command line. Filtering by feature, not by file.
+
+---
+
+## Side-by-side: real BrewLog test migration
+
+Yesterday's [Day 19 DI post](/blog/dependency-injection-swift-without-frameworks) included this XCTest-style test:
+
+```swift
+// Before — XCTest style
+import XCTest
+@testable import BrewCore
+
+final class BrewListViewModelTests: XCTestCase {
+    var store: MockBrewStore!
+    var viewModel: BrewListViewModel!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        store = MockBrewStore()
+        viewModel = BrewListViewModel(store: store)
+    }
+
+    override func tearDown() async throws {
+        store = nil
+        viewModel = nil
+        try await super.tearDown()
+    }
+
+    func testLoadsBrews() async throws {
+        store.brews = [Brew(name: "Ethiopian Yirgacheffe", rating: 5)]
+        await viewModel.loadBrews()
+        XCTAssertEqual(viewModel.brews.count, 1)
+        XCTAssertEqual(viewModel.brews.first?.name, "Ethiopian Yirgacheffe")
+    }
+
+    func testIsLoadingToggle() async throws {
+        await viewModel.loadBrews()
+        XCTAssertFalse(viewModel.isLoading)
+    }
+
+    func testDeletesBrew() async throws {
+        let brew = Brew(name: "Burundi Natural", rating: 4)
+        store.brews = [brew]
+        await viewModel.deleteBrew(brew)
+        XCTAssertEqual(store.deleteCallCount, 1)
+        XCTAssertTrue(viewModel.brews.isEmpty)
+    }
+}
+```
+
+The Swift Testing migration:
+
+```swift
+// After — Swift Testing
+import Testing
+@testable import BrewCore
+
+@Suite("BrewListViewModel")
+struct BrewListViewModelTests {
+
+    @Test("loads brews on call")
+    func loadsBrews() async {
+        let store = MockBrewStore()
+        store.brews = [Brew(name: "Ethiopian Yirgacheffe", rating: 5)]
+        let viewModel = BrewListViewModel(store: store)
+
+        await viewModel.loadBrews()
+
+        #expect(viewModel.brews.count == 1)
+        #expect(viewModel.brews.first?.name == "Ethiopian Yirgacheffe")
+    }
+
+    @Test("isLoading resets after fetch")
+    func isLoadingResets() async {
+        let store = MockBrewStore()
+        let viewModel = BrewListViewModel(store: store)
+
+        await viewModel.loadBrews()
+
+        #expect(viewModel.isLoading == false)
+    }
+
+    @Test("deletes brew and reloads")
+    func deletesBrew() async {
+        let store = MockBrewStore()
+        let brew = Brew(name: "Burundi Natural", rating: 4)
+        store.brews = [brew]
+        let viewModel = BrewListViewModel(store: store)
+
+        await viewModel.deleteBrew(brew)
+
+        #expect(store.deleteCallCount == 1)
+        #expect(viewModel.brews.isEmpty)
+    }
+}
+```
+
+What changed:
+
+| XCTest | Swift Testing |
+|---|---|
+| `class ... : XCTestCase` | `struct` (no inheritance) |
+| `var store!` + `setUp`/`tearDown` | Local `let` in each test |
+| `XCTAssertEqual(a, b)` | `#expect(a == b)` |
+| `XCTAssertTrue(x)` | `#expect(x)` |
+| `XCTAssertFalse(x)` | `#expect(!x)` |
+| `XCTUnwrap(optional)` | `try #require(optional)` |
+
+The struct approach with local variables instead of class properties is the biggest conceptual shift. In XCTest you create properties and set them up once because the class is initialized once per test class. In Swift Testing, the struct is initialized fresh for each test — the Swift Testing runtime creates a new instance per `@Test`. So you just make everything local.
+
+This is *much* cleaner. No `setUp` to forget to call `super` in. No instance state leaking between tests if you forget to nil it out in `tearDown`. Each test is completely self-contained.
+
+---
+
+## The one thing XCTest still wins on
+
+Swift Testing does not support **UI testing**. If you're writing `XCUIApplication` tests — tapping buttons in the simulator, checking accessibility labels on screen — you still need `XCTestCase`. Swift Testing has no `XCUITest` equivalent and Apple hasn't announced one.
+
+For the BrewLog test target, the breakdown is:
+
+- Unit tests (ViewModels, models, networking) → Swift Testing
+- Integration tests (real SwiftData container, real network) → Swift Testing works fine
+- UI tests (simulator automation, screenshot tests) → XCTest, and that's fine
+
+The two frameworks coexist in the same test target without issues. You can have an `XCTestCase` subclass and a `@Suite` struct in the same Xcode test target, and both run when you hit `⌘U`. You don't have to migrate everything at once.
+
+Performance testing with `measure {}` in XCTest also has no direct Swift Testing equivalent yet — though you can approximate it with `.timeLimit` traits if you know your threshold up front.
+
+---
+
+## Migration strategy
+
+The practical path is:
+
+1. **New tests** — always write in Swift Testing. Zero cost to start.
+2. **Existing unit tests** — migrate when you touch the file for another reason. Don't do a big-bang migration for its own sake.
+3. **UI tests** — keep in XCTest. Don't touch them unless you're refactoring.
+
+Apple's migration guide suggests moving the `import XCTest` to `import Testing` and working through compiler errors. The errors are actually pretty clear — `XCTAssert*` just won't resolve, so you rewrite each assertion. Most test files take 10-15 minutes to migrate once you're comfortable with the syntax.
+
+The one thing that surprises people: `XCTestCase` lifecycle hooks (`setUpWithError`, `tearDownWithError`) have no direct equivalent. In Swift Testing, you use `init()` for setup and `deinit` for teardown. Or — and this is the better pattern — just use local variables per test.
+
+---
+
+## The TDD loop in Swift Testing
+
+The red-green-refactor loop with Swift Testing is faster in Xcode 26. The test results update inline in the source file without switching to the Test navigator. You see the checkmark or the red X next to each `@Test` function as the suite runs.
+
+For the [Day 21 TDD post](/blog) tomorrow, we'll use this exact setup — `@Suite`, `#expect`, parametrized assertions — to drive a real feature in BrewLog from zero to working with test-first development. It's a lot more readable than the same loop in XCTest.
+
+The short version: Swift Testing is what Apple would have built in 2013 if they knew what Swift would become. Now they do, and it shows. Start there for new tests. Migrate the rest when it makes sense.
+
+---
+
+If you want the testing strategy for a real app — unit, integration, and the architecture that makes it possible — that's a core part of the [SwiftUI at Scale course](/learn). We build Atlas from scratch with every layer tested, including the DI setup from [Day 19](/blog/dependency-injection-swift-without-frameworks) and the SPM module structure from [Day 18](/blog/spm-modular-architecture-swift-when-to-split).
+
+*Day 20 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [Dependency injection in Swift without frameworks](/blog/dependency-injection-swift-without-frameworks). Tomorrow: TDD for SwiftUI — a real workflow that isn't academic.*
