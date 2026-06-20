@@ -1,0 +1,285 @@
+---
+title: "TDD for SwiftUI: A Red-Green-Refactor Workflow That Isn't Academic"
+description: "Day 21 of the 30-day iOS series. I went looking for a BrewLog feature to drive test-first and found a real bug already shipped: the Streak stat has been hardcoded to zero since day one. Here's the actual red-green-refactor session that fixed it."
+pubDate: 2026-06-20
+tags: ["Swift", "TDD", "Swift Testing", "SwiftUI", "Red-Green-Refactor", "iOS Development", "Tutorial", "Testing", "iOS"]
+author: "Mario"
+coverImage: "/images/blog/tdd-swiftui-red-green-refactor-cover.jpg"
+coverImageAlt: "A red traffic light glowing above an unlit green light on a city street — the stop-then-go cycle that gives test-driven development its name."
+---
+
+{/*
+  SEO target keywords:
+  - TDD SwiftUI tutorial
+  - red green refactor Swift example
+  - test driven development SwiftUI ViewModel
+  - Swift Testing TDD workflow
+  - testing observable models not views SwiftUI
+  - real TDD example Swift
+  - SwiftUI @Observable unit testing
+  - TDD workflow iOS developer 2026
+  - how to test SwiftUI without UI tests
+  - BrewLog streak calculation Swift
+
+  Internal linking strategy:
+  - /blog/swift-testing-framework-xctest-migration-guide (Day 20 — the framework this post drives)
+  - /blog/swiftui-state-bindable-environment-decision-map (Day 12 — the "test the model, not the view" precedent)
+  - /blog/dependency-injection-swift-without-frameworks (Day 19 — the seam that makes this testable)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /learn (SwiftUI at Scale — TDD as a default workflow, not a chapter)
+
+  Day 21 of the 30-day iOS series. Week 3 close (Monetization, Architecture, Testing).
+*/}
+
+While writing yesterday's post, I went digging through BrewLog for a real feature to drive test-first, on camera, no cuts. I wanted something small enough for a blog post and real enough that the bug, if there was one, would actually matter.
+
+There was a bug. It was mine. It had been live since the project's first commit.
+
+Open BrewLog's home screen and you'll see three stat cards: **This week**, **All time**, and **Streak**. The first two are computed from real data. The third one is this:
+
+```swift
+private struct StatsRow: View {
+    let weekCount: Int
+    let total: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            StatCard(label: "This week", value: "\(weekCount)", icon: "calendar")
+            StatCard(label: "All time", value: "\(total)", icon: "chart.bar.fill")
+            StatCard(label: "Streak", value: "0", icon: "flame.fill")
+        }
+    }
+}
+```
+
+`"0"`. A string literal. Every BrewLog user, forever, has a brewing streak of exactly zero days, no matter how many espressos they've logged in a row. Nobody filed a bug, because a number that's always zero doesn't crash. It just quietly lies, in a font weight that says "trust me."
+
+This is the most honest possible starting point for a post about TDD, so let's use it.
+
+---
+
+## Test the model, not the view
+
+The "TDD for SwiftUI" tutorials that bounce off the language usually try to test a `View` struct directly — snapshot the rendered output, assert on strings buried in a `body`. That's slow, brittle, and it's testing SwiftUI's rendering engine, not your logic.
+
+The actual move, the one this whole series keeps coming back to since [Day 12](/blog/swiftui-state-bindable-environment-decision-map), is: **push the decision out of the view and into a plain function or an `@Observable` model, then test that.** The `streakGlass(streak:)` function from Day 5 and `SubscriptionPolicy.canLogNewBrew` from Day 16 both live by this rule. The view's only job is to call the function and put the result on screen — too dumb to have a bug of its own.
+
+"Streak" is a number that gets computed from a list of dates. That's not a view problem. It's not even a SwiftData problem. It's a pure function:
+
+```
+currentStreak(brewDates: [Date]) -> Int
+```
+
+No `@Query`, no `ModelContext`, no SwiftUI import. Just dates in, an integer out. That's the whole seam, and it's exactly the kind of thing you write the test for *first*, because there is genuinely nothing to do until you've decided what it should return.
+
+---
+
+## Red: write the test you don't have code for yet
+
+Before `currentStreak` exists anywhere, here's the first test:
+
+```swift
+import Testing
+import Foundation
+@testable import BrewLog
+
+@Suite("currentStreak: consecutive brewing days")
+struct BrewStreakTests {
+
+    @Test("five brews on five consecutive days, asked today -> streak of 5")
+    func consecutiveDaysCountUp() {
+        let calendar = Calendar(identifier: .gregorian)
+        let today = calendar.startOfDay(for: .now)
+        let dates = (0..<5).map { calendar.date(byAdding: .day, value: -$0, to: today)! }
+
+        #expect(currentStreak(brewDates: dates, asOf: today, calendar: calendar) == 5)
+    }
+}
+```
+
+Run it, and Xcode doesn't fail the assertion — it fails the build:
+
+```
+error: cannot find 'currentStreak' in scope
+        #expect(currentStreak(brewDates: dates, asOf: today, calendar: calendar) == 5)
+                ^~~~~~~~~~~~~
+** TEST FAILED **
+```
+
+That compiler error *is* red. People assume "red" means a failing assertion, but a build failure because the thing you're testing doesn't exist yet is the most common shade of red in real TDD. You haven't written a single line of production code, and you already know two things: the function's name and its signature. That's not nothing.
+
+---
+
+## Green: the dumbest thing that could possibly pass
+
+Resist the urge to handle every edge case you can already imagine. Write the version that makes this one test pass and nothing more:
+
+```swift
+func currentStreak(
+    brewDates: [Date],
+    asOf referenceDate: Date = .now,
+    calendar: Calendar = .current
+) -> Int {
+    let loggedDays = Set(brewDates.map { calendar.startOfDay(for: $0) })
+
+    var streak = 0
+    var day = calendar.startOfDay(for: referenceDate)
+    while loggedDays.contains(day) {
+        streak += 1
+        guard let previous = calendar.date(byAdding: .day, value: -1, to: day) else { break }
+        day = previous
+    }
+    return streak
+}
+```
+
+```
+** TEST SUCCEEDED **
+Test case 'BrewStreakTests/consecutiveDaysCountUp()' passed (0.000 seconds)
+```
+
+Green. Eleven lines, ten minutes, ship it — and this is exactly where the academic version of this tutorial stops. Test passed, function works, move on to the next chapter. It's also where a real streak counter would have shipped a second, sneakier bug straight to the App Store.
+
+---
+
+## The edge case the textbook skips
+
+Here's the question a tutorial never asks: what happens if you check the streak at 7 AM, before you've had today's coffee?
+
+Walk through the function above. `loggedDays` doesn't contain today, because today's brew hasn't happened yet. The `while` loop checks `today`, finds nothing, and stops immediately. Streak: zero. You logged coffee every single day for two weeks, and the one morning you check before pouring, the app tells you your streak is dead.
+
+That's not a hypothetical. That's the exact bug that makes people uninstall streak-based apps — the punishment lands before the deadline does. So I wrote the test for it before touching the implementation:
+
+```swift
+@Test("no brew yet today, but five in a row through yesterday -> still 5, not 0")
+func todayHasGraceBeforeBreaking() {
+    let calendar = Calendar(identifier: .gregorian)
+    let today = calendar.startOfDay(for: .now)
+    // Five brews ending yesterday — nothing logged for `today`.
+    let dates = (1...5).map { calendar.date(byAdding: .day, value: -$0, to: today)! }
+
+    #expect(currentStreak(brewDates: dates, asOf: today, calendar: calendar) == 5)
+}
+```
+
+```
+Test case 'BrewStreakTests/todayHasGraceBeforeBreaking()' failed (0.000 seconds)
+```
+
+Red again, on real assertion logic this time, not a missing symbol. Good — that's the loop doing its job. The fix is a one-day grace period: if today isn't logged yet, start counting from yesterday instead of declaring defeat.
+
+```swift
+func currentStreak(
+    brewDates: [Date],
+    asOf referenceDate: Date = .now,
+    calendar: Calendar = .current
+) -> Int {
+    let loggedDays = Set(brewDates.map { calendar.startOfDay(for: $0) })
+    let today = calendar.startOfDay(for: referenceDate)
+
+    var day = today
+    if !loggedDays.contains(today) {
+        guard let yesterday = calendar.date(byAdding: .day, value: -1, to: today) else { return 0 }
+        day = yesterday
+    }
+
+    var streak = 0
+    while loggedDays.contains(day) {
+        streak += 1
+        guard let previous = calendar.date(byAdding: .day, value: -1, to: day) else { break }
+        day = previous
+    }
+    return streak
+}
+```
+
+```
+** TEST SUCCEEDED **
+Test case 'BrewStreakTests/consecutiveDaysCountUp()' passed (0.000 seconds)
+Test case 'BrewStreakTests/todayHasGraceBeforeBreaking()' passed (0.000 seconds)
+```
+
+That's the refactor step, and notice it wasn't "clean up the code" — it was "the second test changed what correct even means," which is the honest version of refactoring most courses don't show you, because their example only ever needed one test to begin with.
+
+---
+
+## The rest of the edge cases, because users are creative
+
+Three more, written the same way — failing first if the implementation didn't already cover them, which I checked one at a time instead of assuming:
+
+```swift
+@Test("a gap two days back breaks the streak even if today is logged")
+func gapBreaksStreak() {
+    let calendar = Calendar(identifier: .gregorian)
+    let today = calendar.startOfDay(for: .now)
+    let dates = [0, 1, 3, 4, 5].map { calendar.date(byAdding: .day, value: -$0, to: today)! }
+
+    #expect(currentStreak(brewDates: dates, asOf: today, calendar: calendar) == 2)
+}
+
+@Test("three brews on the same day only count as one day of streak")
+func sameDayBrewsCollapseToOne() {
+    let calendar = Calendar(identifier: .gregorian)
+    let today = calendar.startOfDay(for: .now)
+    let dates = [today, today.addingTimeInterval(3600), today.addingTimeInterval(28800)]
+
+    #expect(currentStreak(brewDates: dates, asOf: today, calendar: calendar) == 1)
+}
+
+@Test("no brews ever logged -> streak of 0, not a crash")
+func emptyHistoryIsZero() {
+    #expect(currentStreak(brewDates: [], calendar: Calendar(identifier: .gregorian)) == 0)
+}
+```
+
+The same-day test exists because BrewLog lets you log a second espresso at 4 PM without penalty — and a careless `streak += 1` per *brew* instead of per *day* would have quietly turned every double-coffee afternoon into a two-day jump. The empty-history test exists because "new user, zero data" is the very first state your app is ever in, and it's the one state every demo conveniently skips.
+
+Five tests, all green, all on a function with zero dependencies:
+
+```
+Test suite 'BrewStreakTests' started
+Test case 'BrewStreakTests/consecutiveDaysCountUp()' passed (0.000 seconds)
+Test case 'BrewStreakTests/emptyHistoryIsZero()' passed (0.000 seconds)
+Test case 'BrewStreakTests/sameDayBrewsCollapseToOne()' passed (0.000 seconds)
+Test case 'BrewStreakTests/todayHasGraceBeforeBreaking()' passed (0.000 seconds)
+Test case 'BrewStreakTests/gapBreaksStreak()' passed (0.000 seconds)
+** TEST SUCCEEDED **
+```
+
+---
+
+## Wiring it into the view that started this
+
+This is the part academic TDD examples treat as an afterthought, but it's the only part the user ever sees. Two small edits to `ContentView.swift`. A computed property next to the existing `weekCount`:
+
+```swift
+private var streak: Int {
+    currentStreak(brewDates: allBrews.map(\.date))
+}
+```
+
+And the string literal that started this whole post gets to retire:
+
+```swift
+StatCard(label: "Streak", value: "\(streak)", icon: "flame.fill")
+```
+
+That's it. No `@StateObject`, no view model class, no protocol. The view stays exactly as dumb as it was — it just stopped lying. I built and ran it on the simulator with BrewLog's existing demo-seed flag, which already drops five sample brews across five consecutive days for screenshot purposes:
+
+![BrewLog's home screen showing the Streak stat card now reading 5, matching five real seeded brews across five consecutive days, instead of the previous hardcoded 0.](/images/blog/tdd-brewlog-streak-stat-fixed.png)
+
+Five seeded brews, five-day streak, computed for real. The same number the test suite predicted before a single pixel rendered.
+
+---
+
+## What "not academic" actually means here
+
+Textbook TDD shows you one test, one implementation, one green checkmark, and calls it a day. Real TDD is what happened in the middle of this post: the first green checkmark was a trap. It passed the only test that existed and shipped a UX bug that would have punished BrewLog's most loyal users — the ones who actually have a streak to lose.
+
+The discipline isn't "write tests first" as a ritual. It's that writing the test *forces you to state the rule out loud* before you can hide behind an implementation that merely "seems to work." `currentStreak` returning 0 for someone with a two-week streak seems fine right up until you write the sentence "the streak should still count if I haven't brewed yet today" and realize your code doesn't say that anywhere.
+
+This whole exercise was possible in about twenty minutes because the function had no dependencies to fake. That's not luck — it's the same seam this series keeps building toward: [DI without a framework on Day 19](/blog/dependency-injection-swift-without-frameworks) and [Swift Testing's cleaner syntax on Day 20](/blog/swift-testing-framework-xctest-migration-guide) both exist to make this exact loop fast enough that you actually do it, instead of saving testing for "later" — which is where good intentions go to die.
+
+If you want the testing strategy baked in from line one of a real app — not retrofitted into a year-old codebase the way this post just did — that's the spine of the [SwiftUI at Scale course](/learn), where we build Atlas with the model/view seam in place before the first feature exists, not after the first bug report.
+
+*Day 21 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [Swift Testing Framework — why you should migrate from XCTest](/blog/swift-testing-framework-xctest-migration-guide). Tomorrow: a custom networking layer in 100 lines of code, no Alamofire required.*
