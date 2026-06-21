@@ -1,0 +1,371 @@
+---
+title: "A Custom Networking Layer in 100 Lines of Swift — No Alamofire"
+description: "Day 22 of the 30-day iOS series. URLSession, async/await, a generic Endpoint, and one typed error enum — the entire networking layer is 85 real lines, tested with a URLProtocol stub, and wired into a real BrewLog feature with a real local server."
+pubDate: 2026-06-21
+tags: ["Swift", "Networking", "URLSession", "Async Await", "iOS Development", "Tutorial", "Swift Testing", "TDD", "Architecture"]
+author: "Mario"
+coverImage: "/images/blog/custom-networking-layer-urlsession-cover.jpg"
+coverImageAlt: "A tangled mass of colorful telephone wires on the left resolving into a neatly organized black patch panel on the right — the same shape as replacing scattered URLSession calls with one clean networking layer."
+---
+
+{/*
+  SEO target keywords:
+  - custom networking layer Swift
+  - URLSession async await tutorial
+  - Swift networking without Alamofire
+  - generic Endpoint Swift API client
+  - typed network errors Swift enum
+  - URLProtocol stub testing Swift
+  - Swift Testing parallel tests gotcha
+  - test URLSession without a server
+  - Swift API client architecture 2026
+  - async await networking layer iOS
+
+  Internal linking strategy:
+  - /blog/tdd-swiftui-observable-viewmodel-red-green-refactor (Day 21 — direct prequel, same TDD seam discipline)
+  - /blog/dependency-injection-swift-without-frameworks (Day 19 — protocol-based service injection reused here)
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (Day 8 — idle/loading/loaded/failed state pattern + Stub/Failing fakes precedent)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /learn (SwiftUI at Scale — composition root, DI spine)
+
+  Day 22 of the 30-day iOS series. Opens Week 4 (Networking, Performance, Advanced). Series part 1/2 (networking layer).
+*/}
+
+BrewLog's "Tip of the day" card has shown the exact same tip since the project's first commit. Not a bug, exactly — unlike [Day 21's streak counter](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor), it isn't lying to anyone. The grind-size advice is genuinely good. It's just frozen, because it's a string literal sitting inside a SwiftUI view:
+
+```swift
+Text("Grind size matters more than dose. If your espresso pulls fast and tastes sour, go finer...")
+```
+
+Every tutorial that adds "fetch this from a server" to an app reaches for the same first instinct: paste a `URLSession.shared.data(for:)` call directly into the view or the view model, `try?` the JSON decode, move on. Do that four or five times across an app and you've got four or five slightly different ideas of what a failed request even means — one spot crashes on a bad status code, another silently shows nothing, a third decodes garbage into half-populated optionals and calls it a day.
+
+So today's the day the tip gets a real backend call. Let's build the smallest networking layer that doesn't paint us into that corner.
+
+---
+
+## Why not Alamofire, why not Moya
+
+Both are good libraries. Neither is solving a 2026 problem anymore.
+
+Alamofire and Moya exist because, in the completion-handler era, `URLSession` was genuinely painful — nested callbacks, manual response validation, no built-in JSON pipeline. `async`/`await` removed almost all of that pain from the standard library itself. What's left to build on top is small enough to own: a way to describe a request, a way to send it and get a typed result back, and a way to talk about what went wrong. That's three types, not a dependency.
+
+Owning it also means zero black boxes when something breaks at 11 PM and the stack trace runs through code you didn't write.
+
+---
+
+## The three pieces
+
+**`Endpoint`** describes a request without knowing how to send one:
+
+```swift
+struct Endpoint {
+    var path: String
+    var method: String = "GET"
+    var queryItems: [URLQueryItem] = []
+}
+```
+
+**`APIError`** is the one vocabulary every call site speaks, instead of four different optional-unwrapping conventions:
+
+```swift
+enum APIError: Error, Equatable {
+    case invalidURL
+    case transport(String)
+    case badStatus(Int)
+    case decoding(String)
+}
+```
+
+**`NetworkClient`** is the protocol that does the actual work, with `URLSessionNetworkClient` as the one real implementation:
+
+```swift
+protocol NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T
+}
+
+struct URLSessionNetworkClient: NetworkClient {
+    let baseURL: URL
+    let session: URLSession
+
+    init(baseURL: URL, session: URLSession = .shared) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        guard var components = URLComponents(
+            url: baseURL.appendingPathComponent(endpoint.path),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw APIError.invalidURL
+        }
+        components.queryItems = endpoint.queryItems.isEmpty ? nil : endpoint.queryItems
+
+        guard let url = components.url else {
+            throw APIError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = endpoint.method
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw APIError.transport(error.localizedDescription)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidURL
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.badStatus(http.statusCode)
+        }
+
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw APIError.decoding(error.localizedDescription)
+        }
+    }
+}
+```
+
+That's the entire transport layer. `Endpoint.swift`, `NetworkClient.swift`, and the one concrete service below come to **85 lines**, counted, not rounded up for a catchy headline:
+
+```
+$ wc -l Endpoint.swift NetworkClient.swift BrewTipsService.swift
+       7 Endpoint.swift
+      60 NetworkClient.swift
+      18 BrewTipsService.swift
+      85 total
+```
+
+---
+
+## Testing it without a server
+
+A generic client is exactly the kind of thing you can't honestly unit-test by calling a real API — that's an integration test wearing a unit test's clothes, and it'll be flaky the day the Wi-Fi is bad. The actual seam is `URLSession` itself, via `URLProtocol`: register a fake protocol class that intercepts every request and hands back whatever the test wants, no socket involved.
+
+```swift
+final class StubURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) -> (HTTPURLResponse, Data)) = { request in
+        (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let (response, data) = Self.handler(request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+```
+
+Four tests, written before I trusted the implementation: a clean 2xx decode, a 500 that should throw `.badStatus(500)` and not try to parse a body that isn't there, malformed JSON on an otherwise-fine response, and a check that query items actually land on the URL.
+
+```swift
+@Test("non-2xx status code throws badStatus, not a decoding error")
+func nonSuccessStatusThrowsBadStatus() async throws {
+    StubURLProtocol.handler = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+        return (response, Data())
+    }
+
+    await #expect(throws: APIError.badStatus(500)) {
+        _ = try await makeClient().send(Endpoint(path: "widgets/1"), as: Widget.self)
+    }
+}
+```
+
+First run, three of the four failed. Not because the client was wrong — because the test harness was:
+
+```
+Test case 'NetworkClientTests/queryItemsAreAppended()' failed (0.000 seconds)
+Test case 'NetworkClientTests/decodesSuccessResponse()' failed (2.000 seconds)
+Test case 'NetworkClientTests/nonSuccessStatusThrowsBadStatus()' failed (2.000 seconds)
+Test case 'NetworkClientTests/malformedBodyThrowsDecodingError()' passed (2.000 seconds)
+```
+
+`decodesSuccessResponse` — the test that hands back `{"name":"kettle"}` and expects a decoded `Widget` — failed with `Caught error: .decoding("The data couldn't be read because it is missing.")`. Missing data, for a handler that explicitly returns data. That's the second-most-common shade of red, right behind [Day 21's missing-symbol build error](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor): the test is failing for a reason that has nothing to do with the line you're trying to prove.
+
+Swift Testing runs every test in a suite in parallel by default. `StubURLProtocol.handler` is a single shared `static var`. Four tests racing to set that one variable before their own request fires means a test can — and did — receive another test's response. The fix isn't in the production code at all:
+
+```swift
+@Suite("URLSessionNetworkClient", .serialized)
+struct NetworkClientTests {
+    // ...
+}
+```
+
+`.serialized` tells Swift Testing to run this suite's tests one at a time. Green, every time, instead of green-ish-most-of-the-time:
+
+```
+Test case 'NetworkClientTests/decodesSuccessResponse()' passed (0.000 seconds)
+Test case 'NetworkClientTests/nonSuccessStatusThrowsBadStatus()' passed (0.000 seconds)
+Test case 'NetworkClientTests/malformedBodyThrowsDecodingError()' passed (0.000 seconds)
+Test case 'NetworkClientTests/queryItemsAreAppended()' passed (0.000 seconds)
+```
+
+Worth remembering any time a test suite shares mutable state through a stub, a singleton, or a static var: parallel-by-default is a great feature right up until two tests reach for the same drawer at once.
+
+---
+
+## The actual feature: BrewTipsService
+
+With a tested client, the BrewLog-specific part is almost an afterthought — which is the entire point of separating the transport layer from the feature:
+
+```swift
+struct BrewTipDTO: Decodable {
+    let tip: String
+}
+
+protocol BrewTipsService {
+    func fetchTipOfTheDay() async throws -> String
+}
+
+struct RemoteBrewTipsService: BrewTipsService {
+    let client: NetworkClient
+
+    func fetchTipOfTheDay() async throws -> String {
+        let dto = try await client.send(Endpoint(path: "tips/today"), as: BrewTipDTO.self)
+        return dto.tip
+    }
+}
+```
+
+Same protocol-first move as [Day 19's DI post](/blog/dependency-injection-swift-without-frameworks): the view talks to `BrewTipsService`, never to `URLSessionNetworkClient` directly, so a test can swap in a fake that returns instantly.
+
+The view needs somewhere to put loading/success/failure, and the shape is the same idle → loading → loaded/failed machine from [Day 8's `NoteSummaryModel`](/blog/foundation-models-first-on-device-ai-feature-no-backend):
+
+```swift
+@Observable
+final class TipOfTheDayModel {
+    enum State: Equatable {
+        case idle
+        case loading
+        case loaded(String)
+        case failed
+    }
+
+    static let fallbackTip = "Grind size matters more than dose. If your espresso pulls fast and tastes sour, go finer. If it pulls slow and tastes bitter, go coarser. Tune one variable at a time."
+
+    private(set) var state: State = .idle
+    private let service: BrewTipsService
+
+    init(service: BrewTipsService) {
+        self.service = service
+    }
+
+    func load() async {
+        state = .loading
+        do {
+            let tip = try await service.fetchTipOfTheDay()
+            state = .loaded(tip)
+        } catch {
+            state = .failed
+        }
+    }
+}
+```
+
+Tested with the same Stub/Failing fake pattern as Day 8 — no `URLSession`, no `URLProtocol`, because this model doesn't know networking exists:
+
+```swift
+private struct FailingBrewTipsService: BrewTipsService {
+    struct DummyError: Error {}
+    func fetchTipOfTheDay() async throws -> String { throw DummyError() }
+}
+
+@Test("load() on a throwing service ends in failed, not a crash")
+func loadFailureEndsInFailedState() async {
+    let model = TipOfTheDayModel(service: FailingBrewTipsService())
+    await model.load()
+    #expect(model.state == .failed)
+}
+```
+
+```
+Test case 'TipOfTheDayModelTests/startsIdle()' passed (0.000 seconds)
+Test case 'TipOfTheDayModelTests/loadSucceeds()' passed (0.000 seconds)
+Test case 'TipOfTheDayModelTests/loadFailureEndsInFailedState()' passed (0.000 seconds)
+```
+
+That `.failed` case matters more than it looks. If the request times out — bad cell signal, a backend deploy mid-flight, whatever — the card falls back to the static tip instead of going blank:
+
+```swift
+private var tipText: String {
+    switch tipModel.state {
+    case .loaded(let tip): tip
+    default: TipOfTheDayModel.fallbackTip
+    }
+}
+```
+
+A networking feature that degrades to "the old hardcoded version" on failure is a much better failure mode than a `ProgressView` that spins forever. The view's whole job is one `switch` and a `.task` — it stays exactly as dumb as the Day 21 streak card did.
+
+---
+
+## Proving it against a real server, not a mock
+
+BrewLog doesn't have a production backend, so rather than fake the success path *inside* the running app — which would mean trusting the same code I just wrote tests for — I pointed it at the simplest possible real server: a nine-line Python script with no dependencies, run on localhost.
+
+```python
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+TIP = "Pre-heat your cup with hot water before pulling a shot. Espresso poured into a cold cup loses ten degrees in the first thirty seconds, right when you want it hottest."
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"tip": TIP}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+HTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+```
+
+```
+$ python3 brewlog_tip_server.py &
+$ curl -s http://127.0.0.1:8080/tips/today
+{"tip": "Pre-heat your cup with hot water before pulling a shot..."}
+```
+
+`URLSessionNetworkClient(baseURL: URL(string: "http://127.0.0.1:8080")!)` — plain HTTP, no certificate, no Info.plist exception needed, because App Transport Security has had a standing exemption for loopback addresses since iOS 16. Built and ran BrewLog on the simulator against that server:
+
+![BrewLog's home screen with the Tip of the Day card showing a fresh tip — "Pre-heat your cup with hot water before pulling a shot..." — fetched live over HTTP from a local Python server instead of the old hardcoded grind-size string.](/images/blog/brewlog-tip-of-the-day-networking-live.png)
+
+That's a real network round trip on a real simulator, not a screenshot of a mock. Swap `127.0.0.1:8080` for a real API once BrewLog has one, and nothing else in this post changes — the entire point of the `NetworkClient` protocol is that the call sites never know the difference.
+
+---
+
+## What's deliberately not here yet
+
+This is part 1 of 2 on purpose. What's missing — and what every "build your own networking layer" tutorial conveniently skips — is everything that makes a networking layer survive contact with production: retrying a flaky request, refreshing an expired auth token mid-flight, and not firing the same request five times because five views asked for the same data at once. All three need an `actor`, because they all involve state that has to stay correct under concurrent access, and that's exactly the kind of place `@MainActor`-by-default from [Day 1](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency) won't save you — this state isn't UI state.
+
+That's Day 23.
+
+---
+
+## The short version
+
+| Piece | Lines | Job |
+|---|---|---|
+| `Endpoint` | 7 | Describes a request |
+| `APIError` | part of NetworkClient.swift | One typed vocabulary for everything that can go wrong |
+| `URLSessionNetworkClient` | ~50 | Sends the request, decodes the response |
+| `BrewTipsService` | 18 | The one feature-specific call site |
+
+85 lines, four tests, zero third-party dependencies, and a `.serialized` trait that exists because the test *harness*, not the client, had the bug. If you want this kind of test-first discipline baked into a real app's architecture from line one — composition root, DI, the works — that's the spine of the [SwiftUI at Scale course](/learn), built around Atlas from the very first commit instead of retrofitted in on Day 22.
+
+---
+
+*Day 22 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [TDD for SwiftUI, the non-academic version](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor). Tomorrow: retry, token refresh, and request deduplication in the same networking layer — the production use cases tutorials skip.*

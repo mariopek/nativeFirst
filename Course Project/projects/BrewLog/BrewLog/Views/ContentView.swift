@@ -505,6 +505,18 @@ private struct BrewRow: View {
 
 private struct TipOfTheDay: View {
     @Environment(UserPreferences.self) private var prefs
+    @State private var tipModel = TipOfTheDayModel(
+        service: RemoteBrewTipsService(
+            client: URLSessionNetworkClient(baseURL: URL(string: "http://127.0.0.1:8080")!)
+        )
+    )
+
+    private var tipText: String {
+        switch tipModel.state {
+        case .loaded(let tip): tip
+        default: TipOfTheDayModel.fallbackTip
+        }
+    }
 
     var body: some View {
         @Bindable var prefs = prefs
@@ -526,7 +538,7 @@ private struct TipOfTheDay: View {
                 .accessibilityIdentifier("FavoriteTipButton")
             }
 
-            Text("Grind size matters more than dose. If your espresso pulls fast and tastes sour, go finer. If it pulls slow and tastes bitter, go coarser. Tune one variable at a time.")
+            Text(tipText)
                 .font(.body)
                 .foregroundStyle(.white)
         }
@@ -543,6 +555,9 @@ private struct TipOfTheDay: View {
                 )
         )
         .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 6)
+        .task {
+            await tipModel.load()
+        }
     }
 }
 
