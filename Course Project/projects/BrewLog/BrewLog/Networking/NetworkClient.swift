@@ -35,6 +35,9 @@ struct URLSessionNetworkClient: NetworkClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = endpoint.method
+        for (field, value) in endpoint.headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
 
         let data: Data
         let response: URLResponse

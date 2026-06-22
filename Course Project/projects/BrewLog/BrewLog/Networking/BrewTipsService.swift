@@ -12,7 +12,7 @@ struct RemoteBrewTipsService: BrewTipsService {
     let client: NetworkClient
 
     func fetchTipOfTheDay() async throws -> String {
-        let dto = try await client.send(Endpoint(path: "tips/today"), as: BrewTipDTO.self)
+        let dto = try await client.send(Endpoint(path: "tips/today", requiresAuth: true), as: BrewTipDTO.self)
         return dto.tip
     }
 }

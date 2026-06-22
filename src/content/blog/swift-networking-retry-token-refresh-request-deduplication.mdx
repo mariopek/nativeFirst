@@ -1,0 +1,375 @@
+---
+title: "Retry, Token Refresh, and Request Deduplication in Swift"
+description: "Day 23 of the 30-day iOS series. The three production concerns every 'build your own networking layer' tutorial skips, built as composable actors on top of Day 22's client — plus a real concurrency bug I found writing the test, not the code."
+pubDate: 2026-06-22
+tags: ["Swift", "Networking", "Swift Concurrency", "Actors", "iOS Development", "Tutorial", "Swift Testing", "TDD", "Architecture"]
+author: "Mario"
+coverImage: "/images/blog/networking-retry-auth-refresh-dedup-cover.jpg"
+coverImageAlt: "A relay runner mid-sprint on an outdoor track, baton in hand, captured at full stride — the same shape as a request that has to keep moving forward through a dropped connection, an expired token, or a second caller asking for the same thing."
+---
+
+{/*
+  SEO target keywords:
+  - retry logic Swift networking
+  - token refresh actor Swift
+  - request deduplication Swift async await
+  - single-flight pattern Swift actor
+  - Swift actor reentrancy bug
+  - async let race condition Swift
+  - exponential backoff Swift URLSession
+  - 401 token refresh interceptor Swift
+  - Swift Testing concurrent test
+  - composable network client decorator Swift
+
+  Internal linking strategy:
+  - /blog/custom-networking-layer-swift-urlsession-async-await (Day 22 — direct prequel, same NetworkClient/Endpoint this post wraps)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root, MainActor-by-default callback)
+  - /blog/dependency-injection-swift-without-frameworks (Day 19 — protocol-first composition, decorator over the same seam)
+  - /blog/tdd-swiftui-observable-viewmodel-red-green-refactor (Day 21 — "test the seam, not the integration" precedent)
+  - /learn (SwiftUI at Scale — composition root, DI spine)
+
+  Day 23 of the 30-day iOS series. Closes Week 4's networking pair (Day 22 was 1/2). Series part 2/2.
+*/}
+
+Day 22 ended with a confession: the 85-line networking layer I'd just built was a toy. Not because it was wrong — the tests were green, the BrewLog tip card really did fetch from a real local server — but because it had never met a flaky connection, an expired token, or two views asking for the same thing at the same time. I said that was Day 23. It's Day 23.
+
+Three production concerns, three actors, and — I'll get to this — one genuine concurrency bug that showed up in the ninth test I wrote, not in the code it was testing.
+
+---
+
+## Why these three, and why actors
+
+Retry, token refresh, and request deduplication all share a property: they're about **state that has to stay correct while multiple callers hit it at once**. A retry counter, a cached token, an in-flight request — if two requests can mutate any of those at the same time, you get a duplicate refresh call, a retry that fires twice, or a cache that never clears.
+
+That's exactly the job description of a Swift `actor`. And it's worth a callback to [Day 1](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency): BrewLog builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, meaning every plain `struct` or `class` in this project runs on the main thread unless told otherwise. An `actor` is the one declaration that opts *out* of that default — it carves out its own isolation domain no matter what the project-wide setting says. That's not incidental here. It's the entire reason the next two types are actors and not structs.
+
+---
+
+## Token refresh: one refresh, however many callers
+
+The naive fix for an expired token is "catch the 401, refresh, retry." The naive fix breaks the moment two requests 401 at once — both see the token as stale, both call the refresh endpoint, and now you've got two refresh calls racing, possibly invalidating each other's token.
+
+`AuthTokenStore` exists to make that structurally impossible:
+
+```swift
+actor AuthTokenStore {
+    private(set) var currentToken: String
+    private var refreshTask: Task<String, Error>?
+    private let refresher: () async throws -> String
+
+    init(initialToken: String, refresher: @escaping () async throws -> String) {
+        self.currentToken = initialToken
+        self.refresher = refresher
+    }
+
+    func refreshedToken() async throws -> String {
+        if let refreshTask {
+            return try await refreshTask.value
+        }
+
+        let task = Task { try await refresher() }
+        refreshTask = task
+        defer { refreshTask = nil }
+
+        let token = try await task.value
+        currentToken = token
+        return token
+    }
+}
+```
+
+The trick is the `refreshTask` property. The first caller to arrive finds it `nil`, creates the real refresh `Task`, and stores it before awaiting it. Every caller that arrives *while that's in flight* finds the stored task and just awaits the same one — no second network call, no second `currentToken` write. Ten callers racing for a refresh trigger exactly one HTTP request:
+
+```swift
+@Test("ten callers racing for a refresh only trigger the network call once")
+func concurrentCallersShareOneRefresh() async throws {
+    let refreshCount = Counter()
+    let store = AuthTokenStore(initialToken: "stale") {
+        await refreshCount.increment()
+        try? await Task.sleep(for: .milliseconds(50))
+        return "fresh"
+    }
+
+    let results = try await withThrowingTaskGroup(of: String.self) { group -> [String] in
+        for _ in 0..<10 {
+            group.addTask { try await store.refreshedToken() }
+        }
+        var collected: [String] = []
+        for try await token in group { collected.append(token) }
+        return collected
+    }
+
+    #expect(results == Array(repeating: "fresh", count: 10))
+    #expect(await refreshCount.value == 1)
+}
+```
+
+```
+Test case 'AuthTokenStoreTests/refreshUpdatesCurrentToken()' passed (0.000 seconds)
+Test case 'AuthTokenStoreTests/concurrentCallersShareOneRefresh()' passed (1.000 seconds)
+```
+
+This pattern has a name — single-flight — and it's the same shape whether you're refreshing a token, warming a cache, or deduplicating a request. Which is the next section.
+
+---
+
+## Request deduplication: forgetting what type you're holding
+
+Two views asking for the same tip at the same time shouldn't mean two HTTP calls. The fix again is "if a request for this key is already in flight, hand the caller that one instead of starting a new one" — but a generic networking layer has to coalesce requests for *any* `Decodable` type, in one dictionary, which means the cache has to forget what type it's holding:
+
+```swift
+actor RequestDeduplicator {
+    private var inFlight: [String: Task<Any, Error>] = [:]
+
+    func value<T>(for key: String, as type: T.Type, perform: @escaping () async throws -> T) async throws -> T {
+        if let existing = inFlight[key] {
+            guard let result = try await existing.value as? T else {
+                throw APIError.decoding("Deduplicated request resolved to an unexpected type.")
+            }
+            return result
+        }
+
+        let task = Task<Any, Error> { try await perform() }
+        inFlight[key] = task
+        defer { inFlight[key] = nil }
+
+        guard let result = try await task.value as? T else {
+            throw APIError.decoding("Deduplicated request resolved to an unexpected type.")
+        }
+        return result
+    }
+}
+```
+
+`Task<Any, Error>` plus a cast back to `T` on the way out. It's a little ugly, and I'm not going to pretend otherwise — every generic request-coalescer I've ever seen ends up here one way or another, because the alternative is a separate dictionary per type, which doesn't compose.
+
+---
+
+## The bug that was in the test, not the code
+
+Here's where Day 23 stopped being a normal Tuesday.
+
+The obvious test for `RequestDeduplicator` is two concurrent calls for the same key:
+
+```swift
+async let first = deduplicator.value(for: "tips/today", as: String.self) {
+    await callCount.increment()
+    return "first"
+}
+async let second = deduplicator.value(for: "tips/today", as: String.self) {
+    await callCount.increment()
+    return "second"
+}
+
+let (firstResult, secondResult) = try await (first, second)
+#expect(firstResult == secondResult)
+#expect(await callCount.value == 1)
+```
+
+I ran it. It failed:
+
+```
+Expectation failed: (firstResult → "first") == (secondResult → "second")
+Expectation failed: await callCount.value == 1
+```
+
+`callCount` was 2. Both closures had run. The actor I'd just convinced you can't have two callers create their own task for the same key had, apparently, let exactly that happen.
+
+I spent longer than I'd like to admit assuming I had an actor-isolation bug — that somehow two callers were seeing an empty cache "at the same time." So I pulled the actor out into a standalone script, ran it 200 times in a loop with print statements at every step, and watched what actually happened:
+
+```
+[A] entered value(), inFlightKeys=[]
+[A] becoming the in-flight runner, inserting key
+    >>> A perform() running
+[A] perform() finished with success("first")
+[A] resolving 0 waiters
+[B] entered value(), inFlightKeys=[]
+[B] becoming the in-flight runner, inserting key
+    >>> B perform() running
+[B] perform() finished with success("second")
+[B] resolving 0 waiters
+```
+
+There's the bug, and it's not in the actor. **A runs to completion — including clearing its own cache entry — before B even starts.** `async let` schedules two child tasks; it doesn't promise they'll actually overlap.
+
+When neither closure does any real asynchronous work, the runtime can — and regularly does — run the first one start-to-finish before the second gets a turn. By the time B checks the cache, A has already finished and cleaned up after itself. The two calls never collide, so there's nothing to deduplicate — the test that was supposed to prove concurrency safety was quietly testing two sequential calls instead.
+
+Over 200 runs of the standalone version, that happened 34 times. Not rare. Not exotic. A coin you'd lose to roughly one time in six.
+
+The fix isn't in `RequestDeduplicator` — it was already correct. The fix is making the test *force* the overlap it claims to be testing, instead of hoping for it:
+
+```swift
+let firstHasStarted = Gate()
+
+let firstTask = Task {
+    try await deduplicator.value(for: "tips/today", as: String.self) {
+        await callCount.increment()
+        await firstHasStarted.open()
+        try? await Task.sleep(for: .milliseconds(20))
+        return "first"
+    }
+}
+
+await firstHasStarted.wait()
+
+let secondResult = try await deduplicator.value(for: "tips/today", as: String.self) {
+    await callCount.increment()
+    return "second"
+}
+let firstResult = try await firstTask.value
+
+#expect(firstResult == "first")
+#expect(secondResult == "first")
+#expect(await callCount.value == 1)
+```
+
+`Gate` is eight lines wrapping a `CheckedContinuation` — `open()` resumes whoever's waiting, `wait()` suspends until someone calls `open()`. The test now *knows* the first call has registered itself before the second one fires, instead of crossing its fingers. Back in Xcode, on the real target:
+
+```
+Test case 'RequestDeduplicatorTests/concurrentCallsShareOneInFlightTask()' passed (0.000 seconds)
+```
+
+Green on every run since, including the back-to-back retry Xcode does automatically on a failure — the same repeat-on-failure mechanism that, before this fix, had quietly caught and re-confirmed the bug twice in the same invocation.
+
+The lesson generalizes past this one test: if a "concurrent" test doesn't force the overlap it's trying to prove — with a continuation, a sleep, anything that guarantees the second call arrives while the first is still working — it isn't testing concurrency. It's testing the scheduler's mood that day. [Day 22's](/blog/custom-networking-layer-swift-urlsession-async-await) `.serialized` fix was the test harness lying about isolation; this one is the test *design* lying about overlap. Same family of bug, opposite end of the suite.
+
+---
+
+## Retry: only for failures that deserve a second try
+
+Retry is the simplest of the three and the easiest to get wrong in the other direction — retrying a 404 doesn't fix a 404, it just makes the user wait three times longer to find out their request was always going to fail.
+
+```swift
+private static func isRetryable(_ error: APIError) -> Bool {
+    switch error {
+    case .transport:
+        return true
+    case .badStatus(let code):
+        return (500...599).contains(code)
+    case .invalidURL, .decoding:
+        return false
+    }
+}
+```
+
+Transport failures and 5xx responses get up to two retries with linear backoff (200ms, then 400ms). Everything else — a bad URL, a 404, a malformed body — fails immediately, because trying again can't change the answer.
+
+---
+
+## Composing all three
+
+`ResilientNetworkClient` is a decorator: it implements the same `NetworkClient` protocol it wraps, so nothing that calls it — `BrewTipsService`, the view model, a future feature — has to know it exists.
+
+```swift
+struct ResilientNetworkClient: NetworkClient {
+    let wrapped: NetworkClient
+    let authTokenStore: AuthTokenStore
+    let deduplicator: RequestDeduplicator
+    var maxRetries: Int = 2
+
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        let key = "\(endpoint.method) \(endpoint.path)?\(endpoint.queryItems)"
+        return try await deduplicator.value(for: key, as: T.self) {
+            try await sendWithRetryAndAuth(endpoint, as: T.self)
+        }
+    }
+
+    private func sendWithRetryAndAuth<T: Decodable>(
+        _ endpoint: Endpoint,
+        as type: T.Type,
+        attempt: Int = 1,
+        didRefreshToken: Bool = false
+    ) async throws -> T {
+        var request = endpoint
+        if request.requiresAuth {
+            request.headers["Authorization"] = "Bearer \(await authTokenStore.currentToken)"
+        }
+
+        do {
+            return try await wrapped.send(request, as: T.self)
+        } catch APIError.badStatus(401) where request.requiresAuth && !didRefreshToken {
+            // Refreshing is itself just a network call — but it must never
+            // route back through this same client, or a 401 on the refresh
+            // endpoint would try to refresh itself forever.
+            _ = try await authTokenStore.refreshedToken()
+            return try await sendWithRetryAndAuth(endpoint, as: T.self, attempt: attempt, didRefreshToken: true)
+        } catch let error as APIError where Self.isRetryable(error) && attempt <= maxRetries {
+            try await Task.sleep(for: .milliseconds(200 * attempt))
+            return try await sendWithRetryAndAuth(endpoint, as: T.self, attempt: attempt + 1, didRefreshToken: didRefreshToken)
+        }
+    }
+}
+```
+
+Dedup wraps the outside, because two callers asking for the same thing should share one whole attempt — retries, auth refresh, and all. Inside that, every retry recomputes the `Authorization` header from `endpoint` (the original, not the locally mutated copy), which means a retry that follows a token refresh automatically picks up the new token. No extra plumbing for that — it falls out of recursing on the unmodified parameter instead of the mutated local.
+
+The `didRefreshToken` flag caps the auth-recovery path at exactly one refresh-and-retry. If the freshly refreshed token *also* 401s, the error propagates instead of looping — a token that's rejected right after a successful refresh means something is actually wrong, not stale.
+
+Five tests cover the orchestration through a fake `NetworkClient`, not a real `URLSession` — the same "test the seam, not the transport" call [Day 19's](/blog/dependency-injection-swift-without-frameworks) DI post made:
+
+```
+Test case 'ResilientNetworkClientTests/retriesTransientFailure()' passed (1.000 seconds)
+Test case 'ResilientNetworkClientTests/doesNotRetryClientErrors()' passed (0.000 seconds)
+Test case 'ResilientNetworkClientTests/refreshesTokenOn401()' passed (0.000 seconds)
+Test case 'ResilientNetworkClientTests/doesNotRefreshForUnauthenticatedEndpoints()' passed (0.000 seconds)
+Test case 'ResilientNetworkClientTests/deduplicatesConcurrentCalls()' passed (0.000 seconds)
+```
+
+---
+
+## Proving it against the real server
+
+BrewLog's `TipOfTheDay` card now builds its client with all three layers wrapped around Day 22's `URLSessionNetworkClient`, starting with a deliberately stale token:
+
+```swift
+private static func makeClient() -> NetworkClient {
+    let baseURL = URL(string: "http://127.0.0.1:8080")!
+    let transport = URLSessionNetworkClient(baseURL: baseURL)
+
+    let authTokenStore = AuthTokenStore(initialToken: "expired-token") {
+        let dto = try await transport.send(
+            Endpoint(path: "auth/refresh", method: "POST"),
+            as: TokenRefreshDTO.self
+        )
+        return dto.token
+    }
+
+    return ResilientNetworkClient(
+        wrapped: transport,
+        authTokenStore: authTokenStore,
+        deduplicator: RequestDeduplicator()
+    )
+}
+```
+
+Note the refresher closure calls `transport` directly, not the `ResilientNetworkClient` being built — exactly the "never route the refresh through itself" rule from a few sections up.
+
+Pointed at the same nine-line Python server from Day 22, now requiring a bearer token on `/tips/today` and serving `/auth/refresh`, the very first launch produces this server log:
+
+```
+401 — rejected token: 'Bearer expired-token'
+200 — issued a fresh token
+200 — tip served with a valid token
+```
+
+That's the whole story in three lines: BrewLog tried with the stale token it started with, got rejected, refreshed without anyone asking it to, and retried successfully — all before the card finished its first render:
+
+![BrewLog's Tip of the Day card showing a fresh tip fetched live after a 401-refresh-retry round trip the view never knew happened — the app started with a deliberately expired token and recovered on its own.](/images/blog/brewlog-tip-of-the-day-auth-refresh-live.png)
+
+The view's code didn't change to make this work. It still just calls `service.fetchTipOfTheDay()` and switches on idle/loading/loaded/failed. That's the actual payoff of building this as a decorator: the resilience lives entirely below a protocol the view never sees past.
+
+---
+
+## The short version
+
+| Piece | Lines | Job |
+|---|---|---|
+| `AuthTokenStore` | 32 | One refresh in flight, however many callers ask |
+| `RequestDeduplicator` | 28 | One real request in flight per key |
+| `ResilientNetworkClient` | 56 | Composes both plus bounded, selective retry |
+
+116 new lines, nine new tests, and a bug that was in the test suite's assumptions about `async let`, not in a single line of the actors it was testing. If you want a curriculum that treats "the test had the bug" as a normal Tuesday instead of an embarrassing footnote, that instinct — write it red, trust the failure, find out which side actually lied — is the spine of the [SwiftUI at Scale course](/learn).
+
+---
+
+*Day 23 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [a custom networking layer in 100 lines](/blog/custom-networking-layer-swift-urlsession-async-await). Tomorrow: SOLID principles in Swift, with the receipts from a real early commit instead of a slide deck.*

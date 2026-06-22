@@ -503,13 +503,35 @@ private struct BrewRow: View {
     }
 }
 
+private struct TokenRefreshDTO: Decodable {
+    let token: String
+}
+
 private struct TipOfTheDay: View {
     @Environment(UserPreferences.self) private var prefs
-    @State private var tipModel = TipOfTheDayModel(
-        service: RemoteBrewTipsService(
-            client: URLSessionNetworkClient(baseURL: URL(string: "http://127.0.0.1:8080")!)
+    @State private var tipModel = TipOfTheDayModel(service: RemoteBrewTipsService(client: Self.makeClient()))
+
+    private static func makeClient() -> NetworkClient {
+        let baseURL = URL(string: "http://127.0.0.1:8080")!
+        let transport = URLSessionNetworkClient(baseURL: baseURL)
+
+        // Starts deliberately stale. The first real request always 401s,
+        // which is exactly the path this client needs to prove it can recover
+        // from without the view ever finding out.
+        let authTokenStore = AuthTokenStore(initialToken: "expired-token") {
+            let dto = try await transport.send(
+                Endpoint(path: "auth/refresh", method: "POST"),
+                as: TokenRefreshDTO.self
+            )
+            return dto.token
+        }
+
+        return ResilientNetworkClient(
+            wrapped: transport,
+            authTokenStore: authTokenStore,
+            deduplicator: RequestDeduplicator()
         )
-    )
+    }
 
     private var tipText: String {
         switch tipModel.state {
