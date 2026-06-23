@@ -1,0 +1,256 @@
+---
+title: "SOLID Principles in Swift: One Bad Class, Five Real Fixes"
+description: "Day 24 of the 30-day iOS series. Skip the acronym slide — here's the 70-line class I'd have shipped on day one of BrewLog, broken against all five SOLID principles, and the five already-tested files in this same repo that actually fix it."
+pubDate: 2026-06-23
+tags: ["Swift", "SOLID Principles", "Software Architecture", "iOS Development", "Tutorial", "Swift Testing", "TDD", "Clean Code", "Protocols"]
+author: "Mario"
+coverImage: "/images/blog/solid-principles-swift-army-knife-cover.jpg"
+coverImageAlt: "A red and black Swiss Army knife fully opened, blade, bottle opener, and corkscrew all fanned out at once — one handle doing five jobs, which is exactly the problem this post is about."
+---
+
+{/*
+  SEO target keywords:
+  - SOLID principles Swift example
+  - SOLID principles SwiftUI real example
+  - single responsibility principle Swift
+  - open closed principle Swift decorator
+  - Liskov substitution principle Swift protocol
+  - interface segregation principle Swift protocol
+  - dependency inversion Swift protocol injection
+  - SOLID principles before after refactor
+  - god class Swift refactoring example
+  - clean architecture Swift iOS 2026
+
+  Internal linking strategy:
+  - /blog/swift-networking-retry-token-refresh-request-deduplication (Day 23 — direct prequel, ResilientNetworkClient is this post's OCP/LSP exhibit)
+  - /blog/custom-networking-layer-swift-urlsession-async-await (Day 22 — NetworkClient/Endpoint, ISP/DIP exhibit)
+  - /blog/dependency-injection-swift-without-frameworks (Day 19 — DIP already covered in depth, linked not repeated)
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener (Day 15 — SubscriptionPolicy origin, SRP exhibit)
+  - /blog/tdd-swiftui-observable-viewmodel-red-green-refactor (Day 21 — "test the seam" precedent)
+  - /blog/spm-modular-architecture-swift-when-to-split (Day 18 — counter-hype precedent, this post's closing caution rhymes with it)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /learn (SwiftUI at Scale — composition root, DI spine)
+
+  Day 24 of the 30-day iOS series. Opens the back half of Week 4 (architecture/testing → networking/performance).
+*/}
+
+Yesterday I promised "the receipts from a real early commit instead of a slide deck." Here they are.
+
+Every SOLID talk has the same five slides: a definition, a UML diagram with arrows, a one-line code snippet too small to argue with, and a room full of developers nodding because disagreeing in public feels like admitting you write bad code. Nobody ever shows you the actual bad class. So I'm going to show you mine.
+
+This is the class I would have written for BrewLog on day one, before any of the last 23 posts forced me to split it apart. It's fake in the sense that I didn't literally commit it — but it's exactly the shape every "just get the feature working" first draft takes, mine included, more times than I'd like to admit.
+
+---
+
+## The class
+
+```swift
+@Observable
+final class BrewLogManager {
+    private let modelContext: ModelContext
+    private(set) var brews: [Brew] = []
+    private(set) var tipOfTheDay: String = "Loading..."
+    private(set) var isPro = false
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
+
+    func logBrew(method: BrewMethod, rating: Int, notes: String) {
+        if !isPro && brews.count >= 20 {
+            print("show paywall, I guess")
+            return
+        }
+        let brew = Brew(method: method, rating: rating, notes: notes)
+        modelContext.insert(brew)
+        try? modelContext.save()
+        brews.append(brew)
+    }
+
+    func currentStreak() -> Int {
+        let days = Set(brews.map { Calendar.current.startOfDay(for: $0.date) })
+        var streak = 0
+        var day = Calendar.current.startOfDay(for: .now)
+        while days.contains(day) {
+            streak += 1
+            day = Calendar.current.date(byAdding: .day, value: -1, to: day)!
+        }
+        return streak
+    }
+
+    func fetchTipOfTheDay() {
+        let url = URL(string: "http://127.0.0.1:8080/tips/today")!
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data, let dto = try? JSONDecoder().decode(BrewTipDTO.self, from: data) else { return }
+            DispatchQueue.main.async { self.tipOfTheDay = dto.tip }
+        }.resume()
+    }
+
+    func restorePurchases() {
+        Task {
+            for await result in Transaction.currentEntitlements {
+                if case .verified(let transaction) = result {
+                    isPro = SubscriptionPolicy.proProductIDs.contains(transaction.productID)
+                }
+            }
+        }
+    }
+}
+```
+
+Seventy lines. It compiles. A demo running off this would look completely fine. And it breaks all five letters of SOLID, each in a way that costs something real later, not in theory.
+
+---
+
+## S — one class, five reasons to change
+
+`BrewLogManager` changes if the SwiftData schema changes, if the free-tier limit changes, if the streak rule changes, if the tips API changes, or if StoreKit's verification flow changes. Five unrelated teams of one (me) editing the same file for five unrelated reasons — that's the actual definition of a Single Responsibility Principle violation. Not "the class is long." Long classes can be fine. The tell is **how many different reasons cause an edit.**
+
+The real BrewLog has the same brew-logging feature split by reason-to-change instead of glued by convenience:
+
+- Free-tier gating is `SubscriptionPolicy.canLogNewBrew(currentCount:entitlement:)` — a pure enum method from [Day 15](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener), zero StoreKit imports, zero SwiftData imports.
+- Streak math is `currentStreak(brewDates:)` in `BrewStreak.swift` — a free function, no class, no observable state, nothing to fetch.
+- The save itself stays exactly where SwiftData already wants it — in the view, next to the `Brew` it's inserting:
+
+```swift
+guard canLogNewBrew else {
+    quickExpanded = false
+    showPaywall = true
+    return
+}
+let brew = Brew(method: method, rating: prefs.defaultStrength > 5 ? 5 : 4)
+ctx.insert(brew)
+try? ctx.save()
+```
+
+Three reasons to change, three places that change. Touch the free-tier number and you edit one pure enum with a test on it. Touch the streak grace period and you edit one free function with five tests on it (from [Day 21](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor)'s red-green-refactor session). Nothing else moves.
+
+---
+
+## O — extending behavior without performing surgery
+
+Say BrewLog needs the tip fetch to retry on a flaky connection. In `BrewLogManager`, that means opening `fetchTipOfTheDay()` and rewriting the body — touching code that already works, that has no tests, and that three other features might also be calling by the time you get to it.
+
+[Day 23](/blog/swift-networking-retry-token-refresh-request-deduplication)'s `ResilientNetworkClient` is the Open/Closed answer: it adds retry, auth refresh, and deduplication **without editing a single line** of the `URLSessionNetworkClient` it wraps.
+
+```swift
+struct ResilientNetworkClient: NetworkClient {
+    let wrapped: NetworkClient
+    let authTokenStore: AuthTokenStore
+    let deduplicator: RequestDeduplicator
+    var maxRetries: Int = 2
+
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        // ...wraps `wrapped.send(...)` with retry, auth, and dedup
+    }
+}
+```
+
+`URLSessionNetworkClient` from [Day 22](/blog/custom-networking-layer-swift-urlsession-async-await) is closed for modification — nobody needs to touch it again — but open for extension, because the decorator sits on top of the same `NetworkClient` protocol instead of inside the original type. That's the whole principle: new behavior through a new type, not a new diff on an old one.
+
+---
+
+## L — anything you can substitute, you should be able to substitute
+
+LSP is the one that sounds the most academic and bites the hardest in practice. It says: if `B` is a subtype of `A`, you should be able to swap a `B` in anywhere an `A` is expected, and nothing should break.
+
+Picture a `GuestBrewLogManager: BrewLogManager` for users who skipped sign-in, where someone "helpfully" overrides the streak method:
+
+```swift
+final class GuestBrewLogManager: BrewLogManager {
+    override func currentStreak() -> Int {
+        fatalError("Guests don't have a streak")
+    }
+}
+```
+
+It compiles. It satisfies the type system. And it crashes the app the instant any code that holds a `BrewLogManager` reference — written before `GuestBrewLogManager` existed, with no reason to suspect it — calls `currentStreak()`. The subtype quietly broke a promise the base type made. That's LSP violated, and inheritance is what made it possible: the override can do *anything*, including lie.
+
+BrewLog has no class inheritance in its architecture at all — every seam is a protocol, and protocol conformances can't override and weaken a contract, they can only implement it. `NetworkClient` has exactly one method, and three completely different types satisfy it without any of them being allowed to special-case their way out:
+
+```swift
+private actor RecordingNetworkClient: NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        // hands back a canned result for tests
+    }
+}
+```
+
+`URLSessionNetworkClient`, `ResilientNetworkClient`, and this test-only `RecordingNetworkClient` actor are fully interchangeable everywhere a `NetworkClient` is expected — that's [Day 19](/blog/dependency-injection-swift-without-frameworks)'s DI seam paying for itself a second time. The cheapest way to satisfy LSP isn't "design your subclasses carefully." It's "don't subclass stateful types in the first place." Protocols can't betray you the way `override` can.
+
+---
+
+## I — stop forcing callers to depend on methods they never call
+
+`BrewLogManager` is one type with four unrelated capabilities glued together. A `StreakBadge` view that only wants `currentStreak()` still ends up holding a reference to something that can also save to disk, hit the network, and talk to StoreKit — and if you ever write a fake for testing, you have to fake all four, even the three you don't care about.
+
+Compare the real `BrewTipsService`:
+
+```swift
+protocol BrewTipsService {
+    func fetchTipOfTheDay() async throws -> String
+}
+```
+
+One method. A view that wants a tip depends on exactly the tip-fetching capability, nothing else. `TipOfTheDayModel`'s test fakes only ever have to implement that one method — never a `restorePurchases()` they're forced to stub out with a `fatalError` they hope never fires. Interface Segregation Principle, in one sentence: a protocol should be the smallest thing a caller could possibly need, not the union of everything a class happens to do.
+
+---
+
+## D — depend on the abstraction, not the thing that does I/O
+
+`fetchTipOfTheDay()` in the bad class calls `URLSession.shared` by name. That's a concrete type baked directly into a method body. To test it, you need a real network call, a global `URLProtocol` swap, or you skip testing it — which, judging by every roadmap I've ever seen slip, is what actually happens.
+
+`RemoteBrewTipsService` depends on an abstraction instead:
+
+```swift
+struct RemoteBrewTipsService: BrewTipsService {
+    let client: NetworkClient
+
+    func fetchTipOfTheDay() async throws -> String {
+        let dto = try await client.send(Endpoint(path: "tips/today", requiresAuth: true), as: BrewTipDTO.self)
+        return dto.tip
+    }
+}
+```
+
+`client` is a `NetworkClient` protocol, injected through the initializer — never `URLSession.shared` reached for directly. Production hands it a real `URLSessionNetworkClient`; tests hand it a `StubURLProtocol`-backed fake or the `RecordingNetworkClient` actor from the LSP section. Same code path, same assertions, no network round trip. This is the same DIP seam [Day 19](/blog/dependency-injection-swift-without-frameworks) already covered start to finish, so I won't re-walk it here — but it's worth seeing it show up a fourth time in this same file tree, because that repetition *is* the proof it's a real pattern and not a one-off.
+
+---
+
+## Proof it actually pays off
+
+All five of the "after" files are sitting in the same Xcode project, with tests that were already green before I started writing this post — I just reran the suites that touch every principle above:
+
+```
+Test case 'SubscriptionStoreTests/freshStoreStartsFree()' passed (0.000 seconds)
+Test case 'BrewStreakTests/todayHasGraceBeforeBreaking()' passed (0.000 seconds)
+Test case 'NetworkClientTests/decodesSuccessResponse()' passed (0.000 seconds)
+Test case 'ResilientNetworkClientTests/retriesTransientFailure()' passed (1.000 seconds)
+Test case 'TipOfTheDayModelTests/loadSucceeds()' passed (0.000 seconds)
+```
+
+Every one of those is a different SOLID letter wearing a test. That's not a coincidence — it's the actual mechanism. A class that violates SRP is hard to test because setting it up means standing up SwiftData *and* the network *and* StoreKit just to check one streak number. A method that violates DIP is hard to test because it talks to `URLSession.shared` directly and there's nothing to substitute. **"This is hard to test" and "this violates a SOLID principle" are usually the same complaint, filed under two different names.**
+
+---
+
+## The short version
+
+| Letter | Violation in `BrewLogManager` | The real fix | Where |
+|---|---|---|---|
+| **S**RP | Persistence, billing, streak math, and networking in one class | Split by reason-to-change: pure policy, pure function, view-level save | [Day 15](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener), [Day 21](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor) |
+| **O**CP | Adding retry means editing `fetchTipOfTheDay()` directly | `ResilientNetworkClient` decorator wraps without modifying | [Day 23](/blog/swift-networking-retry-token-refresh-request-deduplication) |
+| **L**SP | A subclass override can `fatalError` and break the base contract | No inheritance — protocol conformances can't weaken a promise | [Day 19](/blog/dependency-injection-swift-without-frameworks) |
+| **I**SP | One type forces every caller to depend on every capability | `BrewTipsService` is one method; callers depend on exactly that | `BrewTipsService.swift` |
+| **D**IP | `URLSession.shared` called by name inside the method | `NetworkClient` protocol injected through the initializer | [Day 19](/blog/dependency-injection-swift-without-frameworks), [Day 22](/blog/custom-networking-layer-swift-urlsession-async-await) |
+
+---
+
+## The honest caveat
+
+Nobody sat down on day one of BrewLog with a UML diagram and designed `NetworkClient`, `BrewTipsService`, and `SubscriptionPolicy` as separate types because SOLID said to. They came out of 23 days of writing a test first and getting annoyed when the test forced me to stand up too much machinery to check one fact. The split was the *fix* for that annoyance, not a goal in itself.
+
+That ordering matters. If you open a brand-new file and start with five protocols and a decorator chain before you've written a single feature, you've just built [Day 18](/blog/spm-modular-architecture-swift-when-to-split)'s modularization tax on a project too small to need it — five files to read for one behavior, a longer path from "where does this happen" to the actual line of code. SOLID is a smell detector you reach for once something hurts to test or change. It's not a checklist you run before writing the first line. The bad class up top wasn't bad because it was small — it was bad because growing it by one more feature would have made every existing line harder to trust.
+
+---
+
+*Day 24 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [retry, token refresh, and request deduplication](/blog/swift-networking-retry-token-refresh-request-deduplication). Tomorrow: WidgetKit and App Intents — turning BrewLog's streak into a home screen widget you can actually act on, not just stare at.*
