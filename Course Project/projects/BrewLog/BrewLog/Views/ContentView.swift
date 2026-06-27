@@ -31,6 +31,7 @@ private struct HomeTab: View {
     @State private var isComposing = false
     @State private var showPaywall = false
     @State private var brewToDelete: Brew?
+    @State private var brewingMethod: BrewMethod?
     @State private var quickExpanded = ProcessInfo.processInfo.arguments.contains("EXPANDED_DEMO")
 
     private var demoStreak: Int {
@@ -84,9 +85,18 @@ private struct HomeTab: View {
                         showPaywall = true
                         return
                     }
-                    let brew = Brew(method: method, rating: prefs.defaultStrength > 5 ? 5 : 4)
-                    ctx.insert(brew)
-                    try? ctx.save()
+                    // Espresso, Moka, and cold brew are done before you'd unlock
+                    // the phone to check — those still log instantly. Filter and
+                    // Aeropress run for minutes; logging them as "finished" the
+                    // moment you tap is the same lie Day 21 found in the streak
+                    // stat, so those start a real countdown instead.
+                    if recommendedBrewDuration(for: method) != nil {
+                        brewingMethod = method
+                    } else {
+                        let brew = Brew(method: method, rating: prefs.defaultStrength > 5 ? 5 : 4)
+                        ctx.insert(brew)
+                        try? ctx.save()
+                    }
                 }
                 .padding(.trailing, 20)
                 .padding(.bottom, 28)
@@ -117,6 +127,14 @@ private struct HomeTab: View {
             }
             .sheet(isPresented: $showPaywall) {
                 PaywallView()
+            }
+            .sheet(item: $brewingMethod) { method in
+                BrewTimerView(method: method) { rating in
+                    let brew = Brew(method: method, rating: rating)
+                    ctx.insert(brew)
+                    try? ctx.save()
+                }
+                .interactiveDismissDisabled()
             }
             .confirmationDialog(
                 "Delete this brew?",
