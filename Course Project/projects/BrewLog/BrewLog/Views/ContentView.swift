@@ -32,6 +32,7 @@ private struct HomeTab: View {
     @State private var showPaywall = false
     @State private var brewToDelete: Brew?
     @State private var brewingMethod: BrewMethod?
+    @State private var showFullHistory = false
     @State private var quickExpanded = ProcessInfo.processInfo.arguments.contains("EXPANDED_DEMO")
 
     private var demoStreak: Int {
@@ -69,7 +70,7 @@ private struct HomeTab: View {
                     }
                     StatsRow(weekCount: weekCount, total: allBrews.count, streak: streak)
                     WeeklyGoalProgress(weekCount: weekCount, goal: prefs.weeklyGoal, progress: weeklyProgress)
-                    RecentBrewsSection(brews: allBrews, brewToDelete: $brewToDelete)
+                    RecentBrewsSection(brews: allBrews, brewToDelete: $brewToDelete, showFullHistory: $showFullHistory)
                     TipOfTheDay()
                 }
                 .padding()
@@ -127,6 +128,9 @@ private struct HomeTab: View {
             }
             .sheet(isPresented: $showPaywall) {
                 PaywallView()
+            }
+            .sheet(isPresented: $showFullHistory) {
+                BrewHistoryView(brews: allBrews)
             }
             .sheet(item: $brewingMethod) { method in
                 BrewTimerView(method: method) { rating in
@@ -432,6 +436,7 @@ private struct NewBrewSheet: View {
 private struct RecentBrewsSection: View {
     let brews: [Brew]
     @Binding var brewToDelete: Brew?
+    @Binding var showFullHistory: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -439,7 +444,13 @@ private struct RecentBrewsSection: View {
                 Text("Recent brews")
                     .font(.headline)
                 Spacer()
-                if !brews.isEmpty {
+                if brews.count > 8 {
+                    Button("See all (\(brews.count))") {
+                        showFullHistory = true
+                    }
+                    .font(.subheadline)
+                    .accessibilityIdentifier("SeeAllBrewsButton")
+                } else if !brews.isEmpty {
                     Text("\(brews.count)")
                         .font(.subheadline.monospaced())
                         .foregroundStyle(.secondary)
@@ -475,7 +486,7 @@ private struct RecentBrewsSection: View {
     }
 }
 
-private struct BrewRow: View {
+struct BrewRow: View {
     let brew: Brew
 
     var body: some View {

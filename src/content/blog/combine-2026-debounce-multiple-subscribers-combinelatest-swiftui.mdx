@@ -1,0 +1,209 @@
+---
+title: "Combine in 2026: The Three Cases Where It's Still Better Than async/await"
+description: "Day 27 of the 30-day iOS series. A real searchable brew history for BrewLog, built with Combine instead of async/await, and the three reasons it was the right call: debounce, independent multiple subscribers, and a four-way CombineLatest pipeline."
+pubDate: 2026-06-28
+tags: ["Swift", "Combine", "SwiftUI", "iOS Development", "Tutorial", "Swift Testing", "TDD", "Observation", "CombineLatest", "debounce"]
+author: "Mario"
+coverImage: "/images/blog/combine-2026-espresso-dual-spout-cover.jpg"
+coverImageAlt: "An espresso machine portafilter pouring two separate streams of coffee into two paper cups sitting side by side on a stainless steel drip tray — one source, two independent streams."
+---
+
+{/*
+  SEO target keywords:
+  - Combine framework 2026 still relevant
+  - Combine vs async/await SwiftUI
+  - Combine debounce search SwiftUI example
+  - CombineLatest4 real example Swift
+  - Combine with @Observable not ObservableObject
+  - multiple subscribers one publisher Combine
+  - searchable() bottom search bar iOS 26 Liquid Glass
+
+  Internal linking strategy:
+  - /blog/live-activities-dynamic-island-decision-matrix-swiftui (Day 26 — direct prequel)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /blog/custom-networking-layer-swift-urlsession-async-await (Day 22 — the async/await baseline this post argues against, fairly)
+  - /learn (course hub)
+
+  Day 27 of the 30-day iOS series. Opens the "old framework, still
+  relevant" stretch of Week 4 — Combine today, UIKit interop tomorrow,
+  then macros and build times to close out the series.
+*/}
+
+"Combine is dead" is one of those lines that's about 80% true and gets repeated as if it's 100%. async/await ate most of what Combine used to be for — one network call, one image decode, one await, done. But BrewLog's brew history has been stuck at eight rows with no way to search since the very first commit, and the feature I built to fix that turned out to need exactly the 20% Combine still owns: debounce, fan-out to independent subscribers, and a multi-source reactive pipeline. Here's the real code.
+
+---
+
+## The lie: "Recent brews" tops out at eight, forever
+
+Open BrewLog, log enough coffee, and the home screen quietly stops showing you anything past your eighth brew:
+
+```swift
+ForEach(brews.prefix(8)) { brew in
+    NavigationLink(value: brew) {
+        BrewRow(brew: brew)
+    }
+}
+```
+
+That `.prefix(8)` isn't a bug exactly — it's the right call for a home screen summary. But there was never a "see everything" escape hatch, which means brew number nine onward effectively didn't exist as far as the UI was concerned. Same shape of gap this series keeps finding: nothing crashes, nothing's wrong in the data, the app just quietly stops showing you something true.
+
+The fix needed three things working together: a free-text search over notes and method names, a method filter, and a minimum-rating filter — all live, all reactive, all without re-filtering the whole list on every keystroke. That last constraint is where async/await stops being the obvious tool.
+
+---
+
+## Why this isn't an async/await problem
+
+If you've only ever needed Combine for "make a network call," it's fair to assume async/await replaced it entirely. Try writing this search feature with only async/await and you hit three walls in order:
+
+1. **Debounce.** async/await gives you one linear chain of suspension points. There's no built-in "wait until the user stops typing for 300ms" primitive — you'd hand-roll a cancellable `Task` that sleeps and checks if it's stale, which is exactly the kind of code Combine's `.debounce` operator exists to delete.
+2. **Multiple independent subscribers.** One search term needs to drive two unrelated things: the actual filtered list, and a "recent searches" history that has zero business knowing the filter pipeline exists. With `async`, fanning one event out to N independent listeners means either a delegate-style callback list (you're reinventing Combine) or tightly coupling both consumers into the same function.
+3. **Multi-source composition.** The filtered list depends on four independent, changing inputs — search text, method filter, minimum rating, and the live SwiftData query results. `Publishers.CombineLatest4` is built for exactly this. The `async`/`await` equivalent is a hand-rolled `AsyncStream` merge with manual state tracking for "what's the latest value from each of these four things right now."
+
+None of that is theoretical. It's the actual shape `BrewHistorySearchModel` needed, written in order, starting from a failing compile because the type didn't exist yet — same "only kind of red I trust" as [Day 26](/blog/live-activities-dynamic-island-decision-matrix-swiftui).
+
+---
+
+## A Combine pipeline living inside an `@Observable` class
+
+BrewLog has used `@Observable` everywhere since this series started — zero `ObservableObject`, zero `@Published`. The thing worth knowing: that doesn't lock you out of Combine. You can run a real Combine pipeline privately inside an `@Observable` class and have it write its results into a plain stored property. SwiftUI's `Observation` framework tracks the property access, not how the value got produced.
+
+```swift
+import Foundation
+import Combine
+
+@Observable
+final class BrewHistorySearchModel {
+    var searchText: String = "" {
+        didSet { searchTextSubject.send(searchText) }
+    }
+    var methodFilter: BrewMethod? {
+        didSet { methodFilterSubject.send(methodFilter) }
+    }
+    var minimumRating: Int = 0 {
+        didSet { minimumRatingSubject.send(minimumRating) }
+    }
+
+    private(set) var filteredBrews: [Brew] = []
+    private(set) var recentSearchTerms: [String] = []
+
+    private let searchTextSubject = CurrentValueSubject<String, Never>("")
+    private let methodFilterSubject = CurrentValueSubject<BrewMethod?, Never>(nil)
+    private let minimumRatingSubject = CurrentValueSubject<Int, Never>(0)
+    private let allBrewsSubject = CurrentValueSubject<[Brew], Never>([])
+    private var cancellables: Set<AnyCancellable> = []
+```
+
+Every `@Observable` property that needs to feed the pipeline gets a `didSet` that forwards into a matching `CurrentValueSubject`. That's the entire bridge. No `ObservableObject`, no `@Published`, no Combine-specific SwiftUI binding magic — just a plain class with a Combine pipeline as an implementation detail.
+
+---
+
+## Use case 1: debounce, so typing doesn't refilter on every keystroke
+
+```swift
+let debouncedSearchText = searchTextSubject
+    .debounce(for: .milliseconds(debounceMilliseconds), scheduler: DispatchQueue.main)
+    .removeDuplicates()
+```
+
+`.debounce` restarts its timer on every new value and only lets one through once the input goes quiet. Type "citrusy" character by character and the pipeline downstream sees exactly one value, not seven. This is the operator async/await genuinely doesn't have a one-liner for — you'd be reaching for `Task.sleep` plus manual cancellation to get the same behavior, which is just Combine's debounce written out by hand, worse.
+
+---
+
+## Use case 2: two subscribers, one publisher, zero coupling
+
+```swift
+// Subscriber 1: the actual filtered list.
+Publishers.CombineLatest4(debouncedSearchText, methodFilterSubject, minimumRatingSubject, allBrewsSubject)
+    .map { searchText, method, minimumRating, brews in
+        brews.filter { brew in
+            (method == nil || brew.method == method)
+                && brew.rating >= minimumRating
+                && (searchText.isEmpty
+                    || brew.notes.localizedCaseInsensitiveContains(searchText)
+                    || brew.method.label.localizedCaseInsensitiveContains(searchText))
+        }
+    }
+    .sink { [weak self] filtered in
+        self?.filteredBrews = filtered
+        self?.onFilterApplied()
+    }
+    .store(in: &cancellables)
+
+// Subscriber 2: recent-searches bookkeeping. Same debounced text stream,
+// no idea subscriber 1 exists. Delete the filter pipeline entirely and
+// this still works, unchanged.
+debouncedSearchText
+    .filter { !$0.isEmpty }
+    .sink { [weak self] term in self?.recordSearch(term) }
+    .store(in: &cancellables)
+```
+
+This is the part with no clean async/await answer. Two `.sink` calls subscribe to the same `debouncedSearchText` publisher, and neither knows the other exists. One drives the filtered list. The other drives a "recent searches" chip list. If you deleted the filtering subscriber tomorrow, the recent-searches one wouldn't notice — that's the actual feature of Combine that survived the async/await migration: a publisher is a broadcast, not a single hand-off.
+
+---
+
+## Use case 3: `CombineLatest4`, four moving parts, one derived array
+
+Search text, method filter, minimum rating, and the live `allBrews` SwiftData query are four independently changing inputs. `Publishers.CombineLatest4` re-runs the `.map` the instant *any one* of them changes, always with the latest value of the other three. Change the method picker and the rating stays put, the search text stays put, and the filtered list updates anyway — no manual "did the source change, did the filter change, which one do I re-run" bookkeeping.
+
+That's the multi-source reactive composition async/await pushes back onto you as a hand-written `AsyncStream` merge. Combine ships it as one type.
+
+---
+
+## The honest gap: no virtual clock for `.debounce`
+
+Day 26's `BrewTimerModel` tested timer logic by injecting `now: Date` — no real waiting, fully deterministic. Combine's `.debounce` doesn't offer that seam without pulling in a scheduler abstraction library; it runs on a real `DispatchQueue` against the real clock. The tests below use a short debounce window (20ms) and a generous settle wait (150ms) instead — same honest tradeoff as [Day 23](/blog/swift-networking-retry-token-refresh-request-deduplication)'s concurrency-overlap test, which also gave up on faking time and used a real `Gate` instead.
+
+```swift
+@Test("rapid keystrokes settle into a single filter pass, not one per character")
+func debounceCollapsesRapidTyping() async throws {
+    let model = BrewHistorySearchModel(debounceMilliseconds: 20)
+    model.updateSource([Brew(method: .filter, rating: 5, notes: "bright, fruity, the good batch")])
+
+    var filterPassCount = 0
+    model.onFilterApplied = { filterPassCount += 1 }
+
+    for partial in ["b", "br", "bri", "brig", "bright"] {
+        model.searchText = partial
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    try await Task.sleep(for: .milliseconds(150))
+
+    #expect(filterPassCount == 1)
+    #expect(model.filteredBrews.count == 1)
+}
+```
+
+`onFilterApplied` is a thin test-only closure, same pattern as Day 25 and Day 26's injectable callbacks — the only honest way to count emissions from outside without exposing internal Combine plumbing.
+
+The other two tests prove the other two use cases directly: one shows `recentSearchTerms` recording a term even when `filteredBrews` ends up empty (proving the subscribers are actually decoupled, not just theoretically), and one sets `methodFilter` and `minimumRating` with no search text at all and confirms `CombineLatest4` merges all four sources correctly.
+
+```
+Test case 'BrewHistorySearchModelTests/debounceCollapsesRapidTyping()' passed (1.000 seconds)
+Test case 'BrewHistorySearchModelTests/recentSearchesAreIndependentOfFilterResults()' passed (1.000 seconds)
+Test case 'BrewHistorySearchModelTests/combineLatestMergesAllFourDimensions()' passed (1.000 seconds)
+```
+
+Full existing suite — every test from Day 1 through Day 26 — still green on the same run. Nothing about adding a Combine pipeline next to twenty-six days of `@Observable`, actors, and async/await broke anything, which is itself the point: these aren't competing paradigms you have to pick once and commit to forever.
+
+---
+
+## What it looks like for real
+
+A "See all" link shows up on the home screen once you've logged more than eight brews:
+
+![BrewLog's home screen showing a 9-day streak, stats row, and a "Recent brews" header with a "See all (10)" link replacing the plain count now that history has grown past the home screen's eight-row preview.](/images/blog/combine-brewlog-history-search-filtered.png)
+
+Tapping it opens a real search sheet — method picker, minimum-rating stepper, and a search field wired straight to `BrewHistorySearchModel.searchText`. Typing "citrusy" collapses ten brews down to the one whose notes actually mention it, debounced, through the four-way pipeline above:
+
+One thing this screenshot caught that I didn't expect going in: iOS 26's Liquid Glass redesign moved `.searchable()`'s search field to a floating bar anchored at the bottom of the screen instead of pinned under the navigation title. If you've been following [Day 4](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency)'s Liquid Glass coverage, this is the same redesign showing up somewhere a tutorial wouldn't think to mention it — a system modifier you didn't touch, rendering differently for free.
+
+---
+
+## The takeaway
+
+Combine didn't survive in 2026 out of nostalgia. It survived because three of its core operators — `debounce`, multicast subscription, and `CombineLatest` — solve real problems that async/await's single-threaded-chain model doesn't have a clean answer for. The right framing isn't "Combine vs. async/await," it's "use the await chain for one thing happening once, reach for Combine when N things are happening continuously and need to talk to each other." BrewLog now does both, in the same `@Observable` class, and neither one knows the other is there.
+
+---
+
+*Day 27 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [Live Activities and the Dynamic Island](/blog/live-activities-dynamic-island-decision-matrix-swiftui). The full reactive-architecture module — Combine, `@Observable`, and where the line between them actually sits — is part of the SwiftUI at Scale course coming to [/learn](/learn). Tomorrow: UIKit tricks SwiftUI still can't do without it.*
