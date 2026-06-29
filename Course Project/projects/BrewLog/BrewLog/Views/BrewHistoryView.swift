@@ -1,9 +1,11 @@
 import SwiftUI
+import PDFKit
 
 struct BrewHistoryView: View {
     let brews: [Brew]
 
     @State private var search = BrewHistorySearchModel()
+    @State private var exportedPDFData: Data?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -57,11 +59,59 @@ struct BrewHistoryView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        exportedPDFData = BrewHistoryPDFExporter.makePDF(for: search.filteredBrews)
+                    } label: {
+                        Label("Export PDF", systemImage: "doc.richtext")
+                    }
+                    .accessibilityIdentifier("ExportPDFButton")
+                }
             }
             .onAppear { search.updateSource(brews) }
             .onChange(of: brews) { _, newBrews in search.updateSource(newBrews) }
             .accessibilityIdentifier("BrewHistorySheet")
+            .sheet(isPresented: Binding(
+                get: { exportedPDFData != nil },
+                set: { isPresented in if !isPresented { exportedPDFData = nil } }
+            )) {
+                if let exportedPDFData {
+                    BrewHistoryPDFExportSheet(pdfData: exportedPDFData)
+                }
+            }
         }
+    }
+}
+
+private struct BrewHistoryPDFExportSheet: View {
+    let document: PDFDocument
+    let fileURL: URL
+    @Environment(\.dismiss) private var dismiss
+
+    init(pdfData: Data) {
+        document = PDFDocument(data: pdfData) ?? PDFDocument()
+        let url = URL.temporaryDirectory.appending(path: "BrewLog-History.pdf")
+        try? pdfData.write(to: url)
+        fileURL = url
+    }
+
+    var body: some View {
+        NavigationStack {
+            PDFKitPreviewView(document: document)
+                .navigationTitle("Export preview")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        ShareLink(item: fileURL) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                }
+        }
+        .accessibilityIdentifier("BrewHistoryPDFExportSheet")
     }
 }
 
