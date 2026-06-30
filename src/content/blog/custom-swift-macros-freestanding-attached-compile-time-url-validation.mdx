@@ -1,0 +1,228 @@
+---
+title: "Custom Swift Macros: When They're Actually Worth the Build-Time Cost"
+description: "Day 29 of the 30-day iOS series. The difference between @freestanding and @attached macros, why most macro ideas are over-engineering traps, and a real #URL macro — built TDD-first as a standalone Swift package — that catches BrewLog's force-unwrapped base URL at compile time instead of runtime."
+pubDate: 2026-06-30
+tags: ["Swift", "Swift Macros", "SwiftSyntax", "iOS Development", "Tutorial", "Swift Testing", "TDD", "Compile-Time Safety"]
+author: "Mario"
+coverImage: "/images/blog/swift-macros-rubber-stamp-cover.jpg"
+coverImageAlt: "A wooden rubber stamp reading 'geprüft' (checked) resting on an open legal document, mid-stamp — something getting verified before it's allowed to count as approved."
+---
+
+{/*
+  SEO target keywords:
+  - custom Swift macro example
+  - @freestanding vs @attached macro Swift
+  - Swift macro compile time validation
+  - ExpressionMacro SwiftSyntax tutorial
+  - #URL macro Swift
+  - when to use Swift macros
+  - assertMacroExpansion testing
+  - Swift macro over-engineering
+
+  Internal linking strategy:
+  - /blog/uikit-tricks-swiftui-cant-do-uiviewrepresentable-pdfkit (Day 28 — direct prequel)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series root)
+  - /blog/custom-networking-layer-swift-urlsession-async-await (Day 22 — the force-unwrapped baseURL this post fixes)
+  - /blog/swift-testing-framework-xctest-migration-guide (Day 20 — testing-framework continuity/contrast)
+  - /learn (course hub)
+
+  Day 29 of the 30-day iOS series. Second-to-last day — UIKit interop
+  yesterday, macros today, build times tomorrow to close the series.
+*/}
+
+Every line of `Endpoint(path: "tips/today", requiresAuth: true)` in BrewLog's networking layer eventually has to turn into a real `URL`. And the place that happens — `TipOfTheDay.makeClient()` in `ContentView.swift` — has looked like this since Day 22: `URL(string: "http://127.0.0.1:8080")!`. A force-unwrap, on a string literal, that's been sitting in the codebase for seven days of this series without anyone questioning it. That `!` is exactly the kind of thing a macro is good for. Not because macros are magic — because this is the rare case where "catch it at compile time instead of runtime" is actually true, instead of being the marketing pitch every macro tutorial leads with.
+
+---
+
+## The two flavors, in one sentence each
+
+A **`@freestanding` macro** generates an expression or a statement at a call site that starts with `#` — `#URL(...)`, `#warning(...)`, `#stringify(...)`. You write `#something`, the compiler replaces it with real code before type-checking runs.
+
+An **`@attached` macro** generates *additional* code around a declaration you already wrote — `@Observable` on a class adds storage and conformances, `@AddPublisher` (made up, but you get the idea) might synthesize a `Combine` publisher next to a stored property. You annotate something, the macro adds to it.
+
+BrewLog's `!` problem is a freestanding case: there's no existing declaration to attach to, just a string literal that needs validating before it becomes a `URL`. So `#URL(...)` it is.
+
+---
+
+## The over-engineering trap, named honestly
+
+Before writing the macro: the boring non-macro version of this fix is one line.
+
+```swift
+guard let baseURL = URL(string: "http://127.0.0.1:8080") else {
+    fatalError("BrewLog base URL is malformed — this should never happen for a hardcoded literal")
+}
+```
+
+That's it. That's a complete fix. It moves the crash from "silent force-unwrap" to "loud, explained `fatalError`," and it took ten seconds to write. A macro buys you exactly one thing this doesn't: the bad string never compiles in the first place, instead of crashing the first time that code path runs. If your URL strings are always hardcoded literals reviewed in every PR, that gap is small. If junior devs paste connection strings into this code path six months from now without you in the room, the gap matters a lot more.
+
+The honest rule: reach for a macro when you want a class of mistake to be *unwritable*, not just *caught*. Reach for a guard, an assertion, or a linter rule when "caught at the first test run" is good enough. Most ideas that start with "what if a macro generated this for me" are solving a problem a function or a protocol already solves — the over-engineering trap isn't macros being bad, it's reaching for compiler-plugin machinery to save four lines you'd write once.
+
+---
+
+## RED — assert the expansion before the macro exists
+
+Macro testing doesn't run the generated code — it asserts on the syntax tree the macro produces, via `assertMacroExpansion` from `swift-syntax`'s `SwiftSyntaxMacrosTestSupport`. Built as a standalone local Swift package (`BrewLogMacros/`, sibling to the BrewLog Xcode project — more on why standalone in a minute), the first test asserts something that can't pass yet, because `URLMacro` doesn't exist:
+
+```swift
+import SwiftSyntaxMacros
+import SwiftSyntaxMacrosTestSupport
+import XCTest
+@testable import BrewLogMacrosPlugin
+
+nonisolated(unsafe) private let testMacros: [String: Macro.Type] = ["URL": URLMacro.self]
+
+final class URLMacroTests: XCTestCase {
+    func testValidURLExpandsToForceUnwrappedURLInit() {
+        assertMacroExpansion(
+            #"#URL("http://127.0.0.1:8080")"#,
+            expandedSource: #"URL(string: "http://127.0.0.1:8080")!"#,
+            macros: testMacros
+        )
+    }
+}
+```
+
+```
+error: cannot find 'URLMacro' in scope
+```
+
+Same red as every other day in this series — the type genuinely doesn't exist yet, so the compiler isn't lying.
+
+---
+
+## The gotcha that decided the whole design: `URL(string:)` barely rejects anything
+
+The instinct for a `#URL` macro is "check `URL(string:) != nil` at compile time instead of force-unwrapping at runtime." Tried that first, then ran the actual values through a real Swift REPL to see what `URL(string:)` rejects:
+
+```
+"not a url with spaces and no scheme" -> Optional(not%20a%20url%20with%20spaces%20and%20no%20scheme)
+"http://"                             -> Optional(http://)
+"://broken"                           -> Optional(://broken)
+""                                    -> nil
+```
+
+`URL(string:)` percent-encodes its way around almost anything. Spaces, missing schemes, even `://broken` — all "valid" as far as `URL(string:)` is concerned. The only thing in that list it actually rejects is an empty string. A macro that only catches empty string literals is not a macro worth writing — you'd see that typo in the first line of output anyway.
+
+`URLComponents(string:)?.scheme` turned out to be the bar that actually matches what people mean by "a real base URL":
+
+```
+"127.0.0.1:8080"          -> scheme: nil   (forgot the scheme — the actual BrewLog-shaped typo)
+" http://127.0.0.1:8080"  -> scheme: nil   (leading whitespace — silently breaks URL(string:) too)
+"http://127.0.0.1:8080"   -> scheme: "http"
+```
+
+This is the same shape of finding as Day 27's `.searchable()` surprise or Day 23's `async let` race: the thing that looked obvious from the API name (`URL(string:)` validates URLs, right?) turned out to be far more permissive than it sounds, and the real fix only fell out after checking real values instead of trusting the function name.
+
+---
+
+## GREEN — the macro implementation
+
+```swift
+import Foundation
+import SwiftCompilerPlugin
+import SwiftSyntax
+import SwiftSyntaxMacros
+
+struct URLMacroError: Error, CustomStringConvertible {
+    let description: String
+}
+
+public struct URLMacro: ExpressionMacro {
+    public static func expansion(
+        of node: some FreestandingMacroExpansionSyntax,
+        in context: some MacroExpansionContext
+    ) throws -> ExprSyntax {
+        guard
+            let argument = node.arguments.first?.expression,
+            let stringLiteral = argument.as(StringLiteralExprSyntax.self),
+            stringLiteral.segments.count == 1,
+            case .stringSegment(let segment) = stringLiteral.segments.first
+        else {
+            throw URLMacroError(description: "#URL requires a static string literal, not an interpolated or dynamic value")
+        }
+
+        let urlString = segment.content.text
+
+        guard URLComponents(string: urlString)?.scheme != nil else {
+            throw URLMacroError(description: "\"\(urlString)\" has no scheme — URLComponents would also reject it. Did you forget \"http://\"?")
+        }
+
+        return "URL(string: \(literal: urlString))!"
+    }
+}
+
+@main
+struct BrewLogMacrosPluginEntry: CompilerPlugin {
+    let providingMacros: [Macro.Type] = [URLMacro.self]
+}
+```
+
+`ExpressionMacro` gets one job: take the syntax node for `#URL(...)`, return the syntax node it should become. Throwing `URLMacroError` from inside `expansion` is all it takes to surface a real compiler diagnostic — no manual `Diagnostic`/`DiagnosticsError` plumbing needed for a single-message case. The public-facing declaration that makes `#URL` callable at all is three lines in a separate target (macro *plugins* and macro *declarations* are always split into two SPM targets — the plugin is a compiler executable, the declaration is what client code links against):
+
+```swift
+@freestanding(expression)
+public macro URL(_ string: String) -> Foundation.URL = #externalMacro(module: "BrewLogMacrosPlugin", type: "URLMacro")
+```
+
+Full suite, real run:
+
+```
+Test Case 'testValidURLExpandsToForceUnwrappedURLInit' passed (0.001 seconds).
+Test Case 'testMissingSchemeFailsAtCompileTimeInsteadOfCrashingAtRuntime' passed (0.000 seconds).
+Test Case 'testLeadingWhitespaceFailsAtCompileTime' passed (0.004 seconds).
+Test Case 'testNonStringLiteralArgumentIsRejectedBeforeItEverReachesURLParsing' passed (0.000 seconds).
+Executed 4 tests, with 0 failures (0 unexpected) in 0.006 seconds
+```
+
+---
+
+## What it looks like for real — including the failure
+
+`assertMacroExpansion` proves the syntax tree is right. It doesn't prove the diagnostic shows up as an actual compiler error when a real target builds. So: a small executable target (`BrewLogMacrosDemo`) that imports the macro for real, swapped to the bad string, built with plain `swift build`:
+
+```swift
+let baseURL = #URL("127.0.0.1:8080")
+```
+
+```
+error: emit-module command failed with exit code 1
+/BrewLogMacrosDemo/main.swift:4:15: error: "127.0.0.1:8080" has no scheme — URLComponents would also reject it. Did you forget "http://"? (from macro 'URL')
+4 | let baseURL = #URL("127.0.0.1:8080")
+  |               `- error: "127.0.0.1:8080" has no scheme — URLComponents would also reject it. Did you forget "http://"? (from macro 'URL')
+```
+
+That's a real `swift build` failure, on a real package, with no test runner involved — the typo never produces a binary. Put the scheme back and it builds and runs clean:
+
+```
+$ swift run BrewLogMacrosDemo
+Build complete! (0.55s)
+BrewLog tip-of-the-day client would talk to: http://127.0.0.1:8080
+```
+
+---
+
+## Why this stayed a standalone package instead of going into BrewLog's Xcode project
+
+Every other feature in this series has dropped straight into `BrewLog.xcodeproj` — Xcode 16's file-system-synchronized groups mean a new `.swift` file in the right folder just shows up in the target, no project file surgery required. A macro target is different: it needs its own SPM package with a `swift-syntax` dependency, which means adding a *package* dependency to an existing `.xcodeproj`, which means hand-editing `project.pbxproj` to add a package reference and a product dependency — the exact kind of unattended project-file surgery Day 25 and Day 26 both declined for the same reason: corrupting the one local Xcode project this whole series runs `xcodebuild test` against would block every remaining day, on the second-to-last day of the series.
+
+So `BrewLogMacros` lives as its own real, fully buildable, fully tested SPM package next to BrewLog rather than Pulse and Atlas, provably real via `swift build` and `swift test` from the command line — same "standalone repro outside Xcode" move Day 23 used for its actor race condition, just with a permanent package instead of a throwaway script. The integration line BrewLog would actually use, the day someone's comfortable adding the package dependency by hand in Xcode's UI:
+
+```swift
+// Today:
+let baseURL = URL(string: "http://127.0.0.1:8080")!
+// After adding the BrewLogMacros package dependency:
+let baseURL = #URL("http://127.0.0.1:8080")
+```
+
+Same line count. The difference is entirely in what happens when someone fat-fingers the string.
+
+---
+
+## The takeaway
+
+`@freestanding` generates an expression where you call it; `@attached` generates code around a declaration you wrote. Reach for either one when you want a category of bug to be literally unwritable — not whenever a function would also work, and not before you've checked what the "obvious" non-macro fix already rejects. BrewLog's seven-day-old force-unwrap turned out to be a genuinely good fit: a hardcoded string, a real failure mode, and a validation rule (`URLComponents(string:)?.scheme != nil`) that only became correct after checking real inputs instead of trusting `URL(string:)`'s name.
+
+---
+
+*Day 29 of the [30-day iOS development series](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). Yesterday: [UIKit tricks SwiftUI still can't do](/blog/uikit-tricks-swiftui-cant-do-uiviewrepresentable-pdfkit). The force-unwrapped `baseURL` this post fixes first showed up in [Day 22's networking layer](/blog/custom-networking-layer-swift-urlsession-async-await). Macro testing infrastructure and `swift-syntax` fundamentals are covered in more depth in the SwiftUI at Scale course on [/learn](/learn). Tomorrow: the last day — build time optimization for a solo developer running five-plus apps off one machine.*
