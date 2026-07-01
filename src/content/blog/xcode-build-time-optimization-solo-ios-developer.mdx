@@ -1,0 +1,205 @@
+---
+title: "Build Time Optimization for the Solo iOS Developer Running 5+ Apps"
+description: "Day 30 of the 30-day iOS series. Real numbers, real DerivedData chaos, and the three things that actually move the needle on Xcode build times when you're maintaining multiple apps on one machine."
+pubDate: 2026-07-01
+tags: ["Xcode", "iOS Development", "Build Time", "Performance", "Swift", "DerivedData", "Xcode 26", "Developer Tools", "Tutorial"]
+author: "Mario"
+coverImage: "/images/blog/xcode-build-time-stopwatch-cover.jpg"
+coverImageAlt: "A close-up black and white photograph of a mechanical stopwatch — the kind a track coach would hold, not a Rolex — face-on, hands frozen mid-second."
+---
+
+{/*
+  SEO target keywords:
+  - Xcode build time optimization 2026
+  - DerivedData cleanup Xcode
+  - COMPILER_INDEX_STORE_ENABLE NO Xcode speedup
+  - Xcode 26 explicit modules build speed
+  - swift-syntax prebuilt binaries Xcode 26
+  - solo iOS developer multiple apps build times
+  - xcodebuild showBuildTimingSummary
+  - Xcode derived data multiple apps
+
+  Internal linking strategy:
+  - /blog/custom-swift-macros-freestanding-attached-compile-time-url-validation (Day 29 — swift-syntax dependency context)
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency (Day 1 — series start)
+  - /blog/custom-networking-layer-swift-urlsession-async-await (Day 22 — BrewLog networking, root of the monolith)
+  - /blog/spm-modular-architecture-swift-when-to-split (Day 18 — the modular architecture framing)
+  - /learn (course hub)
+
+  Day 30 of the 30-day iOS series — the finale. No new feature in BrewLog today;
+  instead: real benchmarks and a retrospective on what 30 days of adding files
+  to a single-target Xcode project actually costs you.
+*/}
+
+My `~/Library/Developer/Xcode/DerivedData` folder is 16 gigabytes right now. I have 24 entries in it. One of my apps, Asistento, has *six* separate DerivedData directories — five of them stale, holding ~1.6 GB of old build artifacts that are doing nothing except making me sad every time I check disk usage.
+
+That's the thing nobody tells you when you're starting your third or fourth app: the build tax doesn't compound linearly. It compounds in bookkeeping.
+
+This is Day 30, the last post in the series. No new feature today. Instead, let's talk about what actually moves the needle on build times when you're a solo developer maintaining a fleet of apps on one machine. Real numbers. Real commands. The kind of thing you'd find buried in a forum post from 2019 and then spend twenty minutes verifying still applies.
+
+---
+
+## Step one: find out where the time is actually going
+
+Most build-time advice skips the diagnostic step. You get "turn on whole module optimization" before anyone checks what's actually slow. The right first move is `-showBuildTimingSummary`:
+
+```bash
+xcodebuild build \
+  -project YourApp.xcodeproj \
+  -scheme YourApp \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -configuration Debug \
+  -showBuildTimingSummary
+```
+
+For BrewLog — 30 Swift files across 30 days of this series, a single target, no third-party dependencies — a cold build (no DerivedData) produces this:
+
+```
+SwiftCompile (10 tasks) | 19.093 seconds
+SwiftEmitModule (1 task) |  0.731 seconds
+SwiftDriver (1 task)     |  0.403 seconds
+Ld (3 tasks)             |  0.268 seconds
+AppIntentsSSUTraining    |  0.159 seconds
+ExtractAppIntentsMetadata|  0.103 seconds
+CodeSign (3 tasks)       |  0.070 seconds
+** BUILD SUCCEEDED **
+Wall clock: ~5 seconds
+```
+
+Wall clock is 5 seconds because the 10 compile tasks ran in parallel across cores. The 19 seconds of `SwiftCompile` work is the real number — that's how much CPU time actually burned. For a 30-file app, that's roughly 0.6 seconds of compile time per file on average. Useful as a baseline; not alarming on its own.
+
+Incremental build (nothing changed): **1 second flat.** Xcode's incremental dependency tracking is genuinely good when DerivedData is healthy.
+
+---
+
+## The index tax
+
+Here's the one that surprised me most when I ran the numbers.
+
+Add `COMPILER_INDEX_STORE_ENABLE=NO` to the same clean build:
+
+```bash
+xcodebuild build \
+  -project BrewLog.xcodeproj \
+  -scheme BrewLog \
+  -destination 'platform=iOS Simulator,id=83675DB0-E4BF-4CE8-A4D5-20A0DCE5BF8D' \
+  -configuration Debug \
+  COMPILER_INDEX_STORE_ENABLE=NO \
+  -showBuildTimingSummary
+```
+
+```
+SwiftCompile (10 tasks) |  5.799 seconds   ← was 19.093
+SwiftEmitModule (1 task)|  0.611 seconds
+SwiftDriver (1 task)    |  0.347 seconds
+Ld (3 tasks)            |  0.264 seconds
+** BUILD SUCCEEDED **
+Wall clock: ~4 seconds
+```
+
+`SwiftCompile` dropped from 19 seconds to 5.8 seconds. **The index store accounts for 13 seconds of compile work** in BrewLog alone. On a bigger, older app with 200 files, that number scales badly.
+
+What's the index store for? It's what powers jump-to-definition, find-in-project (symbol search), and the call hierarchy panel in Xcode. If you're in a rapid prototyping phase — writing, running, tweaking layout — and not using those features, disabling it during your "build and see" loop is free seconds. Re-enable it before a proper review session. You can set it per-scheme in Xcode's scheme editor under "Build → Environment Variables" without touching any global settings.
+
+The Xcode 26 caveat: Apple improved the indexer considerably in the last two releases (faster parallel passes, smarter invalidation). If you haven't tried a cold build recently, run the timing summary first before reaching for the nuclear option. The gap might be smaller now than it was in Xcode 15.
+
+---
+
+## DerivedData hygiene
+
+Back to the 16GB situation. Here's what a `du -sh` over DerivedData looks like on my machine right now:
+
+```
+4.1G  FitMyCV-azfiuxanfyfmsqgvdcoxmzldfalx/
+2.8G  Asistento-fxlcqycckbhbquabjoeozpwvswao/   ← current
+2.4G  ModuleCache.noindex/
+1.7G  MindMap_Visual-exwyitohfazdkaboqxrlunbzpsom/
+1.0G  ReleaseKit-aiuxurrcdxmzdkgmiuamkhtejncz/
+329M  Asistento-eipqtzycbnqmszelkwnvexppaahq/    ← stale
+329M  Asistento-ajiesuzjbfrsatcgfbwtlwcwikph/    ← stale
+325M  Asistento-efwrlwpgcqsqcxfldbuhksrguotx/    ← stale
+324M  Asistento-atuuzfqbwiliadewbhzmpnjnteht/    ← stale
+323M  Asistento-hkzmbomfumbpwhepgqxvliqvfudv/    ← stale
+```
+
+Five stale Asistento folders, ~1.6 GB total. Xcode creates a new DerivedData directory whenever a project's path changes — you moved the project to a new folder, renamed a parent directory, opened it from a different clone location. Each old path leaves a full artifact tree behind. No automatic cleanup.
+
+For a solo dev, the practical fix is a one-liner run every few weeks:
+
+```bash
+# Nuclear option — wipes everything, costs you one cold build per project
+rm -rf ~/Library/Developer/Xcode/DerivedData
+
+# Targeted — remove stale entries for a specific project (keep the newest)
+ls -t ~/Library/Developer/Xcode/DerivedData | grep "^Asistento" | tail -n +2 \
+  | xargs -I{} rm -rf ~/Library/Developer/Xcode/DerivedData/{}
+```
+
+The nuclear option is usually fine if your project is under 10 files and builds in under a minute. For anything larger, the targeted approach keeps the current entry warm and only cleans the dead ones.
+
+The `ModuleCache.noindex` at 2.4 GB is a separate thing — it's the pre-compiled framework modules Xcode reuses across all projects. Safe to delete; it rebuilds automatically on the next build. Worth clearing when you suspect a corrupted module is causing mysterious "module compiled with Swift X cannot be imported by the Swift Y compiler" errors that shouldn't be happening.
+
+---
+
+## What Xcode 26 actually changed
+
+Two things are worth calling out specifically, because they're real improvements that get buried in the release notes.
+
+**Explicit modules.** Since Xcode 16, Xcode builds Swift modules in "explicit" mode by default — the `-explicit-module-build` flag you can see if you dump the raw `xcodebuild` invocation. In practice this means each module knows exactly what it depends on at the start of the build, so more work can be parallelized. For a multi-target project where you've been wondering why target A blocks target B from starting, this is where the improvement lives. The difference is most visible in workspace builds with 5+ targets, not single-target apps like BrewLog.
+
+**SPM prebuilt binaries for macro dependencies.** This one is a bigger deal than Apple made it sound. If you added any Swift macro package in the last two years, you remember the pain: `swift-syntax` pulls in several hundred thousand lines of Swift code and takes *minutes* to compile from scratch. Every developer who clones your repo pays that cost once. In Swift 6.2, SPM downloads prebuilt binaries for `swift-syntax` automatically:
+
+```
+.build/prebuilts/swift-syntax/600.0.1/
+  swiftlang-6.2.3.3.21-MacroSupport-macos_aarch64.zip   (66 MB)
+  swiftlang-6.2.3.3.21-manifest.json
+```
+
+The [BrewLogMacros package from Day 29](/blog/custom-swift-macros-freestanding-attached-compile-time-url-validation) — which depends on `swift-syntax 600.0.1` — built in 7 seconds on a machine that already had these prebuilts cached. The same build from a truly cold machine with no prebuilts downloads the zip and skips the source compilation entirely. What used to be a 3-minute CI penalty per new contributor is now a 66 MB download. That's not a marginal improvement; that's removing an entire category of "why is CI so slow now" support tickets.
+
+---
+
+## When to reach for module isolation
+
+[Day 18](/blog/spm-modular-architecture-swift-when-to-split) covered this in depth, but the build-time angle is worth revisiting quickly.
+
+BrewLog has 30 Swift files across 14 folders (Models, Networking, Views, PDF, Search, Widgets, LiveActivity, Intents…). Compile time for the whole thing is under 6 seconds without indexing. At this scale, splitting into separate SPM modules would *hurt* build time, not help it — each module boundary adds module-scan overhead and serialization round-trips that are only paid off once the modules get large enough to make parallel compilation worthwhile.
+
+The rough threshold in my experience:
+- **Under 50 files in a single target**: don't split for build time reasons. The overhead wins.
+- **50–150 files**: profile first with `-showBuildTimingSummary`. If one folder takes half the total compile time, that's a candidate for isolation.
+- **150+ files**: module isolation is almost certainly worth it. The incremental rebuild story alone (change one file in `Networking`, don't recompile `Views`) justifies the dependency graph complexity.
+
+BrewLog sat at 30 files after 30 days. Comfortable in the "don't bother" zone. The networking code we isolated into a concept for Day 22/23 would be the first real candidate if this were a production app, because networking changes frequently and touches few other things.
+
+---
+
+## BrewLog, 30 days later
+
+The project that started with one file and `@Observable` in a struct now has:
+
+- **30 Swift source files** across 14 feature folders
+- **17 test files** covering models, networking, PDF export, search, widgets, Live Activities, intents, and the schema migration
+- **74 passing tests** (Swift Testing, all green as of yesterday's Day 29)
+- **Cold build: 5s wall clock**, 4s with `COMPILER_INDEX_STORE_ENABLE=NO`
+- **Incremental build: 1s** (unchanged files, warm DerivedData)
+
+Not bad for an app that started as a daily tutorial anchor and grew into something that actually does meaningful things — streak tracking, real networking with retry and token refresh, a StoreKit paywall, a PDF exporter, a searchable history with Combine pipelines, a Live Activity pour-over timer, a Widget, an App Intent, a compiled #URL macro. All TDD'd, all tested on a real simulator, none of it fake.
+
+---
+
+## The actual advice
+
+Build time optimization for a solo developer with 5+ apps is 80% bookkeeping, not 80% compiler flags. The three things that have moved the most needle for me:
+
+1. **Run `-showBuildTimingSummary` before reaching for any setting.** Know where the time goes. Nine times out of ten, the bottleneck isn't what you assumed.
+
+2. **Kill stale DerivedData regularly.** One cleanup script in your monthly rotation wipes gigabytes of dead artifacts that are silently poisoning cold-build estimates.
+
+3. **Don't split targets for build time until you cross ~50 files.** The module boundary tax is real. Wait until you have a file large enough to pay it off.
+
+The index store flag and explicit modules are real improvements with real numbers behind them — but they're the seasoning, not the meal.
+
+---
+
+*Day 30 of 30. Yesterday: [Custom Swift Macros and the #URL compile-time validator](/blog/custom-swift-macros-freestanding-attached-compile-time-url-validation). The series started 30 days ago with [MainActor by default in Swift 6.2](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency). All the techniques from this series are covered in more depth in the courses at [/learn](/learn) — if you want to go deeper on any of it, that's the place.*
