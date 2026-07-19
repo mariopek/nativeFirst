@@ -1,5 +1,8 @@
 import type { APIRoute } from 'astro';
 
+// Dynamic POST endpoint — must run on-demand, not prerendered.
+export const prerender = false;
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')

@@ -1,6 +1,9 @@
 import type { APIRoute } from 'astro';
 import { createClient } from '@supabase/supabase-js';
 
+// Dynamic webhook receiver — must run on-demand, not prerendered.
+export const prerender = false;
+
 export const POST: APIRoute = async ({ request, locals }) => {
   try {
     const formData = await request.formData();

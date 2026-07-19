@@ -1,6 +1,9 @@
 import type { APIRoute } from 'astro';
 import { createClient } from '@supabase/supabase-js';
 
+// Reads auth cookies at request time — must run on-demand, not prerendered.
+export const prerender = false;
+
 export const GET: APIRoute = async ({ request, locals }) => {
   const cookies = request.headers.get('cookie') || '';
   const accessToken = extractSupabaseToken(cookies);

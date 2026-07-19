@@ -1,6 +1,9 @@
 import type { APIRoute } from 'astro';
 import { createClient } from '@supabase/supabase-js';
 
+// Dynamic auth check — must run on-demand, not prerendered.
+export const prerender = false;
+
 export const POST: APIRoute = async ({ request, locals }) => {
   try {
     const body = await request.json();

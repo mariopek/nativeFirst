@@ -1,6 +1,9 @@
 import type { APIRoute } from 'astro';
 import { createClient } from '@supabase/supabase-js';
 
+// Reads auth cookies at request time — must run on-demand, not prerendered.
+export const prerender = false;
+
 function getSupabaseAdmin(locals: any) {
   const runtime = (locals as any).runtime;
   const supabaseUrl =

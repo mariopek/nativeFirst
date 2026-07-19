@@ -26,8 +26,17 @@ function fixReactCloudflare() {
 
 export default defineConfig({
   site: 'https://nativefirstapp.com',
-  output: 'server',
+  // Static-by-default (hybrid): only routes that opt in with `prerender = false`
+  // (API endpoints, deck OG pages, AASA) are bundled into the Cloudflare Worker.
+  // This keeps the Worker under Cloudflare's 3 MiB limit as blog content grows —
+  // previously `output: 'server'` bundled every route + all content into the
+  // Worker, which pushed it past the limit and failed every deploy.
+  output: 'static',
   adapter: cloudflare(),
+  redirects: {
+    '/apps/applyiq': '/apps/rolebud',
+    '/blog/how-ats-systems-work-applyiq': '/blog/how-ats-systems-work-rolebud',
+  },
   integrations: [
     mdx(),
     react(),
