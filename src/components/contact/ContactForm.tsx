@@ -13,7 +13,7 @@ const SUBJECT_OPTIONS = [
   { value: '', label: 'Select a subject' },
   { value: 'General Inquiry', label: 'General Inquiry' },
   { value: 'ThinkBud Support', label: 'ThinkBud Support' },
-  { value: 'ApplyIQ Support', label: 'ApplyIQ Support' },
+  { value: 'RoleBud Support', label: 'RoleBud Support' },
   { value: 'PromptKit Support', label: 'PromptKit Support' },
   { value: 'Bug Report', label: 'Bug Report' },
   { value: 'Feature Request', label: 'Feature Request' },

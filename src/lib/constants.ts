@@ -340,11 +340,54 @@ export const SWIFTUI_IN_PRACTICE_COURSE = {
   ],
 };
 
-export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE | typeof SWIFTUI_FOUNDATIONS_COURSE | typeof SWIFTUI_IN_PRACTICE_COURSE> = {
+export const SWIFTUI_AT_SCALE_COURSE = {
+  slug: 'swiftui-at-scale',
+  title: 'Advanced SwiftUI & iOS Development',
+  subtitle: 'Build Atlas — Tourist Journal, Test-First, Multi-Platform',
+  description: 'The advanced course. We build Atlas — a tourist journal with CloudKit sync, App Group widget, ActivityKit live activity, App Intents on six system surfaces, MapKit, custom layouts — test-first end to end, in the Essential Developer rhythm. Every line lands as RED → GREEN → REFACTOR. Modular SPM from line one. iOS, iPadOS, macOS, and visionOS from one codebase.',
+  author: 'NativeFirst Team',
+  isPremium: false,
+  totalLessons: 14,
+  modules: [
+    {
+      number: 1,
+      title: 'Modular Architecture',
+      description: 'TDD forces the boundary. Modular SPM packages, public-API discipline, and the composition root that keeps every concrete dependency in one place.',
+      lessonCount: 3,
+    },
+    {
+      number: 2,
+      title: 'CloudKit',
+      description: 'The three databases, SwiftData + CloudKit sync, and a per-field merge layer that makes concurrent edits non-destructive.',
+      lessonCount: 3,
+    },
+    {
+      number: 3,
+      title: 'System Integration',
+      description: 'Widgets driven by a TimelineProvider, Live Activities that fit inside the daily push budget, and App Intents that surface on Siri, Shortcuts, Spotlight, Action Button, Control Center, and Focus filters.',
+      lessonCount: 3,
+    },
+    {
+      number: 4,
+      title: 'Advanced UI',
+      description: 'Custom Layout protocol as a pure function, the new MapKit-SwiftUI APIs driven by a value-typed camera reducer.',
+      lessonCount: 2,
+    },
+    {
+      number: 5,
+      title: 'Production Readiness',
+      description: 'Instruments perf budgets, multi-platform from line one, and a CI ship pipeline that holds the production bar at every release.',
+      lessonCount: 3,
+    },
+  ],
+};
+
+export const COURSES: Record<string, typeof COURSE | typeof PREMIUM_COURSE | typeof SWIFTUI_FOUNDATIONS_COURSE | typeof SWIFTUI_IN_PRACTICE_COURSE | typeof SWIFTUI_AT_SCALE_COURSE> = {
   'vibe-code-native': COURSE,
   'ship-native': PREMIUM_COURSE,
   'swiftui-foundations': SWIFTUI_FOUNDATIONS_COURSE,
   'swiftui-in-practice': SWIFTUI_IN_PRACTICE_COURSE,
+  'swiftui-at-scale': SWIFTUI_AT_SCALE_COURSE,
 };
 
 export function getCourseBySlug(slug: string) {
