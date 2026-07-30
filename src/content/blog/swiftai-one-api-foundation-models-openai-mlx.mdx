@@ -1,0 +1,137 @@
+---
+title: "I Tried the Library That Puts Foundation Models, OpenAI, and MLX Behind One Swift API"
+description: "SwiftAI is a new open-source Swift package that wraps Apple's on-device Foundation Models, OpenAI, and MLX behind one interface — reply(to:), @Generable structs, streaming, tool calls. I actually installed it, ran real on-device inference, and hit a documentation bug and a guardrail glitch within ten minutes. Here's what works, what doesn't, and whether it's worth adopting today."
+pubDate: 2026-07-30
+tags: ["Swift", "SwiftUI", "Foundation Models", "AI", "iOS Development", "Open Source", "MLX", "OpenAI"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1763161786687-43d0c9babdf0?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A compact multi-port GAN charging adapter — one small brick, several different outputs, which is exactly the pitch behind a library that puts several AI backends behind one Swift interface."
+---
+
+{/*
+  SEO target keywords:
+  - SwiftAI Swift library
+  - unified API Foundation Models OpenAI MLX
+  - Swift AI library on-device and cloud
+  - @Generable Swift structured output
+  - Foundation Models SystemLLM Swift
+  - swap AI backend Swift one line
+  - open source Swift LLM library 2026
+  - Apple Intelligence Swift package
+  - MLX Swift on-device model
+  - SwiftAI alpha review
+
+  Internal linking strategy:
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend — the on-device baseline SwiftAI wraps
+  - /blog/thinkbud-foundation-models-real-case-what-worked-what-didnt — the wall that made this library appealing
+  - /blog/ios-apps-leaking-llm-api-keys-llmjacking-2026 — yesterday's post, relevant the moment you add OpenaiLLM
+  - /blog/context-rot-ai-coding-agents-swift-codebase-2026 — the broader "small model, real limits" theme
+  - /learn/vibe-code-native — AI-tools course
+  - /learn/networking-with-ai — the lesson this library would replace half of
+
+  External references:
+  - https://github.com/mi12labs/SwiftAI (MIT, alpha, 362 stars / 23 forks as of testing)
+  - Verified firsthand: compiled and ran real Foundation Models inference via SystemLLM on macOS 26.2 / Swift 6.2.3
+*/}
+
+Nine months ago, on this very blog, I wrote about hitting a wall with ThinkBud. It was built on Apple's on-device Foundation Models, everything was going great, and then the context window ran out of road and I had to bolt a cloud model on as a fallback. That meant new types, a new call site, a new mental model for "what happens when this fails," bolted onto code that had never expected to talk to anything but the device it was running on.
+
+If a library like SwiftAI had existed back then, that afternoon would have been a lot shorter. So when it popped up on Hacker News this week with 362 stars and a description promising "one API for Apple's on-device models, OpenAI, MLX, and custom backends," I didn't just read the README. I installed it and made it do things.
+
+Ten minutes in, it had already lied to me about a system requirement, refused an inference call for no discernible reason, and confidently told me the wrong population for my own hometown. Let's get into it.
+
+---
+
+## What SwiftAI actually is
+
+[SwiftAI](https://github.com/mi12labs/SwiftAI) is an open-source Swift package from mi12labs. The pitch is simple: instead of writing separate integration code for Apple's [Foundation Models](/blog/foundation-models-first-on-device-ai-feature-no-backend), OpenAI's API, and MLX-based local models, you write against one set of types, and the backend is a plug you swap.
+
+The core shape:
+
+```swift
+let llm = SystemLLM()
+let reply = try await llm.reply(to: "Summarize this brew's tasting notes.")
+```
+
+Want structured output instead of a string blob? Slap `@Generable` on a struct and ask for it by type:
+
+```swift
+@Generable
+struct CityInfo {
+    let name: String
+    let country: String
+    let population: Int
+}
+
+let info = try await llm.reply(to: "Tell me about Ljubljana, Slovenia.", returning: CityInfo.self)
+```
+
+That compiles down to real JSON-schema-constrained generation, not a regex hoping for the best. There's a `Chat` actor for multi-turn conversations, a `Tool` protocol for function calling, and streaming variants of everything. On paper, it's the API I'd have designed myself: `SystemLLM`, `OpenaiLLM`, and `MlxLLM` all conform to the same `LLM` protocol, so the same `@Generable` structs, the same tools, and mostly the same call sites work no matter which one is running underneath.
+
+---
+
+## Finding number one: the README lied about the minimum OS
+
+The docs list macOS 14 and iOS 17 as the floor. I set up a scratch Swift package targeting macOS 14, dropped in `SystemLLM()`, and got:
+
+```
+error: 'SystemLLM' is only available in macOS 26.0 or newer
+```
+
+Makes sense once you think about it — Foundation Models itself only shipped with the OS that introduced Apple Intelligence's on-device model, and that's macOS 26 / iOS 26, not 14 or 17. The README's stated minimums describe what the *package* will compile against, not what `SystemLLM` will actually run on. Small thing, but it's exactly the kind of gap that costs you twenty minutes the first time you hit it and never gets fixed because the maintainer tested on a machine that was already on 26.
+
+I bumped the package to `platforms: [.macOS(.v26)]` (which, incidentally, needs `swift-tools-version:6.2` — the `.v26` case doesn't exist in older manifest versions either), and it built clean.
+
+---
+
+## Finding number two: it actually works, and it's honestly wrong in an interesting way
+
+I ran the `CityInfo` example above for real, on-device, no API key, no network call:
+
+```
+STRUCTURED: CityInfo(name: "Ljubljana", country: "Slovenia", population: 201600)
+```
+
+The structure is perfect. Every field is the right type, nothing crashed, no JSON parsing gymnastics on my end. That part of the pitch is completely real — this is a genuinely nicer way to get typed data out of a language model than the "beg it to emit valid JSON and pray" era we were all doing two years ago.
+
+The population, though: Ljubljana is a bit under 300,000 people, not 201,600. Apple's on-device model got the shape of the answer right and the substance of the answer wrong by about a third — a small, well-known model with no internet access, guessing at a fact instead of knowing it. This is not a SwiftAI bug. It's a live demo of the exact limitation I keep hammering on this blog: the on-device model is a real tool for structure, tone, and summarization, and a genuinely bad source of facts it wasn't trained to know precisely. `@Generable` makes the *shape* of the hallucination type-safe. It does nothing about the hallucination itself.
+
+---
+
+## Finding number three: a genuinely weird refusal
+
+I tried `Chat`, the multi-turn wrapper, with the most harmless prompt I could think of:
+
+```swift
+let chat = Chat(with: SystemLLM())
+let r1: String = try await chat.send("My name is Mario and I write a Swift blog. Remember that.")
+let r2: String = try await chat.send("What's my name and what do I write?")
+```
+
+The first reply was fine. The second came back as:
+
+> "My apologies, but I can't assist with that."
+
+No error thrown, no exception, just Apple's on-device model politely declining to repeat a name I'd told it thirty seconds earlier. I reran the exact same shape of test with a different phrasing — "My name is Mario and I write a Swift blog called NativeFirst" followed by "What is the name of my blog?" — and it answered correctly both times, memory intact (`chat.messages.count` came back as 4, exactly what you'd expect for two exchanges).
+
+So the session and history-tracking machinery in `Chat` works fine — I could see the growing message array. The refusal is a quirk of Apple's on-device safety layer being oddly trigger-happy about *some* phrasing of "recall a personal detail," even completely benign ones, and not others. It's the same overcautious-guardrail behavior anyone who's shipped a Foundation Models feature has run into at least once. SwiftAI just hands you the raw response, refusal and all — it doesn't paper over Apple's model being weird, which I'd call the correct design choice even though it made my test look broken for a second.
+
+---
+
+## The one thing "one API" doesn't quite mean
+
+Here's the nuance the marketing copy glosses over. `Chat` is declared as `actor Chat<LLMType: LLM>` — it's generic over the concrete backend type. `Chat(with: SystemLLM())` and `Chat(with: OpenaiLLM(apiKey:model:))` are two different concrete types under the hood. Swapping backends is a genuine one-line change at the call site where you construct the chat — you're not fighting a rewrite — but it's not a runtime toggle you flip on a single existing instance without an `any LLM` existential wrapper of your own. That's a completely reasonable design (Swift generics over an existential buys you compile-time safety and no dynamic dispatch overhead), just worth knowing before you promise your team "we can switch providers with a feature flag."
+
+That distinction matters most the moment you add `OpenaiLLM` for the cases Apple's on-device model can't handle. At that point you're holding a real API key inside your app again, and [yesterday's post about the 282 iOS apps that leaked their LLM keys](/blog/ios-apps-leaking-llm-api-keys-llmjacking-2026) applies exactly as written — SwiftAI doesn't change where the secret has to live. Keep it server-side, proxy the call, same as always.
+
+---
+
+## Should you actually use it
+
+It's labeled **alpha** in its own README, with "rough edges and breaking changes are expected" right there in plain text, and I found two of those rough edges before I'd even finished my coffee. That's not a knock — it's an honest alpha tag doing its job. If you're prototyping, or you're the kind of person who enjoys filing GitHub issues that get fixed within a week (362 stars in what looks like its first real week of attention suggests this one might), it's worth a spin.
+
+If you're shipping to the App Store next month, I'd wait. Not because the idea is bad — the idea is exactly right, and it's the same instinct behind [why context management for AI agents matters so much right now](/blog/context-rot-ai-coding-agents-swift-codebase-2026): fragmentation between backends is a real, growing tax on anyone building AI features in Swift, and somebody solving it well is worth rooting for. I just wouldn't build my subscription revenue on a library whose maintainers are telling me, in writing, to expect breaking changes.
+
+I'll be watching this one. If it's still getting commits in three months, it's probably going to be how I wire ThinkBud's next cloud fallback — a much shorter rewrite than the one that started this whole post.
+
+If you want to build the on-device-first, fall-back-to-server pattern properly — including where the key actually lives — that's covered start to finish in our [AI-tools course](/learn/vibe-code-native), specifically the [networking with AI lesson](/learn/networking-with-ai).
