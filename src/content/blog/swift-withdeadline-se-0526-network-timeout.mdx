@@ -1,0 +1,208 @@
+---
+title: "Swift Just Got a Real Timeout API. Here's What We've All Been Duct-Taping Instead."
+description: "SE-0526 withDeadline was accepted into Swift on July 30, 2026 — a real, composable, absolute-time-limit API for async operations. I found the exact gap it fills in a real app's networking layer, fixed it today's way with a TaskGroup race, and lined it up against what withDeadline will let me delete once it ships."
+pubDate: 2026-07-31
+tags: ["Swift", "Swift Concurrency", "Async Await", "Networking", "Swift Evolution", "iOS Development", "Testing"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1617882494853-1398971c349e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A black digital clock display against a dark background, evoking a countdown running out"
+---
+
+{/*
+  SEO target keywords:
+  - Swift withDeadline SE-0526
+  - Swift async timeout
+  - Swift Task deadline
+  - withTaskCancellationHandler CancellationError reason
+  - Swift TaskGroup race timeout pattern
+  - Swift network request timeout async await
+  - Swift 6.2 concurrency timeout
+  - CancellationError.Reason deadlineExpired
+
+  Internal linking strategy:
+  - /blog/swift-networking-retry-token-refresh-request-deduplication — the exact ResilientNetworkClient this post extends
+  - /blog/custom-networking-layer-swift-urlsession-async-await — the original networking layer both of those build on
+  - /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree — the other "napkin diagram" concurrency post this pairs with
+  - /blog/swift-6-2-strict-concurrency-migration-invoize-before-after — the race-condition post, same "cancellation is subtle" theme
+  - /blog/swiftai-one-api-foundation-models-openai-mlx — yesterday's post, for the "still testing bleeding-edge Swift stuff" continuity
+  - /learn/networking-with-ai — the course lesson this pattern would show up in
+
+  External references:
+  - https://github.com/swiftlang/swift-evolution/blob/main/proposals/0526-deadline.md
+  - https://forums.swift.org/t/accepted-with-modifications-se-0526-withdeadline/88645 (accepted July 30, 2026)
+  - Verified locally: Xcode 26.2 / Swift 6.2.3 does not yet include withDeadline (checked via `swift --version`)
+*/}
+
+There's a scene near the start of *In Time* where Justin Timberlake looks down at the glowing green clock embedded in his forearm and it reads "1:00:00" — his entire remaining lifespan, counting down, no snooze button. Melodramatic movie, but it's the cleanest metaphor for a problem every async codebase eventually has: something is running, you gave it a budget, and the language has no idea that budget exists.
+
+Swift async code has always been able to run forever. `Task.sleep` gives you a delay. Cancellation gives you a way to stop something *if you remember to hook it up*. But "run this, and if it's not done in five seconds, cut it off and tell me why" has never been a first-class thing you could just write. Yesterday, that changed — [SE-0526: `withDeadline`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0526-deadline.md) was [accepted into the language](https://forums.swift.org/t/accepted-with-modifications-se-0526-withdeadline/88645) on July 30, 2026, after three rounds of review.
+
+I went looking for the gap it fills in a real codebase before I'd even finished reading the proposal. Took about four minutes to find one.
+
+---
+
+## The gap: BrewLog's network client has no idea how long is too long
+
+I've written about BrewLog's [`ResilientNetworkClient`](/blog/swift-networking-retry-token-refresh-request-deduplication) before — it wraps a plain `URLSessionNetworkClient` with retry-on-5xx, refresh-and-retry-once on an expired token, and request deduplication so two callers asking for the same thing at once only hit the server once. Composition over inheritance, no framework, does exactly what it says.
+
+Here's what it doesn't do: bound how long any of that takes.
+
+```swift
+private func sendWithRetryAndAuth<T: Decodable>(
+    _ endpoint: Endpoint,
+    as type: T.Type,
+    attempt: Int = 1,
+    didRefreshToken: Bool = false
+) async throws -> T {
+    // ... auth header, the actual send ...
+    catch let error as APIError where Self.isRetryable(error) && attempt <= maxRetries {
+        try await Task.sleep(for: .milliseconds(200 * attempt))
+        return try await sendWithRetryAndAuth(endpoint, as: T.self, attempt: attempt + 1, didRefreshToken: didRefreshToken)
+    }
+}
+```
+
+`URLSession` has its own per-request timeout (60 seconds by default), so no single attempt hangs literally forever. But nothing bounds the *whole call*. A flaky server returning 503s can burn through a 401-triggered token refresh, two retries with backoff, each one eating up to 60 seconds of its own — worst case that's minutes, with zero user-facing signal that anything is even wrong. The spinner just... keeps spinning. It's the same shape of bug as the streak stat that lied since Day One, or the tip-of-the-day card frozen on a string — a thing that's technically working, that nobody ever put a ceiling on.
+
+That's exactly the shape of problem `withDeadline` exists for. One catch: it isn't in any shipping toolchain yet. I checked — Xcode 26.2 on this machine reports Swift 6.2.3, and the proposal was accepted less than 24 hours before I wrote this sentence. So I built the fix two ways: the way you'd write it *today*, with a real test proving it actually works, and the way you'll write it once `withDeadline` lands.
+
+---
+
+## Today's version: a `TaskGroup` race
+
+Before `withDeadline`, the standard pattern for "run this, but not forever" is racing two child tasks in a `withThrowingTaskGroup` and taking whichever finishes first:
+
+```swift
+struct ResilientNetworkClient: NetworkClient {
+    let wrapped: NetworkClient
+    let authTokenStore: AuthTokenStore
+    let deduplicator: RequestDeduplicator
+    var maxRetries: Int = 2
+    var overallBudget: Duration = .seconds(8)
+
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        let key = "\(endpoint.method) \(endpoint.path)?\(endpoint.queryItems)"
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await deduplicator.value(for: key, as: T.self) {
+                    try await sendWithRetryAndAuth(endpoint, as: T.self)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: overallBudget)
+                throw APIError.timedOut
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+}
+```
+
+Two child tasks, one race. If the real call wins, `group.cancelAll()` kills the sleeping timer task — harmless, it was never going to do anything but throw. If the timer wins, it cancels the real call, which propagates down through the retry loop and the deduplicator and eventually reaches the actual `URLSession.data(for:)` call. `defer` guarantees the loser gets cancelled either way.
+
+It works. But look at what it costs to get there: a whole extra child task just to hold a `Task.sleep`, manual `cancelAll()` bookkeeping, and an `APIError.timedOut` case I had to invent and thread through `isRetryable` by hand. This is the *good* version of the pattern — the version people usually skip writing at all, which is exactly how you end up with a network client that has no overall budget in the first place.
+
+### Proving it actually cuts off a hung server
+
+The scary part of any timeout wrapper is proving it doesn't just... not work. So the test uses a mock that never returns:
+
+```swift
+private actor HangingNetworkClient: NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+        try await Task.sleep(for: .seconds(999))
+        fatalError("unreachable — the budget should have cancelled this first")
+    }
+}
+
+@Test("a server that never answers is cut off at the overall budget, not left to hang")
+func timesOutAHungServer() async throws {
+    let hung = HangingNetworkClient()
+    let client = ResilientNetworkClient(
+        wrapped: hung,
+        authTokenStore: AuthTokenStore(initialToken: "unused") { "unused" },
+        deduplicator: RequestDeduplicator(),
+        overallBudget: .milliseconds(150)
+    )
+
+    let clock = ContinuousClock()
+    let start = clock.now
+
+    await #expect(throws: APIError.timedOut) {
+        _ = try await client.send(Endpoint(path: "widgets/1"), as: Widget.self)
+    }
+
+    #expect(clock.now - start < .seconds(1))
+}
+```
+
+That `fatalError` isn't decoration — if `cancelAll()` didn't actually reach the hanging task, this test doesn't fail cleanly, it *hangs the whole suite* for 999 seconds until CI kills it. Which is a pretty good stand-in for what happens to a real app when nobody ever builds this wrapper. Real run, real red-to-green on a booted iPhone 17 Pro simulator:
+
+```
+Test Suite 'ResilientNetworkClientTests' passed
+Test Case '-[BrewLogTests.ResilientNetworkClientTests timesOutAHungServer]' passed (0.153 seconds)
+Test Case '-[BrewLogTests.ResilientNetworkClientTests retriesWithinBudgetStillSucceed]' passed (0.201 seconds)
+Executing 6 tests, with 0 failures
+```
+
+Full existing suite for the file — the 503-retry test, the 401-refresh test, the dedup test — all still green. The budget wrapper is additive; it doesn't change behavior for any call that finishes on time.
+
+---
+
+## What `withDeadline` replaces
+
+Here's the same fix, written against the accepted proposal:
+
+```swift
+func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T {
+    let key = "\(endpoint.method) \(endpoint.path)?\(endpoint.queryItems)"
+    return try await withDeadline(in: overallBudget) {
+        try await deduplicator.value(for: key, as: T.self) {
+            try await sendWithRetryAndAuth(endpoint, as: T.self)
+        }
+    }
+}
+```
+
+That's the whole diff. No second child task, no manual `cancelAll()`, no invented `.timedOut` error case to smuggle through the retry logic — `withDeadline` cancels `body` for you when the clock runs out, and the failure comes back as a real, typed `CancellationError`:
+
+```swift
+public struct CancellationError: Error {
+    @nonexhaustive
+    public enum Reason {
+        case userRequested
+        case deadlineExpired
+    }
+    public var reason: Reason { get }
+}
+```
+
+That `.deadlineExpired` case is the detail I like most. Right now, if you catch a `CancellationError` in Swift, you genuinely cannot tell *why* — did the user swipe away the screen, did the parent task get cancelled, did something time out? You've been guessing from context. After SE-0526, you check `.reason` and you know. (One thing changed between the second and third review, worth knowing if you read older SE-0526 discussion threads: `.userRequested` was originally going to be the *only* non-deadline case and covered every kind of manual cancellation — the accepted version keeps that name specifically for explicit `task.cancel()` calls.)
+
+The proposal also solves the nesting problem for free. Wrap a `withDeadline(in: .seconds(8))` call *inside* another one with a 5-second budget, and "when more than one `withDeadline` is nested the minimum of the expirations is taken" — the outer, tighter deadline always wins, no matter how deep the call stack goes. Try building that correctly by hand with the `TaskGroup` version and you'll be threading a deadline parameter through every layer of your networking stack. `withDeadline` just makes it a scoping rule.
+
+And if you need to ask "is there a deadline active right now, and when," that's in too:
+
+```swift
+extension Task where Success == Never, Failure == Never {
+    public static var hasActiveDeadline: Bool { get }
+    public static func activeDeadline<C: Clock & Identifiable>(for clock: C) -> C.Instant?
+    public static var cancellationReason: CancellationError.Reason? { get }
+}
+```
+
+Useful for exactly the kind of thing a retry loop wants to know: *should I even bother sleeping 200ms before the next attempt, or is the deadline about to eat that time anyway?*
+
+---
+
+## The part that's still true today
+
+I want to be straight about where this stands: I couldn't compile a single line of the `withDeadline` version. `swift --version` on this machine says `Apple Swift version 6.2.3` — the standard toolchain shipped in Xcode 26.2 — and the proposal was accepted less than a day before I wrote this post. It hasn't landed in a toolchain snapshot I have access to, so everything in that "what it replaces" section is transcribed straight from [the accepted proposal text](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0526-deadline.md), not something I ran.
+
+Which is also the honest reason to write about it *now* rather than waiting: the gap it fills is real and shipping in production code today, the fix people reach for today is the clunkier `TaskGroup` race, and knowing exactly what's about to get simpler is worth more before it ships than after — that's the window where you can look at your own retry logic and go "oh, I have three of these."
+
+If your app has a network client with retries, or a background sync job, or literally anything that calls `await` and hopes for the best — go check whether it has an overall budget. Mine didn't, until today.
+
+---
+
+*BrewLog's full test suite — this file plus every prior post's tests — stayed green throughout. If you want the "why does retry logic exist in the first place" version of this story, [Retry, Token Refresh, and Request Deduplication in Swift](/blog/swift-networking-retry-token-refresh-request-deduplication) covers `ResilientNetworkClient` from scratch, and [the original networking layer](/blog/custom-networking-layer-swift-urlsession-async-await) is the plain `URLSessionNetworkClient` underneath it. For more "what actually changed in Swift 6.2 concurrency," [the `@concurrent` vs `nonisolated` vs `@MainActor` decision tree](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) and [the strict-concurrency migration post](/blog/swift-6-2-strict-concurrency-migration-invoize-before-after) both live in the same neighborhood. And if you're building a networking layer with an AI pair right now, the [Networking with AI](/learn/networking-with-ai) lesson in the course walks through the same URLSession-plus-async/await foundations this whole client sits on.*
