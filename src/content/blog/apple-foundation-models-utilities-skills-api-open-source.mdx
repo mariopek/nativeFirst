@@ -1,0 +1,129 @@
+---
+title: "Apple Just Open-Sourced the 'Skills API' Everyone Assumed Was a Claude Thing"
+description: "Apple's new foundation-models-utilities package brings a Skills API, history compaction, and a chat-completions bridge to Swift's Foundation Models framework. Here's what's actually in the box, and how it maps onto BrewLog."
+pubDate: 2026-08-01
+tags: ["Foundation Models", "Swift", "Apple Intelligence", "Open Source", "iOS Development", "SwiftUI", "AI", "Xcode 27"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1640682841767-cdfce3aea6e0?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An organized box of wrenches and hand tools, each one distinct but sharing the same case — a Swift toolbox metaphor"
+---
+
+{/*
+  SEO target keywords:
+  - Apple foundation-models-utilities
+  - Foundation Models Skills API
+  - Swift AI agent context management
+  - Foundation Models open source
+  - ChatCompletionsLanguageModel Swift
+  - ios AI skills api
+  - ios foundation models history management
+  - Apple Intelligence developer tools 2026
+
+  Internal linking plan:
+  - your-prompts-are-not-skills-yet.mdx (the "yet" callback — PromptKit's whole thesis, now shipped as an Apple API)
+  - apple-foundation-models-on-device-ai-iphone.mdx (Foundation Models 101)
+  - thinkbud-foundation-models-real-case-what-worked-what-didnt.mdx (a real on-device ceiling this package might move)
+  - context-rot-ai-coding-agents-swift-codebase-2026.mdx (history/context management framing)
+  - swiftai-one-api-foundation-models-openai-mlx.mdx (the other "unify the model layer" package, published two days ago)
+  - /learn/vibe-code-native (course CTA)
+*/}
+
+Back in March I wrote a post called ["Your Prompts Are Not Skills. Yet."](/blog/your-prompts-are-not-skills-yet) The "yet" was doing a lot of work in that title. I meant it as a nudge — save your prompts as reusable skills, stop losing your best work in a Notes app graveyard.
+
+I did not expect Apple to answer it. But this week, buried in a GitHub repo nobody on my timeline was talking about, they did. `apple/foundation-models-utilities` shipped with an honest-to-god `Skills` type. Not a metaphor. An actual Swift struct you initialize with a name, a description, and a prompt.
+
+I read the whole README twice to make sure I wasn't imagining it.
+
+---
+
+## What actually shipped
+
+At WWDC 2026, Apple promised the Foundation Models framework itself would go open source "later this summer." That part hasn't landed yet — the framework is still Apple's closed, on-device implementation. What landed instead is a companion package, Apache-2.0 licensed, called `foundation-models-utilities`. Think of it as the seams Apple's own engineers needed while building real things on top of Foundation Models, cut loose for the rest of us.
+
+Add it the normal SPM way:
+
+```swift
+.package(url: "https://github.com/apple/foundation-models-utilities", from: "1.0.0")
+```
+
+Three pieces are worth your attention. None of them are Apple Intelligence features. All of them are the unglamorous plumbing every serious AI feature ends up needing anyway.
+
+---
+
+## Skills: prompts that show up only when the model needs them
+
+Here's the part that made me sit up. A `Skill` isn't a static system prompt bolted onto every request — it's something the framework activates just-in-time, mid-transcript:
+
+```swift
+Skills(activations: assistant.activations) {
+    Skill(
+        name: "style-guide",
+        description: "Applies the project's writing style guide",
+        prompt: "# Style Guide\n\nUse active voice. Avoid jargon..."
+    )
+}
+```
+
+Two initializers exist, and the difference matters: `prompt` gets injected as a tool output (the model "discovers" it, like a lookup), while `instructions` gets folded into the very first instructions entry (the model always has it). `activations` is `@Observable`, so you can watch which skills actually fired — genuinely useful for debugging why a session went off-script.
+
+This is the exact shape of the problem PromptKit exists to solve on the human side: you write a prompt once, give it a name and a description, and reuse it instead of retyping the same 40 lines every time. Apple just built the machine-facing version of the same idea, and gave it `allowsDeactivation: true` so a skill can retire itself once it's no longer relevant to the conversation.
+
+If you've been prompt-engineering Foundation Models by hand-assembling one giant `instructions:` string, this is the retirement plan for that string.
+
+---
+
+## History management: compaction as a modifier, not a script you write
+
+I wrote about [context rot](/blog/context-rot-ai-coding-agents-swift-codebase-2026) back in July — the way agents quietly get dumber as their transcript grows, because everything from turn one is still sitting in the context window, load-bearing or not. That post was about coding agents like Claude Code. The same disease hits any on-device chat feature that runs past a handful of turns: an inventory assistant, a support bot embedded in your app, anything stateful.
+
+`foundation-models-utilities` treats this as a first-class problem instead of something you duct-tape yourself:
+
+```swift
+.summarizeHistory(entryThreshold: 10, model: status.summarizerModel)
+.rollingWindow(entries: 10)
+.droppingCompletedToolCalls()
+```
+
+Three strategies, composable as modifiers on a session's transcript. `droppingCompletedToolCalls()` alone is worth the install — every tool-calling session accumulates the full input/output payload of every tool it ever ran, most of which is dead weight by turn five. `rollingWindow` is the blunt instrument (keep the last N, drop the rest). `summarizeHistory` is the expensive-but-graceful one, handing older entries to a summarizer model once you cross a threshold, so the gist survives even if the verbatim text doesn't.
+
+None of this is novel if you've built RAG pipelines or agent frameworks in Python. What's novel is that it's now a first-party Swift API, with no server round-trip required, sitting one `import` away from a SwiftUI view.
+
+---
+
+## ChatCompletionsLanguageModel: the escape hatch
+
+The third piece is the least exciting on paper and the most useful in practice. `ChatCompletionsLanguageModel` lets you point Foundation Models' own APIs at any server speaking the chat-completions REST shape — a local MLX server, a self-hosted model, whatever you've got running on your LAN:
+
+```swift
+let model = ChatCompletionsLanguageModel(
+    name: "minimax-m2.5",
+    url: URL(string: "http://localhost:8000/v1")!,
+    supportsGuidedGeneration: false
+)
+```
+
+I [tried the SwiftAI package](/blog/swiftai-one-api-foundation-models-openai-mlx) two days ago for almost exactly this — one `LLM` protocol across the on-device model, OpenAI, and MLX. Apple shipping its own first-party version of the same bridge, days later, from inside the platform vendor itself, tells you where the wind is blowing: the API surface you use for the on-device model and the API surface you use for a hosted one are converging into the same three or four methods. Vendor lock-in at the model layer is getting structurally harder to justify.
+
+`supportsGuidedGeneration: false` is the honest bit — not every server can do Foundation Models' `@Generable` structured output, and the initializer makes you say so up front instead of finding out at runtime with a cryptic decode failure.
+
+---
+
+## Where this would actually go in BrewLog
+
+BrewLog's `TipOfTheDay` feature (the on-device tip generator I built back in the course series) is a single-shot call — ask the model for a coffee tip, get a tip, done. No history, no skills, nothing to compact. It doesn't need any of this. But it's also the wrong example, and that's the point worth making.
+
+The features that *do* need it are the ones the [ThinkBud Foundation Models post](/blog/thinkbud-foundation-models-real-case-what-worked-what-didnt) already ran into: anything multi-turn. A tutoring flow that remembers what you got wrong three questions ago. A brew-log assistant you can ask "what's different about today's batch versus my usual" and have it actually recall your usual. The moment a feature crosses from "one prompt, one answer" into "a conversation," you've silently signed up to solve context growth yourself — or you use `.rollingWindow()` and get back to building the feature instead of reinventing transcript trimming for the fourth time this year.
+
+That's the real value of a package like this. It's not a new capability. It's Apple admitting that "on-device AI feature" and "on-device AI feature that doesn't fall over after fifteen turns" are two different engineering problems, and only handing you the tools for the first one wasn't enough.
+
+---
+
+## The framework itself is still coming
+
+Worth being precise about what shipped and what didn't. The Foundation Models framework — the actual on-device model, the `@Generable` macro, `LanguageModelSession` — is still Apple's closed implementation, still iOS 26+ only, still not open source. `foundation-models-utilities` is a *utilities* package that sits on top of it. Apple's own docs call the patterns inside it "emerging and experimental," which is corporate for "we're still figuring out the right shape too, come help us find the edges."
+
+If you're the type who reads a README twice before trusting it (see: me, this week), that's the appropriately skeptical read. But experimental-and-Apache-2.0 beats closed-and-proprietary every time I've had to choose between them, and this is the first real signal that Foundation Models is going to grow a community layer instead of staying a sealed box with a WWDC keynote slide.
+
+Go read the [Foundation Models basics](/blog/apple-foundation-models-on-device-ai-iphone) if you haven't shipped a feature with it yet, then go add three lines of `.droppingCompletedToolCalls()` to whatever multi-turn thing you're building. Future you, twenty turns deep into a support conversation, will not thank you out loud, but they'll notice.
+
+If you want the fast track on turning prompts into the kind of reusable, parameterized thing a `Skill` struct expects, our [Vibe Coding Native](/learn/vibe-code-native) course has a full lesson on exactly that translation — from a one-off prompt you typed once to something structured enough to hand to a model as infrastructure.
