@@ -1,0 +1,125 @@
+---
+title: "Swift Testing Runs Your Suite in Parallel. That Static Var You Swap for DI Is a Race Condition."
+description: "Swift Testing parallelizes tests by default, in the same process. A huge number of Swift codebases — BrewLog's AppIntents suite included — still inject test dependencies by mutating a global static var. ST-0026 proposes a .taskLocal trait to fix it properly. Here's the real bug, the real code, and where the proposal stands."
+pubDate: 2026-08-02
+tags: ["Swift Testing", "Swift Concurrency", "Swift Evolution", "TDD", "Testing", "iOS Development", "AppIntents"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1761023717432-572bd8f780e1?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A hand holding a hotel key card up to a door lock"
+---
+
+{/*
+SEO target keywords: Swift Testing parallel execution, ST-0026 taskLocal trait, Swift Testing static var dependency injection, Swift Testing race condition, @TaskLocal Swift Testing, Swift Testing .serialized trait, AppIntents unit testing Swift
+
+Internal linking plan:
+- /blog/widgetkit-app-intents-log-brew-without-opening-app — the original post where LogBrewIntent.modelContainerProvider was built (the exact code this post revisits)
+- /blog/swift-testing-framework-xctest-migration-guide — general Swift Testing migration background
+- /blog/tdd-swiftui-observable-viewmodel-red-green-refactor — TDD workflow context
+- /blog/swift-withdeadline-se-0526-network-timeout — same "here's a Swift Evolution proposal working through review, and the real gap it fills" format, published the day before
+- /learn/swiftui-in-practice-15-swift-testing-view-models — tracked course lesson on Swift Testing / makeSUT pattern
+*/}
+
+Three years ago a hotel in Zagreb handed me a key card that also opened the room next door. Not a fluke — the front desk had reissued my card off the same encoder that just cleared out the previous guest, and for about an hour, two rooms answered to one piece of plastic. Nobody found out until the previous guest's replacement walked in on me mid-unpacking.
+
+That's a static var. One object, two owners, no idea they're sharing it until someone walks in mid-write.
+
+---
+
+## The bug hiding in plain sight
+
+Swift Testing runs your tests in parallel by default. Not "parallel-ish across suites" — actual `async let`-style concurrency, generally in the same process, using task groups under the hood. It's one of the framework's real wins: your 74-test suite that took 40 seconds under XCTest suddenly takes 12.
+
+It's also why a pattern that shows up in a huge number of Swift codebases is quietly dangerous.
+
+Here's [BrewLog](/blog/widgetkit-app-intents-log-brew-without-opening-app)'s `LogBrewIntent`, the AppIntent behind the home screen widget's quick-log button. AppIntents ships its own dependency injection — `@Dependency` plus `AppDependencyManager` — and it doesn't survive contact with a unit test: call `perform()` directly and you get `"AppDependency ... was not initialized prior to access"`, because the property only resolves inside the system's real dispatch (Siri, Shortcuts, an actual widget tap). So the intent falls back to the boring, testable seam:
+
+```swift
+struct LogBrewIntent: AppIntent {
+    static var modelContainerProvider: () -> ModelContainer = {
+        fatalError("LogBrewIntent.modelContainerProvider must be set before the intent runs")
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try Self.logBrew(in: Self.modelContainerProvider())
+        return .result()
+    }
+}
+```
+
+`BrewLogApp.swift` sets the real one at launch. The test suite sets a fake one before the test that needs it:
+
+```swift
+@Test("perform() reads the container from the static provider BrewLogApp configures at launch")
+@MainActor
+func performUsesTheConfiguredProvider() async throws {
+    let container = try makeContainer()
+    LogBrewIntent.modelContainerProvider = { container }
+
+    _ = try await LogBrewIntent().perform()
+    // ...
+}
+```
+
+That line — `LogBrewIntent.modelContainerProvider = { container }` — mutates a `static var` that every other test in the process can also read. It never gets reset. It doesn't need to, today, because it's the only test in the file that touches it. But it's shared, mutable, global state, sitting in a suite that Swift Testing is actively running in parallel with everything else. Add a second test next month that also flips that provider, and you don't get a compile error. You get a test that fails on a Tuesday, passes on a Wednesday, and passes again the moment you run it in isolation to find out why — the single worst kind of bug to be handed a ticket for.
+
+---
+
+## Why this isn't a BrewLog problem
+
+This isn't a BrewLog-specific mistake — it's the standard shape of "swap in a fake at test time" DI in Swift, because Swift never had a first-class answer for *scoped* mutable state until fairly recently. Feature flags, mocked API clients, `Date.now` overrides for testing, locale overrides — all of it tends to land on a mutable static somewhere, because a plain static is the easiest thing that compiles.
+
+XCTest got away with this for a decade because XCTest, by default, runs tests serially. One test finishes, its cleanup runs, the next one starts. A mutated static var was ugly but safe — first in the door, last one out, no overlap.
+
+Swift Testing broke that safety net on purpose, in exchange for real speed. `.serialized` exists precisely for suites like this:
+
+```swift
+@Suite(.serialized)
+struct LogBrewIntentTests { /* ... */ }
+```
+
+...but reaching for `.serialized` every time you touch a static is opting back out of the thing that makes Swift Testing worth switching to. It's a tourniquet, not a fix.
+
+---
+
+## What ST-0026 actually proposes
+
+There's a proper fix moving through Swift Evolution right now: **ST-0026, the `.taskLocal` test trait**, pitched by the Point-Free team in June and put up for formal review from July 17–27, 2026. It builds on `TestScoping` — the scoping-trait mechanism Swift Testing has shipped since 6.1 — and turns "bind a task-local for the duration of this test" into a one-line trait instead of a hand-written `Trait` conformance every time you need one.
+
+The shape of it:
+
+```swift
+@Test(.taskLocal($featureEnabled, true))
+func brewSuggestionUsesTheNewAlgorithm() {
+    #expect(FeatureFlags.featureEnabled)
+}
+```
+
+or bound at the whole-suite level:
+
+```swift
+@Suite(.taskLocal(LogBrewIntent.$modelContainerProvider, { fakeContainer }))
+struct LogBrewIntentTests { /* every test in here gets the fake, safely */ }
+```
+
+Task-local values are, by construction, scoped to the task (and its children) that set them. Two parallel tests binding the same task-local at the same time don't see each other's writes — there's no shared cell to race over, because there's no shared cell. No reset step to forget. No `.serialized` tax. The fake container is real DI, not a global that happens to behave if nobody else is running.
+
+The one catch: it needs the underlying property to actually be declared `@TaskLocal`, not a plain `static var` — so adopting it means changing `LogBrewIntent.modelContainerProvider` from a static to a task-local at the source, not just at the call site. That's a real migration, not a drop-in swap, which is exactly the kind of thing worth knowing before you reach for it.
+
+The review thread's live disagreement is refreshingly small in scope: whether the second argument needs a label (`withValue:`, `as:`) or stays positional, the way SwiftUI's `.environment(\.keyPath, value)` does. Nobody in the thread is arguing against the trait existing — "the type is going to be useful" is the closest thing to a dissenting opinion I could find. That's usually a sign a proposal ships close to how it was pitched.
+
+---
+
+## What to actually do about it today
+
+You don't need ST-0026 merged to fix the smell it's pointing at. Three honest options, worst to best:
+
+1. **Do nothing, and get lucky.** Fine until it isn't. This is where most of us are right now.
+2. **Reach for `.serialized`** on any suite that mutates shared static state. Costs you the parallelism, keeps the bug from ever firing. A reasonable stopgap.
+3. **Convert the seam to `@TaskLocal` today**, ST-0026 or not — the underlying mechanism (`TestScoping`, task-local binding via a custom `Trait`) has been available since Swift Testing 6.1. ST-0026 just makes the ergonomics good enough that you'll actually do it instead of reaching for option 2 out of laziness.
+
+Grep your test suite for `static var` assignments inside a `@Test` function. If you find one, you've found a hotel key that opens two rooms — it just hasn't been an issue yet because nobody's checked in at the same time.
+
+---
+
+*Related reading: how [BrewLog's networking layer](/blog/swift-withdeadline-se-0526-network-timeout) is working through its own Swift Evolution gap, the [TDD workflow](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor) this suite was built with, and the [XCTest → Swift Testing migration guide](/blog/swift-testing-framework-xctest-migration-guide) if you're still mid-move. For a slower walkthrough of the `makeSUT` pattern and `@Test`/`#expect` basics, [lesson 15 of SwiftUI In Practice](/learn/swiftui-in-practice-15-swift-testing-view-models) covers the ground this post assumes.*
