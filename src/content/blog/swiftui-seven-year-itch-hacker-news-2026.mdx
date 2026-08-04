@@ -1,0 +1,84 @@
+---
+title: "SwiftUI Just Turned Seven. Hacker News Is Having the Itch."
+description: "SwiftUI shipped in 2019 and just hit its seven-year mark, and a viral Hacker News thread (plus pieces from Yakov Manshin and John Gruber) is relitigating whether it ever grew up. I've built a real app in it for months — here's where my own bugs match the complaints, and where they don't."
+pubDate: 2026-08-04
+tags: ["SwiftUI", "iOS Development", "Swift", "UIKit", "App Architecture"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1639953803381-e9c3f3a38253?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A building permanently wrapped in construction scaffolding"
+---
+
+{/*
+  SEO target keywords:
+  - SwiftUI after 7 years
+  - SwiftUI problems 2026
+  - SwiftUI vs UIKit still relevant
+  - SwiftUI undo redo bug
+  - SwiftUI performance issues
+  - is SwiftUI production ready 2026
+  - SwiftUI GeometryReader problems
+
+  Internal linking strategy:
+  - Links to /blog/uikit-tricks-swiftui-cant-do-uiviewrepresentable-pdfkit (real "drop to UIKit" example)
+  - Links to /blog/observable-vs-observableobject-1000-row-redraw-benchmark (real SwiftUI redraw/performance investigation)
+  - Links to /blog/widgetkit-app-intents-log-brew-without-opening-app (declined Widget Extension, real risk-aversion example)
+  - Links to /blog/swiftui-state-bindable-environment-decision-map (the @Observable property wrapper maze)
+  - Links to /learn/swiftui-in-practice (course module)
+
+  External reference strategy:
+  - Hacker News: "SwiftUI After 7 Years" thread
+  - Yakov Manshin, "SwiftUI After 7 Years: A Story of Mediocrity" (ykvm.com, July 2026)
+  - John Gruber, Daring Fireball, "SwiftUI Only Makes It Easy to Develop Bad Apps" (June 2026) — Apple Journal undo/redo bug
+*/}
+
+There's an old Marilyn Monroe movie called *The Seven Year Itch*. The premise: after seven years of marriage, the comfort curdles into restlessness, and you start noticing every little thing that's wrong with the relationship you swore was fine.
+
+SwiftUI shipped at WWDC 2019. It just turned seven. And this week, a chunk of Hacker News had exactly that conversation about it, in public, with citations.
+
+I've spent the last several months building a real app — BrewLog, the one I use for every hands-on post on this blog — entirely in SwiftUI. So when the thread showed up in my feed, I didn't read it as drama. I read it as a checklist. Let's go through it.
+
+---
+
+## The thread, and the two pieces that fed it
+
+The Hacker News post itself is short, but it's a portal into two much sharper essays. The first is Yakov Manshin's ["SwiftUI After 7 Years: A Story of Mediocrity."](https://ykvm.com/2026/07/swiftui-a-story-of-mediocrity/) The second, and the one that actually stings, is John Gruber's ["SwiftUI Only Makes It Easy to Develop Bad Apps."](https://daringfireball.net/2026/06/swiftui_only_makes_it_easy_to_develop_bad_apps)
+
+Gruber's opening line is the one worth sitting with: "SwiftUI is productive, modern, and often delightful, right up until you try to make a really good Mac app." His example isn't theoretical — it's Apple's own Journal app. Delete a word from a sentence, hit Undo, and instead of getting the word back, you lose the *entire sentence*. Gruber says he's personally lost real writing to this. His point isn't "SwiftUI has a bug." It's that AppKit solved correct undo/redo in roughly 1989, and here we are, thirty-seven years later, watching Apple's own first-party app get it wrong in Apple's own newest UI framework.
+
+Manshin's piece is the longer, angrier version of the same argument, and he backs it with specifics: Apple's official Landmarks tutorial has had a visibly broken macOS sidebar for over two years. `AsyncImage`'s caching story was *still in beta* as of last month. Keyboard-dismiss-on-scroll — a UIKit feature since iOS 7 — didn't land in SwiftUI until iOS 16. And his closing argument is the one that should make any of us pause: "you can never know for sure how many times a view will update." That's not a nitpick. That's the core promise of a declarative framework — draw a function of state, let the framework figure out the rest — quietly not being kept.
+
+---
+
+## Where my own scar tissue agrees
+
+I don't have Gruber's or Manshin's years, but I've hit versions of every category they name, on a real app, this year.
+
+**The redraw problem is real, and I measured it.** I didn't just take SwiftUI's "just describe your UI, we'll handle updates efficiently" claim on faith — I put a counter on it. In my [`@Observable` vs `ObservableObject` benchmark](/blog/observable-vs-observableobject-1000-row-redraw-benchmark), 1,000 rows and a redraw counter showed exactly the kind of "how many times does this actually update" opacity Manshin is complaining about. `@Observable` is a real improvement over `ObservableObject` — I'm not walking that back — but "real improvement" and "you can reason about it" are different claims, and only one of them is true.
+
+**I've personally had to drop out of SwiftUI to ship a basic feature.** BrewLog needed to export brew history to a shareable PDF. There is no SwiftUI-native way to *view* a PDF — none. I ended up wrapping PDFKit's `PDFView` in [a `UIViewRepresentable`](/blog/uikit-tricks-swiftui-cant-do-uiviewrepresentable-pdfkit), which is fine, it works, but it's also a seven-year-old framework telling me "just describe the UI declaratively" and then handing me a fifteen-year-old imperative view when I need something a text editor from 2004 could do.
+
+**I've backed away from a whole feature because the framework boundary felt too risky to touch.** I planned a real Home Screen widget for BrewLog's daily streak. I got as far as [a `TimelineProvider` and a working `AppIntent`](/blog/widgetkit-app-intents-log-brew-without-opening-app) before deciding *not* to wire up the actual Widget Extension target, because doing it right meant an App Group entitlement and hand-editing `project.pbxproj` — on infrastructure I wasn't willing to risk breaking for a blog post. That's not a SwiftUI bug exactly. But it's downstream of the same thing both essays point at: the "easy path" stops being easy exactly when you need something a real app needs.
+
+**The property-wrapper maze is a genuine tax, not just unfamiliarity.** I wrote [an entire decision map](/blog/swiftui-state-bindable-environment-decision-map) just to explain when to reach for `@State` versus `@Bindable` versus `@Environment` — three tools for roughly one job, distinguished by ownership rules that aren't visible at the call site. If a framework needs a flowchart to use correctly seven years in, that's not a skill issue on my end. That's the framework.
+
+---
+
+## Where I think the pile-on overshoots
+
+Here's where I'll push back, because the internet's favorite move after a thread like this is to declare the whole framework a mistake, and that's not what I've actually experienced.
+
+For everything that's genuinely rough, SwiftUI has also let me — one person, on the side, next to a day job — ship a real app with SwiftData persistence, StoreKit 2 subscriptions, and a working test suite, faster than I could have in UIKit. The framework being incomplete at the edges is a real, documented, citable problem. The framework being *useless* is a take that only survives if you ignore what it gets right in the 90% of the app that isn't fighting undo/redo or `GeometryReader`.
+
+The honest version of "seven years in" isn't "still a beta" and it isn't "totally mature" either. It's: the core loop — model your state, describe your view as a function of it, let diffing handle updates — works, and works well, for most screens most apps need. The remaining 10% — precise undo/redo, PDF rendering, some macOS-specific behaviors, certain layout edge cases — still needs either a workaround or a trip back to UIKit/AppKit. Gruber and Manshin are right that seven years is a long time to still be saying that about the *remaining* 10%. They're wrong if the takeaway is that the other 90% doesn't count.
+
+---
+
+## What I'd actually tell you to do with this
+
+If you're picking a framework for a new screen today, the calculus hasn't changed because of one viral thread: SwiftUI first, UIKit/AppKit as a named, deliberate escape hatch for the specific thing it can't do — not as a sign you did something wrong. Know the escape hatch exists *before* you need it, not at 11pm when your export feature has no way to preview a PDF.
+
+If you maintain something built entirely in SwiftUI, this is a good week to go looking for your own version of the Journal undo bug — the thing that's been "basically fine" for so long nobody's actually tested it. I found mine by literally counting redraws instead of assuming the framework was doing the sane thing. It usually is. Not always.
+
+Seven years in, SwiftUI is old enough that "it's still new, give it time" has stopped being a real excuse — and mature enough that "it's fundamentally broken" is no longer a real argument either. Both things are true at once. That's just what year seven of any relationship looks like.
+
+For a deeper walkthrough of when to lean on SwiftUI patterns versus when to reach for something else in a production app, the [SwiftUI in Practice](/learn/swiftui-in-practice) course module goes through the same tradeoffs with more room to breathe than a blog post allows.
