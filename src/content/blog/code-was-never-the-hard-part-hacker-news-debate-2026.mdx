@@ -1,0 +1,94 @@
+---
+title: "Hacker News Is Fighting Over Whether Code Was Ever the Hard Part. Two of My Own Bugs Settle It."
+description: "A viral Hacker News thread (658+ points) argues that 'code was never the hard part' is an insult to programmers. I went looking through my own BrewLog bugs from the last two weeks for evidence — and found one on each side."
+pubDate: 2026-08-09
+tags: ["AI Coding", "Vibe Coding", "Swift", "Software Engineering", "Hacker News"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1690802824192-a4b6f24d0481?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A large iceberg floating in the ocean, most of its mass hidden underwater"
+---
+
+{/*
+SEO target keywords: code was never the hard part, hacker news AI coding debate, is coding easy with AI, vibe coding requirements gathering, AI coding agents Swift, what's actually hard in programming 2026
+Internal linking plan:
+- swift-testing-tasklocal-trait-st-0026-static-var-di.mdx (static var DI race — code compiled, judgment was the hard part)
+- swift-networking-retry-token-refresh-request-deduplication.mdx (Day 23 async let race — same theme, earlier example)
+- live-activities-dynamic-island-decision-matrix-swiftui.mdx (recommendedBrewDuration decision matrix — the "requirements are hard" case study)
+- swiftui-seven-year-itch-hacker-news-2026.mdx (recent HN-thread post, same "the internet argues, I check my own code" format)
+- /learn/vibe-code-native (course lesson)
+*/}
+
+Two Tuesdays ago I asked Xcode's AI agent to write a function that decides how long a coffee should brew. Espresso and cold brew get `nil` — no timer, they're either instant or someone else's problem. Filter gets 240 seconds. Aeropress gets 150. It took the agent about four seconds to produce a clean switch statement.
+
+It took me twenty minutes of tasting bad coffee to know if those numbers were right.
+
+That gap — four seconds of typing versus twenty minutes of judgment — is basically the whole fight currently eating Hacker News alive.
+
+---
+
+## The thread
+
+A post titled ["Code was never the hard part" is an insult to all programmers](https://news.ycombinator.com/item?id=49222189) hit 658 points and 400+ comments this week. The author, [Senko Rašić](https://blog.senko.net/code-was-never-the-hard-part-is-an-insult-to-all-programmers), is responding to a line that's become a reflex in every AI-coding thread: *code was never the hard part, understanding the requirements was.*
+
+His counter is simple and a little annoyed: if code were easy, why do senior engineers get paid what they get paid? Why does *Clean Code* exist as a whole genre? Why is software still, after fifty years, "so damn buggy"? And by the same logic — if requirements are the *actually* hard part, why aren't product managers the highest-paid people in the building?
+
+The comments split about how you'd expect. One camp (`mempko`, a self-described 30-year veteran) draws a line between "coding," which you can teach almost anyone in six months, and "programming" — the actual problem-solving, which is a different and much harder skill. Another camp (`blub`) pushes back hard: "code is a form of low-level design," not transcription, and the best requirements in the world are worthless if the implementation is wrong. `hakunin` just rejects the premise outright, comparing "writing code isn't hard, writing *correct* code is" to saying building *a* car isn't hard, only building a *real* car is — which is to say, a distinction with no actual content.
+
+Nobody won. Nobody was going to.
+
+But I've spent the last few months pairing with an AI agent on a real Swift app almost daily, and I've got receipts from both sides of this argument sitting in my own git history. Worth checking before picking a side.
+
+---
+
+## Exhibit A: the part that actually was easy
+
+The brew-duration function from the top of this post is real, from [BrewLog's Live Activities work](/blog/live-activities-dynamic-island-decision-matrix-swiftui). Here's the shape of it:
+
+```swift
+func recommendedBrewDuration(for method: BrewMethod) -> TimeInterval? {
+    switch method {
+    case .espresso, .mokaPot, .coldBrew:
+        return nil
+    case .filter:
+        return 240
+    case .aeropress:
+        return 150
+    }
+}
+```
+
+The agent wrote this correctly on the first try, compiled clean, passed the test I wrote for it. Genuinely nothing hard here — not for the agent, not for me reviewing it. This is the strongest evidence for the "code was never the hard part" camp you'll find in my repo. Nobody needed six months of craft to produce this switch statement.
+
+What took actual time was deciding it needed to exist at all. BrewLog's quick-add flow had been silently lying since day one — tapping "Filter" logged a finished brew *instantly*, as if pour-over takes zero seconds. Nobody wrote a ticket for that. I found it by using my own app and noticing the timestamps didn't make sense for how coffee actually works. Then I had to decide, using nothing but domain knowledge no compiler can check, which methods deserve a timer and how long that timer should run. The agent had no opinion on any of that, because it has never made a cup of aeropress coffee.
+
+That's `mempko`'s distinction in one file: the coding was six-months-of-training-easy. Recognizing the gap and picking the right numbers was the part that actually needed me.
+
+---
+
+## Exhibit B: the part where the code itself was the trap
+
+But "requirements are hard, code is easy" doesn't survive contact with [Day 23's concurrency bug](/blog/swift-networking-retry-token-refresh-request-deduplication) either.
+
+I had a test written to prove two concurrent requests hit an actor correctly — `async let` spinning up two calls at once. It compiled. It passed. It was also lying, because nothing forced the two child tasks to actually overlap; if neither did real async work, the first could finish and clear shared state before the second was even scheduled. A green checkmark on a test that doesn't test the thing it claims to test is worse than no test, and no requirements document on Earth would have caught it — you need to actually understand Swift's cooperative scheduling to see the hole.
+
+Same story landed again just [last week](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di): Swift Testing runs suites in parallel by default now, in the same process, which turns the extremely common "mutate a static var to inject a test double" pattern into a race condition nobody notices until two suites happen to interleave badly. The code that broke wasn't complicated. It was *exactly* as simple as `blub` says code should be allowed to be. It was wrong anyway, in a way that had nothing to do with requirements and everything to do with genuinely understanding what "parallel" means at the language level.
+
+Neither of these bugs shows up if you buy the "typing was always the bottleneck" story. Neither shows up if you buy "only the business logic is hard" either. They're both proof that code review — real, load-bearing understanding of what the computer will actually do — is its own skill, separate from typing speed and separate from talking to customers.
+
+---
+
+## So who's right?
+
+Honestly? Checking my own two weeks of commits, I think the HN thread is arguing about the wrong axis.
+
+Before agents, writing code and thinking about code were smashed into the same block of time. You'd type for twenty minutes, and somewhere in there you were also designing, second-guessing, and catching your own mistakes, because typing is slow enough to think while you do it. It *felt* like "coding" was the hard part because coding was the only thing on the clock.
+
+Agents didn't make the thinking easier. They made the typing disappear. What's left, once the switch statement writes itself in four seconds, is just... the thinking, now fully exposed with nothing to hide behind. The brew-duration numbers. The actor-overlap assumption. The static-var pattern that was fine for six years until parallel execution turned it into a landmine. That was always the hard part — it just used to be invisible, folded into the minutes you spent physically producing code.
+
+`bob1029`'s comment on the thread gets closest: writing code was never hard, writing *correct* code was, and that's the value nobody's outsourced yet. I'd only add — correct isn't just "matches the requirements." Half my recent bugs were correct by that standard and wrong anyway. The requirements never mentioned Swift's task-scheduling semantics because the person writing the requirements had no idea BrewLog's tests were checking the wrong thing.
+
+If you're pairing with an agent daily and it feels like your job got easier, check what you actually spent your last debugging session on. I'd bet it wasn't the part the agent wrote.
+
+---
+
+If you're figuring out where AI agents genuinely help versus where they just move the hard part somewhere less visible, [our vibe-coding-to-native lesson](/learn/vibe-code-native) walks through exactly that handoff — what to hand off, what to keep, and how to tell the difference before it costs you a debugging session.
