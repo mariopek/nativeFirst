@@ -1,0 +1,159 @@
+---
+title: "Weak Self Isn't the Retain Cycle Fix You Think It Is in @Observable"
+description: "The old [weak self] advice was written for closures capturing classes. @Observable changes what actually gets captured, and in a few common SwiftUI patterns weak self silently does nothing at all. Here's where it still matters and where it's dead weight."
+pubDate: 2026-08-15
+tags: ["Swift", "SwiftUI", "Observable", "Memory Management", "Swift Concurrency", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1451195090173-2e0781d7c33e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A tangled knot of cables, impossible to trace one strand from end to end"
+---
+
+I spent an hour once hunting a "leak" that wasn't one. Instruments showed a view model staying alive after its view disappeared, I added `[weak self]` to every closure I could find, and the allocation count didn't move by a single object. Not one.
+
+Turned out the retain cycle wasn't in a closure at all. It was a `Timer` holding a strong reference through `Timer.scheduledTimer`, which no amount of `weak self` in my own code was ever going to touch. I'd been treating "add weak self" as a reflex instead of understanding what actually holds what.
+
+That reflex gets worse with `@Observable`. The macro changes enough about how properties are captured that some of the old advice stops applying — and some new gotchas show up that nobody warned you about.
+
+---
+
+## What weak self was actually for
+
+The rule from the `ObservableObject` era was simple: a class capturing `self` strongly in an escaping closure, where that closure is *also* stored by something `self` owns (directly or transitively), creates a cycle. Neither object can deallocate because each is waiting on the other.
+
+```swift
+class LegacyViewModel: ObservableObject {
+    @Published var items: [Item] = []
+    private var cancellable: AnyCancellable?
+
+    func load() {
+        cancellable = service.fetch()
+            .sink { [weak self] items in
+                self?.items = items
+            }
+    }
+}
+```
+
+`cancellable` is a property of `self`. The closure captures `self`. Without `weak`, `self` → `cancellable` → closure → `self` is a closed loop, and neither side ever hits zero references. This is the textbook case, and `weak self` is exactly the right fix.
+
+Nothing about that logic changed. What changed is how often it actually applies once you move to `@Observable`.
+
+---
+
+## Case one: where weak self does nothing
+
+Here's the pattern that burned me. A view model uses structured concurrency instead of Combine:
+
+```swift
+@Observable
+final class BrewTimerModel {
+    var remainingSeconds: Int = 0
+    private var task: Task<Void, Never>?
+
+    func start(duration: Int) {
+        remainingSeconds = duration
+        task = Task { [weak self] in
+            while let self, self.remainingSeconds > 0 {
+                try? await Task.sleep(for: .seconds(1))
+                self.remainingSeconds -= 1
+            }
+        }
+    }
+}
+```
+
+The `[weak self]` here is correct — `task` is a property of `self`, the task's closure captures `self`, that's the same shape as the Combine example. Fine.
+
+But here's the version that fooled me, on a different property in the same class:
+
+```swift
+    func logAnalyticsEvent() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.analytics.record(.brewStarted)
+        }
+    }
+```
+
+This `Task` is never stored anywhere. It's a fire-and-forget local variable that goes out of scope the moment `logAnalyticsEvent()` returns. There is no property holding a reference back to it, so there is no cycle to break — `weak self` here doesn't prevent a leak, because there was never going to be one. It's not wrong, exactly. It's just theater. The actual risk with unstored tasks isn't retention, it's that the task keeps running (and possibly touching a deallocated view's state) after nobody cares about the result anymore — a different bug with a different fix, usually `Task.isCancelled` checks or cancelling explicitly in `deinit`.
+
+**The rule that actually matters:** `weak self` prevents a cycle only when something owned by `self` is what's holding the closure. If the closure lives in a local variable, a loop body, or gets handed to a system API that doesn't retain it long-term, there's nothing to break.
+
+---
+
+## Case two: @Observable's macro-generated storage
+
+`@Observable` rewrites your stored properties into computed properties backed by an `ObservationRegistrar`. That's invisible in normal use, but it matters for one specific pattern: closures that capture a single property instead of `self`.
+
+```swift
+@Observable
+final class BrewStreak {
+    var count: Int = 0
+}
+
+// Somewhere else:
+let streak = BrewStreak()
+someLongLivedPublisher.sink { newValue in
+    streak.count = newValue   // captures `streak`, not a property
+}
+```
+
+This looks like it dodges the whole problem — no `self` in sight. But `streak` is still a strong reference into the closure, and if `someLongLivedPublisher` is itself something `streak` (or a container `streak` lives in) retains, you've built the same cycle with different names. The macro doesn't change the ownership graph; it just changes how the property *reads* under the hood. Renaming `self` to a local `let` doesn't launder a cycle — it just makes it harder to spot with a find-and-replace for "self".
+
+---
+
+## Case three: the one that's actually new
+
+This one is specific to `@Observable` and doesn't have a pre-Observation equivalent. SwiftUI's `View` structs are cheap and short-lived by design, but if a view closure captures an `@Observable` object and that closure is handed to something long-lived — a `NotificationCenter` observer token is the classic offender — you get a cycle that spans the view/model boundary entirely:
+
+```swift
+struct BrewDetailView: View {
+    @State private var model = BrewDetailModel()
+
+    var body: some View {
+        Text("\(model.brew.name)")
+            .onAppear {
+                NotificationCenter.default.addObserver(
+                    forName: .brewUpdated, object: nil, queue: .main
+                ) { _ in
+                    model.refresh()   // strong capture of model
+                }
+                // no token stored, no removeObserver — this observer
+                // and its closure now live as long as the app does
+            }
+    }
+}
+```
+
+`addObserver(forName:object:queue:using:)` returns an opaque token, and `NotificationCenter` holds the closure until you explicitly call `removeObserver` with that token (or until the whole center deallocates, which for `.default` is never). Nobody's `self` is in this closure — it's a `@State` local — so the classic mental model of "check for self captures" walks right past it. The fix isn't `[weak model]`. It's storing the token and removing it in `.onDisappear`, or using the newer `NotificationCenter.Notifications` async sequence and letting structured concurrency's own cancellation handle cleanup:
+
+```swift
+    var body: some View {
+        Text("\(model.brew.name)")
+            .task {
+                for await _ in NotificationCenter.default
+                    .notifications(named: .brewUpdated) {
+                    model.refresh()
+                }
+                // task cancels automatically when the view disappears,
+                // which tears down the async sequence with it
+            }
+    }
+```
+
+No token to manage, no observer to forget removing, and the lifetime is tied to the view instead of to a manually-paired add/remove call.
+
+---
+
+## The actual checklist
+
+Skip the reflex. When you're looking at a closure and wondering whether it needs `[weak self]` (or `[weak someObject]`), ask two questions instead:
+
+1. **Is this closure being stored somewhere that the captured object owns, directly or through a chain?** If the closure just runs and disappears — a local `Task`, a one-shot `withCheckedContinuation` body, most `.task` and `.onAppear` blocks — there's nothing to break.
+2. **If it is stored, who's actually holding the loop shut?** Sometimes it's `self`. Sometimes, as in the `NotificationCenter` case, it's a system object holding *your* closure with no `self` in sight, and the fix is removing the registration, not weakening a capture.
+
+Instruments' memory graph debugger settles this faster than reasoning about it in your head — if you're not sure, profile it before you start sprinkling `weak` everywhere. Every `weak self` you add that isn't load-bearing is a tiny tax: an extra optional unwrap, one more `guard let self else { return }` a reader has to parse to figure out whether it matters. Reflex weak-self isn't free. It's just cheap enough that most of us never notice we're paying it.
+
+---
+
+If you're migrating an older `ObservableObject` codebase and hitting Observable's autoclosure quirks along the way, I wrote up [the StateObject autoclosure gotcha](/blog/observableobject-to-observable-migration-stateobject-autoclosure-gotcha) separately — it's a related but distinct trap in the same migration. For the concurrency side of things, [the Swift 6.2 strict concurrency migration](/blog/swift-6-2-strict-concurrency-migration-invoize-before-after) covers what changes when the compiler starts enforcing isolation instead of trusting you to get it right, and [dependency injection without a framework](/blog/dependency-injection-swift-without-frameworks) is worth a look if closures-as-dependencies is a pattern you lean on — the same ownership questions apply there too. For a structured walkthrough of `@Observable` itself, the [SwiftUI Foundations course](/learn/swiftui-foundations) has a lesson dedicated to it.
