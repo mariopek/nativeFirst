@@ -1,0 +1,147 @@
+---
+title: "ST-0026 Got Accepted. The Whole Review Came Down to One Parameter Label."
+description: "Swift Testing's .taskLocal trait (ST-0026) was accepted with modifications on August 15, 2026 — the only change was adding a withValue: label. Here's the final API, why the label debate actually mattered, and the real BrewLog migration it unlocks."
+pubDate: 2026-08-16
+tags: ["Swift Testing", "Swift Evolution", "Swift Concurrency", "API Design", "TDD", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1783099779589-fd12bde5c2aa?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A label maker printing a strip of text, close up"
+---
+
+{/*
+SEO target keywords: ST-0026 accepted, Swift Testing taskLocal trait, withValue label Swift Evolution, Swift API naming guidelines, Swift Testing static var race condition fix, TaskLocalTrait Swift
+
+Internal linking plan:
+- /blog/swift-testing-tasklocal-trait-st-0026-static-var-di — the Aug 2 post covering ST-0026 while still in review, with the original LogBrewIntent race condition
+- /blog/widgetkit-app-intents-log-brew-without-opening-app — where LogBrewIntent.modelContainerProvider was originally built
+- /blog/swift-testing-framework-xctest-migration-guide — general Swift Testing background
+- /blog/swift-withdeadline-se-0526-network-timeout — same "proposal I covered mid-review, here's where it landed" format
+- /learn/swiftui-in-practice-15-swift-testing-view-models — tracked course lesson on Swift Testing basics
+*/}
+
+Two weeks ago I wrote about a Swift Evolution proposal working its way through review. On August 15, it shipped — **accepted with modifications**, per the Testing Workgroup. I went looking for what changed between the pitch and the final API, expecting maybe a renamed type or a dropped edge case.
+
+The entire review came down to one argument: does the second parameter need a label.
+
+That's it. That's the modification.
+
+---
+
+## What actually got decided
+
+[ST-0026](https://github.com/swiftlang/swift-evolution/blob/main/proposals/testing/0026-task-local-test-trait.md) adds a `.taskLocal` trait to Swift Testing — a one-line way to bind a task-local value for the duration of a test or suite, instead of hand-writing a `TestScoping` conformance every time. I covered the mechanics in the [original post](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di): it's the proper fix for a pattern that's all over real Swift codebases, where a `static var` gets mutated for dependency injection and quietly turns into a race condition the moment Swift Testing starts running your suite in parallel.
+
+The pitch's proposed spelling was positional:
+
+```swift
+@Suite(.taskLocal(FeatureFlags.$isEnabled, true))
+struct MySuite { /* ... */ }
+```
+
+The accepted spelling adds one word:
+
+```swift
+@Suite(.taskLocal(FeatureFlags.$isEnabled, withValue: true))
+struct MySuite { /* ... */ }
+```
+
+Stuart Montgomery, the review manager, wrote it up plainly: nearly all of the review discussion centered on whether that second parameter needed a label, and if so, what it should say. The proposal authors — Brandon Williams and Stephen Celis of Point-Free — had cited SwiftUI's unlabeled modifier arguments as precedent (`.padding(8)`, `.opacity(0.5)`, no label in sight). The workgroup didn't buy it. SwiftUI is a declarative DSL that intentionally bends Swift's API Naming Guidelines for its own readability goals — it's not a template for what a testing trait should look like. And `withValue` had a second thing going for it: it's the exact name of the method you already call to bind a task local by hand (`$myValue.withValue(x) { ... }`), so the trait's spelling now echoes the primitive underneath it instead of inventing a new vocabulary.
+
+---
+
+## Why that's not bikeshedding
+
+It's tempting to read "the whole review was about a label" as proof that Swift Evolution spends its time on trivia. I don't think that's what happened here.
+
+Picture the unlabeled version in a real test file, six months from now, written by someone who didn't read the proposal:
+
+```swift
+@Test(.taskLocal($currentUser, mockAdmin))
+func adminOnlyFeatureIsVisible() { /* ... */ }
+```
+
+Which argument is the task local and which is the value? You can probably guess from the `$` sigil — if you remember that `$` means task local, and if the reader's eye actually catches it. Now imagine the task local isn't referenced by its property wrapper projection at all, because someone stored it in a local constant first, or the two arguments happen to be the same type. The unlabeled version leans entirely on argument order and a punctuation mark. The labeled version doesn't:
+
+```swift
+@Test(.taskLocal($currentUser, withValue: mockAdmin))
+func adminOnlyFeatureIsVisible() { /* ... */ }
+```
+
+`withValue:` is doing real work at the call site, not decorating it. That's the whole test for whether a label earns its keep — and it's the same test Swift's own API Naming Guidelines have been arguing for since before Swift Testing existed. A one-word review outcome isn't evidence of nitpicking; it's evidence the rest of the proposal was already right.
+
+---
+
+## The catch nobody argues about
+
+The label wasn't the only detail worth knowing — it's just the one that got debated. The part everyone agreed on quietly is the part that'll actually trip you up:
+
+> The task local being bound *must* be defined outside the test target.
+
+You can't do this:
+
+```swift
+@TaskLocal var isEnabled = false
+
+@Test(.taskLocal($isEnabled, withValue: true))  // 🛑 Cannot find '$isEnabled' in scope
+func test() { /* ... */ }
+```
+
+The `@Test` macro can't see the `$isEnabled` symbol the `@TaskLocal` macro generates, because macro-to-macro symbol visibility is [a known gap](https://forums.swift.org/t/macro-symbol-visibility-to-other-macros/87629) in the language today, not a Swift Testing bug. The task local has to live in a target the test target *imports* — your app module, a shared framework, anywhere but the test file itself.
+
+That's not a footnote. It's the difference between "drop this trait into your existing test" and "restructure where your task local lives first."
+
+---
+
+## Applying it to the bug I actually found
+
+Back in [the original post](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di), BrewLog's `LogBrewIntent` — the AppIntent behind the widget's quick-log button — injects its `ModelContainer` through a plain static var, because AppIntents' own `@Dependency` system doesn't survive a direct `perform()` call in a test:
+
+```swift
+struct LogBrewIntent: AppIntent {
+    static var modelContainerProvider: () -> ModelContainer = {
+        fatalError("LogBrewIntent.modelContainerProvider must be set before the intent runs")
+    }
+    // ...
+}
+```
+
+That static lives in the main app target already — [`LogBrewIntent.swift`](/blog/widgetkit-app-intents-log-brew-without-opening-app), not the test target — so the "must be defined outside the test target" rule is already satisfied. The migration is smaller than it looked two weeks ago. Swap the declaration:
+
+```swift
+struct LogBrewIntent: AppIntent {
+    @TaskLocal static var modelContainerProvider: () -> ModelContainer = {
+        fatalError("LogBrewIntent.modelContainerProvider must be set before the intent runs")
+    }
+    // ...
+}
+```
+
+And the test that used to mutate a shared static now binds a scoped value instead:
+
+```swift
+@Suite(.taskLocal(LogBrewIntent.$modelContainerProvider, withValue: { try! makeContainer() }))
+struct LogBrewIntentTests {
+    @Test("perform() reads the container from the task-local provider")
+    @MainActor
+    func performUsesTheConfiguredProvider() async throws {
+        _ = try await LogBrewIntent().perform()
+        // ...
+    }
+}
+```
+
+No `.serialized`, no shared cell to race over, no reset step to remember. Two parallel tests binding the same task local at the same time each get their own scoped value — the same guarantee `async let` and structured concurrency give you everywhere else, finally extended to dependency injection.
+
+I haven't shipped this change to BrewLog's actual test target yet, and neither should you ship it to yours today. The implementation PR ([swiftlang/swift-testing#1764](https://github.com/swiftlang/swift-testing/pull/1764)) is still open as of this writing — accepted by the workgroup, not yet merged, not yet in a released toolchain. "Accepted" and "shipped" are different words for a reason, and conflating them is how you end up explaining to a teammate why their Xcode won't compile a trait that technically exists.
+
+---
+
+## What to do while you wait
+
+Nothing changes about the advice from two weeks ago. If you've got a `static var` getting mutated inside a `@Test` function today, `.serialized` is still the honest stopgap, and converting the seam to `@TaskLocal` by hand — the underlying mechanism has shipped since Swift Testing 6.1 — is still the honest fix. `.taskLocal` just makes the ergonomics good enough that you'll actually reach for the fix instead of the stopgap once it lands.
+
+What did change is smaller and, I'd argue, more useful to notice: a Swift Evolution review that produces a one-word diff isn't a review that wasted three weeks. It's a review where the design was right on the first pass, and the process spent its energy on the one place a reader's eye could genuinely go wrong. That's a cheap review by the standards of language design — and exactly the kind you want the more consequential proposals to get.
+
+---
+
+*Related reading: the [original race condition and proposal writeup](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di), the [XCTest → Swift Testing migration guide](/blog/swift-testing-framework-xctest-migration-guide) if you're still moving over, and [SE-0526's own path through review](/blog/swift-withdeadline-se-0526-network-timeout) for another proposal that shipped close to how it was pitched. For `@Test`/`#expect` basics and the `makeSUT` pattern this post assumes, [lesson 15 of SwiftUI In Practice](/learn/swiftui-in-practice-15-swift-testing-view-models) covers the ground.*
