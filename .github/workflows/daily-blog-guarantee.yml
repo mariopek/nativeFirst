@@ -1,0 +1,100 @@
+name: Daily blog guarantee
+
+# The floor under the daily blog post.
+#
+# The four scheduled tasks on the Mac (07:51 / 12:04 / 17:00 / 21:00 local) are
+# the preferred path — they research and write something fresh. But they only
+# run while the Mac is awake with the Claude app open, which is why days still
+# went missing. This job runs in GitHub's cloud and does not care whether the
+# Mac is asleep, closed, or on a plane.
+#
+# It does NOT write anything. It promotes a pre-written post from content-queue/
+# and pushes it; Cloudflare Pages then deploys from main as usual.
+
+on:
+  schedule:
+    # 20:00 UTC = 22:00 CEST — after all four local attempts have had their turn,
+    # so a freshly-researched post always wins over a queued one.
+    # (GitHub's scheduler can run late under load; that's fine for a backstop.)
+    - cron: "0 20 * * *"
+  workflow_dispatch:  # lets you trigger it by hand from the Actions tab
+
+concurrency:
+  group: daily-blog-guarantee
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  ensure-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Identify as the automation
+        run: |
+          git config user.name  "nativefirst-bot"
+          git config user.email "pekmario@gmail.com"
+
+      - name: Ensure today has a post
+        id: ensure
+        run: bash scripts/blog-ensure-today.sh --build --commit
+
+      - name: Push
+        if: success()
+        run: |
+          if git diff --quiet origin/main HEAD; then
+            echo "nothing new to push"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected — rebasing and retrying"
+            git pull --rebase --autostash origin main || true
+          done
+          echo "::error::could not push after 3 attempts"
+          exit 1
+
+      - name: Verify it is live
+        if: success()
+        run: |
+          SLUG=$(git log -1 --name-only --pretty=format: -- src/content/blog/ \
+                 | grep -m1 'mdx$' | xargs -r basename | sed 's/\.mdx$//')
+          if [ -z "$SLUG" ]; then
+            echo "no new post in the last commit — nothing to verify"
+            exit 0
+          fi
+          URL="https://nativefirstapp.com/blog/$SLUG/"
+          echo "waiting for Cloudflare Pages to deploy $URL"
+          for i in $(seq 1 12); do
+            sleep 30
+            CODE=$(curl -sL -o /dev/null --max-time 20 -w '%{http_code}' "$URL" || echo 000)
+            echo "  check $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "LIVE: $URL" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          # Not fatal: the commit is on main, so a later Cloudflare build still
+          # picks it up. Flag it rather than failing the whole guarantee.
+          echo "::warning::$URL was not 200 after ~6 minutes — check Cloudflare Pages"
+          echo "PUSHED but not yet live: $URL" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,180 @@
+---
+title: "Your Background Task Isn't Broken. iOS Just Decided It Wasn't Worth Running."
+description: "BGTaskScheduler doesn't promise your task will run — it's a request, scored against battery, usage patterns, and network state. Here's how the budget actually works, how to test it without waiting three days, and how to design a sync that survives never being called."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Background Tasks", "BGTaskScheduler", "iOS Development", "Swift", "Debugging", "Performance"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1551825687-f9de1603ed8b?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A dimly lit warehouse aisle at night, empty and waiting"
+---
+
+{/*
+  SEO target keywords:
+  - BGTaskScheduler not running
+  - BGAppRefreshTask iOS
+  - BGProcessingTask
+  - background refresh debugging simulator
+  - _simulateLaunchForTaskWithIdentifier
+  - iOS background execution budget
+  - background task expiration handler
+
+  Internal linking strategy:
+  - /blog/swiftdata-two-years-later-migration-test — the persistence layer a background sync writes into
+  - /blog/xcode-build-time-optimization-solo-ios-developer — same "the tool can tell you, if you ask" theme
+  - /blog/swift-testing-framework-xctest-migration-guide — testing things that are awkward to trigger
+  - /blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener — the other "Apple's API has opinions" walkthrough
+  - /learn/swiftui-in-practice — course track
+
+  Evergreen: no dated news hook. Safe to publish any time.
+*/}
+
+I spent two days convinced `BGTaskScheduler` was broken.
+
+The registration was right. The identifier matched the plist. The handler was there. I'd background the app, wait, foreground it — nothing. No log, no breakpoint, no evidence the system had ever heard of me. I rewrote it three times. I filed a mental radar. I complained to a friend, who asked the question that fixed it: "Is your phone plugged in?"
+
+It wasn't. And it was at 30%. And I'd been launching from Xcode, which by itself makes the system deprioritize you.
+
+Here's the thing nobody puts in bold in the documentation: **`BGTaskScheduler.submit()` is a request, not a schedule.** You are not setting a timer. You are adding your name to a list that iOS sorts by how much it feels like doing you a favor.
+
+---
+
+## What actually decides whether you run
+
+The system weighs, roughly:
+
+- **Battery level and charging state.** Plugged in is dramatically better. Low Power Mode is close to a hard no for refresh tasks.
+- **How often the user opens your app.** An app opened daily at 8am gets scheduled around 8am. An app opened twice a month gets scheduled approximately never. This is the biggest factor and the one you cannot code around.
+- **Network and thermal conditions.** Bad cell signal or a warm device pushes you down the list.
+- **How well you behaved last time.** Overrun your window or get killed by the watchdog and you're less trusted next time.
+
+Two task types, and picking the wrong one is a common cause of "it never runs":
+
+```swift
+// Short, frequent, best-effort. ~30 seconds. Use for a quick content refresh.
+let refresh = BGAppRefreshTaskRequest(identifier: "com.nativefirst.brewlog.refresh")
+refresh.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+
+// Longer, heavier, much pickier about conditions. Minutes, typically overnight
+// while charging. Use for a real sync, a migration, a cleanup.
+let process = BGProcessingTaskRequest(identifier: "com.nativefirst.brewlog.sync")
+process.requiresNetworkConnectivity = true
+process.requiresExternalPower = true      // massively improves your odds
+```
+
+Note `earliestBeginDate` — *earliest*. It's a floor, never a target. Setting it to 15 minutes from now does not mean 15 minutes from now. It means "not before."
+
+---
+
+## The setup, in the order things actually break
+
+**1. Info.plist.** Two separate things, and people usually forget the second:
+
+```xml
+<key>UIBackgroundModes</key>
+<array>
+    <string>fetch</string>
+    <string>processing</string>
+</array>
+<key>BGTaskSchedulerPermittedIdentifiers</key>
+<array>
+    <string>com.nativefirst.brewlog.refresh</string>
+    <string>com.nativefirst.brewlog.sync</string>
+</array>
+```
+
+If an identifier isn't in `BGTaskSchedulerPermittedIdentifiers`, registration throws at launch. Loudly, at least — this one you'll notice.
+
+**2. Register before the app finishes launching.** Not in `.task`, not in `onAppear`. It has to happen during launch or the system won't route the task to you.
+
+```swift
+@main
+struct BrewLogApp: App {
+    init() {
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: "com.nativefirst.brewlog.refresh",
+            using: nil
+        ) { task in
+            handleRefresh(task as! BGAppRefreshTask)
+        }
+    }
+    var body: some Scene { WindowGroup { ContentView() } }
+}
+```
+
+**3. Always reschedule, first thing.** The single most common real bug: your task runs once, works perfectly, and never runs again — because a submitted request is consumed when it fires. Reschedule at the *top* of the handler, before any work that might throw.
+
+```swift
+func handleRefresh(_ task: BGAppRefreshTask) {
+    scheduleRefresh()   // FIRST. Before anything that can fail.
+
+    let work = Task {
+        do {
+            try await SyncService.shared.refresh()
+            task.setTaskCompleted(success: true)
+        } catch {
+            task.setTaskCompleted(success: false)
+        }
+    }
+
+    task.expirationHandler = {
+        work.cancel()
+        task.setTaskCompleted(success: false)
+    }
+}
+```
+
+**4. Honor the expiration handler.** You get seconds of warning that your window is closing. Cancel your work and call `setTaskCompleted` yourself. If the system has to kill you instead, that counts against you next time. This is also why your async work needs to actually respond to cancellation — a `Task` that ignores `Task.isCancelled` and keeps hammering the network is exactly the behavior that gets you demoted.
+
+---
+
+## Testing it without waiting three days
+
+This is the part that turns two days of confusion into ten minutes, and almost nobody knows it exists.
+
+Run the app from Xcode, background it, then pause the debugger and run:
+
+```
+e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateLaunchForTaskWithIdentifier:@"com.nativefirst.brewlog.refresh"]
+```
+
+Your handler fires immediately. Same for forcing expiration, which is how you find out whether your cancellation actually works:
+
+```
+e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateExpirationForTaskWithIdentifier:@"com.nativefirst.brewlog.refresh"]
+```
+
+Two caveats. These are private, so they're debug-only and could change between Xcode versions. And they bypass the entire scheduling decision — they prove your *handler* is correct, not that iOS will ever choose to call it. Those are different bugs and it's worth being clear with yourself about which one you're chasing.
+
+For the second kind, `BGTaskScheduler.shared.getPendingTaskRequests` tells you what the system thinks it owes you:
+
+```swift
+let pending = await BGTaskScheduler.shared.pendingTaskRequests()
+print(pending.map(\.identifier))   // empty means you never successfully submitted
+```
+
+An empty array when you expected an entry means your `submit()` threw and you swallowed it. It throws more often than people expect — including if the user has Background App Refresh switched off entirely, which is a perfectly normal thing for a user to have done.
+
+---
+
+## Design for never being called
+
+The real lesson isn't a trick. It's that a background task is an optimization, and you have to build as if it won't happen.
+
+If your app is *wrong* when the background task doesn't run — stale data shown as fresh, a queue that grows forever, a sync that only works overnight — you don't have a background task problem, you have an architecture problem. Users with Low Power Mode on and an app they open weekly will simply never get it.
+
+What works:
+
+- **Refresh on foreground too.** The background task is a head start, not the mechanism. If the data is stale when the user opens the app, fetch then and show a loading state like an honest person.
+- **Make the work idempotent and resumable.** It might run at 3am on Tuesday, or three times in an hour, or get killed halfway through writing to [your SwiftData store](/blog/swiftdata-two-years-later-migration-test). All three have to be fine.
+- **Never show a timestamp you can't back up.** "Last updated 2 hours ago" is a lie if the refresh silently failed. Track the last *successful* sync, not the last attempt.
+- **Keep it short.** A 30-second budget means the useful version does one focused thing. Fetching everything and reconciling it is a `BGProcessingTask`, and even then only while charging.
+
+---
+
+Two days of my life went into learning that the API was working correctly and my phone just didn't care. That's not a bug in `BGTaskScheduler` — it's the whole design, and once you see it that way the API stops being mysterious and starts being reasonable. iOS is protecting a battery you don't own.
+
+Build for the version where it never runs. Then the times it does are a bonus instead of a dependency.
+
+---
+
+*For more of the same "Apple's API has opinions and won't tell you until you violate them" genre, [the StoreKit 2 paywall walkthrough](/blog/storekit-2-paywall-from-scratch-subscriptions-transaction-listener) covers the transaction listener you also can't skip. [Swift Testing](/blog/swift-testing-framework-xctest-migration-guide) is the right tool for the resumability behavior above, since you can test the sync logic without any of this scheduling. And the [SwiftUI in Practice](/learn/swiftui-in-practice) track covers the foreground-refresh patterns that make a missed background task a non-event.*

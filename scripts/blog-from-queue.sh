@@ -37,6 +37,11 @@ mv "$SRC" "$DEST" || exit 1
 sed -i '' "s/^pubDate: .*/pubDate: $(date +%F)/" "$DEST"
 echo "stamped pubDate: $(date +%F)"
 
+# Stage the removal from the queue right away. Otherwise git keeps tracking a
+# phantom copy in content-queue/ and the GitHub Actions guarantee — which only
+# sees committed files — miscounts how many posts are actually queued.
+git add -A content-queue >/dev/null 2>&1
+
 bash scripts/blog-publish.sh "$SLUG" "Blog: $(grep -m1 '^title:' "$DEST" | sed 's/^title: *//' | tr -d '"')"
 RC=$?
 

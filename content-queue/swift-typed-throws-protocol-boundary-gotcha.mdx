@@ -1,0 +1,127 @@
+---
+title: "Typed Throws in Swift 6: A Real Migration, and the Wall It Hits at a Protocol"
+description: "Swift 6's typed throws (throws(SomeError)) let you catch errors exhaustively without a default case. Applied to BrewLog's real NetworkClient, here's what actually improves — and the protocol boundary where typed throws quietly stops helping."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift 6", "Error Handling", "Swift Concurrency", "Networking", "iOS Development", "API Design"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1501967539894-fc5b4464c400?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A brick wall with a visibly patched section of newer, different-colored bricks"
+---
+
+{/*
+SEO target keywords: Swift typed throws, throws(SomeError) Swift 6, SE-0413 typed throws, Swift typed throws protocol, exhaustive catch Swift, typed throws vs Result Swift
+
+Internal linking plan:
+- /blog/custom-networking-layer-swift-urlsession-async-await — the original URLSessionNetworkClient / APIError this post modifies
+- /blog/swift-networking-retry-token-refresh-request-deduplication — ResilientNetworkClient, the decorator wrapping this same client
+- /blog/dependency-injection-swift-without-frameworks — protocol-seam DI background, relevant to the protocol-boundary section
+- /blog/swift-6-2-strict-concurrency-migration-invoize-before-after — another "real Swift 6 migration, here's what actually broke" post
+- /learn/error-handling-loading-states — tracked course lesson on error handling in SwiftUI
+- /learn/swiftui-in-practice-05-protocol-network-layer — tracked course lesson on the protocol network layer this post's APIError lives in
+*/}
+
+I went looking for every `catch` block in BrewLog's networking code last week, for an unrelated reason, and found the same shape four times in a row:
+
+```swift
+} catch let error as APIError {
+    // handle it
+} catch {
+    // this branch is dead code, and the compiler has no way to know that
+}
+```
+
+Every throw site in `URLSessionNetworkClient.send` throws `APIError`. Every single one. The function signature just says `throws`, so every caller is stuck writing a catch-all for an error type that can never actually arrive. Swift 6 has a real fix for this, and it's been sitting there since SE-0413 since Swift 5.10 shipped it experimentally, then Swift 6 made it fully usable: **typed throws**.
+
+---
+
+## What `throws(APIError)` actually buys you
+
+The change at the function signature is one word:
+
+```swift
+protocol NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws(APIError) -> T
+}
+```
+
+That's it — `throws(APIError)` instead of a bare `throws`. [BrewLog's real `APIError`](/blog/custom-networking-layer-swift-urlsession-async-await) is already a closed `enum`, which is exactly the shape typed throws wants:
+
+```swift
+enum APIError: Error, Equatable {
+    case invalidURL
+    case transport(String)
+    case badStatus(Int)
+    case decoding(String)
+    case timedOut
+}
+```
+
+Every `throw` inside `URLSessionNetworkClient.send` already throws one of these five cases — the implementation doesn't change at all. What changes is the call site. This now compiles without a catch-all, and the compiler will tell you if you miss a case:
+
+```swift
+do {
+    let brews = try await client.send(.recentBrews, as: [Brew].self)
+} catch .badStatus(let code) {
+    logger.warning("server returned \(code)")
+} catch .timedOut {
+    showRetryBanner()
+} catch {
+    // error here is APIError, not any Error — exhaustive, not a catch-all
+}
+```
+
+That last `catch` isn't a safety net anymore. It's an actual branch the compiler is forcing you to handle, because `error` is statically typed as `APIError`, not the boxed `any Error` a plain `throws` gives you. Miss a case Swift thinks matters and you'll know at compile time, not from a crash report three weeks later when `.decoding` shows up in production and lands in a generic "something went wrong" toast.
+
+---
+
+## The part that's easy to miss: it's zero-cost, not just tidier
+
+This isn't only about exhaustiveness. `throws` in Swift has always boxed its error into `any Error` — an existential, allocated on the heap in the general case. `throws(APIError)` skips that entirely. The error is a concrete `enum` value passed like any other typed return, no existential box, no dynamic dispatch to figure out what's actually inside it. For a hot path — and a networking layer that fires on every pull-to-refresh qualifies — that's not a rounding error, it's the same category of win Swift's `some`/`any` distinction gives you for return types, just applied to the error channel instead.
+
+---
+
+## Where it stops helping: the protocol itself
+
+Here's the part that isn't in the pitch's highlight reel. `NetworkClient` is a protocol specifically *because* BrewLog swaps implementations — the real `URLSessionNetworkClient` in the app, a fake one in tests. Typed throws makes a promise at the protocol level that every conformance has to keep:
+
+```swift
+protocol NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws(APIError) -> T
+}
+```
+
+Every single conforming type must throw *exactly* `APIError` now — not a subtype, not a different enum, not `URLError` passed straight through. That's fine for `URLSessionNetworkClient`, which already wraps everything into `APIError`. It's a real wall for a test double that wants to simulate a raw `URLError` or a decoding crash from a completely different layer:
+
+```swift
+struct FailingNetworkClient: NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws(APIError) -> T {
+        throw APIError.transport("offline")   // ✅ compiles
+        // throw URLError(.notConnectedToInternet)  // 🛑 won't compile — wrong error type
+    }
+}
+```
+
+The test double is forced to translate its failure into `APIError` before it can throw it — which, to be fair, is usually the right call: a test double simulating what your real client's *contract* looks like, not leaking a lower-level error type your real implementation would never actually surface. But it's a constraint you're opting into, and it bites hardest exactly where DI and fakes live, because that's where you're most tempted to reach for whatever error type is lying around.
+
+You can get flexibility back with a generic error parameter instead of a concrete one:
+
+```swift
+protocol NetworkClient {
+    associatedtype Failure: Error
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws(Failure) -> T
+}
+```
+
+That lets each conformance pick its own error type — but now `Failure` shows up as an associated type, which means `NetworkClient` can no longer be used as `any NetworkClient` without `some`/generic constraints threading it through every call site that touches it. [ResilientNetworkClient](/blog/swift-networking-retry-token-refresh-request-deduplication), the decorator that wraps retry and dedup logic around this same protocol, would need to either fix `Failure == APIError` explicitly or become generic over it too. Either way, the "just add a type in parens" migration from the previous section turns into a real API-shape decision the moment more than one implementation exists.
+
+---
+
+## Where I'd actually reach for it
+
+Not at every `throws` in the codebase — that's a bigger diff than the win justifies, and most of BrewLog's `throws` sites (SwiftData calls, `Codable` conformances calling into `JSONDecoder`) throw a genuine grab-bag of system error types that don't collapse into one clean enum anyway. Typed throws earns its keep in a specific shape: a leaf function, one concrete implementation (or a protocol with exactly the implementations you control and no third-party conformances), and an existing closed error enum that's already doing the real classification work. `URLSessionNetworkClient.send` is precisely that shape. A protocol meant to grow new fakes and new backends next quarter isn't — not because typed throws is wrong there, but because the constraint it adds is a real design decision, not a free upgrade.
+
+Grep your own `catch { }` blocks for ones sitting under a `catch let error as SomeEnum` that's already doing all the real work. That empty catch-all is usually typed throws' actual audience — a case Swift can already prove is unreachable, once you tell it what type to expect instead of asking it to guess.
+
+---
+
+*Related reading: [the original NetworkClient and APIError this post migrates](/blog/custom-networking-layer-swift-urlsession-async-await), [ResilientNetworkClient's retry and dedup decorators](/blog/swift-networking-retry-token-refresh-request-deduplication) built on top of the same protocol, and [dependency injection in Swift without a framework](/blog/dependency-injection-swift-without-frameworks) for the protocol-seam thinking this post's Failure-type tradeoff assumes. For a slower walkthrough of the protocol network layer itself, [lesson 5 of SwiftUI In Practice](/learn/swiftui-in-practice-05-protocol-network-layer) and [the error-handling and loading-states lesson](/learn/error-handling-loading-states) cover the ground this post builds on.*

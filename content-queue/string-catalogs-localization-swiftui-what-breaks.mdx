@@ -1,0 +1,149 @@
+---
+title: "String Catalogs Made Localization Easy. Then I Found the Four Things They Don't Catch."
+description: "Xcode's String Catalogs replaced .strings files and genuinely fixed the worst parts of iOS localization. But automatic string extraction has blind spots — interpolation, plurals, SwiftUI initializers, and the layout that breaks in German. Here's what still needs a human."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Localization", "SwiftUI", "Xcode", "iOS Development", "String Catalogs", "Accessibility"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1569614143555-c16fa782357d?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Overhead airport direction signs printed in several languages at once"
+---
+
+{/*
+  SEO target keywords:
+  - Xcode String Catalogs
+  - SwiftUI localization
+  - .xcstrings migration
+  - LocalizedStringKey vs String
+  - Swift string interpolation localization
+  - plural rules stringsdict
+  - German layout truncation iOS
+
+  Internal linking strategy:
+  - /blog/observable-vs-observableobject-1000-row-redraw-benchmark — the other "measure it, don't assume" post
+  - /blog/spm-modular-architecture-swift-when-to-split — module boundaries, which localization crosses awkwardly
+  - /blog/swift-testing-framework-xctest-migration-guide — testing the things that quietly break
+  - /blog/xcode-build-time-optimization-solo-ios-developer — the other Xcode-tooling deep dive
+  - /learn/swiftui-in-practice — course track
+
+  Evergreen: no dated news hook. Safe to publish any time.
+*/}
+
+The first time I shipped a localized app, I found out about the bug from a screenshot. A user in Munich sent a photo of my settings screen where a button said "Benachrichtigungseinstellu…" and then just gave up. The English was "Notifications." The German was thirty-one characters. My button was not thirty-one characters wide.
+
+Nobody tells you that localization is 20% translation and 80% discovering that your layout had opinions.
+
+String Catalogs — Xcode's `.xcstrings` format, which replaced the old `.strings` and `.stringsdict` pair — fixed a genuinely miserable workflow. One file, a real editor, automatic extraction, per-string translation state, and no more merge conflicts in a file where every line looks identical. It's one of the better developer-experience things Apple has shipped.
+
+It also quietly convinced a lot of people that localization is now automatic. It isn't. Here are the four places it still needs you.
+
+---
+
+## What String Catalogs actually fixed
+
+Worth being fair before I complain. The old world was: a `.strings` file per language, a separate `.stringsdict` XML monstrosity for plurals, `genstrings` run by hand, and no way to tell which strings were translated, stale, or orphaned. Every merge was a knife fight.
+
+Now you add a String Catalog, and Xcode extracts every localizable string at build time. Each one gets a state — new, stale, needs review, translated. Delete a string from code and the catalog flags it. Add one and it appears. Plurals live in the same file with a real UI instead of hand-written XML.
+
+If you're still on `.strings`, migrating is a right-click: **Migrate to String Catalog**. Do it. The rest of this post assumes you have.
+
+---
+
+## Blind spot 1: interpolation eats your string
+
+This is the one that gets everybody, because the code looks completely reasonable.
+
+```swift
+// Extracted correctly — the catalog sees "Brews this week"
+Text("Brews this week")
+
+// NOT extracted the way you want
+Text("Brews this week: \(count)")
+```
+
+The second one *does* get extracted, but as the literal key `Brews this week: %lld`. That's fine. The problem is when you build the string yourself first:
+
+```swift
+let label = "Brews this week: \(count)"
+Text(label)          // extracts NOTHING
+```
+
+`Text` takes a `LocalizedStringKey` when you hand it a literal. Hand it a `String` variable and you get the plain-`String` overload, which does no lookup at all. Your text silently ships in English forever, and no tool warns you, because as far as the compiler is concerned you asked for exactly what you got.
+
+The fix is to keep the literal at the call site, or be explicit:
+
+```swift
+Text("Brews this week: \(count)")                    // good
+Text(verbatim: someUserSuppliedName)                  // explicitly NOT localized
+String(localized: "Brews this week: \(count)")        // when you need a String
+```
+
+**Practical rule:** any time you find yourself assigning a user-facing string to a `let` before displaying it, stop and use `String(localized:)`. That single habit catches most of these.
+
+---
+
+## Blind spot 2: plurals are not a formatting problem
+
+English lulls you into thinking pluralization is "add an s, unless the count is 1." So people write:
+
+```swift
+Text("\(count) brew\(count == 1 ? "" : "s")")
+```
+
+This is wrong in a way that's invisible until it isn't. Russian has three plural forms depending on whether the count ends in 1, 2–4, or something else. Arabic has six. Japanese has one — your `s` logic produces gibberish there too, just quietly.
+
+String Catalogs handle this properly: right-click the string, **Vary by Plural**, and you get the actual CLDR categories for each language. Xcode shows you *one*, *other* for English and the full set for Russian, because it knows the rules.
+
+But it only offers that if the count is part of the localized string in the first place. If you did the ternary above, there's nothing to vary — you've already made the decision in Swift, in English, permanently.
+
+```swift
+// Let the catalog own it
+Text("^[\(count) brew](inflect: true)")   // automatic grammar agreement
+// or just extract "%lld brews" and use Vary by Plural
+```
+
+That `^[...](inflect: true)` syntax is Apple's automatic grammar agreement. It's genuinely clever and works for a decent set of languages. It is not a substitute for checking the ones it doesn't cover.
+
+---
+
+## Blind spot 3: strings that live outside a view
+
+Extraction finds string literals in code Xcode compiles for your target. Which means it misses, or half-misses:
+
+- **Strings in a Swift package.** Each package needs its own String Catalog and its own `defaultLocalization` in `Package.swift`. Your app's catalog will not pick them up. If you've [split your app into SPM modules](/blog/spm-modular-architecture-swift-when-to-split), you now have a localization file per module, and you get to decide whether that's clean architecture or a filing problem. (It's both.)
+- **`Info.plist` values.** Permission strings — `NSCameraUsageDescription` and friends — live in `InfoPlist.xcstrings`, a *separate* catalog. Forgetting this means your camera prompt is in English while the rest of the app isn't, which looks worse than not localizing at all.
+- **Anything built from a server response.** Obviously. But it's worth saying out loud, because "the backend sends the error message" is a decision that quietly makes half your error states unlocalizable.
+
+---
+
+## Blind spot 4: the layout, which is the actual hard part
+
+Back to my Munich button.
+
+German is the standard cautionary tale — roughly 30% longer than English on average, and much worse for compound nouns. But the real problem isn't any one language, it's that you designed against one specific string length and never checked the others.
+
+The good news is Xcode will show you without any translation work at all. In your scheme's Run options, set **App Language** to **Double-Length Pseudolanguage** and run. Every string doubles. Anything that truncates, wraps badly, or shoves a button off screen shows up immediately.
+
+There's also **Right-to-Left Pseudolanguage**, which mirrors your entire layout. This is where you find out that the leading/trailing you thought you used is actually a hardcoded `.left`, and that your custom back chevron now points the wrong way.
+
+Both take about four minutes to run and will find more real bugs than an afternoon of reading your own code. Same lesson as [benchmarking `@Observable` instead of guessing](/blog/observable-vs-observableobject-1000-row-redraw-benchmark) — the tool that actually measures beats the reasoning you did in your head.
+
+A few habits that prevent most of it:
+
+- Never set a fixed `.frame(width:)` on anything containing text.
+- Use `.lineLimit(2)` with `.minimumScaleFactor(0.8)` rather than praying.
+- Prefer `.leading`/`.trailing` over `.left`/`.right`. Always. Even in a codebase you swear will never be RTL.
+- Test with Dynamic Type at accessibility sizes *and* a long language. That combination is where layouts actually die.
+
+---
+
+## What I'd tell someone starting today
+
+Add the String Catalog on day one, even if you're shipping English-only. The cost is nearly zero and it means your strings are already extracted when you decide to add a second language. Retrofitting localization into an app with 400 hardcoded literals is a genuinely awful week.
+
+Then treat these four as a checklist before every release: no `String` variables going into `Text`, plurals varied in the catalog rather than in Swift, packages and `InfoPlist.xcstrings` accounted for, and one run each in double-length and RTL pseudolanguage.
+
+That's maybe twenty minutes. It's the difference between "we support German" and "we support German, and it looks like we meant it."
+
+---
+
+*If you want the broader Xcode-tooling angle, [build time optimization for solo developers](/blog/xcode-build-time-optimization-solo-ios-developer) covers the other half of the "your tools already know, you just have to ask them" idea, and [the Swift Testing migration guide](/blog/swift-testing-framework-xctest-migration-guide) is about catching the quiet breakages before users do. The [SwiftUI in Practice](/learn/swiftui-in-practice) track builds these habits in from the start rather than bolting them on later.*
