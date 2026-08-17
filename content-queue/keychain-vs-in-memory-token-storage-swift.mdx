@@ -1,0 +1,211 @@
+---
+title: "The Actor That Refreshes Your Token Perfectly. It Also Forgets It on Relaunch."
+description: "AuthTokenStore solved the token-refresh race condition with a Swift actor. What it never solved is where the token lives between launches. Here's why an in-memory actor isn't secure storage, and what a Keychain-backed version actually costs you."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Keychain", "Security", "Swift Concurrency", "Actors", "iOS Development", "Networking"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1462045504115-6c1d931f07d1?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An old padlock and key resting against weathered metal — the kind of lock you can see is doing something, unlike a token sitting quietly in RAM"
+---
+
+{/*
+  SEO target keywords:
+  - Swift Keychain wrapper
+  - KeychainAccess vs raw Security framework
+  - store auth token securely iOS
+  - kSecClassGenericPassword Swift
+  - Swift actor token storage
+  - in-memory token vs Keychain
+  - iOS token persistence relaunch
+
+  Internal linking strategy:
+  - /blog/swift-networking-retry-token-refresh-request-deduplication — the AuthTokenStore actor this post picks up where it left off
+  - /blog/dependency-injection-swift-without-frameworks — same protocol-seam pattern applied to storage instead of networking
+  - /blog/swift-testing-framework-xctest-migration-guide — how to test a Keychain-backed store without touching the real Keychain
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency — actor isolation background, referenced again here
+  - /learn/swiftui-in-practice — course track
+
+  Evergreen: no dated news hook. Safe to publish any time.
+*/}
+
+I wrote `AuthTokenStore` a few weeks back and was pretty proud of it. One actor, one `refreshTask`, and the classic "two requests both see a 401 and both try to refresh" race was just... gone. Structurally impossible, not defended against. I said so [in the post](/blog/swift-networking-retry-token-refresh-request-deduplication).
+
+Then I force-quit BrewLog to test something unrelated, reopened it, and got bounced straight to the login screen. Not a bug. Working exactly as designed. The token had been sitting in a `private(set) var` the whole time, and a `var` doesn't survive a process exit. It never did. I just hadn't logged out enough to notice.
+
+That's the gap nobody mentions when they show you a clean actor-based token store: **concurrency-safe and persistent are two completely different properties, and solving one tells you nothing about the other.**
+
+---
+
+## What the actor actually guarantees
+
+Quick recap, because it matters for what comes next. `AuthTokenStore` looks like this:
+
+```swift
+actor AuthTokenStore {
+    private(set) var currentToken: String
+    private var refreshTask: Task<String, Error>?
+    private let refresher: () async throws -> String
+
+    func refreshedToken() async throws -> String {
+        if let refreshTask {
+            return try await refreshTask.value
+        }
+        let task = Task { try await refresher() }
+        refreshTask = task
+        defer { refreshTask = nil }
+        let token = try await task.value
+        currentToken = token
+        return token
+    }
+}
+```
+
+This guarantees exactly one thing: **however many callers hit `refreshedToken()` concurrently, the refresh network call fires once.** That's a real, valuable, easy-to-get-wrong guarantee. It says nothing about where `currentToken` lives, and it was never supposed to. The actor's job is serializing access, not choosing storage.
+
+`currentToken` is a Swift property. It lives in the process's memory. When the process dies — force quit, crash, iOS reclaiming memory in the background, a phone restart — it's gone. That's not a bug in the actor. It's just what "memory" means.
+
+---
+
+## Why "just save it to UserDefaults" is the wrong instinct
+
+The obvious next move is to persist `currentToken` somewhere that survives a relaunch. `UserDefaults` is right there, it's one line, and it works. It's also the wrong line for a token.
+
+`UserDefaults` backs onto a plist file sitting unencrypted in your app's container. Anyone with filesystem access to the device — a stolen and jailbroken phone, a bad actor with physical access and enough patience, a poorly-scoped backup extraction tool — can read it in plain text. A session token in `UserDefaults` is a token you've handed to whoever gets the phone next.
+
+Keychain exists specifically for this case: small, sensitive, sensitive-because-someone-could-authenticate-as-you values. It's encrypted at rest, tied to the device (and optionally to Face ID / passcode presence), and it's the thing App Review and every security checklist you'll ever read actually expects for a token.
+
+---
+
+## A Keychain-backed store, same shape as the actor
+
+The nice part: you don't have to change how `AuthTokenStore` is *used* anywhere else in the app. You change where `currentToken` is read from and written to, behind the same actor boundary.
+
+```swift
+protocol TokenPersisting: Sendable {
+    func load() -> String?
+    func save(_ token: String)
+    func clear()
+}
+
+struct KeychainTokenStore: TokenPersisting {
+    private let service = "com.nativefirst.brewlog.auth"
+    private let account = "session-token"
+
+    func load() -> String? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        let status = withUnsafeMutablePointer(to: &result) {
+            SecItemCopyMatching(query as CFDictionary, $0)
+        }
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func save(_ token: String) {
+        let data = Data(token.utf8)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary) // upsert: clear, then add
+        var attributes = query
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    func clear() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+```
+
+That `kSecAttrAccessibleAfterFirstUnlock` line is doing more work than it looks like. It's the setting that decides *when* the Keychain will hand the token back to you — after the device has been unlocked once since boot, regardless of whether it's currently locked. That's the right default for a background refresh token: your `BGTaskScheduler` job can run overnight while the phone is locked on a nightstand and still read it. The stricter `whenUnlocked` variant would silently fail that same background task, which is a fun bug to chase because the failure looks identical to a network error.
+
+Now `AuthTokenStore` takes one of these instead of a bare `String`:
+
+```swift
+actor AuthTokenStore {
+    private var currentToken: String?
+    private var refreshTask: Task<String, Error>?
+    private let refresher: () async throws -> String
+    private let persistence: TokenPersisting
+
+    init(persistence: TokenPersisting, refresher: @escaping () async throws -> String) {
+        self.persistence = persistence
+        self.currentToken = persistence.load()
+        self.refresher = refresher
+    }
+
+    func refreshedToken() async throws -> String {
+        if let refreshTask {
+            return try await refreshTask.value
+        }
+        let task = Task { try await refresher() }
+        refreshTask = task
+        defer { refreshTask = nil }
+
+        let token = try await task.value
+        currentToken = token
+        persistence.save(token)   // the one new line that fixes relaunch
+        return token
+    }
+
+    func logOut() {
+        currentToken = nil
+        persistence.clear()
+    }
+}
+```
+
+The concurrency story doesn't change at all — same single-flight refresh, same actor isolation. The only new behavior is that the constructor now hydrates from Keychain instead of starting blank, and a successful refresh writes through instead of just updating memory.
+
+---
+
+## The part that makes this testable
+
+`TokenPersisting` is a protocol for exactly the reason [the networking layer's seams](/blog/dependency-injection-swift-without-frameworks) are protocols: so tests never touch the real Keychain. A `SecItemAdd` call in a unit test is slow, occasionally flaky in CI sandboxes, and leaves state behind if a test crashes mid-run. None of that belongs in a fast test suite.
+
+```swift
+final class InMemoryTokenPersistence: TokenPersisting, @unchecked Sendable {
+    private var stored: String?
+    func load() -> String? { stored }
+    func save(_ token: String) { stored = token }
+    func clear() { stored = nil }
+}
+
+@Test func refreshWritesThroughToPersistence() async throws {
+    let persistence = InMemoryTokenPersistence()
+    let store = AuthTokenStore(persistence: persistence) { "new-token" }
+
+    _ = try await store.refreshedToken()
+
+    #expect(persistence.load() == "new-token")
+}
+```
+
+That test proves the write-through behavior without a single real Keychain call. The actual `KeychainTokenStore` doesn't need a unit test at all, honestly — it needs one manual pass on a real device confirming `SecItemAdd`/`SecItemCopyMatching` round-trip, since the Keychain APIs are thin enough that there's not much logic left to unit-test once you've isolated them behind the protocol.
+
+---
+
+## One thing this still doesn't fix
+
+Keychain persistence solves "the token survives a relaunch." It does not solve "the token is valid forever" — a stored refresh token can still be revoked server-side, expire, or belong to an account the user signed out of on another device. `refreshedToken()` can still throw. The UI still needs a real "session expired, please log in again" path, Keychain or not. Persistence buys you convenience across relaunches; it was never going to buy you a token that can't go stale.
+
+---
+
+Concurrency-safe and durable sound like the same kind of "solved" problem. They aren't. One is about *who* can touch the value at once; the other is about *whether the value still exists* the next time anyone asks. Get the actor right and you've earned exactly half of a working token store — the interesting half was never the hard part.
+
+*If you're building the networking layer this token store plugs into, [Retry, Token Refresh, and Request Deduplication](/blog/swift-networking-retry-token-refresh-request-deduplication) is the piece this post assumes you've already read. For the protocol-seam pattern applied more broadly, see [Dependency Injection in Swift Without a Framework](/blog/dependency-injection-swift-without-frameworks). And [Swift Testing](/blog/swift-testing-framework-xctest-migration-guide) covers the `@Test` syntax used above if it's new to you.*
