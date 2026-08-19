@@ -1,0 +1,86 @@
+---
+title: "InlineArray Just Got Hashable. Here's Why That Took a Whole Proposal."
+description: "SE-0543 was accepted on August 18, 2026, giving InlineArray a Hashable conformance. It sounds like a one-line addition — it wasn't. Here's what InlineArray actually is, why Hashable needed its own proposal, and where a fixed-size, stack-allocated array earns its keep over a regular Array."
+pubDate: 2026-08-19
+tags: ["Swift Evolution", "Swift", "Performance", "Data Structures", "Embedded Swift", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1518281539443-08689d97d643?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of small identical storage compartments, evenly spaced"
+---
+
+{/*
+SEO target keywords: SE-0543 accepted, InlineArray Hashable Swift, InlineArray Swift explained, fixed-size array Swift, Embedded Swift InlineArray, Swift Evolution August 2026
+
+Internal linking plan:
+- /blog/st-0026-tasklocal-trait-accepted-withvalue-label — same "proposal accepted, here's the final API" format
+- /blog/swift-withdeadline-se-0526-network-timeout — another proposal that shipped close to its pitch
+- /blog/custom-networking-layer-swift-urlsession-async-await — value types and performance-minded Swift
+- /learn/performance-optimization — tracked course lesson on profiling and memory in SwiftUI apps
+*/}
+
+I almost skipped this one. "InlineArray gets Hashable" sounds like the kind of Swift Evolution proposal that exists purely so the changelog has something to put in it. Add a protocol conformance, ship it, move on.
+
+Then I read the actual proposal and found out why it took a review instead of a pull request: **InlineArray can't inherit Hashable the normal way, because it doesn't inherit anything the normal way.**
+
+---
+
+## What InlineArray actually is
+
+If you haven't touched it yet, that's fair — it's new enough that most iOS codebases don't have one. `InlineArray` is a fixed-size, stack-allocated collection, introduced for the cases where a regular `Array` is doing more work than you need:
+
+```swift
+var buffer: InlineArray<4, UInt8> = [0, 0, 0, 0]
+buffer[0] = 0xFF
+```
+
+That `4` isn't a starting capacity you can grow past — it's baked into the type itself, the same way `SIMD4<Float>` bakes in its width. There's no heap allocation, no retain/release traffic, no reference counting. The whole thing lives inline, wherever you declare it: on the stack, or inline inside a struct if you nest it there.
+
+That's the entire pitch. You trade `Array`'s flexibility for a size known at compile time, and in exchange you get a value type that behaves more like a C array than a Swift collection — which is exactly what you want in a tight loop, a fixed-size protocol header, or anything running under [Embedded Swift](https://www.swift.org/blog/embedded-swift-examples/), where the heap might not even be available.
+
+---
+
+## Why Hashable needed its own proposal
+
+Here's the part that made me stop skimming. For an ordinary generic struct, `Hashable` conformance is close to free — the compiler synthesizes it, or you write a five-line `hash(into:)` that folds each stored property into the hasher. `InlineArray` can't do either, because of how it's actually represented under the hood.
+
+`InlineArray<N, Element>` isn't backed by a Swift array or a tuple you can iterate with normal reflection. The compiler represents it as a genuinely fixed-size block of memory, sized by the integer generic parameter `N`. There's no `for element in self` you can drop into a synthesized `hash(into:)`, because at the point where the compiler needs to generate that code, it doesn't have an existing iteration mechanism to call — `InlineArray`'s own `Sequence`-like access had to be built specifically for this.
+
+[SE-0543](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0543-inlinearray-hashable.md) is what plumbs that through: it defines `hash(into:)` in terms of `InlineArray`'s actual storage model, folding each element in using the same span-based access the type already exposes, rather than pretending it's an `Array` in disguise. It also nails down that two `InlineArray` values only compare equal — and only hash equal — when they share both the same `N` and the same `Element` type. `InlineArray<3, Int>` and `InlineArray<4, Int>` aren't comparable at all; the type system rules that out before you'd ever get to a runtime hash check.
+
+That's a small API surface with a not-small amount of compiler work behind it. It's why this took a proposal instead of a one-line diff — the label debates that dominate other Evolution reviews weren't the issue here; the representation was.
+
+---
+
+## Where you'd actually reach for this
+
+I'll be honest: for most SwiftUI app code, you won't. If you're modeling a `Set<Brew.ID>` for selected rows in a list, `Array` and the standard library's synthesized `Hashable` are correct and fast enough, and reaching for `InlineArray` there is a premature optimization with extra syntax.
+
+The cases where it earns its keep are narrower and more specific:
+
+**Fixed-size binary structures.** Parsing a protocol header, a UUID's sixteen bytes, a fixed record format from a file or a socket — anywhere the size is a domain fact, not a runtime detail:
+
+```swift
+struct PacketHeader: Hashable {
+    var magic: InlineArray<4, UInt8>
+    var version: UInt8
+    var length: UInt16
+}
+```
+
+Now `PacketHeader` itself gets a free, correct `Hashable` conformance that doesn't allocate — useful the moment you want to deduplicate headers in a `Set` or use one as a dictionary key while parsing a stream.
+
+**Embedded Swift targets.** If you're writing Swift for a microcontroller or anywhere else the standard heap allocator isn't guaranteed to exist, `InlineArray` was already one of the few collection types you could reach for. Before SE-0543, using one as a dictionary key or putting it in a `Set` meant hand-rolling `Hashable` yourself, hoping you got the semantics — especially the "different `N` means different type" rule — right. Now you don't.
+
+**Hot loops where you were about to write a tuple.** If you've ever reached for `(UInt8, UInt8, UInt8, UInt8)` specifically to avoid `Array`'s heap allocation, `InlineArray<4, UInt8>` is the same idea with actual subscripting, `count`, and now equality and hashing, instead of `.0`, `.1`, `.2`, `.3`.
+
+---
+
+## What doesn't change
+
+If none of those three describe your code, this proposal changes nothing about your day. `InlineArray` isn't replacing `Array` as the default collection — it's not even trying to. It's a specialized tool for a specific tradeoff, and SE-0543 just closes a gap that made the tool awkward to use fully: you can now put one in a `Set`, use it as a `Dictionary` key, or compare two of them without writing the conformance by hand.
+
+That's the pattern worth noticing across a lot of recent Swift Evolution activity, not just this proposal: the language keeps adding narrow, correctly-scoped types for narrow, correctly-scoped problems, then spends a follow-up review or two making sure those types integrate with everything the standard library already assumes — `Hashable`, `Equatable`, `Codable`. It's slower than shipping the type "done" on day one. It's also how you avoid a type that works everywhere except the one place someone actually needed it.
+
+---
+
+*Related reading: [ST-0026's own path through review](/blog/st-0026-tasklocal-trait-accepted-withvalue-label) for another proposal I covered on acceptance day, [SE-0526's timeout API](/blog/swift-withdeadline-se-0526-network-timeout) for a similar "here's what actually shipped" writeup, and [the async/await networking layer post](/blog/custom-networking-layer-swift-urlsession-async-await) if you want more on value types and performance in a real networking stack. For profiling and memory tradeoffs in a shipping SwiftUI app, [the Performance Optimization lesson](/learn/performance-optimization) covers when Instruments should send you looking for something like this in the first place.*
