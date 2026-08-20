@@ -1,0 +1,127 @@
+---
+title: "Apple's On-Device Speech API Reserves Five Locale Slots. You Never Get Them Back."
+description: "A developer who actually shipped an app on SpeechTranscriber and Foundation Models found that AssetInventory.release(reservedLocale:) doesn't release anything. I checked Apple's own docs against the bug report, and the gap between what's documented and what happens on a real device is the whole story."
+pubDate: 2026-08-20
+tags: ["Swift", "Speech Framework", "Foundation Models", "On-Device AI", "iOS 26", "SpeechAnalyzer", "AssetInventory", "Apple Intelligence", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1453738773917-9c3eff1db985?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A studio microphone against a dark background, standing in for on-device speech transcription."
+---
+
+{/*
+  SEO target keywords:
+  - AssetInventory reservedLocales bug
+  - SpeechTranscriber locale reservation limit
+  - AssetInventory release reservedLocale not working
+  - on-device speech transcription iOS 26
+  - maximumReservedLocales Swift
+  - SpeechAnalyzer SpeechTranscriber production app
+  - Foundation Models LanguageModelSession per call
+  - Apple Intelligence speech locale cap
+
+  Internal linking strategy:
+  - /blog/thinkbud-foundation-models-real-case-what-worked-what-didnt (the other "on-device AI has a wall" field report)
+  - /blog/foundation-models-first-on-device-ai-feature-no-backend (intro to the on-device FM stack this builds on)
+  - /blog/swift-testing-tasklocal-trait-st-0026-static-var-di (static/shared state as a testing and correctness hazard, same shape as the session-reuse lesson)
+  - /blog/swiftai-one-api-foundation-models-openai-mlx (unifying on-device/server LLM APIs, same on-device-AI-in-production beat)
+  - /apps/thinkbud (on-device Foundation Models app, natural mention)
+  - /learn/vibe-code-native (course landing page)
+
+  External reference strategy:
+  - developer.apple.com/documentation/speech/assetinventory (primary source, fetched via curl)
+  - Reddit r/swift source thread (KREANIQS, "Lessons from shipping a production app on SpeechTranscriber + on-device Foundation Models")
+*/}
+
+Picture a parking garage with exactly five spots. You pull in, park, and go inside. There's no ticket, no meter, no way to reclaim the spot — not when you leave, not when you sell the car, not even if you never park there again. The garage just remembers you were there. Forever. That's `AssetInventory` on iOS 26, and it took a real shipping app to find out the hard way.
+
+---
+
+## The stack in question
+
+Apple's on-device speech pipeline (`SpeechAnalyzer` and `SpeechTranscriber`, introduced alongside Foundation Models) transcribes audio entirely on the device. No network call, no server bill, no audio ever leaving the phone. To do that, it needs a language model asset for whatever locale you're transcribing — German, Japanese, Brazilian Portuguese, whatever your users actually speak — and those assets get downloaded and installed on demand.
+
+Managing which locales are installed is the job of a type called [`AssetInventory`](https://developer.apple.com/documentation/speech/assetinventory). Its public surface is small and reads like exactly what you'd expect:
+
+```swift
+static func reserve(locale: Locale) async throws
+static func release(reservedLocale: Locale) async
+static var reservedLocales: [Locale] { get async }
+static var maximumReservedLocales: Int { get }
+```
+
+You reserve a locale before you can use it. You release it when you're done. There's a cap on how many you can hold at once, and Apple's own documentation for that cap is refreshingly honest about not promising a fixed number:
+
+> "This value is the largest allowed count of reservedLocales. The value may vary between devices according to storage space."
+
+Reasonable. Sounds like normal resource management — a budget that flexes with the device you're on. On paper, this is a clean, well-designed API.
+
+---
+
+## What actually happens on a real device
+
+A developer building [Vocapa](https://apps.apple.com/app/id6789586072), a voice-notes app that runs transcription and Foundation Models enrichment entirely on-device, posted a detailed field report to r/swift after shipping. The locale reservation system was the thing that cost them an architecture:
+
+- On current iOS releases, the cap resolved to **5** — system-wide, not per app.
+- A reservation is taken the moment the asset installs, and it **survives both a reboot and an app reinstall.**
+- `release(reservedLocale:)` — the method whose own doc comment says it "removes an asset locale reservation" — **never actually returned a slot** in their testing.
+- Calling `reserve(locale:)` while already at the cap could **hang**, reproducibly, under the Xcode debugger.
+
+Read that documentation quote again next to the behavior. The API contract says released locales unsubscribe from their backing assets and free the slot. The device says otherwise. That's not a missing feature or an unclear edge case — it's a public method that doesn't do what its own doc comment says it does. Feedback was filed with Apple; as of this writing there's no fix.
+
+If your app supports five or fewer languages total, you'll probably never notice. If it's a transcription tool aimed at anyone outside a single-language market — which is most of them — five is not a lot of slots for a resource you can only spend once.
+
+---
+
+## The pattern that survives it
+
+The original plan was an LRU cache: install a new locale, evict the least-recently-used one to make room. Reasonable design, dead on arrival, because eviction requires a working `release`. Since that method is a no-op in practice, "least recently used" just becomes "locale five, permanently occupied by whatever got installed fifth."
+
+What shipped instead was a gate that treats every reservation as a one-way door:
+
+```swift
+enum LocaleBudget {
+    static func canReserve(_ locale: Locale) async -> Bool {
+        let current = await AssetInventory.reservedLocales
+        if current.contains(locale) { return true }
+        return current.count < AssetInventory.maximumReservedLocales
+    }
+}
+
+func transcribe(audio: URL, locale: Locale) async throws -> String {
+    guard await LocaleBudget.canReserve(locale) else {
+        throw TranscriptionError.languageBudgetExhausted
+    }
+    // Lazy, on-demand install only — never speculative, never a
+    // warm-up pass, never triggered by the user merely picking a
+    // language in settings. Every install permanently spends a slot,
+    // so only spend one when a real recording needs it.
+    try await AssetInventory.reserve(locale: locale)
+    // ... run the actual transcription
+}
+```
+
+Three deliberate design choices in there, each one earned by the bug: check the budget *before* touching the OS, install strictly lazily so browsing a language picker never silently burns a slot, and surface a real user-facing "language budget exhausted" state instead of letting the fifth-plus locale hang inside an OS call with no explanation. None of it is clever. All of it exists because the documented undo button doesn't work.
+
+---
+
+## Five more things worth stealing
+
+The locale cap was the sharpest edge, but the same field report had four other findings worth keeping around if you're anywhere near this stack:
+
+**The simulator lies twice.** It can't transcribe audio at all, and its Foundation Models output comes from a different model than the real on-device one — output quality and instruction-following genuinely diverge. Real-device validation isn't optional polish here; it's a hard gate before shipping any prompt change. This is the same lesson [ThinkBud's own Foundation Models detour](/blog/thinkbud-foundation-models-real-case-what-worked-what-didnt) ran into from a different angle — the simulator tells you the happy path works and says nothing about where the wall actually is.
+
+**One `LanguageModelSession` per call.** Reusing a session across unrelated inputs leaked context between them — note A's content bleeding into note B's summary. A fresh session per invocation, enforced by tests, is now a hard rule. It's the same category of bug as [treating shared mutable state as safe by default](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di): the type system won't stop you from reusing a session, only discipline (and a test that fails when you don't) will.
+
+**Transcripts are untrusted input.** Voice-to-text becomes a prompt the instant it feeds an enrichment call, and users can and will say things that look like instructions. Wrapping the transcript in delimiters made instruction-following robust; removing literal examples from the prompt stopped fragments of those examples from leaking into generated output on-device — a failure mode that, notably, never showed up in the simulator.
+
+**Pass the language explicitly, every time.** Auto-detection wasn't reliable enough to trust. One side effect worth remembering if you support German: Apple appears to use a single shared model across every `de-*` locale, so switching between `de-DE`, `de-CH`, and `de-AT` changes nothing about transcription quality — the locale tag is doing less work than you'd assume.
+
+**Don't record straight to AAC.** A process killed mid-recording leaves an empty, unplayable `.m4a` husk. Recording raw LPCM into a CAF container and encoding to AAC at ingest time means an interrupted call, a force-quit, or an OS kill leaves something a salvage pass can still recover.
+
+---
+
+## The actual lesson
+
+None of this is really about speech. It's about what "the docs said X" is worth when X touches system-managed, device-persisted state you don't control. `AssetInventory` isn't a cache you can flush — the reservation lives somewhere below your app's sandbox, and Apple's own release method just doesn't reach it yet. The fix isn't clever code. It's treating every call that spends a shared, capped, unrecoverable resource as if the undo button is decorative — because right now, it is.
+
+If you're building anything with [Foundation Models](/blog/foundation-models-first-on-device-ai-feature-no-backend) or the on-device speech stack, budget for the resources you can't get back before you budget for the ones you can.
