@@ -1,0 +1,131 @@
+---
+title: "Swift Wants to Let a Closure Promise 'I Run Once.' Here's the Bug That's Been Waiting For It."
+description: "A fresh Swift Evolution pitch, @called(once), lets the compiler know a function is invoked at most one time — and that one guarantee quietly unlocks Task closures that consume non-Sendable values and non-Copyable captures that don't work today. Here's the errors it fixes, in real code."
+pubDate: 2026-08-21
+tags: ["Swift", "Swift Concurrency", "Swift Evolution", "Sendable", "Closures", "iOS Development", "Task"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1485761954900-f9a29f318567?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single closed padlock hanging on a chain, evoking something used exactly once and then done"
+---
+
+{/*
+SEO target keywords: Swift @called(once), Swift Evolution called once attribute, Swift Task sending capture error, Swift non-Copyable closure capture, Swift compiler consuming closure
+
+Internal linking plan:
+- /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree — the isolation keyword decision tree this attribute sits next to
+- /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency — background on why Swift 6.2 defaults changed
+- /blog/swift-6-2-strict-concurrency-migration-invoize-before-after — real migration post, same "here's the error you'll actually see" framing
+- /blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work — self-capture/reference-cycle background this attribute also touches
+- /blog/swift-withdeadline-se-0526-network-timeout — another "here's a fresh Swift Evolution pitch and the gap it fills" post
+- /learn/swiftui-in-practice-13-swift-6-concurrency — tracked course lesson on @MainActor, Sendable, actors
+*/}
+
+I hit this error on a Tuesday and just stared at it for a minute:
+
+```
+error: sending 'ns' risks causing data races
+```
+
+The code looked completely reasonable. A `Task` capturing a value, sending it to `@MainActor`, done. One capture, one use, no way for two threads to touch it at the same time. And yet the compiler wouldn't budge, because it had no way to *know* that — it can't see that my closure only runs once. So it assumes the pessimistic case: what if this thing gets called twice, from two places, at the same time? That's the case `sending` exists to catch, and until now Swift had no way for me to tell it "no, actually, that case can't happen here."
+
+There's a fresh [Swift Evolution pitch](https://forums.swift.org/t/pitch-introduce-a-way-to-annotate-functions-that-are-called-at-most-once/89088) from Pavel Yaskevich, posted yesterday, that closes exactly this gap. It's called `@called(once)`, and it's one of those proposals that looks tiny on the surface — an attribute, a few extra type-checking rules — but it quietly unlocks a bunch of code that's been fighting the compiler since Swift 6's strict concurrency checking shipped.
+
+---
+
+## The problem: the compiler has no idea how many times you'll call something
+
+Here's the motivating example straight from the proposal, and it's the kind of thing that's easy to miss in review:
+
+```swift
+func executeOnce(fn callOnce: () -> Void) {
+  callOnce()
+  // ... 200 lines later ...
+  callOnce() // <- no error
+}
+```
+
+Nothing here tells the compiler `callOnce` is meant to run exactly once. The name is a lie the compiler can't check. It compiles fine either way — call it once, call it five times, doesn't matter.
+
+That sounds like a nitpick until you connect it to two things Swift developers hit constantly: sending non-Sendable values across isolation boundaries, and capturing non-Copyable values in closures.
+
+---
+
+## Where this actually bites: `Task` and `sending`
+
+`Task { }` closures are the textbook case. You're inside a `@MainActor` context, you want to hand a value off to a background `Task`, and the value isn't `Sendable`:
+
+```swift
+class NonSendable {}
+
+func sendAgain(_ ns: sending NonSendable) {}
+
+func captureSending(_ ns: sending NonSendable) {
+  Task {
+    sendAgain(ns) // error: Sending 'ns' risks causing data races
+  }
+}
+```
+
+The compiler's reasoning isn't wrong, exactly — it's just working with too little information. A closure can, in general, be called any number of times from any number of places. If it could be called twice concurrently, `ns` really could end up touched from two isolation domains at once, and that's a genuine data race. The compiler has no choice but to assume the worst.
+
+`Task`'s closure, in practice, runs exactly once. Every Swift developer knows this. The compiler doesn't, because there's currently no way to say it in the type system.
+
+`@called(once)` says it. If `Task`'s initializer is updated to take a `@called(once)` closure, the "called at most once" guarantee is baked into the type — not a runtime promise, not a comment, a fact the compiler can verify. And once that's true, sending a non-Sendable capture across the boundary stops being a hypothetical race and becomes exactly the safe, single-handoff operation it always was in practice.
+
+---
+
+## The second unlock: non-Copyable captures
+
+This is the one I didn't expect to care about until I saw the example. Non-Copyable types (`~Copyable`) already can't be captured in an ordinary closure if the closure *consumes* them — because an ordinary closure might run twice, and you can't consume the same non-Copyable value twice:
+
+```swift
+struct NonCopyable: ~Copyable {
+   consuming func use() {}
+}
+
+func executeOnce(_ fn: () -> Void) {
+  fn()
+}
+
+func testConsumption() {
+  let nc = NonCopyable()
+  executeOnce {
+    nc.use() // error here
+  }
+}
+```
+
+That error is correct today, because `executeOnce`'s parameter is a plain `() -> Void` — nothing stops someone from calling `fn()` twice inside `executeOnce`, and `nc` can't be consumed twice. But if `executeOnce` took a `@called(once)` closure instead, the compiler could verify the call happens at most once, and the consuming capture becomes provably safe. The proposal describes this as *inferred* — you don't annotate the capture itself, the compiler figures out from the closure body that `nc.use()` is a consuming use, and allows it because the enclosing closure can't run twice.
+
+If you've been keeping non-Copyable types out of your closures because the compiler kept rejecting perfectly reasonable code, this is the proposal that's supposed to fix that.
+
+---
+
+## The mechanism is more interesting than the syntax
+
+The attribute itself is simple — apply it to a function type, and calling that function becomes a *consuming* operation, the same way calling a method on a `~Copyable` struct consumes `self`:
+
+```swift
+func callMoreThanOnce(c: @called(once) () -> Void) {
+  c()
+  c() // error: 'c' is consumed more than once
+}
+```
+
+That's the whole trick: `@called(once)` function types are themselves non-copyable. Calling one destroys it. The compiler already has a complete, battle-tested model for "this value can be consumed at most once" — it's the ownership system that ships non-Copyable types today. This proposal doesn't invent new machinery; it just points a function type at machinery that already exists.
+
+Worth noting what it deliberately *doesn't* promise: this is **at most once**, not **exactly once**. The proposal is explicit about why — verifying "called on every path" is a flow analysis that falls apart the moment a closure can escape into a `Task`, a completion handler, or a stored property, because the compiler can no longer see every path that leads to it running. At-most-once sidesteps that entirely, because it falls directly out of the existing consume-at-most-once rule for non-Copyable values, escaping or not. It's a smaller guarantee, but it's one the compiler can actually check in every case, not just the easy ones.
+
+There's also a nice side effect for the reference-cycle problem I wrote about in [weak self and @Observable](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work): a `@called(once)` closure that implicitly captures `self` is much lower risk for cycles, because the closure can't be copied and calling it consumes its captures. The proposal calls this out as a natural replacement for the internal `@_implicitSelfCapture` attribute, particularly for `Task` initializers.
+
+---
+
+## Where this sits if you're already tracking Swift 6.2/6.3 concurrency
+
+If you went through the `@concurrent` / `nonisolated` / `@MainActor` [decision tree](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) or the [strict concurrency migration](/blog/swift-6-2-strict-concurrency-migration-invoize-before-after), this proposal isn't a new isolation keyword — it doesn't compete with any of those. It's a closure execution guarantee that sits underneath them, and it's specifically aimed at the `sending` and capture-checking errors that survive even after you've got isolation right. If you've ever fixed a `sending` error by restructuring code instead of understanding it, `@called(once)` is the proposal explaining why that error existed in the first place.
+
+It's day one of the pitch — status is "Awaiting review," there's no accepted proposal number yet, and the API surface (does `Task`'s initializer actually adopt this?) isn't settled. But the motivation section reads like a list of bugs I've personally worked around in the last six months, and that's usually a good sign a Swift Evolution pitch is going somewhere.
+
+---
+
+**One thing to watch:** the proposal is explicit that adding `@called(once)` to an existing public API is source-compatible for callers but **ABI-breaking** — it changes the calling convention from borrowed to consuming. If you maintain a resilient library, that's not a "just add the attribute" change once this ships; it's a proper API-evolution decision. Worth keeping in the back of your mind before you go looking for places to slap it on.
