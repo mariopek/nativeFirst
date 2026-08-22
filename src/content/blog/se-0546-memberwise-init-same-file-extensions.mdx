@@ -1,0 +1,102 @@
+---
+title: "Swift Finally Lets You Put a Memberwise Init Where It Belongs"
+description: "SE-0546 fixes a Swift limitation nearly a decade old: you couldn't define a struct's memberwise initializer in a same-file extension. Here's why that mattered, with a real example from a Live Activity."
+pubDate: 2026-08-22
+tags: ["Swift", "Swift Evolution", "SwiftUI", "ActivityKit", "Macros"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1493710494541-43364cb47485?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A neatly organized drawer with everything in its own compartment"
+---
+
+{/*
+SEO keywords: SE-0546, memberwise initializer Swift, same-file extension init, Swift Evolution 2026,
+synthesized memberwise init, ActivityAttributes ContentState, Point-Free Swift proposal,
+Swift macro generated struct public init, Codable Hashable same-file extension precedent
+Internal linking plan: swift-testing-tasklocal-trait-st-0026-static-var-di (same Point-Free authors),
+apple-foundation-models-utilities-skills-api-open-source, freestanding-attached-macros (Day 29, if tracked),
+/learn/vibe-code-native course lesson
+*/}
+
+I keep every struct's initializer next to its properties. Not because I read that in a style guide somewhere — because Swift makes you.
+
+Try to move it into an extension and the compiler slaps you: `invalid redeclaration of synthesized memberwise 'init'`. So every struct with a public initializer ends up as one lump, properties and init and everything else all crammed into the base declaration, no matter how big it gets.
+
+Yesterday that was just how Swift worked. As of today, it isn't anymore.
+
+---
+
+## The proposal that finally showed up
+
+[SE-0546](https://forums.swift.org/t/se-0546-same-file-memberwise-initializer-extensions/89120), authored by Stephen Celis and Brandon Williams (yes, the Point-Free guys — same duo behind the [`.taskLocal` test trait](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di) I covered a few weeks back), went into review today, August 21, and runs through September 4.
+
+The pitch is almost embarrassingly small. This currently doesn't compile:
+
+```swift
+public struct Post {
+    public var title: String
+}
+
+extension Post {
+    // 🛑 invalid redeclaration of synthesized memberwise 'init'...
+    public init(title: String) { self.title = title }
+}
+```
+
+Under SE-0546, it will — as long as the hand-written initializer has the exact same parameter names, types, and order as the one Swift would've synthesized anyway. Get that wrong and you're back to defining a genuinely custom init in the base declaration, same as always.
+
+That's the whole feature. No new syntax, no new keyword, nothing to learn. It just stops treating "I wrote out the initializer Swift was already going to write for me, in a different file location" as a redeclaration.
+
+---
+
+## Why this took ten years to fix
+
+The underlying complaint isn't new — there's a [forum post from 2019](https://forums.swift.org/t/why-doesn-t-an-init-in-an-extension-suppress-the-synthesized-init/35182) asking for exactly this. Back then it read as a minor organizational nitpick. Nice to have, not exactly load-bearing.
+
+Then Swift got macros, and the nitpick turned into a real wall.
+
+A macro that generates a struct — think `@Draftable` producing a nested `Draft` type with optional versions of your properties — has no way to make that struct's memberwise init `public`. The macro expansion can't put a hand-written public init in the base declaration (it's not writing the base declaration, the macro's expansion mostly *is* the base declaration), and it can't put one in an extension either, because that's exactly the thing that was illegal. You end up with a struct nobody outside the module can actually construct.
+
+Same story if a macro-generated type needs to conform to a protocol whose requirement happens to match its internal synthesized init — the type has the *right* initializer, it's just not accessible from outside, and there's no legal place to fix that without touching the macro's own generated code.
+
+Ten years of "would be nice" became "actively blocks macro authors" almost overnight. That's usually how these things move.
+
+---
+
+## Where I'd have used this already
+
+I went looking through BrewLog — the demo app I write most of this blog against — for a real spot this would've helped, and found one in about thirty seconds: `BrewTimerAttributes.swift`, the `ActivityAttributes` struct backing the Live Activity from the timer feature I covered in [an earlier post](/blog/live-activities-dynamic-island-decision-matrix-swiftui).
+
+```swift
+struct BrewTimerAttributes: ActivityAttributes {
+    struct ContentState: Codable, Hashable {
+        var startDate: Date
+        var totalDuration: TimeInterval
+    }
+
+    var method: BrewMethod
+}
+```
+
+`ContentState` already conforms to `Codable` and `Hashable` — both of which Swift is perfectly happy to synthesize in a same-file extension, and has been for years. That's actually called out directly in SE-0546's own "Alternatives Considered" section as the existing precedent: if the compiler already trusts you to add a synthesized `Codable` conformance in an extension without it colliding with anything, why not the same trust for `init`?
+
+Right now, if I wanted BrewLog's Live Activity code to live in a real Widget Extension target — something the project has deliberately held off on, for reasons I wrote about at the time — `ContentState`'s memberwise init would need to go `public`, and the only place Swift lets me write that today is wedged into the same declaration as the properties. Once SE-0546 ships, I could keep the struct's data shape in one file and its public API surface in another, the same way I already split extensions for protocol conformances. Small thing. Genuinely useful thing.
+
+---
+
+## What this doesn't do
+
+It's worth being precise about the boundary, because it's easy to read "extensions can have inits now" as bigger than it is.
+
+This is **not** general permission to define arbitrary custom initializers in extensions and have them suppress the synthesized one. It only fires when your hand-written init is a dead ringer for the one Swift would've generated — same labels, same types, same order. Change any of that and you've written a real custom initializer, which extensions could already hold; you've just lost the "also delete the synthesized default" behavior, exactly like today.
+
+It's also same-file only, on purpose. The proposal's authors considered allowing it anywhere in the module and rejected that explicitly — scattering a struct's public initializer somewhere else entirely in the codebase makes the type harder to reason about from the declaration site, and Swift already draws that same-file line for `Codable`/`Hashable` synthesis. Consistent, at least.
+
+And there's no ABI or source-compatibility story here at all, because there's nothing to break. This only legalizes code that used to be a compiler error. If you weren't hitting the error, nothing about your code changes.
+
+---
+
+## The takeaway
+
+Small language changes like this rarely feel exciting on their own — nobody's rewriting an app around a memberwise init. But they're the ones that quietly remove a reason to structure your code worse than you'd like to. If you've ever split a struct's protocol conformances into tidy extensions and then had to shove `public init` back into the base declaration because Swift wouldn't let it live anywhere else, SE-0546 is for you.
+
+Review runs through September 4. If BrewTimerAttributes is any indication, plenty of real code is already shaped to use this the day it lands.
