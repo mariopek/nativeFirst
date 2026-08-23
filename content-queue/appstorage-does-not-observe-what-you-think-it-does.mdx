@@ -1,0 +1,115 @@
+---
+title: "@AppStorage Looked Like Free State Management. It Isn't Watching What You Think."
+description: "@AppStorage feels like @State that happens to persist. It's actually a thin wrapper over UserDefaults with a KVO bridge bolted on, and that difference bites the moment a widget, an app extension, or a background task touches the same key."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "AppStorage", "UserDefaults", "WidgetKit", "iOS Development", "State Management"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1516110833967-0b5716ca1387?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single light switch on a wall, mid-flip — the kind of state change that's supposed to be simple but isn't always seen by everyone in the house"
+---
+
+{/*
+  SEO target keywords:
+  - @AppStorage not updating
+  - SwiftUI AppStorage widget not refreshing
+  - UserDefaults suite App Group SwiftUI
+  - @AppStorage vs @State difference
+  - AppStorage KVO UserDefaults observation
+
+  Internal linking strategy:
+  - /blog/widgetkit-app-intents-log-brew-without-opening-app — the widget that first exposed this bug in BrewLog
+  - /blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency — MainActor context relevant to why cross-process writes don't trigger a view update
+  - /blog/custom-networking-layer-swift-urlsession-async-await — same "looks simple, has a process boundary" lesson applied to networking
+  - /learn/swiftui-in-practice — course track
+
+  Evergreen: no dated news hook. Safe to publish any time.
+*/}
+
+I added a "brew streak" counter to BrewLog's widget last month. Log a brew in the app, the widget's number goes up. Simple. `@AppStorage("streakCount")` in the app, `UserDefaults(suiteName:)` read in the widget's timeline provider, done in twenty minutes.
+
+Except the app's own UI didn't update. I'd log a brew, watch the streak label sit there unchanged, and only see the new number after force-quitting and reopening. The widget was reading the value fine. The view showing that exact same key, in the exact same process, wasn't.
+
+That's when I actually read what `@AppStorage` does instead of assuming it's `@State` with a persistence bow on top.
+
+---
+
+## What `@AppStorage` actually is
+
+`@AppStorage` is sugar over `UserDefaults`. When you write:
+
+```swift
+@AppStorage("streakCount") var streakCount = 0
+```
+
+SwiftUI reads the current value from `UserDefaults.standard` on init, and sets up a KVO observation so that when *that specific key, in that specific `UserDefaults` instance* changes, the view invalidates. It's not a general "wake up whenever this piece of app state changes" mechanism. It's tied, tightly, to one string key in one defaults suite.
+
+That tight coupling is exactly what broke my streak counter, because I had two different property wrappers pointed at two different suites.
+
+---
+
+## The bug: two `UserDefaults`, one key, zero communication
+
+The widget needs an App Group to read data written by the host app — that's not optional, extensions and the main app run in separate processes with separate sandboxes. So the write side used the shared suite:
+
+```swift
+let shared = UserDefaults(suiteName: "group.com.nativefirst.brewlog")
+shared?.set(streak, forKey: "streakCount")
+```
+
+And the SwiftUI view, written before the widget existed, still had:
+
+```swift
+@AppStorage("streakCount") var streakCount = 0
+```
+
+No suite name means `.standard`. Two completely different plists, same key string. The widget's timeline provider read from the App Group suite and saw the update fine — timeline providers don't use `@AppStorage`, they just call `UserDefaults(suiteName:)` directly on each refresh, so there's no observation to miss. But the in-app view's `@AppStorage` was watching `.standard`, which nobody was writing to anymore. It wasn't broken. It was doing exactly what it was told, watching a key that had quietly stopped being the source of truth.
+
+The fix was one line — point the property wrapper at the same suite:
+
+```swift
+@AppStorage("streakCount", store: UserDefaults(suiteName: "group.com.nativefirst.brewlog"))
+var streakCount = 0
+```
+
+Once the read and write side agreed on which plist they meant, the KVO observation started firing and the view updated the moment the app wrote a new value. The bug was never about `@AppStorage` failing to observe — it was observing perfectly. It just wasn't observing the thing I'd changed.
+
+---
+
+## Where else this shows up
+
+Once I knew what to look for, I found the same shape of bug in two other places:
+
+**Background tasks writing through a different code path.** A `BGAppRefreshTask` handler that updates a cached value via a plain `UserDefaults.standard.set(...)` call, while the view reads it through `@AppStorage` pointed at a *different* store instance created earlier and cached in a singleton. Two `UserDefaults(suiteName:)` calls with the same suite name are supposed to be equivalent — they read and write the same underlying plist — but if one of them was accidentally constructed with `nil` or a typo'd suite string, you get the same silent split.
+
+**Another process changing the value.** Even with the suite matching, `@AppStorage`'s KVO observation only reliably fires for changes made *within the same process*, or across processes via Darwin notifications that `UserDefaults` posts for App Group suites specifically. Plain `.standard` writes from an extension won't reliably wake up a KVO observer in the host app — this is part of why the shared-suite pattern exists, not just for read access but for the cross-process notification to work at all.
+
+The common thread: `@AppStorage` observes a *specific storage location*, not a *concept*. "The user's streak count" is a concept. `UserDefaults.standard["streakCount"]` and `UserDefaults(suiteName: "group.…")["streakCount"]` are two different, unrelated storage locations that happen to share a spelling.
+
+---
+
+## A cheap way to catch this before it ships
+
+Grep the codebase for every place a given key string appears:
+
+```bash
+grep -rn '"streakCount"' --include="*.swift" .
+```
+
+If that turns up more than one distinct `UserDefaults` construction — `.standard` in one file, `UserDefaults(suiteName:)` in another — that's the bug, before you ever run the app. It's a five-second check that would have caught mine instantly, and it's worth running on any key that's read or written from more than one target (main app, widget extension, share extension, background task).
+
+The longer-term fix is to not repeat the key string at all. Wrap it:
+
+```swift
+enum BrewLogDefaults {
+    static let suite = UserDefaults(suiteName: "group.com.nativefirst.brewlog")!
+    static let streakCountKey = "streakCount"
+}
+```
+
+and reference `BrewLogDefaults.suite` and `BrewLogDefaults.streakCountKey` from both the widget's timeline provider and every `@AppStorage` declaration. A typo'd suite name becomes a compile error or an obvious single point to check, instead of a silent divergence that only shows up as "the UI just doesn't update sometimes."
+
+---
+
+`@AppStorage` isn't lying about what it does — it's exactly as literal as `UserDefaults` KVO always was. The mistake is expecting it to behave like `@State`, watching *your app's idea of a value*, when it's actually watching *one exact key in one exact plist*. The moment two parts of your app disagree on which plist that is, even by one missing suite name, you get a view that looks broken but is actually just faithfully reporting on the wrong thing.
+
+*If you're wiring up the widget side of this, [WidgetKit + App Intents](/blog/widgetkit-app-intents-log-brew-without-opening-app) covers the timeline provider that reads the App Group suite this post writes to. For the MainActor context that determines when a SwiftUI view is even eligible to redraw once the observation does fire, see [MainActor by Default](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency).*
