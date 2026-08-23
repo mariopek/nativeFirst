@@ -1,0 +1,144 @@
+---
+title: "VoiceOver in SwiftUI: The Five Bugs Your Beautiful UI Is Hiding"
+description: "SwiftUI gives you accessibility almost for free, until the moment it doesn't. A practical checklist of the five VoiceOver bugs that show up in real apps, and the SwiftUI modifiers that actually fix them."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Accessibility", "VoiceOver", "iOS", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1488509082528-cefbba5ad692?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Person holding a phone with eyes closed, representing non-visual interaction"
+---
+
+{/*
+SEO target keywords: voiceover swiftui, swiftui accessibility, accessibilityLabel accessibilityElement, ios accessibility testing, accessibilityIdentifier vs accessibilityLabel, swiftui accessibility checklist
+Internal linking plan: evergreen queue post, cross-link on promotion to whatever 2-3 recent SwiftUI-technique posts are live at publish time (e.g. an @Observable or SwiftUI-fundamentals post) plus /learn/vibe-code-native. Verify links are tracked at promotion time, not now.
+*/}
+
+Turn on VoiceOver, close your eyes, and try to use your own app. Most iOS developers have never done this. I hadn't either, until a support email showed up that started with "I can't tell which button does what."
+
+That one sentence sent me down a rabbit hole. SwiftUI's accessibility story is genuinely good — better than UIKit's, honestly, because half of it comes free from using real `Text`, `Button`, and `Image` components instead of hand-rolled views. But "half free" means the other half is exactly the part that breaks, and it breaks quietly. Nothing crashes. Nothing shows a warning in Xcode. VoiceOver just reads garbage, or nothing, or the wrong thing entirely — and you'll never notice unless you go looking.
+
+Here are the five bugs that show up over and over in real SwiftUI codebases, and the actual fix for each.
+
+---
+
+## Bug 1: The icon-only button that reads its symbol name
+
+This one is everywhere. A toolbar full of SF Symbols, zero labels:
+
+```swift
+Button(action: deleteBrew) {
+    Image(systemName: "trash")
+}
+```
+
+VoiceOver doesn't see a trash can. It sees `Image(systemName:)` and, if you're lucky, announces something like "trash, button." If you're unlucky, it announces nothing useful at all — just "button."
+
+The fix is one line, and there's no excuse to skip it on any icon-only control:
+
+```swift
+Button(action: deleteBrew) {
+    Image(systemName: "trash")
+}
+.accessibilityLabel("Delete brew")
+```
+
+Rule of thumb: if a sighted user needs to *see* the icon to know what it does, a VoiceOver user needs `accessibilityLabel` to know the same thing. Every icon-only button, every custom-drawn control, every symbol used as the entire tappable surface.
+
+---
+
+## Bug 2: The card that reads as six separate fragments
+
+Custom list rows built from an `HStack` of `Text` views are common, and they're an accessibility trap by default. SwiftUI treats each child as its own accessibility element unless you tell it otherwise:
+
+```swift
+HStack {
+    VStack(alignment: .leading) {
+        Text(brew.method)
+        Text(brew.date, style: .date)
+    }
+    Spacer()
+    Text("\(brew.rating)★")
+}
+```
+
+Swipe right once with VoiceOver on and you get four separate stops: the method, the date, then a swipe later the rating — each announced in isolation, with no sense that they belong to one brew. A sighted user reads this card as one thing in half a second. A VoiceOver user has to piece it together across four gestures.
+
+`.accessibilityElement(children: .combine)` merges the whole subtree into a single stop, concatenating the text in view order:
+
+```swift
+HStack {
+    VStack(alignment: .leading) {
+        Text(brew.method)
+        Text(brew.date, style: .date)
+    }
+    Spacer()
+    Text("\(brew.rating)★")
+}
+.accessibilityElement(children: .combine)
+```
+
+For anything more custom than a straight concatenation, `.accessibilityElement(children: .ignore)` plus an explicit `.accessibilityLabel(...)` gives you full control over exactly what gets read and in what order — worth it when the visual layout and the logical reading order genuinely diverge.
+
+---
+
+## Bug 3: The state nobody announces
+
+A brew that's currently timing, a form field with a validation error, a toggle that just flipped — sighted users see these instantly through color, animation, or icon change. VoiceOver users get told about them only if you use `accessibilityValue` or trigger an announcement:
+
+```swift
+Toggle("Notifications", isOn: $notificationsEnabled)
+    .accessibilityValue(notificationsEnabled ? "On" : "Off")
+```
+
+`Toggle` actually announces its state without help in most cases — but custom-built toggles (a colored capsule you built yourself with a `Button` and a computed background) do not, and they're common enough in real design systems that this bites constantly. If it looks like a toggle but isn't a real `Toggle`, you own its accessibility value.
+
+For one-off state changes that don't map to a persistent control — a "Brew saved" confirmation, an error that just appeared — `UIAccessibility.post(notification: .announcement, argument: "Brew saved")` interrupts VoiceOver to say it out loud immediately, the same way a sighted user's eye is drawn to a toast notification.
+
+---
+
+## Bug 4: The touch target that's technically there and practically unusable
+
+Apple's Human Interface Guidelines call for a minimum 44×44pt touch target, and this isn't just a Fitts's-law nicety — for anyone with a motor impairment using Switch Control or VoiceOver's own gesture set, a target smaller than that is a wall, not an inconvenience.
+
+SwiftUI's `Button` is generous about this if you let it size itself, but the moment you wrap a small icon in a tight `.frame()` to match a tidy visual design, you can shrink the tappable area below the visible one:
+
+```swift
+Button(action: dismiss) {
+    Image(systemName: "xmark")
+        .font(.caption)
+}
+.frame(width: 24, height: 24) // visually tidy, a real problem for touch access
+```
+
+`.contentShape(Rectangle())` combined with a larger `.frame()` — or simply padding the tap target beyond the visible glyph — decouples "how big it looks" from "how big you can miss it by":
+
+```swift
+Button(action: dismiss) {
+    Image(systemName: "xmark")
+        .font(.caption)
+        .frame(width: 44, height: 44)
+        .contentShape(Rectangle())
+}
+```
+
+The visible `xmark` stays small. The tappable area doesn't.
+
+---
+
+## Bug 5: Dynamic Type that stops at "large"
+
+This is the one that's easiest to miss because it doesn't involve VoiceOver at all — it's about Dynamic Type, and it fails silently the same way. Fixed-size fonts (`Text("Total").font(.system(size: 14))`) simply ignore a user's accessibility text size setting. `.font(.body)` and the other semantic text styles scale automatically; a literal point size never does.
+
+Test this by setting the simulator's text size to the largest accessibility setting (Settings → Accessibility → Display & Text Size → Larger Text, dragged all the way up) and looking at your own app. Layouts that looked fine at the default size routinely truncate, overlap, or clip at the largest setting — and if you've hardcoded any font sizes, those elements simply never grow at all while everything around them does, which reads as more broken than a layout that scales awkwardly.
+
+---
+
+## The actual testing habit
+
+None of this requires a lab or special hardware. Two things, both already on your Mac and simulator:
+
+**Turn on VoiceOver in the simulator** (`Settings → Accessibility → VoiceOver`, or the triple-click-side-button shortcut on a real device) and swipe through your own primary flow — sign-up, checkout, whatever the app's core loop is — with your eyes actually closed. Ten minutes, once, before you ship a screen. You will catch things a code review never will, because a code review reads the Swift, and this bug lives in the gap between the Swift and what gets spoken out loud.
+
+**Use the Accessibility Inspector** (Xcode → Open Developer Tool → Accessibility Inspector) to audit a running app without the eyes-closed theater — it lists every element's label, value, and traits, and flags obviously missing labels automatically. Faster for a quick pass; less honest than actually listening.
+
+Do both. The inspector catches the mechanical misses. Ten minutes of real VoiceOver use catches the ones that are technically labeled but still make no sense in the order they're read — and that gap between "technically accessible" and "actually usable" is exactly where most SwiftUI apps quietly sit today.
