@@ -1,0 +1,158 @@
+---
+title: "SwiftUI Reset My State for No Reason. The Bug Was Identity, Not Bindings."
+description: "A text field kept clearing itself on every re-render, and no amount of staring at @State fixed it. The actual cause was SwiftUI's view identity system silently deciding my view was a brand new one. Here's how identity actually works and the three ways to break it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift", "iOS Development", "State Management", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1494059980473-813e73ee784b?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Scattered puzzle pieces on a table, none of them quite matching — a stand-in for a view SwiftUI keeps mistaking for a different one"
+---
+
+{/*
+  SEO target keywords:
+  - SwiftUI state resets unexpectedly
+  - SwiftUI view identity explained
+  - SwiftUI ForEach id state loss
+  - SwiftUI .id() modifier gotcha
+  - why does @State reset in SwiftUI
+  - SwiftUI struct identity vs structural identity
+  - SwiftUI view diffing algorithm
+
+  Internal linking strategy:
+  - /blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work — another "the obvious fix isn't the real fix" SwiftUI post
+  - /blog/tdd-swiftui-observable-viewmodel-red-green-refactor — testing approach referenced for regression-proofing the fix
+  - /blog/dependency-injection-swift-without-frameworks — protocol-seam pattern, mentioned in passing
+  - /learn/swiftui-in-practice — course track
+
+  Evergreen: no dated news hook. Safe to publish any time.
+*/}
+
+I had a text field that cleared itself every time I typed in it. Not every keystroke — that would've been an obvious binding bug. It cleared itself roughly every third or fourth character, which is a special kind of infuriating because it looks like a race condition and it is not.
+
+I spent an embarrassing amount of time staring at `@State` and `@Binding` declarations, convinced I had a data-flow bug. I didn't. SwiftUI had decided, somewhere in the middle of my typing, that the text field I was typing into was a *different text field* than the one I'd started with. New view, new state, old text gone.
+
+That's the part nobody warns you about early enough: **SwiftUI doesn't track your views. It tracks view identities, and those are not the same thing.**
+
+---
+
+## Structs don't have addresses, so identity has to be invented
+
+A `View` in SwiftUI is a struct. Structs get created and destroyed constantly — every time a parent's `body` re-evaluates, it produces a fresh struct for every child view it contains. If SwiftUI treated "a new struct value" as "a new view," `@State` would reset on every single render. Obviously it doesn't usually do that, so something else is deciding which struct values represent the *same* view across renders.
+
+That something is identity. SwiftUI assigns every view a stable identity, and as long as that identity stays the same across two renders, it treats the view as continuous — same `@State`, same animation context, same everything — even though the underlying struct value is technically brand new each time.
+
+There are two ways a view gets that identity, and mixing them up is where the bugs live.
+
+---
+
+## Structural identity: position in the view tree
+
+Most views never get an explicit ID. They get one for free, based on where they sit in the tree — their type, and their position among their siblings. This is called **structural identity**, and it's why this works without you doing anything:
+
+```swift
+struct CounterView: View {
+    @State private var count = 0
+
+    var body: some View {
+        VStack {
+            Text("Count: \(count)")
+            Button("Increment") { count += 1 }
+        }
+    }
+}
+```
+
+Every time `body` runs, `CounterView` produces a new struct. SwiftUI looks at "a `CounterView` in this position, under this parent" and says: same slot, same identity, keep the `@State`. That's the default, and it's why `@State` feels magically persistent even though the view type itself is immutable and gets rebuilt constantly.
+
+The catch: structural identity depends on *shape*, not just position. If you wrap a view in a conditional, you change its shape.
+
+```swift
+var body: some View {
+    VStack {
+        if isEditing {
+            TextField("Name", text: $name)
+        } else {
+            Text(name)
+        }
+    }
+}
+```
+
+Toggle `isEditing` and SwiftUI doesn't see "the same slot, different content." It sees a `TextField` disappearing and a `Text` appearing — two different structural identities occupying the same visual space for an instant. Any `@State` living inside either branch is gone the moment you swap. If your `TextField` had its own local `@State` for, say, cursor-adjacent UI, that state doesn't survive the toggle. This is the single most common way people accidentally reset state and never connect it to "identity" as a concept — it just looks like the field "forgot" something.
+
+---
+
+## Explicit identity: `.id()` and `ForEach`
+
+The other way a view gets identity is one you hand it yourself, usually through `ForEach` or the `.id()` modifier. This is **explicit identity**, and it's where my text field bug actually lived.
+
+```swift
+struct BrewListView: View {
+    @State private var brews: [Brew] = []
+    @State private var filterText = ""
+
+    var body: some View {
+        List {
+            ForEach(filteredBrews) { brew in
+                BrewRow(brew: brew)
+            }
+        }
+    }
+
+    private var filteredBrews: [Brew] {
+        brews.filter { filterText.isEmpty || $0.name.contains(filterText) }
+    }
+}
+```
+
+`ForEach` uses `Brew`'s `Identifiable` conformance — its `id` — to decide which `BrewRow` is which across renders. That's exactly what you want for a list. It's also exactly what bit me, because my actual bug wasn't in this list at all — it was a search field bound to `filterText`, sitting in a `VStack` above a `ForEach` whose array I was rebuilding from scratch on every keystroke, including reassigning fresh UUIDs to items that hadn't actually changed. Every keystroke, the list's identities churned, SwiftUI decided large parts of the subtree were "new," and the churn was heavy enough to occasionally reset focus and, with it, the in-progress edit.
+
+The fix wasn't in the text field. It was making sure `Brew.id` stayed stable across filtering instead of getting regenerated:
+
+```swift
+// Before — id assigned at construction time inside a computed property,
+// so filtering (which re-derives the array) can produce fresh ids
+private var filteredBrews: [Brew] {
+    brews
+        .filter { filterText.isEmpty || $0.name.contains(filterText) }
+        .map { Brew(id: UUID(), name: $0.name, roast: $0.roast) } // bug: new id every time
+}
+
+// After — filter, don't reconstruct. Identity survives.
+private var filteredBrews: [Brew] {
+    brews.filter { filterText.isEmpty || $0.name.contains(filterText) }
+}
+```
+
+Once identity stopped churning on every keystroke, the focus-loss disappeared. The text field was never the problem. It was a victim of instability three view-tree levels away.
+
+---
+
+## `.id()` is a sledgehammer — use it to force resets, not to fix them
+
+`.id()` lets you override identity explicitly:
+
+```swift
+TextField("Name", text: $name)
+    .id(selectedBrew?.id)
+```
+
+This is genuinely useful when you *want* a fresh view — say, a detail form that should discard its local edit state the moment the user picks a different item from a list, rather than showing the new item's data blended with the old item's half-typed edits. Changing `.id()` forces SwiftUI to treat it as a brand new view and drop all associated state on purpose.
+
+The mistake is reaching for `.id()` to "fix" a state bug you don't understand yet. It'll often make the symptom go away — because it forces a clean reset — while leaving the actual identity instability in place. If you find yourself sprinkling `.id(UUID())` on a view just to make a glitch stop, you've suppressed the bug, not found it. That `UUID()` call re-evaluates on every `body` pass, which means you've just guaranteed the view *never* keeps its identity, ever, which is a much bigger hammer than most people realize they're swinging.
+
+---
+
+## A quick way to tell which kind of bug you have
+
+If state resets whenever a conditional (`if`, `switch`, or the type of a view) changes shape — that's structural identity. Fix it by keeping the view's shape constant and pushing the conditional logic *inside* the view instead of around it, or by using `.opacity()`/`.hidden()` to keep both branches structurally present.
+
+If state resets whenever a collection you're iterating with `ForEach` gets rebuilt, re-sorted, or re-filtered — that's explicit identity. Fix it by making sure the underlying model's `id` is stable and never regenerated during filtering, sorting, or mapping operations that shouldn't be treated as "new data."
+
+Either way, the debugging move that actually works is the same: stop looking at the `@State` declaration, and start asking what SwiftUI thinks this view's identity *was* one render ago versus what it thinks it is now. The state was never broken. SwiftUI just, correctly, gave you a new view.
+
+---
+
+Identity is the one piece of the SwiftUI mental model that's easy to skip past in every tutorial, because most of the time the defaults quietly do the right thing. Then one day they don't, and you're staring at a text field that erases itself, absolutely certain the bug has to be in the binding — because the binding is the only thing you can see. It never was. It was the thing deciding whether that binding still pointed at "the same view" one keystroke later.
+
+*For a related "the obvious explanation isn't the real one" SwiftUI debugging story, see [Weak Self Isn't the Retain Cycle Fix You Think It Is in @Observable](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work). If you want a red-green-refactor workflow for pinning behavior like this down before you go hunting for the cause, [TDD for SwiftUI](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor) covers the loop I used to confirm the fix actually held.*
