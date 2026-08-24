@@ -1,0 +1,110 @@
+---
+title: "Embedded Swift Won't Let You Cheat. Turns Out That's a Feature."
+description: "Embedded Swift bans existentials, reflection, and the Objective-C runtime to fit Swift on microcontrollers. The restrictions it enforces are the same discipline that makes regular iOS code faster — and BrewLog's own networking layer breaks the rule on line one."
+pubDate: 2026-08-24
+tags: ["Swift", "Embedded Swift", "Performance", "iOS Development", "SwiftUI"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1515630278258-407f66498911?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a microcontroller circuit board with visible chips and traces"
+---
+
+{/*
+SEO keywords: Embedded Swift, Swift existentials, any Protocol Swift, protocol witness table, Swift reflection Mirror, Swift monomorphization, Embedded Swift restrictions, Swift 6.4, Swift for microcontrollers, Swift performance existential container.
+Internal links: swift-withdeadline-se-0526-network-timeout (same NetworkClient/ResilientNetworkClient code), weak-self-retain-cycles (Observable discipline theme), xcode-build-time-optimization-solo-ios-developer (binary size / build discipline), swift-testing-tasklocal-trait-st-0026-static-var-di (Swift language discipline theme). Course lesson: /learn/vibe-code-native.
+No app mention this post — didn't fit naturally, last mention 2026-08-03/08-23 window covered elsewhere.
+*/}
+
+Last week two threads landed on r/swift within days of each other. One: "Embedded Swift Improvements Coming in Swift 6.4." The other: "Embedded Swift forces you to write better code." Same feature, two completely different pitches — one's a changelog, the other's a confession.
+
+I went looking for what actually forces anything, and I found the answer sitting in my own BrewLog codebase, on line 9 of a file I wrote three weeks ago.
+
+---
+
+## What Embedded Swift actually is
+
+Embedded Swift isn't a new language. It's a compilation mode — you pass `-enable-experimental-feature Embedded` (soon to be a stable flag) and the compiler produces code with no runtime metadata, no dynamic linking, and a binary that can be a few kilobytes instead of megabytes. It's how Swift runs on a Raspberry Pi Pico, on a Matter accessory's microcontroller, or on any target too small to carry the full Swift runtime.
+
+To get there, the compiler has to remove things regular Swift leans on constantly:
+
+- **No reflection.** `Mirror` doesn't exist. There's no runtime type catalog to walk.
+- **No Objective-C interop.** No bridging, no `@objc`, no `NSObject` — there's no ObjC runtime on a microcontroller.
+- **Generics are fully monomorphized.** Every generic function gets a separate compiled copy per concrete type, at compile time. No shared generic implementation dispatching through witness tables at runtime.
+- **Existential types are heavily restricted.** `any SomeProtocol` needs the compiler to reason about size and layout at compile time in ways it normally defers to runtime. Plenty of everyday existential usage simply won't compile.
+
+Read that list as a spec and it sounds like a cage. Read it as a lint rule and it sounds like the code review you wish you got more often.
+
+---
+
+## The existential you already wrote
+
+Here's `ResilientNetworkClient`, BrewLog's retry-and-dedup wrapper around network calls:
+
+```swift
+struct ResilientNetworkClient: NetworkClient {
+    let wrapped: NetworkClient
+    let authTokenStore: AuthTokenStore
+    let deduplicator: RequestDeduplicator
+    var maxRetries: Int = 2
+    var overallBudget: Duration = .seconds(8)
+    // ...
+}
+```
+
+`let wrapped: NetworkClient` — no `any` written, but that's exactly what it is. Since SE-0335, a bare protocol name in that position means "an existential box holding some conforming type, chosen at runtime." I wrote it that way on purpose: `ResilientNetworkClient` wraps *any* client — the real `URLSessionNetworkClient`, or a mock in tests — and it shouldn't need to know which at compile time.
+
+That's completely idiomatic Swift. It's also precisely the pattern Embedded Swift makes hardest, because `NetworkClient` has a generic method:
+
+```swift
+protocol NetworkClient {
+    func send<T: Decodable>(_ endpoint: Endpoint, as type: T.Type) async throws -> T
+}
+```
+
+A protocol with a generic requirement can't be trivially boxed into a fixed-size existential container the way a plain protocol can — the compiler doesn't know, at the call site, which `T` you'll ask for until you ask. Regular Swift handles this today with a witness table and some runtime bookkeeping. Embedded Swift, with no runtime metadata to spare, has nowhere to put that bookkeeping. This is exactly the shape of protocol Embedded Swift's existential support struggles with hardest.
+
+I'm not going to claim I compiled BrewLog in Embedded mode and watched it fail — I didn't, and that's not what this post is for. But I don't need to run the compiler to know this: `let wrapped: NetworkClient` is an existential of a generic-method protocol, and that's the textbook case Embedded Swift's restrictions target. If I ever wanted this file portable to a constrained target, the fix is generics, not existentials:
+
+```swift
+struct ResilientNetworkClient<Wrapped: NetworkClient>: NetworkClient {
+    let wrapped: Wrapped
+    // ...
+}
+```
+
+Same behavior. The type of `wrapped` gets nailed down at compile time and monomorphized instead of resolved at runtime through a box.
+
+---
+
+## Why the boxed version was slower anyway
+
+Here's the part that has nothing to do with microcontrollers. An existential container in normal Swift is three machine words — enough to either hold a small value inline or point at a heap allocation, plus a pointer to the witness table that says which methods to call. Every call through `any NetworkClient` is an indirect call through that table. It's not slow exactly — Swift's existentials are well-optimized — but it's not free, and it's a cost the generic version simply doesn't pay, because the compiler already knows the concrete type and can often inline straight through.
+
+For one wrapper struct around one network call, that difference is imperceptible. Nobody's profiler will ever point at `ResilientNetworkClient`. But that's exactly the trap: the cost is small enough to never show up in a flame graph, and common enough that it's everywhere — every `[any Codable]`, every `(some View) -> AnyView`, every protocol-typed array in a hot SwiftUI body — quietly adding up to the vague "why does this feel a little sluggish" you can never quite pin down.
+
+Embedded Swift can't afford to be vague about it, because on a microcontroller "a little slower" and "a little bigger" are the whole budget. So the compiler simply refuses the pattern instead of tolerating it. That's the forcing function the Reddit thread was pointing at — not a style preference, a compiler with zero slack.
+
+---
+
+## Where this actually matters for an iOS app
+
+You are almost certainly not shipping BrewLog to a Matter thermostat. So why care?
+
+Because "would this compile in Embedded Swift" turns out to be a genuinely useful gut-check for regular app code, the same way "could you unit test this without mocking three things" is a gut-check for whether a function is doing too much:
+
+- **A stored `any Protocol` property** is a sign you reached for dynamic dispatch where a generic parameter would've worked, and the compiler would happily specialize it away.
+- **`Mirror`-based code** (some JSON debug-printers, some "auto-generate a form from a struct" tricks) always has a compile-time alternative — usually a macro now, which is faster and gives you an actual compiler error instead of a runtime surprise.
+- **`AnyView` in a SwiftUI hierarchy** is the existential problem's most common iOS costume. It exists to erase a `some View`'s concrete type, and every one you add is another spot the view diffing algorithm has to work harder to reason about.
+
+None of these are wrong to use. `ResilientNetworkClient`'s existential wrapper is genuinely the right call for BrewLog today — the protocol exists specifically so tests can substitute a mock, and that flexibility is worth more than a few nanoseconds of witness-table dispatch. Embedded Swift doesn't get to make that trade; it has no runtime budget at all. Your app does. Use it on purpose, not by accident.
+
+---
+
+## The real takeaway
+
+Embedded Swift's restrictions read like limitations because they're described as "things you can't do." Flip them around and they're a checklist for "things that quietly cost more than they look like": existentials, reflection, dynamic dispatch through protocols with generic methods.
+
+You don't need a microcontroller to benefit from that checklist. You just need to notice, next time you type `any` out of habit, that a compiler somewhere would stop you — and ask yourself whether it should have.
+
+---
+
+*Curious how the actual timeout budget in `ResilientNetworkClient` works? That's covered in [Swift Just Got a Real Timeout API](/blog/swift-withdeadline-se-0526-network-timeout). For more on where Swift's discipline pays off in ways you don't immediately see, [Weak Self Isn't the Retain Cycle Fix You Think It Is](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work) covers a similar "the obvious pattern isn't free" story in `@Observable`. And if you're building your intuition for when a language constraint is actually good design, [Vibe Code Native](/learn/vibe-code-native) is a good place to keep going.*
