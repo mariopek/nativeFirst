@@ -1,0 +1,98 @@
+---
+title: "Your @MainActor Code Was Never Promised the Main Thread. Swift's About to Make That Official."
+description: "Swift Evolution's fourth pitch for Custom Main and Global Executors quietly confirms something most iOS developers get wrong: @MainActor guarantees serialized isolation, not literally Thread.main. Here's what changes and why it matters."
+pubDate: 2026-08-25
+tags: ["Swift", "Swift Concurrency", "Swift Evolution", "MainActor", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1639313521811-fdfb1c040ddb?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An old telephone switchboard with patch cables connecting calls to different lines"
+---
+
+{/*
+SEO keywords: Swift custom executors, MainActor thread guarantee, Swift Evolution custom main and global executors, SchedulingExecutor, TaskExecutor, isMainThread vs MainActor, Swift concurrency executor pitch, actor isolation vs thread identity
+Internal linking plan: swift-6-2-concurrent-nonisolated-mainactor-decision-tree (the decision-tree post this directly extends), swift-6-2-approachable-concurrency-migration-guide (the wider Swift 6.2 concurrency series), swift-withdeadline-se-0526-network-timeout (another "we covered this while it was still a pitch" precedent), swift-testing-tasklocal-trait-st-0026-static-var-di (same pattern, different proposal), course lesson /learn/swiftui-in-practice-13-swift-6-concurrency (Swift 6 Strict Concurrency lesson)
+No app mention this post — didn't fit naturally, last mention 2026-08-24.
+*/}
+
+A junior dev on a team I was consulting for once wrote this inside a `@MainActor` method, just to be safe:
+
+```swift
+assert(Thread.isMainThread, "this should always be true here")
+```
+
+Reasonable instinct. `@MainActor` means "main thread," right? That's the whole mental model everyone builds when they learn Swift concurrency. I told him it was redundant, deleted it in review, moved on. I was right that it would never fire. I was wrong about *why*.
+
+Turns out the assertion wasn't guaranteed by `@MainActor` at all. It was guaranteed by an implementation detail that Swift Evolution is now, four pitches in, formally deciding to let you replace.
+
+---
+
+## The pitch: Custom Main and Global Executors
+
+[The fourth revision](https://forums.swift.org/t/pitch-4-custom-main-and-global-executors/89107) of **Custom Main and Global Executors** went up on the Swift forums this week, from Alastair Houghton, Konrad Malawski, and Evan Wilde. It's been through three earlier rounds; this version trims scope by splitting off delayed enqueuing into its own accepted proposal ([SE-0505](https://forums.swift.org/t/se-0505-delayed-enqueuing-for-executors/84157)) and separates a new `ThreadDonationExecutor` protocol out of `RunLoopExecutor`.
+
+The core idea, [straight from the proposal text](https://github.com/swiftlang/swift-evolution/pull/2654):
+
+> Currently the built-in executor implementations are provided directly by the Swift Concurrency runtime, and are built on top of Dispatch. While developers can currently provide custom executors, it is not possible to override the main executor... or the global default executor.
+
+On Darwin, that's never mattered much, because Dispatch's main queue *is* the main thread, and Apple's runtime hardcodes the main executor to exactly that. The two concepts have been indistinguishable in practice for the entire life of Swift Concurrency. But the proposal's real audience is everyone *not* on Darwin: platforms using `libuv`, `libevent`, `Qt`, or `MFC` for their run loop instead of Dispatch, embedded targets with no OS-level scheduler at all, and — reading between the lines — Apple's own runtime team, who'd like to eventually implement the default executors in Swift instead of C++.
+
+None of that is iOS-specific. But the pitch forces a question worth sitting with even if you never touch a non-Darwin target: **what is `@MainActor` actually promising you?**
+
+---
+
+## It was never "the main thread." It was "one lane at a time."
+
+Here's the part that trips people up, and it's not new to this pitch — it's just been invisible because nothing exposed the seam.
+
+`@MainActor` guarantees **serialized, isolated access**. Every call into MainActor-isolated code executes one at a time, in order, without data races. That's the actual contract. On Apple platforms today, the mechanism happens to be "run it on the main thread via Dispatch's main queue," so the guarantee and the thread have always lined up perfectly. `Thread.isMainThread` inside `@MainActor` code has always been true — but it's true as a *consequence* of the current implementation, not as a language-level promise.
+
+Franz Busch put the practical version of this well in the pitch thread, describing how you can already reconstruct "what executor is this task actually running on" from existing public API:
+
+```swift
+extension Task {
+  static nonisolated(nonsending) func currentExecutor() async -> any Executor? {
+    if let actor = #isolation {
+      return actor.withSerialExecutor { $0 }
+    } else if let taskPreferred = Task.taskPreferredExecutor {
+      return taskPreferred
+    } else {
+      return Task.defaultExecutor
+    }
+  }
+}
+```
+
+Notice what that chain actually checks: isolation, then task-level executor preference, then the default. Thread identity doesn't appear anywhere in it. The runtime was never reasoning about threads — it was reasoning about executors, and threads were just the vehicle Dispatch happened to use to run them.
+
+Once you can supply your own `MainExecutor` conformance — which is exactly what this proposal lets you do — that vehicle stops being fixed. Your `@MainActor` code stays correctly serialized. It might just not be running on the thread named "main" anymore.
+
+---
+
+## Where this actually bites, in code you already ship
+
+I went looking for how casually this assumption shows up in real code, and I didn't have to look far. BrewLog's `LogBrewIntent.swift` marks its App Intent perform method `@MainActor` so it can safely touch the SwiftData model container from a system-invoked context — Siri, Shortcuts, widgets, whatever triggers it:
+
+```swift
+@MainActor
+func perform() async throws -> some IntentResult {
+    // touches the shared ModelContainer safely
+}
+```
+
+That code is correct. It doesn't call `Thread.isMainThread` anywhere, and it doesn't need to — it just needs the isolation guarantee, which is exactly what `@MainActor` is *for*. But I've reviewed plenty of code in other apps that adds a defensive `assert(Thread.isMainThread)` at the top of MainActor methods anyway, usually left over from a pre-Swift-Concurrency codebase where thread checks were the only tool available. That assertion isn't wrong today. It's just testing an implementation detail instead of the actual contract, and this pitch is Swift Evolution's way of saying: don't rely on that gap staying closed forever.
+
+The fix, if you have code like that, is almost too simple to be satisfying: delete the thread check, trust the isolation. If a value needs to be reachable only from MainActor-isolated code, let the type system enforce that through actor isolation, not through an assertion checking which physical thread happens to be running it this week.
+
+---
+
+## What this doesn't change for you today
+
+To be honest about where this stands: it's a **pitch**, not even a review yet, and this is its fourth iteration — proposals at this stage can still shift shape or die entirely. Nothing about `@MainActor`'s behavior on iOS changes the moment this lands. Apple's runtime will very likely keep the Dispatch-backed main executor as the default on Darwin for the foreseeable future, for the same reason it's always made sense there: Core Foundation's run loop already expects it.
+
+What *does* change is that the gap between "what `@MainActor` promises" and "what you've been assuming it promises" stops being theoretical. It becomes an API surface — `MainExecutor`, `TaskExecutor`, `isMainExecutor` — that someone, somewhere, will actually swap out. Cross-platform Swift, embedded Swift, server-side frameworks with their own event loops: all of them get a real reason to do exactly that.
+
+The lesson doesn't need the proposal to ship to be useful right now: if your code's correctness depends on `Thread.isMainThread`, it's depending on the wrong thing. If it depends on `@MainActor` isolation, it's depending on the right thing — and it'll keep working no matter what ends up running underneath it.
+
+---
+
+*For the full decision tree on `@concurrent`, `nonisolated`, and `@MainActor` in Swift 6.2, see [@concurrent vs nonisolated vs @MainActor: The Swift 6.2 Decision Tree That Fits on a Napkin](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree/). For the migration story this all builds on, [Migrating a Real App to Swift 6.2 Strict Concurrency](/blog/swift-6-2-approachable-concurrency-migration-guide/) walks through 86 real errors. We've covered proposals at this exact pitch stage before and been honest about it — see [Swift Just Got a Real Timeout API](/blog/swift-withdeadline-se-0526-network-timeout/) and [Swift Testing Runs Your Suite in Parallel](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di/). And if actor isolation and Sendable errors still feel like a wall of red text, the course lesson [Swift 6 Strict Concurrency — @MainActor, Sendable, and Reading the Errors](/learn/swiftui-in-practice-13-swift-6-concurrency) is built to get you past exactly that.*
