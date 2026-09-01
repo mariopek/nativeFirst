@@ -1,0 +1,92 @@
+---
+title: "SwiftPM Is Getting Real Compilation Caching. My Five Cold Builds a Day Are About to Get Cheaper."
+description: "SE-0547 brings CAS-backed compilation caching to SwiftPM: content-addressed cache keys instead of timestamps, with reported 67-75% faster clean builds. Here's what it actually configures, and why it matters more for worktrees and CI than for your everyday edit-build-run loop."
+pubDate: 2026-09-01
+tags: ["Swift", "Swift Evolution", "SwiftPM", "Xcode", "Build Time", "CI"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1484557052118-f32bd25b45b5?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of server storage racks, the kind of content-addressed cache infrastructure SwiftPM is about to borrow from"
+---
+
+{/*
+SEO keywords: SE-0547, SwiftPM compilation caching, swift package build-cache, CAS content addressable store Swift,
+swift build cache configure, SwiftPM clean build speed, compilation caching CI Swift, prefix mapping SwiftPM
+
+Internal linking plan: /blog/xcode-build-time-optimization-solo-ios-developer (same build-time obsession, DerivedData angle,
+also the source of the 142s -> 38s numbers this post references), /blog/spm-modular-architecture-swift-when-to-split
+(SPM structure, natural follow-on read), /blog/se-0546-memberwise-init-same-file-extensions (same "small Evolution
+proposal, real payoff" pattern)
+
+Timely: review opened August 25, closes September 1 (today). Update note if it ships as accepted.
+*/}
+
+I run five apps out of one Mac, and I have a personal ritual: every time I switch git worktrees to context-switch between them, I watch the build progress bar and silently do math on how much of my life this is costing me. Turns out Swift has been listening. [SE-0547](https://forums.swift.org/t/se-0547-swiftpm-support-for-compilation-caching/89191) — SwiftPM support for compilation caching — finishes its review today, September 1.
+
+If it ships, the thing costing me those minutes gets a real fix, not another incremental-build tweak.
+
+---
+
+## What's actually new here
+
+Swift and Clang have had compiler-level support for a CAS — a Content Addressable Store — for a while now. You may have seen `-cache-compile-job` flags mentioned in passing if you've ever gone spelunking through `xcodebuild -showBuildSettings` output. What's been missing is SwiftPM actually driving it.
+
+SE-0547 gives SwiftPM three places to turn this on:
+
+```bash
+# per-build
+swift build --enable-build-caching
+
+# package-local, stored in .swiftpm/configuration/ (gitignored by default)
+swift package build-cache configure --enable-caching
+
+# global, stored in ~/Library/org.swift.swiftpm/configuration/
+swift package build-cache configure --global --enable-caching
+```
+
+Each level overrides the one before it, and settings are additive — turn caching on globally, then override just the cache path for one package that needs its cache somewhere with more disk space. There's also `swift package build-cache info` to check the cache's current size and `swift package build-cache clean` to nuke it, which matters more than it sounds like once you've been burned by a stale on-disk cache once.
+
+The proposal's numbers, cited from the authors' own benchmarks on a 12-core machine: a fully cached clean debug build of SwiftPM itself is **68% faster**, SwiftSyntax is **75% faster**, Vapor is **67% faster**. Those aren't incremental-build numbers — those are clean-build numbers, cache warm.
+
+---
+
+## Why "clean build" is the part that matters
+
+Here's the thing about incremental builds: they already work pretty well when you're just editing one file and hitting Cmd-B. Xcode's timestamp-based invalidation handles that case fine. Where it falls over completely is anything that isn't "the same build folder, slightly newer than last time":
+
+- Switching git branches, which touches enough file timestamps to force big recompiles even when the actual code is mostly identical to a branch you built an hour ago
+- Multiple git worktrees — which is exactly my five-apps ritual — where every worktree starts with an empty `.build` or `DerivedData` folder no matter how much of the source overlaps with a sibling worktree
+- CI, which does a clean checkout every single run by design
+
+None of those benefit from incremental builds, because incremental builds work by reusing intermediates in a directory that, in all three cases, doesn't exist yet or was just wiped. Compilation caching sidesteps that entirely: instead of asking "is this file newer than the last build," it hashes the actual inputs — sources, compiler flags, imported modules — into a content-based key, and checks whether that exact key has been compiled before, anywhere. Branch switch, fresh worktree, clean CI checkout — doesn't matter. Same inputs, same hash, same cached output, no recompile.
+
+I wrote up the 142-second-to-38-second numbers I got from disciplined DerivedData hygiene and module splitting in [an earlier build-time post](/blog/xcode-build-time-optimization-solo-ios-developer). That work still stands — it's the incremental-build side of the equation. SE-0547 is the other half, the one that doesn't care how tidy your DerivedData is because it isn't reading timestamps at all.
+
+---
+
+## The detail worth knowing before you flip the switch: prefix mapping
+
+The setting most people will skip past is `--enable-build-cache-prefix-mapping`, on by default whenever caching is enabled. It canonicalizes absolute file paths in the compiler's command line before hashing, which sounds like a footnote until you realize what it unlocks: two checkouts of the same package at different absolute paths — say `/Users/mario/dev/BrewLog` on my machine and `/Users/mario/dev/worktrees/brewlog-feature-x` in a worktree — can share cache entries, because the path itself stops being part of the cache key.
+
+Without prefix mapping, every worktree would compute a different hash purely because `/worktrees/brewlog-feature-x/` isn't `/dev/BrewLog/`, even though the source is byte-identical. That's exactly the case where caching would otherwise buy you nothing for the one workflow I most wanted it for.
+
+There's a real security note buried in the proposal too, worth taking seriously if you're on a shared CI runner: whoever can write to the cache can tamper with build outputs, same risk profile as anyone who can modify your source. Not a reason to skip it locally. A reason to think about permissions before pointing `--build-cache-path` at something shared.
+
+---
+
+## What this doesn't fix
+
+It's a build cache, not a compiler speedup. If your bottleneck is one enormous file that takes forever to type-check even on a genuinely first-ever compile — no prior cache entry exists yet, nothing to replay — SE-0547 does nothing for you. That's still a "split the file, simplify the generics" problem, same as always.
+
+It's also opt-in, deliberately. Existing packages are unaffected until someone runs `swift package build-cache configure --enable-caching`. No default size limit is specified in the proposal beyond "implementation-defined," so the first real question once this ships is what Xcode actually sets it to out of the box, and whether that number is sane for a machine juggling five apps' worth of caches at once.
+
+It's also worth saying that a build cache doesn't fix a package graph that's tangled for other reasons. If you're still shipping one giant target because [splitting it felt like more trouble than it was worth](/blog/spm-modular-architecture-swift-when-to-split), caching will happily speed up recompiling that one giant target — it won't make the underlying structure any less painful to work in. This is a proposal that lands well on healthy package graphs, not one that repairs unhealthy ones.
+
+---
+
+## Where I'd turn this on first
+
+Not on my day-to-day edit-build-run loop — that's already the incremental build's job, and caching won't beat a build that didn't need to recompile anything in the first place. I'd turn it on for the worktree switching, and for CI if any of these apps ever grow a real pipeline instead of my current "push and pray" setup.
+
+Review closes today. If it's accepted, the interesting follow-up post isn't the proposal — it's whatever Xcode's default cache size and eviction policy turn out to be, because that's the number that decides whether five apps' worth of build caches politely coexist on one SSD or start evicting each other into uselessness.
+
+It's a small, mechanical proposal, same as [the same-file memberwise init fix](/blog/se-0546-memberwise-init-same-file-extensions) I wrote up a couple weeks ago — nobody's redesigning their app around it. But it's the kind of thing that quietly gives back minutes you've been losing to a build system doing more work than the situation actually called for.
