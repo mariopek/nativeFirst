@@ -1,0 +1,115 @@
+---
+title: "Your Child View Needs to Tell Its Parent Something. A Binding Is the Wrong Tool."
+description: "@Binding is great for two-way state you own. It's the wrong tool when a child view needs to report something upward that it doesn't own — a measured size, a scroll offset, a list of anchors. That's what PreferenceKey is actually for."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "PreferenceKey", "Layout", "View Composition", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1553877522-43269d4ea984?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Interoffice mail trays passing folders up a chain, each one relayed to the next"
+---
+
+{/*
+SEO keywords: swiftui preferencekey, child to parent communication swiftui, preferencekey vs binding, measure view size swiftui, GeometryReader alternative preferencekey, swiftui onPreferenceChange
+
+Internal linking plan:
+- /blog/swiftui-view-identity-state-reset-bug (view tree mechanics, identity vs data flow)
+- /blog/observable-vs-observableobject-1000-row-redraw-benchmark (state ownership and re-render context)
+- /blog/asyncimage-caching-swiftui-scroll-performance (ScrollView-adjacent, layout measurement in real views)
+- /learn/vibe-code-native course lesson
+- Evergreen queue post, no app mention forced
+*/}
+
+I spent an embarrassing chunk of an afternoon trying to pass a `@Binding<CGFloat>` down through four levels of view hierarchy so a child could report its own height to a parent that needed to size a card around it.
+
+It compiled. It even sort of worked, until the child re-rendered for an unrelated reason and stomped the binding back to a stale value. I was using the wrong mental model, and the fix wasn't a cleverer binding — it was a completely different mechanism I'd been avoiding because the name sounded scarier than it is.
+
+---
+
+## Bindings are for state you own together
+
+A `@Binding` says: this child and this parent share ownership of one piece of truth, and either side can write to it. That's the right shape for a toggle, a text field, a selected tab — things the parent hands down and expects to potentially get changed.
+
+A measured height is not that. The child isn't editing a shared value on the parent's behalf — it's reporting a fact about itself that only it can know, upward, on every layout pass. Modeling that as a two-way binding means fighting SwiftUI's data flow instead of using it, and it's exactly the kind of setup that causes the identity and re-render surprises I've written about [when SwiftUI resets state for reasons that have nothing to do with your bindings](/blog/swiftui-view-identity-state-reset-bug/).
+
+SwiftUI already has a mechanism built for exactly this direction of travel: a `PreferenceKey`.
+
+---
+
+## The shape of a PreferenceKey
+
+A `PreferenceKey` is a typed channel a child writes into and an ancestor reads from, propagating up the view tree the same way `.environment` propagates down it — except the data flows the opposite way.
+
+```swift
+struct HeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+```
+
+Two things to notice. `defaultValue` is what an ancestor sees if no descendant ever sets one. And `reduce` is the part people skip reading and then get confused by: if *multiple* descendants report a value for the same key, `reduce` decides how they combine. Here I'm taking the max, because I want the tallest child to win — for a different key you might sum, or just keep the last one.
+
+---
+
+## Reading a child's size without GeometryReader gymnastics
+
+The classic use case is measuring a view's own size and reporting it upward, without the parent having to reach in and measure it itself:
+
+```swift
+struct ReadHeight: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: HeightKey.self, value: proxy.size.height)
+            }
+        )
+    }
+}
+
+extension View {
+    func readHeight() -> some View {
+        modifier(ReadHeight())
+    }
+}
+```
+
+The child calls `.readHeight()`. The parent listens with `.onPreferenceChange`:
+
+```swift
+struct CardStack: View {
+    @State private var tallestChild: CGFloat = 0
+
+    var body: some View {
+        VStack {
+            BrewSummaryRow(brew: brew)
+                .readHeight()
+        }
+        .onPreferenceChange(HeightKey.self) { tallestChild = $0 }
+        .frame(minHeight: tallestChild)
+    }
+}
+```
+
+Yes, there's still a `GeometryReader` in there — preferences don't replace it as the *measurement* tool, they replace it as the *plumbing* that gets the measured value back out to whoever needs it, without threading a binding through every layer in between. That's the actual improvement: the reporting view and the reading view don't need to know about each other, or about anything in between them.
+
+---
+
+## Why this beats a threaded binding
+
+**The child doesn't need a reference to what it's reporting to.** With a binding, the child has to be handed one, which means every intermediate view in the hierarchy has to accept and forward it even if it doesn't care. With a preference, the child just calls `.preference(key:value:)` and anything above it can choose to listen or not.
+
+**Multiple children can report to the same parent safely.** That's what `reduce` is for. Try doing "give me the max height of N siblings" with bindings and you're manually tracking an array and computing the max yourself, in the parent, defeating the point of the child reporting anything at all.
+
+**It's one-directional on purpose.** The parent can't accidentally write back into the child's reported value the way a stale binding write can clobber child state — read again on the re-render story in [Observable vs ObservableObject](/blog/observable-vs-observableobject-1000-row-redraw-benchmark/), where similar unidirectional-vs-shared-state confusion shows up in a different form.
+
+---
+
+## When not to reach for it
+
+If the value genuinely is shared, mutable state — a search query, a selected filter, a form field — use a binding or `@Observable` model. PreferenceKey adds a full extra render pass (SwiftUI computes preferences, then propagates them, then triggers `onPreferenceChange` closures, which can themselves cause more layout) and paying that cost for something you could've just passed a binding for is pure overhead for no benefit.
+
+The tell is direction and ownership: if the parent hands something down and the child edits it, bind it. If the child knows something the parent can't and needs to say so upward without either side owning the other's state, that's a preference.
+
+**Takeaway:** `@Binding` is for state two views co-own. `PreferenceKey` is for a fact only the child can report, flowing up through however many layers sit in between without any of them needing to know it's happening. Reach for the one that matches the direction the truth actually flows, not the one that's easiest to type first.

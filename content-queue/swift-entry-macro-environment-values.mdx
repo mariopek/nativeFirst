@@ -1,0 +1,95 @@
+---
+title: "Custom @Environment Values Used to Need Five Lines of Boilerplate. Now They Need One."
+description: "The @Entry macro replaces the EnvironmentKey struct, defaultValue, and extension boilerplate every custom SwiftUI environment value needed — but it changes a couple of defaults you should know about before you migrate."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift Macros", "Environment Values", "Dependency Injection", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1533480947378-e2acc9f93ee2?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A labeled drawer organizer with everything in its own compartment"
+---
+
+{/*
+SEO keywords: @Entry macro swiftui, custom environment values swift, EnvironmentKey boilerplate, swift environment values macro, @Entry vs EnvironmentKey, swiftui dependency injection environment
+
+Internal linking plan:
+- /blog/dependency-injection-swift-without-frameworks (environment values as one of the DI mechanisms discussed)
+- /blog/se-0546-memberwise-init-same-file-extensions (same "boilerplate Apple finally removed" theme, same-era proposal)
+- /blog/swift-called-once-attribute-pitch-task-sending-captures (recent small-but-real ergonomics win framing)
+- /learn/vibe-code-native course lesson
+- Evergreen queue post, no app mention forced
+*/}
+
+I used to keep a snippet saved for custom `@Environment` values, because I could never remember the exact shape without looking it up. Four lines of scaffolding just to make one value injectable. Every single time.
+
+Apple apparently got tired of it too.
+
+---
+
+## The old way, in full
+
+Before the `@Entry` macro, adding a custom environment value meant writing a `EnvironmentKey` conformance, a static `defaultValue`, and an extension on `EnvironmentValues` to expose it — three separate pieces of ceremony around one actual idea:
+
+```swift
+private struct BrewReminderIntervalKey: EnvironmentKey {
+    static let defaultValue: TimeInterval = 300
+}
+
+extension EnvironmentValues {
+    var brewReminderInterval: TimeInterval {
+        get { self[BrewReminderIntervalKey.self] }
+        set { self[BrewReminderIntervalKey.self] = newValue }
+    }
+}
+```
+
+None of that is hard. It's just boilerplate that exists purely because the language needed a type to hang the key on, and every custom value needs its own throwaway type. If your app has a dozen custom environment values — theme settings, feature flags, a logging interval, an analytics client — that's a dozen near-identical blocks of code that all say the same thing: "here's a value, here's its default."
+
+---
+
+## The new way
+
+The `@Entry` macro collapses all three pieces into one property declaration:
+
+```swift
+extension EnvironmentValues {
+    @Entry var brewReminderInterval: TimeInterval = 300
+}
+```
+
+That's it. No private key type, no manual getter/setter, no separate `defaultValue` static. The macro expands to the same underlying machinery — it's not a different mechanism, it's Swift generating the ceremony you used to type by hand. Read access at the call site doesn't change at all:
+
+```swift
+struct BrewTimerView: View {
+    @Environment(\.brewReminderInterval) private var reminderInterval
+
+    var body: some View {
+        Text("Reminds every \(Int(reminderInterval))s")
+    }
+}
+```
+
+The same macro works for `Transaction` values and `Container` values too — anywhere SwiftUI already used the key-plus-extension pattern, `@Entry` replaces it. If you've got custom transaction keys for animation coordination, they collapse the same way.
+
+---
+
+## The default-value change that actually matters
+
+Here's the part worth reading past the "look how short it is" headline for: `@Entry` requires an explicit default, and if your type doesn't have an obvious sensible one, you're pushed toward `nil` and an `Optional`, which changes the shape of your reads.
+
+The old pattern let you write a `defaultValue` computed from something else — say, resolving a real default logger lazily instead of hardcoding a placeholder:
+
+```swift
+static let defaultValue: Logger = Logger(subsystem: "com.example.app", category: "default")
+```
+
+`@Entry` wants a value that's constructible at the property declaration itself, which is fine for primitives and simple structs but awkward for anything that needs setup. In practice this pushes reference-type dependencies — a network client, a persistence controller — toward being optional environment values that your view unwraps, rather than always-present ones with a real fallback instance. That's not a regression, exactly, but it's a different failure mode: instead of silently getting a working-but-generic default, you get `nil` and have to decide what that means at every call site. I covered the broader shape of this decision — when to inject through the environment versus a constructor versus a protocol — in [Dependency Injection in Swift Without Frameworks](/blog/dependency-injection-swift-without-frameworks/); `@Entry` doesn't change which mechanism is right for a given dependency, it just makes the environment option cheaper to reach for, which means you'll reach for it more often. Worth deciding on purpose, not by default.
+
+---
+
+## Migrating an existing app
+
+There's no automatic migration tool, and there doesn't need to be one — the two forms are behaviorally identical for anything with a real default value, so it's a mechanical find-and-replace you can do a few values at a time without touching call sites. Start with the environment values that have simple, always-constructible defaults (booleans, numbers, small structs); leave anything that currently computes its default lazily or wraps a shared singleton until you've decided whether it should become optional or keep its custom key.
+
+It's a small change with the same "why did this take Apple this long" energy as [same-file memberwise init extensions](/blog/se-0546-memberwise-init-same-file-extensions/) from a few weeks back — not a feature that changes what your app can do, just one that removes a specific, well-known annoyance every SwiftUI developer has independently gotten tired of.
+
+**Takeaway:** `@Entry` doesn't change what environment values are, it changes how much you type to declare one — but the requirement for a constructible default is worth thinking through before you migrate a value that used to lazily build something more complex.

@@ -1,0 +1,110 @@
+---
+title: "SwiftUI Cancels Your .task When the View Disappears. Your await Doesn't Get the Memo."
+description: "SwiftUI's .task modifier automatically cancels its Task when a view disappears — but cancellation is cooperative, not magic. Here's why your network call keeps running anyway, and the three checks that actually stop it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift Concurrency", "Task Cancellation", "Structured Concurrency", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1519703936-c4a3b3eb88e4?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A runner abruptly stopping mid-stride on a track"
+---
+
+{/*
+SEO keywords: swiftui task cancellation, .task modifier cancel, Task.isCancelled swift, structured concurrency cancellation cooperative, swift task not cancelling, async await cancellation swift
+
+Internal linking plan:
+- /blog/swift-networking-retry-token-refresh-request-deduplication (structured concurrency, same ResilientNetworkClient anchor)
+- /blog/observable-vs-observableobject-1000-row-redraw-benchmark (view lifecycle / re-render context)
+- /blog/swiftui-view-identity-state-reset-bug (view identity churn triggering repeated .task starts)
+- /learn/vibe-code-native course lesson
+- Evergreen queue post, no app mention forced
+*/}
+
+I once watched a detail screen fire off three network requests for the same brew log entry in under two seconds, because the user tapped through a list faster than the API could respond.
+
+Nothing crashed. Nothing errored. The screen just quietly did three times the work it needed to, and the last response to arrive — not necessarily the right one — won.
+
+---
+
+## The setup that looks safe
+
+`.task` is one of SwiftUI's nicer conveniences. Attach it to a view, and it starts a `Task` when the view appears and cancels that `Task` automatically when the view disappears:
+
+```swift
+struct BrewDetailView: View {
+    let brewID: UUID
+    @State private var brew: Brew?
+
+    var body: some View {
+        Group {
+            if let brew {
+                BrewDetailContent(brew: brew)
+            } else {
+                ProgressView()
+            }
+        }
+        .task {
+            brew = try? await client.fetchBrew(id: brewID)
+        }
+    }
+}
+```
+
+That "cancels automatically" line is true and it is exactly where the false confidence creeps in. SwiftUI cancels the *Task*. It does not cancel the *work happening inside your `await`*. Those are two different promises, and the gap between them is where the duplicate-request bug lives.
+
+---
+
+## Cancellation is cooperative — nobody enforces it for you
+
+Swift's structured concurrency cancellation is a flag, not an interrupt. Calling `task.cancel()` (which is what `.task` does under the hood when the view disappears) sets `Task.isCancelled` to `true` and, for `Task.sleep` and a handful of cancellation-aware APIs, throws a `CancellationError` the next time you check. It does **not** reach into whatever your `await` is doing and yank the plug.
+
+If `fetchBrew` looks like this:
+
+```swift
+func fetchBrew(id: UUID) async throws -> Brew {
+    let (data, _) = try await session.data(from: url)
+    return try JSONDecoder().decode(Brew.self, from: data)
+}
+```
+
+`URLSession`'s `data(from:)` does respect cancellation — that specific API is one of the good citizens, and the in-flight request really does get torn down. But the moment you wrap that call in retry logic, request deduplication, or literally any decoding/transform step that doesn't itself check `Task.isCancelled`, you've built a stretch of code that runs to completion regardless of what the view is doing. I wrote about the retry and dedup logic itself in [Retry, Token Refresh, and Request Deduplication in Swift](/blog/swift-networking-retry-token-refresh-request-deduplication/) — the same `ResilientNetworkClient` that makes retries safe is also exactly the kind of code that needs an explicit cancellation check, because it sits between the cancellable leaf call and your `await` call site.
+
+---
+
+## Three places to actually check
+
+**1. Inside loops and retry logic.** If you're retrying a request three times with backoff, check between attempts:
+
+```swift
+for attempt in 0..<maxRetries {
+    if Task.isCancelled { return }
+    do {
+        return try await performRequest()
+    } catch {
+        try await Task.sleep(for: .seconds(backoff(attempt)))
+    }
+}
+```
+
+Without that check, a view the user backed out of ten seconds ago can still be quietly retrying a request nobody's waiting on.
+
+**2. Before writing to `@State` after an `await`.** This one is subtle: even if the underlying work *does* get cancelled, the code after your `await` still runs unless you explicitly bail. A cancelled task doesn't unwind your function for you — it throws only at cancellation checkpoints, and assigning to a `@State` var isn't one:
+
+```swift
+.task {
+    guard let result = try? await client.fetchBrew(id: brewID) else { return }
+    guard !Task.isCancelled else { return }   // <-- easy to forget
+    brew = result
+}
+```
+
+Skip that guard and you can get exactly the race from the opening story: a stale response from a view the user already navigated away from lands and overwrites state that a newer, faster request already populated correctly.
+
+**3. At the boundary of anything you spin up yourself.** `Task { }` (unstructured) and `Task.detached` do **not** inherit cancellation from their parent at all — they're independent by design. If you kick one off inside a `.task` block "to be safe," you've built a leak that outlives the view on purpose. Stick to structured concurrency (`async let`, `TaskGroup`, or the implicit child tasks that `.task` itself creates) unless you have a specific reason to detach, and if you do detach, you now own manually plumbing cancellation through.
+
+---
+
+## Why this bites SwiftUI apps specifically
+
+`.task` restarts every time its identity-relevant state changes — including, per the same identity rules I covered in [SwiftUI Reset My State for No Reason](/blog/swiftui-view-identity-state-reset-bug/), when the *view itself* gets a new identity, not just when data logically changes. Scroll a `List` fast enough and you can tear down and recreate detail views faster than their `.task` blocks resolve, which is exactly the multiply-by-three scenario from the top of this post. The fix isn't to fight SwiftUI's lifecycle — it's to make sure every `await` boundary in the call chain actually checks the flag SwiftUI is already setting for you.
+
+**Takeaway:** `.task`'s automatic cancellation cancels the *Task object*. Your job is making sure the code running inside that task actually looks at `Task.isCancelled` often enough to notice. Cooperative cancellation only cooperates if you write the cooperation.
