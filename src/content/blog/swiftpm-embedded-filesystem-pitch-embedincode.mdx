@@ -1,0 +1,123 @@
+---
+title: "SwiftPM Embeds Resources as Byte Arrays. One 165KB File Can Take 200 Seconds to Compile."
+description: "A fresh Swift Forums pitch wants to give SwiftPM's .embedInCode a real, path-preserving EmbeddedFileSystem — fixing both its lack of directory structure and a documented type-checker bug where a single resource file bloats debug build times by minutes."
+pubDate: 2026-09-03
+tags: ["Swift", "SwiftPM", "Swift Evolution", "Build Time", "Server-Side Swift", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1594571603435-0b192ab6dafa?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Stacked shipping containers, neatly indexed and labeled — the kind of file system SwiftPM's embedded resources still don't have"
+---
+
+{/*
+SEO keywords: SwiftPM embedInCode, EmbeddedFileSystem Swift, Bundle.module alternative, SwiftPM resources, Swift Package Manager
+embedded resources, SwiftPM type checker performance, swift-evolution embedded file system pitch
+
+Internal linking plan: /blog/se-0547-swiftpm-compilation-caching (same "small pragmatic SwiftPM fix" pattern, published two
+days prior), /blog/spm-modular-architecture-swift-when-to-split (SPM structure, natural follow-on), /blog/swift-6-3-android-official-apple-cross-platform
+and /blog/swift-6-3-android-three-weeks-in-what-broke (WASI/cross-platform Swift angle, Foundation-free resources matter there),
+/blog/swift-testing-framework-xctest-migration-guide (test fixtures as a named use case in the pitch itself).
+
+Timely: pitch posted 2026-09-02 (yesterday) by jollyjinx on the Swift Forums, still at the discussion stage, no SE number yet.
+*/}
+
+I've had this exact moment: a debug build that should take ten seconds is crawling, and you blame everything except the actual cause. DerivedData, a stale cache, Xcode being Xcode. It's never the JSON file you embedded with `.embedInCode` last week. Except sometimes it absolutely is — there's a two-year-old GitHub issue where a single 165KB resource took **200 seconds** to compile, and bigger files just stop compiling at all.
+
+Yesterday, someone on the Swift Forums finally [pitched a real fix](https://forums.swift.org/t/pitch-add-an-embedded-file-system-to-swiftpm/89335).
+
+---
+
+## The two ways to ship a resource today, and why neither is great
+
+If you've bundled an image or a config file into a Swift package, you know the fork in the road. [SE-0271](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0271-package-manager-resources.md) gave you `.process`/`.copy` plus `Bundle.module` — the familiar path, and the one every SwiftUI tutorial uses. It works, but it drags Foundation along for the ride and deploys resources as separate files next to your binary.
+
+Since PackageDescription 5.9 there's a second option: `Resource.embedInCode(_:)`. No Foundation, no separate bundle — the resource travels inside the compiled binary as literal Swift source:
+
+```swift
+struct PackageResources {
+    static let identifier_txt: [UInt8] = [72, 101, 108, 108, 111, /* ... */]
+}
+```
+
+That's genuinely useful for a standalone CLI tool, a WASI binary, or anything that needs to be one self-contained artifact. But it has two real limitations, and only one of them is obvious from the API.
+
+The obvious one: you get a flat pile of properties named after file basenames. There's no directory structure. A folder of HTML templates or static web assets — the kind of thing you'd hand to a Vapor route handler — can't be walked as a tree, because there is no tree. Just individually-named byte arrays that happen to share a naming convention.
+
+The one that'll actually hurt you: every byte of every file gets written out as a literal integer in Swift source, and Swift's type checker has to process that whole literal array. The implementation has a `FIXME` admitting this doesn't scale. The real-world consequence is tracked in [swift/#75288](https://github.com/swiftlang/swift/issues/75288): a 165KB resource file produces a roughly **200-second debug build**, and larger files blow past the type checker's limits entirely and just fail to compile. You don't find out until you try.
+
+---
+
+## The fix: give it an actual filesystem
+
+The pitch, from Patrick Stein (`jollyjinx`), doesn't touch the manifest — `.embedInCode("Web")` stays exactly as it is. What changes is what SwiftPM generates from it. Instead of one property per file, you'd get a queryable, path-preserving filesystem:
+
+```swift
+struct PackageResources {
+    static let fileSystem: EmbeddedFileSystem
+
+    struct EmbeddedFileSystem: Sendable {
+        func entry(at path: String) -> Entry?
+        func file(at path: String) -> File?
+        func entries(in directory: String = "") -> [Entry]
+    }
+}
+```
+
+Given a target laid out like this:
+
+```plaintext
+Sources/ExampleServer/
+├── main.swift
+└── Web/
+    ├── index.html
+    ├── css/site.css
+    └── images/logo.svg
+```
+
+you'd walk it the way you'd expect a filesystem to work:
+
+```swift
+for entry in PackageResources.fileSystem.entries(in: "Web/images") {
+    print(entry.name)
+}
+```
+
+The proposal is explicit about borrowing the shape of Go's [`embed.FS`](https://github.com/golang/go/blob/master/src/embed/embed.go) — slash-separated, platform-independent paths, `.` and `..` rejected, deterministic directory ordering, case-sensitive matching regardless of what filesystem you're actually building on. The paths describe a virtual tree, not a location on disk, which is exactly what you want from something that's supposed to work identically whether you built on Darwin, Linux, or Windows.
+
+---
+
+## Fixing the slow part means not writing bytes as source at all
+
+The directory API is the visible half of the pitch. The other half is the one that actually fixes the 200-second build: stop encoding resource bytes as Swift source entirely.
+
+The proposal's sketch places the raw bytes plus a compact sorted index — paths, kinds, offsets, lengths — directly into an object file or a read-only section, the same way a linker already handles static data:
+
+```plaintext
+linked image
+┌─────────────────────────────┐
+│ program code                │
+├─────────────────────────────┤
+│ path → kind/offset/length   │
+├─────────────────────────────┤
+│ raw resource bytes          │
+└─────────────────────────────┘
+```
+
+The generated Swift source would shrink down to a small accessor that points at that section — no more type-checker time proportional to the textual decimal representation of every single byte. That part is explicitly separable from the filesystem API and could ship as a standalone optimization even if the directory-tree half stalls in review.
+
+---
+
+## Not everyone's convinced this is the right layer to fix it at
+
+The replies are where it gets interesting. Miguel de Icaza's answer was blunt: *"These days I would use a plugin to do this sort of thing. You can roll it out today, and sort out all the kinks there."* Fair — SwiftPM plugins already let you generate code at build time, and you don't need Swift Evolution's permission to ship a plugin tomorrow.
+
+The sharper pushback came from another commenter, who argued the real fix belongs at the language level — something like Rust's `include_bytes!` or a C-style `#embed` — and that a past Swift team member has already pushed back on that idea, because it means the compiler reads a file the build system never put on the command line, which makes it an untracked dependency. That's not a small objection: it's the same class of problem that makes incremental builds and caching correct in the first place, and it's exactly the kind of thing [SE-0547's compilation caching](/blog/se-0547-swiftpm-compilation-caching) depends on getting right.
+
+So this is day two of a pitch, not a proposal with an SE number, and there's real disagreement on whether SwiftPM or the compiler is the right place to solve it.
+
+---
+
+## Why I'd actually use this
+
+The named use cases in the pitch read like a list of things I've personally fought with: self-contained CLI tools, [WASI Swift](/blog/swift-6-3-android-three-weeks-in-what-broke) builds where you can't assume a filesystem exists at all, test fixtures you don't want to load through `Bundle.module` gymnastics in a [Swift Testing](/blog/swift-testing-framework-xctest-migration-guide) target, and static web content for a server-side Swift app. None of that is exotic — it's the boring, constant friction of "where does this file actually live at runtime" that every [modular SPM package](/blog/spm-modular-architecture-swift-when-to-split) eventually runs into.
+
+What I like about this pitch isn't the API sketch — that's explicitly still up for debate. It's that it's scoped to fix a real, filed, reproducible bug instead of proposing something speculative. Swift Evolution works best when it looks like this: small, motivated by an actual GitHub issue with actual numbers attached, not a grand redesign. Whether it lands as written or gets rebuilt as a compiler feature instead, `.embedInCode` badly needs *something* — right now it's a feature you reach for once, hit a 200-second wall, and quietly stop using.
