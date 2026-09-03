@@ -1,0 +1,111 @@
+---
+title: "Codable's Snake Case Conversion Looks Like Free API Mapping. It Breaks on the First Acronym."
+description: "JSONEncoder's .convertToSnakeCase and JSONDecoder's .convertFromSnakeCase promise to erase the naming gap between Swift and your API. They do — right up until a property has an acronym in it, and then they fail silently on Optional fields instead of throwing."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Codable", "JSON", "iOS Development", "Debugging", "Networking"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of mismatched mechanical gears, the kind of quiet misalignment that convertToSnakeCase produces on acronym-heavy property names"
+---
+
+{/*
+SEO keywords: Codable convertToSnakeCase, JSONDecoder convertFromSnakeCase, Swift Codable acronym bug, CodingKeys acronym,
+Swift JSON key mapping, keyEncodingStrategy keyDecodingStrategy, Codable silent decode failure Optional
+
+Internal linking plan: /blog/custom-networking-layer-swift-urlsession-async-await (the networking layer this bug hides inside),
+/blog/swift-networking-retry-token-refresh-request-deduplication (same networking-layer series), /blog/typed-throws-swift-6-real-migration-protocol-wall
+(error-handling angle, "the compiler won't save you here either" theme), /learn/networking-with-ai (course lesson, direct topical match).
+
+Evergreen — no news hook, safe to hold in queue for weeks.
+*/}
+
+I once spent an hour debugging a `nil` that had no business being `nil`. The API response had the field. The JSON was valid — I'd printed it, I'd pasted it into a formatter, it was right there. And still, `response.userID` came back empty every single time.
+
+The bug wasn't in my code. It was in the one line I trusted most: `.keyDecodingStrategy = .convertFromSnakeCase`.
+
+---
+
+## The promise: never write CodingKeys again
+
+You know the pitch. Your API speaks `snake_case`. Swift speaks `camelCase`. Rather than hand-writing a `CodingKeys` enum for every model in your app, you flip one switch:
+
+```swift
+let decoder = JSONDecoder()
+decoder.keyDecodingStrategy = .convertFromSnakeCase
+```
+
+and `user_id` becomes `userId`, `created_at` becomes `createdAt`, done. The encoder has the mirror image:
+
+```swift
+let encoder = JSONEncoder()
+encoder.keyEncodingStrategy = .convertToSnakeCase
+```
+
+For the common case — lowercase words joined by underscores — this works exactly as advertised. Most of your models never need a `CodingKeys` enum again. It's a genuinely good default, and I still reach for it first on every new networking layer I write.
+
+The trouble starts the moment an acronym shows up.
+
+---
+
+## What actually happens to `userID`
+
+Here's the part nobody puts in the release notes: `convertToSnakeCase` doesn't know what an acronym is. It has one rule — insert an underscore before every uppercase letter, then lowercase everything — and it applies that rule mechanically, letter by letter.
+
+Walk `userID` through it:
+
+```plaintext
+u  s  e  r  I  D
+            ↑  ↑
+      underscore before each capital
+```
+
+That gives you `user_i_d`, not `user_id`. Same story for anything with a run of capitals: `profileURL` becomes `profile_u_r_l`. `isHTMLValid` becomes `is_h_t_m_l_valid`. The algorithm can't tell the difference between "a new word started here" and "this is one three-letter acronym" — every capital letter looks identical to it.
+
+If your backend actually expects `user_id`, your encoded payload sends `user_i_d` instead, and depending on how forgiving the server is, you get a 400, a silently-ignored field, or — worse — a record created with a null foreign key that someone finds three weeks later.
+
+---
+
+## The decode side is sneakier, because it doesn't crash
+
+Encoding at least produces a wrong-but-visible string you can `print()` your way into finding. Decoding fails quietly, and that's the version that actually costs you an hour.
+
+`convertFromSnakeCase` runs the opposite direction: split on underscores, capitalize the first letter of each word after the first, join. Decode `user_id` and you get `userId` — note the lowercase `d`. Swift's own API design guidelines tell you to name that property `userID`, capital `ID`, to match conventions like `URLSession` and `URL`. So you write:
+
+```swift
+struct User: Codable {
+    let userID: String
+    let name: String
+}
+```
+
+`userID` and the decoder's generated `userId` are two different strings. If `userID` isn't `Optional`, `Codable`'s synthesized initializer will at least throw a `keyNotFound` error you can catch and read. But mark it `Optional<String>` — which plenty of API models legitimately need — and there's no key-not-found error at all. Missing keys are exactly what `Optional` decoding is designed to tolerate. You get `nil`, no crash, no log line, nothing to breakpoint on. The value that was sitting right there in the response body just never made it into your struct.
+
+That's the trap: the failure mode changes based on whether you remembered to mark the field non-optional, and the more defensively you code — the more things you make `Optional` "just in case" — the more of these the strategy quietly eats.
+
+---
+
+## The fix: CodingKeys for the acronym fields, strategy for the rest
+
+You don't have to abandon `.convertFromSnakeCase` — just stop trusting it near acronyms. Keep the global strategy for the boring fields and override the specific ones:
+
+```swift
+struct User: Codable {
+    let userID: String
+    let displayName: String
+    let profileURL: URL?
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case profileURL = "profile_url"
+        case displayName // falls back to the decoder's strategy
+    }
+}
+```
+
+Once you write a manual `CodingKeys` entry for a property, that property opts out of the automatic strategy entirely — the two mix cleanly in the same type. You only need to hand-write the acronym-bearing fields; everything else still gets converted for free.
+
+The other habit worth building: write one small test per model that round-trips a real API payload — decode it, re-encode it, diff the two JSON blobs. It's a five-line test, and it's the fastest way to catch an acronym mismatch before it ships, instead of an hour into a debugging session wondering why a value that's clearly in the response never makes it to the screen.
+
+---
+
+`.convertFromSnakeCase` and `.convertToSnakeCase` are good defaults doing exactly what they were built to do — text transformation, not acronym detection. The bug isn't that they're broken. It's that "looks like it worked" and "worked" are different claims, and `Optional` is very good at hiding the gap between them. Check the [networking layer](/blog/custom-networking-layer-swift-urlsession-async-await) you built this on top of, or the [retry and token-refresh logic](/blog/swift-networking-retry-token-refresh-request-deduplication) wrapping it — if either one swallows decode errors on the way to returning a default value, this exact bug gets even harder to spot. The [networking lesson](/learn/networking-with-ai) in our AI-tools course covers building that layer from scratch, CodingKeys included.
