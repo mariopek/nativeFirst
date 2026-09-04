@@ -1,0 +1,112 @@
+---
+title: "The Fix for SwiftPM's 200-Second Compile Bug Just Landed. It Skips the Type Checker Entirely."
+description: "A new Swift Forums pitch replaces embedInCode's byte-array literals with linked object files and Span<UInt8>, turning a 70-second, 7.2GB build into a 1.6-second one. Here's how it works and why one reviewer already isn't sure it's worth the complexity."
+pubDate: 2026-09-04
+tags: ["Swift", "SwiftPM", "Swift Evolution", "Build Time", "Server-Side Swift", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1429549462610-8dcf74f61550?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "An aerial view of a highway bypass lane cutting past a long line of traffic — the shortcut this pitch takes around Swift's type checker"
+---
+
+{/*
+SEO keywords: SwiftPM embedInCode object file, Swift Span UInt8, SwiftPM resource compile time, Swift Lifetimes feature,
+swift-evolution embedInCode representation, SwiftPM build performance, Swift package manager resources
+
+Internal linking plan: /blog/swiftpm-embedded-filesystem-pitch-embedincode (yesterday's post on the exact same bug, direct
+continuity), /blog/xcode-build-time-optimization-solo-ios-developer (build time theme), /blog/se-0547-swiftpm-compilation-caching
+(same "small pragmatic SwiftPM fix" pattern), /blog/swift-6-3-android-official-apple-cross-platform (cross-platform Swift,
+where Foundation-free resource embedding matters most), /learn/vibe-code-native course lesson.
+
+Timely: pitch posted 2026-09-04 (today) by Gonzalo Larralde on the Swift Forums, direct follow-up to the
+2026-09-02 "Add an Embedded File System to SwiftPM" pitch covered in yesterday's post. No SE number yet, pitch stage,
+two working prototype PRs linked (SwiftPM PR #10494, Swift Build PR #1700).
+*/}
+
+[Yesterday I wrote about](/blog/swiftpm-embedded-filesystem-pitch-embedincode) a nasty SwiftPM bug: embed a 165KB file with `.embedInCode` and your debug build balloons to 200 seconds. I said someone should really do something about the fact that every byte in that file becomes a decimal literal the compiler has to individually type-check.
+
+Someone already had. It just hadn't posted yet.
+
+Less than a day after the filesystem pitch I covered, Gonzalo Larralde dropped a [second pitch](https://forums.swift.org/t/pitch-scalable-embedincode-resources-using-object-files/89370) that goes straight at the compile-time problem instead of the directory-structure one. And the numbers in it are the kind that make you sit up.
+
+---
+
+## The trick: stop asking the compiler to read your file
+
+Quick recap of the bug, because it's worth seeing again. Today, `.embedInCode("payload.bin")` generates Swift source that looks like this:
+
+```swift
+struct PackageResources {
+    static let payload_bin: [UInt8] = [
+        123, 0, 33, 100, 99, // ...one entry per byte, forever
+    ]
+}
+```
+
+Every single byte of your resource becomes a comma-separated integer in a source file, and the Swift type checker has to parse and type-check that entire array literal before it can move on. For a small icon or a JSON config, fine. For anything bigger, you're asking the compiler to do arithmetic homework instead of compiling code.
+
+The new pitch's answer is almost embarrassingly simple once you read it: **don't put the bytes in Swift source at all.** Write them straight into a target-native object file — the same kind the linker already produces for your compiled code — and hand Swift a `Span<UInt8>` that points at that linked memory. No array literal, no type-checking, no per-byte anything. Just a pointer and a length, resolved at link time like any other symbol.
+
+```swift
+.target(
+    name: "Assets",
+    resources: [
+        .embedInCode("payload.bin", representation: .objectFile),
+    ],
+    swiftSettings: [.enableExperimentalFeature("Lifetimes")]
+)
+```
+
+The generated interface changes shape accordingly:
+
+```swift
+struct PackageResources {
+    static var payload_bin: Span<UInt8> {
+        // a non-owning view into the linked object file
+    }
+}
+```
+
+Note that word non-owning. This isn't lazily building an array at runtime and caching it — it's a direct, read-only view into memory the linker already mapped in. Accessing it doesn't allocate or copy anything. `Span` (riding on the same `Lifetimes` experimental feature that's been steadily unlocking borrowed, non-escaping views across the standard library since [Swift 6.2 reworked how isolation gets decided](/blog/swift-6-2-mainactor-by-default-why-apple-reversed-concurrency)) is exactly the type built for this: a safe, bounds-checked, ownership-free window into contiguous memory that isn't a `[UInt8]` you own.
+
+---
+
+## The numbers that make this worth a pitch
+
+The prototype benchmark, run against a 1 MiB resource, is the whole argument in one table:
+
+| Representation | Generated Swift | Build time | Peak build memory |
+|---|---:|---:|---:|
+| Byte array | 3.7 MiB | ~70 seconds | ~7.2 GiB |
+| Object file | 476 bytes | ~1.6 seconds | ~105 MiB |
+
+Read that memory column twice. Compiling a 1 MiB file today can peak at **7.2 gigabytes** of build memory, because the compiler is holding an entire type-checked array expression in its head. The object-file version needs 105 MiB — roughly what you'd expect for handling a linker symbol, because that's basically all it's doing.
+
+And it's not just slower at 1 MiB, it's a wall at 8 MiB. The byte-array representation generates roughly 30 MiB of Swift source and the compiler simply gives up — it can't type-check an expression that large in any reasonable time. The object-file version finishes that same 8 MiB resource in about 1.3 seconds. Not "faster." A completely different category: one of these approaches has a ceiling, and the other doesn't.
+
+I haven't reproduced these numbers myself — I don't have an 8 MiB resource lying around and, per how I write these posts, I'm not going to spin up a throwaway package just to benchmark someone else's PR. But the prototype has working implementations linked for both SwiftPM ([#10494](https://github.com/swiftlang/swift-package-manager/pull/10494)) and Swift Build ([#1700](https://github.com/swiftlang/swift-build/pull/1700)), so this isn't a napkin sketch — it's compiled, running code with numbers attached.
+
+---
+
+## It's not a slam dunk yet
+
+This is a pitch, not even a proposal number yet, and the thread is three posts old as I write this. Two objections are already on the table, and they're both fair.
+
+The first, from forum user j-f1, is about ergonomics: could the existing spelling just get faster under the hood, without a new `representation:` parameter to remember? That's the API question every performance pitch eventually has to answer — do you fix the default silently, or make people opt in explicitly? The proposal currently keeps `.embedInCode("payload.bin")` defaulting to the slow byte-array path and puts the fast path behind an explicit `.objectFile` flag, which means you'd have to already know about this bug to avoid it.
+
+The second, from owenv, is sharper: is this worth the complexity at all? Object files aren't one format — ELF on Linux, Mach-O on Apple platforms, COFF on Windows — and supporting all three inside the build system means bespoke, platform-specific code with its own edge cases and linker quirks, for what's arguably still a niche feature. The counter-suggestion is that this could ship as a SwiftPM plugin instead, iterated on outside the toolchain, rather than baked into Swift Build itself.
+
+I don't think there's an obviously correct answer here yet. Baking it into the toolchain gets you a good default and one implementation everyone shares. A plugin gets you faster iteration and doesn't force every platform maintainer to care about three object file formats on day one. That's a real trade-off, not a formality — expect it to be the crux of whatever review this eventually gets.
+
+---
+
+## Why I'm writing about a pitch nobody's shipped
+
+Normally I'd wait for something to at least get an SE number before covering it. I'm making an exception because the sequence itself is the interesting part: one pitch names a real, measured bug (200 seconds, a hard ceiling past 8 MiB), and less than 48 hours later a second pitch shows up with a working prototype and a benchmark table that answers it. That's Swift Evolution's forum process actually working at the speed people complain it doesn't move at.
+
+Whether `.objectFile` ships as written, gets folded into the default behavior, or gets punted to a plugin — some version of "stop making the type checker read your binary data" is going to land eventually, because the alternative is a compiler that falls over on an 8 MiB config file. If you've ever hit a mysteriously slow debug build and blamed DerivedData, it might be worth [checking your build times properly](/blog/xcode-build-time-optimization-solo-ios-developer) before you assume it's an `.embedInCode` resource bigger than you think.
+
+It's also part of a pattern I keep seeing in SwiftPM lately: small, unglamorous, deeply pragmatic fixes to things that have quietly bugged everyone for years — see also [SE-0547's compilation caching](/blog/se-0547-swiftpm-compilation-caching) from a couple weeks back. None of these make a keynote slide. All of them make your `swift build` less annoying.
+
+---
+
+*Building something cross-platform where Foundation-free resource embedding actually matters? I wrote about [Swift 6.3 running on Android](/blog/swift-6-3-android-official-apple-cross-platform) a few weeks back — that's exactly the kind of target where `.embedInCode` earns its keep over `Bundle.module`. And if build-time gremlins like this one are the reason you've started leaning on an AI agent to at least tell you where to look, [here's how I actually use one day to day](/learn/vibe-code-native) without letting it near the parts that matter.*
