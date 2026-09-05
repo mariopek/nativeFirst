@@ -1,0 +1,140 @@
+---
+title: "@FocusState Looks Simple. Programmatic Focus in SwiftUI Isn't."
+description: "@FocusState works great for the demo. Then you add a 'Next' button, a sheet, or a ForEach, and focus starts silently failing. Here's why, and the patterns that actually hold up."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "iOS Development", "Swift", "UI Forms"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1471877325906-aee7c2240b5f?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single spotlight beam illuminating an empty stage"
+---
+
+{/*
+SEO keywords: SwiftUI FocusState, programmatic focus SwiftUI, FocusState enum multiple fields, SwiftUI keyboard toolbar next field, FocusState not working, dismiss keyboard SwiftUI
+Internal linking plan: swiftui-view-identity-state-reset-bug (focus loss is often an identity bug in disguise), swiftui-state-bindable-environment-decision-map (property wrapper decision context), tdd-swiftui-observable-viewmodel-red-green-refactor (testing state-driven UI), keychain-vs-in-memory-token-storage-swift (loose SwiftUI-forms neighbor, drop if doesn't fit), course lesson /learn/swiftui-foundations-12-forms-and-input
+Evergreen — no news hook, safe to sit in queue for weeks.
+*/}
+
+I once spent an entire afternoon convinced `@FocusState` was broken. It wasn't. My `ForEach` was rebuilding the row I was typing into every time the view redrew, which meant the field holding focus literally stopped existing between keystrokes. SwiftUI didn't lose my focus — it lost the row.
+
+That's the thing about `@FocusState`. The property wrapper itself is maybe ten lines of API surface. The bugs it produces come from everywhere else in your view.
+
+---
+
+## The basic case, which actually works fine
+
+For a single field, `@FocusState` is genuinely simple:
+
+```swift
+struct LoginView: View {
+    @FocusState private var emailFieldFocused: Bool
+
+    var body: some View {
+        TextField("Email", text: $email)
+            .focused($emailFieldFocused)
+        Button("Focus email") {
+            emailFieldFocused = true
+        }
+    }
+}
+```
+
+A `Bool` binding, a `.focused()` modifier, done. The pain starts the moment you have more than one field and want to know *which* one is focused — because the naive approach is to reach for a second `@FocusState` boolean, then a third, and suddenly you're manually making sure only one of five booleans is ever `true` at a time.
+
+## The pattern that actually scales: an enum
+
+The fix everyone eventually lands on is a `Hashable` enum instead of a `Bool`:
+
+```swift
+enum Field: Hashable {
+    case name
+    case email
+    case password
+}
+
+struct SignupView: View {
+    @FocusState private var focusedField: Field?
+
+    var body: some View {
+        Form {
+            TextField("Name", text: $name)
+                .focused($focusedField, equals: .name)
+            TextField("Email", text: $email)
+                .focused($focusedField, equals: .email)
+            SecureField("Password", text: $password)
+                .focused($focusedField, equals: .password)
+        }
+    }
+}
+```
+
+One source of truth, `focusedField`, tells you exactly which field is active — or `nil` if none is. This is also what unlocks the pattern everyone actually wants: a "Next" button on the keyboard toolbar that walks through fields in order.
+
+```swift
+.toolbar {
+    ToolbarItemGroup(placement: .keyboard) {
+        Spacer()
+        Button("Next") {
+            switch focusedField {
+            case .name: focusedField = .email
+            case .email: focusedField = .password
+            case .password, .none: focusedField = nil
+            }
+        }
+    }
+}
+```
+
+That's the whole feature people usually want when they reach for `@FocusState` in the first place — a keyboard that moves you forward instead of forcing a tap on every field.
+
+---
+
+## Where it actually breaks
+
+### 1. Focus dies when the view's identity changes
+
+This was my `ForEach` bug. `@FocusState` is tied to the specific view instance holding it. If SwiftUI decides that instance no longer exists — because its identity changed, not because you removed it from the screen — focus resets to `nil` with no warning. A `ForEach` without stable, unique IDs is the classic trigger: insert or reorder rows and SwiftUI may treat the row you're typing into as a brand-new view rather than the same one that moved. If you've fought this exact "my state vanished for no reason" feeling before, it's the same root cause as [structural vs. explicit view identity issues](/blog/swiftui-view-identity-state-reset-bug) — focus loss is just the most visible symptom.
+
+The fix is the same fix as always: give `ForEach` a stable `id` that's tied to your actual data's identity, not its array index.
+
+### 2. Setting focus during view construction does nothing
+
+This one trips people up because it fails silently:
+
+```swift
+var body: some View {
+    TextField("Email", text: $email)
+        .focused($focusedField, equals: .email)
+        .onAppear {
+            focusedField = .email  // often does nothing
+        }
+}
+```
+
+`.onAppear` can fire before the view is actually laid out and ready to accept focus, especially inside a sheet or a freshly-pushed navigation destination. The field exists in the view tree, but the platform hasn't finished making it focusable yet. Wrapping the assignment in a tiny delay via a `Task` usually fixes it in practice:
+
+```swift
+.onAppear {
+    Task {
+        try? await Task.sleep(for: .milliseconds(50))
+        focusedField = .email
+    }
+}
+```
+
+It's an ugly fix for an ugly problem — a fixed sleep is a guess, not a guarantee — but it's the pragmatic workaround most people ship, and it's a lot better than a text field that silently refuses to grab the keyboard.
+
+### 3. Focus doesn't survive a sheet dismiss
+
+Present a sheet from a focused field, dismiss it, and don't be surprised when the field underneath is no longer focused. The parent view's `@FocusState` value is still whatever it was, but the platform's actual first-responder state got reset by the sheet's presentation and dismissal. If restoring focus after a sheet matters to your flow, you generally have to re-set it explicitly in `.onDismiss`, with the same timing caveat as above.
+
+### 4. `equals:` needs an exact type match, not just "close enough"
+
+`.focused($focusedField, equals: .email)` requires `focusedField`'s type to precisely match what you're comparing against. Mixing an `Int` binding with an enum case, or forgetting the `Field?` optionality, gives you a compiler error that's usually clear — but if you're gluing this together with a generic helper function across screens, a subtly different `Field` enum per screen (a duplicate `case email` in two different types) will compile fine and just never match. Worth double-checking if focus mysteriously never triggers despite the code looking right.
+
+---
+
+## The mental model that actually holds up
+
+Treat `@FocusState` as a *reflection* of first-responder state, not a remote control for it. It tells you the truth about what's currently focused, and setting it is a *request*, not a guarantee — the same way `@State` isn't a promise SwiftUI will redraw the instant you set it. Timing, view identity, and platform-level focus rules all get a vote before your assignment actually lands.
+
+Once you stop expecting it to behave like a simple variable and start treating it as state that the platform partially owns, most of the "why isn't this working" moments turn into "oh, right, of course" moments instead. For the property-wrapper decision-making that leads you here in the first place, the [`@State`/`@Bindable`/`@Environment` map](/blog/swiftui-state-bindable-environment-decision-map) is worth a look — and the [forms and input lesson](/learn/swiftui-foundations-12-forms-and-input) covers the field-building blocks this pattern sits on top of.
