@@ -1,0 +1,140 @@
+---
+title: "SwiftPM Traits Let You Turn Off Half Your Library. Your Test Suite Has No Idea."
+description: "A new Swift Evolution pitch fixes a real gap in SwiftPM package traits: there's currently no way to declare which trait combinations a test target actually needs to run against. Here's the bug, the pitch, and the naming collision that'll trip you up first."
+pubDate: 2026-09-05
+tags: ["Swift", "SwiftPM", "Swift Testing", "Swift Evolution", "Package Manager"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1509822929063-6b6cfc9b42f2?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A brass combination lock dial, close up"
+---
+
+{/*
+SEO keywords: SwiftPM traits, Swift package traits, Swift Evolution trait configurations, swift test --traits, Swift Testing vs SwiftPM traits, TraitConfiguration testTarget, SE-0450 traits
+Internal linking plan: swiftpm-embedincode-object-file-span-fix (same pitch-stage SwiftPM space), se-0547-swiftpm-compilation-caching (SwiftPM evolution), swift-testing-tasklocal-trait-st-0026-static-var-di (the trait-naming collision), spm-modular-architecture-swift-when-to-split (package structure), course lesson /learn/swiftui-in-practice-15-swift-testing-view-models
+No app mention — didn't fit naturally, last mention 2026-09-02, within cadence.
+*/}
+
+Last week I went looking for a bug in a test that wasn't respecting a trait I'd set. I spent a good ten minutes reading Swift Testing docs about `.enabled(if:)` before I realized my mistake: I was reading about the wrong "trait" entirely.
+
+Turns out Swift now has two completely different features called traits, released within months of each other, doing completely unrelated things. One lives in Swift Testing and gates whether a test runs. The other lives in SwiftPM and gates whether *code compiles at all*. I'm not the first person this has confused, and I won't be the last.
+
+But while I was down that rabbit hole, I found something more interesting than my own confusion: a real gap in how SwiftPM traits interact with testing, and a pitch that just landed to fix it.
+
+---
+
+## Quick refresher: what a SwiftPM trait actually is
+
+Package traits shipped in Swift 6.1 as a way to make optional functionality, well, optional — without splitting a library into five packages. You declare traits in your manifest, gate code behind `#if TraitName`, and consumers opt in or out per build:
+
+```swift
+// swift-tools-version: 6.1
+import PackageDescription
+
+let package = Package(
+    name: "MyLibrary",
+    traits: [
+        .default(enabledTraits: ["SomeTrait"]),
+        "SomeTrait",
+        "AnotherTrait",
+    ],
+    targets: [
+        .target(name: "MyLibrary"),
+        .testTarget(name: "MyLibraryTests", dependencies: ["MyLibrary"]),
+    ]
+)
+```
+
+```swift
+// Sources/MyLibrary/MyLibrary.swift
+public struct MyLibrary {
+    #if AnotherTrait
+    /// Only exists when AnotherTrait is enabled.
+    public func anotherTraitOnlyAPI() -> String { "enabled" }
+    #endif
+}
+```
+
+Think of a trait like an optional add-on when you're building a custom PC. The base library is the motherboard. Traits are the extra GPU or the second NIC — bolt them on if you need them, skip them if you don't, and the thing that gets built genuinely differs depending on what you picked.
+
+That's a good feature. The problem shows up the moment you try to write a test.
+
+---
+
+## The bug: your tests only ever see one build
+
+Here's the catch nobody designed for. A single `swift test` invocation builds your test target exactly once, under exactly one trait configuration — whatever the defaults are. So this test, gating on a non-default trait, doesn't even compile:
+
+```swift
+@Test func anotherTraitOnlyAPI() {
+    // error: value of type 'MyLibrary' has no member 'anotherTraitOnlyAPI'
+    // 'AnotherTrait' isn't a default trait, so this build doesn't have it.
+    #expect(MyLibrary().anotherTraitOnlyAPI() == "enabled")
+}
+```
+
+And this one compiles, then just fails, for the opposite reason:
+
+```swift
+@Test func someTraitDisabled() {
+    // Compiles fine, but fails under a plain `swift test`
+    // because 'SomeTrait' is on by default.
+    #expect(!MyLibrary().isSomeTraitEnabled)
+}
+```
+
+You *can* get full coverage today, but only by hand-rolling it: running `swift test`, then `swift test --traits AnotherTrait`, then `swift test --disable-default-traits`, and so on for every combination you care about. That enumeration lives nowhere in the package — it lives in your head, or in a CI script that quietly rots the day someone adds a third trait and forgets to update it. Run a plain `swift test` locally and you'll see failures for anything that isn't your default configuration, which trains everyone to ignore red tests instead of trusting them.
+
+You could try `#if`-gating whole test suites instead, but that has its own hole: enabling *all* traits at once to catch the trait-specific suites means you can never test what happens when trait A and B are on together but C isn't. The combination you actually ship might never get exercised.
+
+---
+
+## The pitch: let the package declare its own valid configurations
+
+[A new pitch on the Swift Forums](https://forums.swift.org/t/pitch-declaring-trait-configurations-for-test-targets-for-easier-testing/89371), posted this week by Om Chachad (a 2026 Swift Mentorship Program participant, building on groundwork from a [2024 forum thread](https://forums.swift.org/t/how-to-test-package-traits/78039)), fixes this by letting the package author say up front which combinations each test target is meant to run against:
+
+```swift
+targets: [
+    .target(name: "MyLibrary"),
+    .testTarget(
+        name: "DefaultTraitsTests",
+        dependencies: ["MyLibrary"],
+        traitConfigurations: [.default]
+    ),
+    .testTarget(
+        name: "AnotherTraitTests",
+        dependencies: ["MyLibrary"],
+        traitConfigurations: [
+            .enabledTraits(["AnotherTrait"]),
+            .enabledTraits(["SomeTrait", "AnotherTrait"]),
+        ]
+    ),
+]
+```
+
+Run `swift test --enable-trait-configurations`, and SwiftPM builds and runs each test target once per configuration it actually declared — nothing more, nothing less:
+
+```
+$ swift test --enable-trait-configurations
+Running tests with default traits
+Test Suite 'DefaultTraitsTests' passed
+Running tests with traits: AnotherTrait
+Test Suite 'AnotherTraitTests' passed
+Running tests with traits: AnotherTrait, SomeTrait
+Test Suite 'AnotherTraitTests' passed
+
+Tests failed for 0 of 3 trait configurations
+```
+
+The elegant part is that no test target gets built under a configuration it didn't ask for. `anotherTraitOnlyAPI` never even attempts to compile under the default build, so it can't produce the confusing "no member" error above. The knowledge of which combinations matter moves from a comment in your CI YAML into the manifest itself, right next to the traits it's describing.
+
+One open question, raised in the thread by Jon Shier: what if you just want every combination tested, without listing them all? Chachad's answer points at `.allCombinations`, expanding to all `2ⁿ` possibilities — deliberately left as a follow-up rather than the default, since a package with even six traits would generate 64 builds nobody asked for. The pitch is still betting that most packages have a handful of combinations that actually matter, not every mathematically possible one.
+
+---
+
+## Where this would actually bite you
+
+If you're shipping a single app target, none of this touches you — this is purely a package-author problem. But it's exactly the kind of thing you'd hit the moment a package grows optional pieces: a networking layer with a trait for a mock backend, a design-system package with a trait for debug-only overlay views, anything where "this code only exists sometimes" is true on purpose. Modularizing a codebase this way is worth doing carefully in the first place — see [when it's worth splitting into packages at all](/blog/spm-modular-architecture-swift-when-to-split), and the course lesson on [testing view models with Swift Testing](/learn/swiftui-in-practice-15-swift-testing-view-models) for the testing side of that split.
+
+It's still a pitch, not even a review-stage proposal — there's no SE number yet, and the linked [draft evolution PR](https://github.com/swiftlang/swift-evolution/pull/3474) is exactly that, a draft. Nothing changes for you today. File it next to [SwiftPM's compilation caching proposal](/blog/se-0547-swiftpm-compilation-caching) and the [recent embedInCode resource pitch](/blog/swiftpm-embedincode-object-file-span-fix) as evidence that SwiftPM's evolution pace has genuinely picked up this year — traits themselves only shipped in 6.1, and the community is already circling back to patch the rough edges before most people have even adopted them.
+
+And if you take one thing from this post: the next time you see the word "trait" in a Swift error message, check which system it's actually talking about. I got burned once; you don't have to. [Swift Testing's own trait system](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di) — tags, `.enabled(if:)`, the whole `Trait` protocol — shares nothing with SwiftPM's traits except the English word. Naming is hard, apparently even for the people who named `nonisolated(unsafe)`.
