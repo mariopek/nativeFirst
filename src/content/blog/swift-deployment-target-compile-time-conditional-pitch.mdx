@@ -1,0 +1,83 @@
+---
+title: "Swift Might Get a Compile-Time #if for Your Deployment Target"
+description: "A fresh Swift Forums pitch proposes #if deploymentTargetAtLeast(...) — a compile-time check tied to your minimum OS version, aimed at killing dead backward-compat branches that if #available can't touch."
+pubDate: 2026-09-06
+tags: ["Swift", "Swift Evolution", "Compiler", "Backward Compatibility", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1554042936-bc28e3ab3ebc?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Pruning shears cutting a dead branch off a tree"
+---
+
+{/*
+SEO keywords: swift deployment target conditional compilation, #if deploymentTarget swift, swift evolution pitch 2026, swift backward compatibility dead code, if available vs compile time swift, swift Mutex OSAllocatedUnfairLock deployment target
+Internal linking plan: swift-withdeadline-se-0526-network-timeout (same "gap between runtime check and compile-time check" theme), swift-6-3-android-official-apple-cross-platform (deployment-target-adjacent), swift-networking-retry-token-refresh-request-deduplication (RequestDeduplicator.swift anchor, actor sidesteps the lock problem), se-0547-swiftpm-compilation-caching (same forums/pitch-stage framing), course lesson /learn/vibe-code-native
+No app mention — last one was 2026-08-23 (two weeks overdue for weekly cadence) but nothing about a compiler-internals conditional-compilation pitch connects naturally to ThinkBud/PromptKit/RoleBud/Invoize. Skipping rather than forcing it, per the "never forced" style rule.
+*/}
+
+Last month I bumped a project's minimum deployment target in Xcode. One field, one number, `26.2` instead of `18.0`. I expected the binary to get a little leaner — fewer paths, fewer checks, one less OS version to think about.
+
+It didn't shrink by a byte.
+
+Every `if #available(iOS 17, *) { … } else { … }` branch I'd ever written was still sitting in there, fully compiled, ready to run legacy code for an OS version that, as of that one-field change, nobody building against my app could even have anymore.
+
+---
+
+## The gap `#available` can't close
+
+`if #available` is a *runtime* check. The compiler still builds both branches into the binary — it has to, because the same binary might run on a phone that's two OS versions behind whatever you're targeting today. That's the right behavior when the OS version varies at runtime.
+
+But your **deployment target** doesn't vary at runtime. It's fixed the moment you build. If your minimum is iOS 26, there is no device running this binary that doesn't have iOS 26. The "backward-compatible" branch of that `if #available` is dead weight that will never execute — and yet it's still there, still compiled, still occasionally the thing that trips up an optimizer or bloats a binary size report.
+
+`#available` also can't help you at all when the thing you need to gate isn't a runtime branch — it's a **declaration**. A type alias. A protocol conformance. An import. You can't wrap a `typealias` or an `import` in `if #available`, because those aren't statements — they're compile-time constructs. For those, your only tool today is the much blunter `#if canImport(...)` or hand-rolled build settings, and neither one knows what your actual deployment target is. You end up duplicating a number the compiler already has, and hoping you remember to keep it in sync.
+
+## The pitch
+
+A [Swift Forums pitch](https://forums.swift.org/t/pitch-conditional-compilation-for-the-deployment-target/89282) posted August 31, 2026 by Jiaxu Li asks exactly this: why doesn't Swift expose the deployment target to conditional compilation directly? The compiler already reads it off the target triple at build time — this isn't new information, just information the language doesn't let you see.
+
+The proposed syntax, updated in a prototype posted just yesterday:
+
+```swift
+#if deploymentTargetAtLeast(macOS 15, iOS 18, *)
+func runFeature() {
+    // Compiled only when the minimum deployment target meets this bar
+}
+#else
+func runFeature() {
+    // Compiled for everything below it
+}
+#endif
+```
+
+It reads like `@available` because it's deliberately modeled on it — an availability-style platform list, unlisted platforms fall back to `*`, and there's priority ordering for `macCatalyst` over `iOS` and specific platforms over `anyAppleOS`. The prototype lives behind an experimental flag (`-enable-experimental-feature DeploymentTargetCondition`) in a fork of both `swift` and `swift-syntax`, and there's no proposal number yet — this is pitch-stage, first-week-of-discussion territory.
+
+## The example that sold me on it
+
+Someone asked the obvious question early in the thread: what's this actually *for*? The best answer came from Jon Shier, and it's concrete enough to steal:
+
+> "I'd like to use `Mutex` where available, fallback to `OSAllocatedUnfairLock`, then a manual `os_unfair_lock` depending on the deployment target / linked SDK, as the runtime check can be visible in low level benchmarks."
+
+`Mutex` — Swift's own low-level synchronization primitive from the `Synchronization` module — is genuinely the best tool for tight, high-frequency locking. But it's new enough that plenty of libraries can't require it yet without cutting off users on older OS versions. So you write the fallback chain: `Mutex` if you can, `OSAllocatedUnfairLock` if you can't, raw `os_unfair_lock` if you really can't. Today, all three branches ship in every build, and the branching itself shows up as measurable overhead in exactly the kind of hot path where you reached for a raw lock in the first place. A library author put it bluntly further down the thread: *"`Synchronization` is great now that we have it, but essentially unusable in a lot of libraries while there are still people using older versions of iOS out in the world."* `#if deploymentTargetAtLeast` would let that library ship the fast path only, the moment its own floor catches up — no runtime check, no dead branch, no waiting for a major version bump to clean house.
+
+That's a much sharper case than mine. My dead `#available` branches were mostly cosmetic. A lock implementation chosen at compile time instead of runtime is a real, benchmarkable difference.
+
+## Where it gets complicated
+
+The thread didn't just nod this through, and the pushback is worth knowing before you get attached to the syntax:
+
+- **It might not survive module serialization.** A check resolved once, at the point a library is compiled, doesn't automatically travel with an inlinable function into whoever links against that library later — which is exactly the case where deployment-target-based dead code elimination would matter most for shared frameworks.
+- **It's not the same question as "what SDK am I building against."** Tim Kientzle-style distinction from the thread: two apps can both build with the iOS 26 SDK while having completely different minimum deployment targets (16.0 vs 26.0). `#if sdk(>=...)` and `#if deploymentTargetAtLeast(...)` answer different questions, and conflating them silently would be worse than not having either.
+- **A narrower, arguably more correct fix exists for the motivating example**: something like `#if available(Synchronization.Mutex)` — checking whether a *symbol* exists, not proxying through an OS version number at all. Nobody's built that yet, but it was raised as the thing this pitch might really be gesturing at.
+
+None of that kills the idea. It's the normal shape of a healthy Swift Evolution pitch: someone shows up with a real annoyance, and by page one the discussion has already found the two or three ways the naive version breaks.
+
+## Where I actually stand on this
+
+I went looking for a place this would help in my own code and came up honest: nowhere. BrewLog's deployment target is already iOS 26.2 — a course demo app gets to point at the newest SDK with zero backward-compat baggage, which makes it the least sympathetic audience for a pitch about trimming legacy branches. Its [request deduplicator](/blog/swift-networking-retry-token-refresh-request-deduplication) doesn't even touch this problem the hard way — it's an `actor`, and actors sidestep the whole `Mutex`-vs-`OSAllocatedUnfairLock`-vs-raw-lock decision tree by construction. That's Swift's higher-level answer to concurrency, and it's the one most app code should reach for anyway.
+
+But most Swift code isn't a course demo app. It's a library shipping to a range of OS versions its author doesn't control, trying to use the fast new primitive without abandoning the users stuck on the old one. That's a real, ongoing tax, and right now the only way to pay it is either eat the runtime branch forever or wait for your deployment target to catch up and then remember to go delete the dead code by hand. A compiler that already knows the answer refusing to tell your source code is the kind of gap Swift Evolution exists to close.
+
+Worth watching. Not worth refactoring anything for yet.
+
+---
+
+*Curious how Swift's evolution process turns a forum post into a shipped feature? The [SwiftPM compilation caching proposal](/blog/se-0547-swiftpm-compilation-caching) went through the same review pipeline this pitch is entering now — and if you're building your own AI-assisted dev workflow around watching proposals like this land, the [vibe-code-native](/learn/vibe-code-native) lesson covers how to keep an agent honest about what's shipped versus what's still a pitch.*
