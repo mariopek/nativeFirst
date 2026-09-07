@@ -1,0 +1,113 @@
+---
+title: "Your defer Didn't Fire Late. It Fired Exactly on Time — Just Not the Time You Meant"
+description: "Swift's defer runs at the end of the enclosing scope, not the end of the function. Inside an if/else branch, that difference can silently defeat the cleanup you thought you wrote."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Concurrency", "Actors", "Debugging", "Swift Testing"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1495364141860-b0d03eccd065?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of an hourglass with sand mid-fall"
+---
+
+{/*
+SEO keywords: Swift defer scope, defer function exit vs block exit, Swift defer gotcha, actor deduplication bug, Swift defer if else, Swift concurrency debugging, request deduplication actor Swift
+Internal linking plan: swift-networking-retry-token-refresh-request-deduplication (same actor-dedup territory, direct pairing), swiftui-task-cancellation-isnt-automatic (another "the runtime does what you said, not what you meant" post), dependency-injection-swift-without-frameworks (same author voice on Swift internals), course lesson /learn/swiftui-in-practice-13-swift-6-concurrency
+Evergreen — no dated news, safe to sit in queue for weeks. Generic illustrative example, not tied to any specific named file, so it stays accurate regardless of what any particular codebase's current state is.
+*/}
+
+I spent twenty minutes convinced a race condition didn't exist, because a print statement told me a dictionary entry was there right up until the moment I checked it and it wasn't. The dictionary wasn't racing. My `defer` was just further upstream than I thought it was.
+
+---
+
+## The setup
+
+Here's the shape of the bug, stripped down to the part that matters. Say you're writing a small in-flight request tracker — the kind of actor that collapses two concurrent calls for the same resource into one shared task, so you don't fire the same network request twice if two parts of your UI ask for the same thing at once.
+
+```swift
+actor RequestTracker {
+    private var inFlight: [String: Task<Data, Error>] = [:]
+
+    func fetch(key: String, using perform: @escaping () async throws -> Data) async throws -> Data {
+        let task: Task<Data, Error>
+        if let existing = inFlight[key] {
+            task = existing
+        } else {
+            task = Task { try await perform() }
+            inFlight[key] = task
+            defer { inFlight[key] = nil }
+        }
+        return try await task.value
+    }
+}
+```
+
+Read that quickly and it looks reasonable: register the task, and when we're done with it, clean it up. That's exactly what `defer` is for — guaranteed cleanup, regardless of how you leave.
+
+The question is: leave *what*, exactly?
+
+---
+
+## Scope exit, not function exit
+
+Swift's documentation is precise about this, even if the wording slides right past you the first time: a `defer` block runs when execution leaves **the scope it's written in**. Not the function. The scope.
+
+In most of the `defer` examples you'll see in tutorials, those are the same thing, because the `defer` sits at the top level of the function body:
+
+```swift
+func loadFile() throws -> Data {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { handle.closeFile() }
+    return try handle.readToEnd() ?? Data()
+}
+```
+
+Here the enclosing scope *is* the function, so "end of scope" and "end of function" happen to line up, and the mental model "defer runs when the function returns" works fine. It's a convenient simplification. It's also wrong in general, and the `RequestTracker` above is exactly the case where it breaks.
+
+In `fetch`, the `defer { inFlight[key] = nil }` is written inside the `else` branch. Its enclosing scope is that `else` block, not the function body. The moment control reaches the closing brace of the `else` — which happens immediately, synchronously, right after `inFlight[key] = task` — the defer fires. That's *before* the function ever reaches `return try await task.value`. There's no suspension point between the assignment and the defer, so nothing else gets a chance to run in between; it just happens, in order, on the same turn.
+
+The practical effect: the entry goes into `inFlight`, and then comes right back out, all before any `await`. A second caller arriving a moment later — even a few microseconds later, after the actor has hopped to the awaited task — will find nothing in the dictionary, register a brand new task, and fire the request a second time. The deduplication logic runs, compiles, has a test that checks single-caller behavior and passes, and does nothing under the exact concurrent load it was written for.
+
+---
+
+## Why this one hides so well
+
+A few things make this specific mistake unusually good at surviving code review.
+
+**It reads correctly at a glance.** "Set the entry, defer clearing the entry" is a completely reasonable sentence, and your eyes accept the pairing without checking which block the `defer` actually lives in. You have to consciously trace the braces.
+
+**Single-caller tests pass.** If your test calls `fetch` once and checks it returns the right value, this code is completely correct. The task still runs, still returns the right `Data`, still gets awaited correctly by the caller that created it. The bug is entirely about a *second*, concurrent caller finding an empty dictionary — which means it only shows up in a test that fires two calls for the same key at effectively the same moment, which is a test people often don't bother writing for a "just cache the in-flight task" helper, precisely because the single-caller case seems like the whole story.
+
+**Everything downstream still type-checks.** There's no compiler warning here. `defer` scoped to an `if`/`else` branch is completely valid, ordinary Swift — it's just not the scope you meant, and the compiler has no way to know your intent was "clean this up when the whole function is done" rather than "clean this up when this branch is done."
+
+---
+
+## The fix, and the actual lesson
+
+The fix is almost embarrassingly small — move the cleanup to where the function-level scope actually is, using a `Task` that tracks its own completion instead of relying on a `defer` placed inside a conditional branch:
+
+```swift
+actor RequestTracker {
+    private var inFlight: [String: Task<Data, Error>] = [:]
+
+    func fetch(key: String, using perform: @escaping () async throws -> Data) async throws -> Data {
+        if let existing = inFlight[key] {
+            return try await existing.value
+        }
+        let task = Task { try await perform() }
+        inFlight[key] = task
+        do {
+            let result = try await task.value
+            inFlight[key] = nil
+            return result
+        } catch {
+            inFlight[key] = nil
+            throw error
+        }
+    }
+}
+```
+
+Notice what changed isn't the *intent* — it's still "register, await, clean up." What changed is that the cleanup now happens after the `await`, at a point that's actually reached once, at the end of the real work, instead of a point that's reached immediately as a side effect of which branch we happened to take.
+
+The broader lesson isn't "don't use `defer` in conditionals" — sometimes that's exactly the scope you want, like closing a resource you only opened in that branch. The lesson is that `defer`'s contract is scope-exit, full stop, and every time you write one, the actual question to ask is "which block's closing brace am I inside of right now" — not "when will this function eventually return." Those two questions have the same answer often enough that it's easy to stop asking the second one, which is exactly when it stops being true.
+
+I ran into the actor-and-await version of this while working through the deduplication pattern in [Retry, Token Refresh, and Request Deduplication in Swift](/blog/swift-networking-retry-token-refresh-request-deduplication/) — worth a read if you're building the same kind of shared-in-flight-task actor and want the cancellation-forwarding half of the story too. It's the same family of bug as [SwiftUI cancelling your `.task` without telling your `await`](/blog/swiftui-task-cancellation-isnt-automatic/): the runtime is doing exactly what the scoping rules say, and the gap is entirely between that and what you assumed the rules were. If you want the fuller concurrency picture, the course covers the decision tree in [Swift 6 Strict Concurrency](/learn/swiftui-in-practice-13-swift-6-concurrency).
