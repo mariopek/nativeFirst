@@ -1,0 +1,79 @@
+---
+title: "Telling Your Coding Agent to 'Use TDD' Doesn't Work. A New Study Shows Why."
+description: "A rigorous study of 26 testing techniques given to AI coding agents finds that naming a technique in your prompt barely changes what they actually do. Here's what that means for Swift and SwiftUI."
+pubDate: 2026-09-08
+tags: ["AI Coding Agents", "Testing", "Swift Testing", "TDD", "Vibe Coding"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1591734392299-62179b2440a5?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A rubber stamp mid-press onto a page, ink still wet"
+---
+
+{/*
+SEO keywords: AI coding agents testing, TDD with AI agents, Claude Code testing agents, agentic coding test quality, property-based testing AI, Swift Testing AI agents, does TDD work with AI, coding agent test theater
+Internal links: xcode-ai-agents-three-months-honest-review (agent workflow experience), your-prompts-are-not-skills-yet (prompt engineering skepticism), tdd-swiftui-observable-viewmodel-red-green-refactor (the human-driven TDD post this one contrasts with), swift-networking-retry-token-refresh-request-deduplication (source of the illustrative code example), code-was-never-the-hard-part-hacker-news-debate-2026 (judgment-as-bottleneck theme)
+Course link: /learn/debugging-with-ai
+*/}
+
+I have a habit, when I hand an agent a gnarly feature, of typing "use TDD" at the end of the prompt like it's a magic word. Write the test first. Watch it fail. Make it pass. Refactor. I've told people to do this for years. Surely telling a model to do it works just as well?
+
+Dan Luu just ran the actual experiment, and the answer is: not really.
+
+---
+
+## The setup
+
+[Dan Luu's study](https://danluu.com/agentic-testing/) is not a vibes post. He took a nontrivial implementation task — writing a Zstd compressor in Rust — and ran it through a coding agent 26 different ways, each time appending a different instruction to the same base prompt: "use TDD," "use property-based testing," "use QuickCheck," "use formal methods with Verus," "audit and fuzz risky areas," and so on down a genuinely long list, including four different pre-written testing "skills" pulled off GitHub. Eighty runs per condition, two effort levels, cost and pass-rate both tracked.
+
+The question wasn't "can agents write tests." It was narrower and more useful: if you, a developer who knows testing matters but isn't a testing expert, bolt a technique name onto your prompt, does the agent's output actually get better?
+
+Mostly, no. The condition with **no extra instruction at all** did above average. TDD underperformed, exactly as Luu predicted going in. The fancy stuff — SMT solvers, formal verification with Verus, differential testing — didn't reliably beat plain unit tests either.
+
+---
+
+## Agents don't do the technique. They do a costume of the technique.
+
+Here's the part that actually matters, and it's not the leaderboard — it's *why* naming a technique didn't help. Luu found that agents, when told to use some rigorous method, generally did one of two things: wrote the tests they were always going to write, just wrapped in that method's syntax, or used the technique in a way that was technically present but got none of its actual value.
+
+Four of the 26 conditions were pre-written "skills" — reusable prompt files, the same idea I was [skeptical of a few weeks back](/blog/your-prompts-are-not-skills-yet) — and they didn't fare any better. One popular testing skill with a quarter-million GitHub stars actively pushed agents toward TDD, and it underperformed right alongside the plain "use TDD" condition. A skill file doesn't fix what a prompt instruction can't.
+
+The Verus condition is the clearest example. Verus is supposed to let you formally prove properties about your code. Agents given Verus mostly proved things like "given a valid index, the result stays in bounds" — true, harmless, and not where the bugs were. Some proofs were flat-out vacuous, of the shape *assume A, therefore A*. Meanwhile the actual bug in most failing Zstd implementations — encode and decode disagreeing on bitstream order — went untouched, because the agents never wrote a proof anywhere near it.
+
+Luu quotes Gary Bernhardt's summary of what agent-written tests tend to look like by default, and it's brutal enough to repeat:
+
+> "AI agents' approach to testing, more or less: Take the pathological cases dreamed up by someone objecting to mocks 15 years ago, without ever having actually used mocks. Naive dreams of excessive mocking. Make those pathologies the backbone of your testing strategy."
+
+The failure that stuck with me most: agents testing bitstream encode/decode round-trips would frequently pick test inputs that were symmetric — the same value forwards and backwards. A palindrome. Which means a bug where the agent silently reversed the *order* of two fields never shows up, because reversing a palindrome gives you the palindrome back. The test passes. The bug ships.
+
+That's not a testing technique problem. That's a "did anyone think about what would make this test actually fail" problem, and no amount of typing "use property-based testing" into the prompt fixes it if the agent doesn't understand what property to test.
+
+---
+
+## Where I've seen this shape of bug before
+
+I don't need Zstd to recognize this. It's the exact same failure mode as a symmetric round-trip test on a `Codable` type — encode a `Brew`, decode it back, assert equality, ship it. That test genuinely proves the encoder and decoder agree with *each other*. It proves nothing about whether either of them agrees with the actual API contract, because if both sides made the same wrong assumption about field order or key naming, the round trip still passes clean.
+
+Or take request deduplication, the pattern from [the retry/token-refresh post](/blog/swift-networking-retry-token-refresh-request-deduplication). A test that fires the same request twice from the same call site and asserts one network call happened is testing the easy case. The bug that actually bites — two *different* call sites racing to build the same dedup key from slightly different query-parameter ordering — needs a test that was written by someone who'd already imagined that failure. An agent told "add test coverage for the deduplicator" will happily write the first test and call it done, because the first test passes and looks reasonable in a diff.
+
+None of this means agents can't write good tests. It means the thing standing between a green checkmark and a test that actually catches something is the same thing it's always been: a human who thought about what could plausibly go wrong. Naming a methodology in the prompt is not a substitute for that thinking — it's a hint the agent can decorate its output with, whether or not it internalized the point.
+
+---
+
+## TDD in the prompt vs. TDD as a loop
+
+This is worth being precise about, because I've [written favorably about TDD for SwiftUI](/blog/tdd-swiftui-observable-viewmodel-red-green-refactor) on this blog, and Luu's result sounds like a contradiction if you squint. It isn't, and the difference is exactly where the human sits.
+
+The red-green-refactor loop I described works because a person writes the failing test first, watches it fail for the *right reason*, then writes the minimum code to pass it. The discipline is in the sequencing, and a person is doing the sequencing.
+
+"Use TDD" typed at the end of an agent prompt asks the model to simulate that discipline unsupervised, in one shot, with no one checking that the red step failed for the right reason. Luu's data says agents mostly don't reconstruct the discipline — they write a test, make it pass, and call the box checked. That's TDD in the same sense that a movie prop gun is a gun. It has the shape. It doesn't do the thing the shape is for.
+
+---
+
+## What I'm actually changing
+
+Not much about how I write tests myself. What I'm changing is what I trust from an agent's test suite without reading it.
+
+A green checkmark from an agent-written test file used to feel like partial evidence. After reading through Luu's failure examples, I read every agent-generated test assertion now, not just skim that the suite passed — specifically asking "what change to the implementation would this test *fail to catch*." That's a slower habit than trusting the runner, and it's the only one Luu's data actually supports.
+
+This lines up with something I keep coming back to on this blog: [code was never the hard part](/blog/code-was-never-the-hard-part-hacker-news-debate-2026) — judgment was. Agents didn't remove the need for that judgment when they got fast at typing. They just moved it further downstream, into the part where you decide whether the test that passed was actually testing anything. If you've been pairing with [Xcode's AI agent for a while](/blog/xcode-ai-agents-three-months-honest-review), this will sound familiar: the code compiles, the tests are green, and the bug is still there, waiting for someone to notice the test never could have caught it.
+
+Naming a technique in your prompt is cheap. Reading what the agent actually asserted is not. Only one of those is doing anything for your test suite.
