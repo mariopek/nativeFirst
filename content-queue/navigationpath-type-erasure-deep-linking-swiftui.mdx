@@ -1,0 +1,98 @@
+---
+title: "NavigationPath Hides Your Routes Behind Type Erasure. Deep Linking Wants Them Back."
+description: "SwiftUI's NavigationPath makes heterogeneous navigation stacks easy to push onto — and nearly impossible to inspect, restore, or deep-link into without a Codable detour. Here's the actual trade-off and how to navigate it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "NavigationStack", "Deep Linking", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1550527882-b71dea5f8089?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A row of small brass padlocks on a wooden surface"
+---
+
+{/*
+SEO keywords: NavigationPath SwiftUI, NavigationStack deep linking, type erasure SwiftUI navigation, restore navigation state SwiftUI, Codable NavigationPath, heterogeneous navigation stack
+Internal links: swiftui-view-identity-state-reset-bug (SwiftUI identity theme), tdd-swiftui-observable-viewmodel-red-green-refactor (ObservableObject/state-driven navigation), widgetkit-app-intents-log-brew-without-opening-app (deep-link-adjacent, entering the app mid-stack), swift-networking-retry-token-refresh-request-deduplication (BrewLog codebase anchor style)
+Course link: /learn/building-the-views (NavigationStack basics)
+*/}
+
+Somewhere in BrewLog's navigation code there's a line that pushes three completely different types onto the same stack — a `Brew`, a `BrewHistoryFilter`, and a plain `String` settings key — and it compiles without a single generic constraint in sight. That's `NavigationPath` doing exactly what it's for. It's also the reason restoring that stack from a push notification took me an entire afternoon longer than it should have.
+
+---
+
+## The problem NavigationPath actually solves
+
+Before `NavigationPath` (iOS 16), a `NavigationStack`'s path had to be a single concrete type — usually an enum you hand-rolled to represent every screen your flow could reach:
+
+```swift
+enum Route: Hashable {
+    case brewDetail(Brew)
+    case historyFilter(BrewHistoryFilter)
+    case settings(String)
+}
+
+@State private var path: [Route] = []
+```
+
+That works, and honestly it's still the right choice for a lot of apps — it's the version I still reach for first when [wiring up a `NavigationStack`](/learn/building-the-views) from scratch. But it means every feature module that wants to push a screen has to know about `Route`, which either lives in a shared module everyone depends on or turns into an ever-growing enum that couples unrelated features together.
+
+`NavigationPath` sidesteps this by type-erasing what you push:
+
+```swift
+@State private var path = NavigationPath()
+
+path.append(someBrew)
+path.append(someFilter)
+path.append("Settings")
+```
+
+Any `Hashable` value goes on the stack, `.navigationDestination(for:)` pattern-matches by type to decide what to render, and no feature needs to import a shared route enum. That decoupling is the entire selling point, and it's a real one — it's why Apple reaches for `NavigationPath` in most of its own sample code now.
+
+---
+
+## What "type-erased" costs you later
+
+The trade is that once something is inside a `NavigationPath`, you can't get a strongly typed answer to "what's on the stack right now." `NavigationPath` exposes a `count` and lets you `removeLast()`, but there's no `path[2] as? Brew` — the elements are boxed, and the box doesn't tell you what's in it without you already knowing.
+
+That's invisible until you need to do one of three completely normal things:
+
+**Restore navigation state after a relaunch.** `NavigationPath` is `Codable` if — and only if — every type you ever pushed onto it is also `Codable`. Miss one (a `String` is fine, a view model reference obviously isn't), and `try JSONEncoder().encode(path)` throws at runtime, not at compile time. You find out in a crash report, not a build error.
+
+**Deep-link three levels deep.** A push notification that should land you on a specific brew's detail screen, past the history list, past the filter sheet, needs you to construct the path *in order* — `path.append(filter); path.append(brew)` — from data your notification handler has no natural place to validate against the actual types `.navigationDestination` expects. Get the order wrong and the destination view never triggers; you just silently stay on the root.
+
+**Test that the stack contains what you think it contains.** With a typed `[Route]`, a unit test is `XCTAssertEqual(path, [.brewDetail(sampleBrew)])`. With `NavigationPath`, there's no equality check worth writing beyond `path.count == 1` — you've traded away exactly the property that made the enum version testable.
+
+None of these are `NavigationPath` bugs. They're the direct, documented consequence of type erasure, showing up exactly where type erasure always shows up: the moment you need to look inside the box instead of just carrying it around.
+
+---
+
+## The pattern that actually works
+
+The fix isn't "don't use `NavigationPath`" — it's keeping a second, typed source of truth for the cases where you need one, and letting `NavigationPath` stay type-erased everywhere else.
+
+```swift
+enum DeepLinkDestination: Codable, Hashable {
+    case brewDetail(id: Brew.ID)
+    case historyFiltered(tag: String)
+}
+
+func applyDeepLink(_ destination: DeepLinkDestination, to path: inout NavigationPath) {
+    switch destination {
+    case .brewDetail(let id):
+        path.append(BrewHistoryFilter.all)
+        path.append(id)
+    case .historyFiltered(let tag):
+        path.append(BrewHistoryFilter(tag: tag))
+    }
+}
+```
+
+The trick is small but it matters: `DeepLinkDestination` only needs to model the handful of entry points your app is ever deep-linked *into* — not every screen reachable by tapping around inside the app. That's a much smaller, much more stable enum than a full `Route` type, and it's the one thing worth being honest and typed about, because it's the one thing an external system (a notification payload, a widget, a URL) needs to construct correctly without seeing your view code.
+
+For state restoration, the same idea: don't try to make the live `NavigationPath` itself round-trip through `Codable` if your stack can contain arbitrary feature types. Persist the smaller `DeepLinkDestination`-shaped intent instead, and replay it through the same `applyDeepLink` function on launch. You lose the ability to restore a scroll position mid-list three screens deep, but you gain something that doesn't throw at decode time when someone adds a new pushable type six months from now and forgets to make it `Codable`.
+
+---
+
+## Pick the erasure level on purpose
+
+This is the same shape of trade-off as [SwiftUI's view identity rules](/blog/swiftui-view-identity-state-reset-bug) — a feature that's convenient specifically because it hides information from you, right up until the moment you need that information back. A typed `[Route]` array costs you coupling between features. `NavigationPath` costs you inspectability at the boundaries — restoration, deep linking, and tests. Both costs are real; they just come due at different times, and only one of them shows up in your first two weeks of building the flow.
+
+If your app has a handful of entry points from outside itself — push notifications, widgets, `App Intents` like [BrewLog's own "log a brew without opening the app" flow](/blog/widgetkit-app-intents-log-brew-without-opening-app) — model those entry points as a small typed enum on purpose, even while the rest of your navigation stays comfortably type-erased. Decide where you need the box to be transparent before you're debugging why a notification silently did nothing.
