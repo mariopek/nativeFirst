@@ -1,0 +1,141 @@
+---
+title: "An Actor Isn't a Lock. It's a Line With a Very Specific Rule About Cutting."
+description: "Swift actors guarantee that only one task touches their state at a time — except across every await, where a second task can walk right in. Here's what actor reentrancy actually means and the bug pattern it causes."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift Concurrency", "Actors", "Swift 6", "Async Await", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1571840615771-acc2e9f42641?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A velvet rope queue barrier stand, the kind used to control who enters one at a time"
+---
+
+{/*
+SEO keywords: swift actor reentrancy, actor isolation swift, swift concurrency race condition, actor is not a lock, async await actor bug, swift 6 actor mutable state
+Internal links: swift-networking-retry-token-refresh-request-deduplication (actor-based dedup, same failure shape), swift-testing-tasklocal-trait-st-0026-static-var-di (concurrency-adjacent race), swift-6-2-concurrent-nonisolated-mainactor-decision-tree (isolation model), migrating-real-app-swift-6-2-strict-concurrency-86-errors (actors under strict concurrency)
+Course link: /learn/swiftui-in-practice-13-swift-6-concurrency
+Evergreen queue post, no app mention forced
+*/}
+
+I spent a solid chunk of my first month with actors assuming they were locks with better syntax. Mark the state `actor`-isolated, the compiler stops you from touching it from the wrong context, done — one task in the room at a time, like a mutex with nicer error messages.
+
+That's true. It's also not the whole story, and the gap between those two sentences is exactly where a specific, repeatable bug lives.
+
+---
+
+## What actors actually promise
+
+An actor guarantees **isolation**, not **exclusion for the whole duration of a call**. Only one task can be *executing* the actor's code at any instant — that part really is like a lock. What it doesn't guarantee is that a single call to one of its methods finishes before any other call starts.
+
+The difference shows up the moment your actor method has an `await` in it:
+
+```swift
+actor TicketCounter {
+    private var soldOut = false
+    private var remaining = 3
+
+    func claimTicket() async -> Bool {
+        guard !soldOut, remaining > 0 else { return false }
+
+        // Some actual work: hitting a server to reserve the seat.
+        try? await Task.sleep(for: .milliseconds(50))
+
+        remaining -= 1
+        if remaining == 0 { soldOut = true }
+        return true
+    }
+}
+```
+
+Call `claimTicket()` from three tasks at once and you'd expect the actor to line them up and let exactly three succeed. It does — this particular example is actually fine, because nothing checks `remaining` a second time after the `await`. But nudge the shape slightly and reentrancy stops being harmless.
+
+---
+
+## The bug: a second task walks in mid-`await`
+
+Here's the version that bites. Say `claimTicket` needs to check something *again* after the network call — a very normal thing to do, since the whole point of the request is often to get a fresher answer:
+
+```swift
+actor TicketCounter {
+    private var soldOut = false
+    private var remaining = 3
+
+    func claimTicket() async -> Bool {
+        guard !soldOut else { return false }
+
+        let stillAvailable = await checkServerInventory()   // <- suspension point
+        guard stillAvailable, remaining > 0 else { return false }
+
+        remaining -= 1
+        if remaining == 0 { soldOut = true }
+        return true
+    }
+}
+```
+
+Two tasks call `claimTicket()` when `remaining == 1`. Task A passes the first guard, suspends on `checkServerInventory()`. While A is suspended, the actor is free — genuinely free, not "free unless you forgot to release a lock" — so Task B runs, also passes the guard (nothing's changed yet), and also suspends on its own network call.
+
+Now both resume. Both see `remaining > 0` is still true, because neither one re-read `remaining` after their `await` — they read it once, before suspending, and again right after resuming, and in between, nothing forced them to notice the other task had already run. Both decrement. `remaining` goes to `-1`, `soldOut` never gets set, and you've sold four tickets for a three-seat show.
+
+That's actor reentrancy: **every `await` inside an actor method is a point where the actor can go serve someone else**, and your local variables don't know that happened. The compiler won't flag it. Nothing crashes. It's a logic bug that only shows up under real concurrent load, which is precisely the condition your unit tests are least likely to reproduce.
+
+---
+
+## Why Swift designed it this way on purpose
+
+The obvious question is why actors don't just queue every call end-to-end and make this impossible. They could — and early actor proposals debated exactly that. The reason they didn't: a strictly serialized actor deadlocks the instant two of its own methods call each other, or the instant a UI needs to stay responsive while an actor method is mid-await waiting on the network.
+
+Non-reentrant actors sound safer until you've written one that hangs your app because method A is awaiting method B, and B can't run until A's slot frees up, and A's slot won't free up until B returns. Reentrancy is the actor model choosing "occasionally lets a subtle race happen" over "occasionally deadlocks the whole program." Both are real costs. Swift picked the one you can defend against with review, over the one you can't defend against at all.
+
+---
+
+## The actual fix: don't trust state across an `await`
+
+The pattern that avoids this isn't "avoid `await` inside actors" — that defeats the purpose of having an actor do real work. It's **re-validate everything you depend on immediately before you mutate, not just once before you suspend**:
+
+```swift
+actor TicketCounter {
+    private var soldOut = false
+    private var remaining = 3
+
+    func claimTicket() async -> Bool {
+        guard !soldOut else { return false }
+
+        let stillAvailable = await checkServerInventory()
+
+        // Re-check AFTER resuming, right before the mutation —
+        // not the value you captured before the suspension.
+        guard stillAvailable, !soldOut, remaining > 0 else { return false }
+
+        remaining -= 1
+        if remaining == 0 { soldOut = true }
+        return true
+    }
+}
+```
+
+The second `guard` is the whole fix. It costs one extra line and it changes nothing about the happy path — it just refuses to act on state that might be stale by the time execution actually resumes. If your actor method mutates state after any `await`, that mutation needs to assume the world changed while it was gone, because inside an actor, it's allowed to.
+
+The other reliable pattern is collapsing the check-then-act sequence so there's no suspension between them at all — do the async work first, gather everything you need, then do one uninterrupted synchronous block that reads and mutates state together:
+
+```swift
+func claimTicket() async -> Bool {
+    guard !soldOut else { return false }
+    let stillAvailable = await checkServerInventory()
+
+    // Everything from here down is synchronous — no suspension,
+    // so no other task can interleave before the mutation lands.
+    guard stillAvailable, !soldOut, remaining > 0 else { return false }
+    remaining -= 1
+    if remaining == 0 { soldOut = true }
+    return true
+}
+```
+
+That's the same code as above, but it's worth naming as its own rule: once you're past the last `await` in a method, everything after it runs atomically with respect to other calls on the actor. The bug only lives in the gap *before* that point, where a stale local variable survives a suspension it shouldn't have trusted.
+
+---
+
+## Where this actually shows up
+
+The ticket-counter example is deliberately small, but the shape recurs anywhere an actor does "check, fetch, then commit" — a request-deduplication actor that checks for an in-flight request, awaits the network, then registers the result; a cache actor that checks for a stale entry, awaits a refetch, then writes the new value; a rate limiter that checks a budget, awaits a call, then decrements it. Any actor method with an `await` sandwiched between a read and a later write of the same property is a candidate, and the fix is the same each time: re-read what you're about to act on, right where you're about to act on it, not earlier.
+
+An actor is a line with a rule about who's allowed to touch the counter — it's not a rule about everyone in line staying frozen while one person steps out to make a phone call. Write your actor methods like the person ahead of you might change their order while they're on that call, because inside an actor, they can.
