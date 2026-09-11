@@ -1,0 +1,81 @@
+---
+title: "Your Upload Doesn't Stop When Your App Gets Killed. It's Not Supposed To."
+description: "URLSession background sessions keep uploads and downloads running after iOS terminates your app — but only if you set them up before the crash, not after. Here's the delegate dance nobody reads the docs closely enough to get right."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["URLSession", "Networking", "iOS", "Background Tasks", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1573529033867-894535b9d3f5?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A delivery truck driving at night, headlights on, mid-route"
+---
+
+{/*
+SEO keywords: urlsession background session swift, ios background upload download, handleEventsForBackgroundURLSession, urlsession delegate vs async await, background transfer swift ios
+Internal links: swift-networking-retry-token-refresh-request-deduplication (same NetworkClient family, linked in body). Related but not linked: bgtaskscheduler-background-refresh-actually-runs (adjacent background-execution topic, different mechanism — BGTaskScheduler vs URLSession background sessions)
+Course link: /learn/vibe-code-native
+Evergreen queue post, no app mention forced
+*/}
+
+I want to be upfront about a mistake I see constantly, because I made it myself first: assuming "background upload" means the same thing as "regular upload, but with a background flag set." It doesn't. It means a different subsystem entirely, one that outlives your app.
+
+That distinction is the whole post.
+
+---
+
+## The request that doesn't need you anymore
+
+A normal `URLSession.shared.uploadTask` lives inside your app's process. Kill the app — user swipes it away, iOS terminates it for memory, whatever — and the request dies with it. That's fine for most things. It's not fine for a five-minute video upload from someone who switches apps to answer a text halfway through.
+
+`URLSessionConfiguration.background(withIdentifier:)` solves this by handing the transfer off to a separate system daemon. Once you start the task, iOS's networking process owns it. Your app can be suspended, terminated, even relaunched from scratch, and the upload keeps going in the background, independent of whether your process exists.
+
+That's the appeal. It's also exactly where the setup stops looking like normal `URLSession` code:
+
+```swift
+let config = URLSessionConfiguration.background(withIdentifier: "com.example.app.upload")
+config.isDiscretionary = false
+config.sessionSendsLaunchEvents = true
+
+let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+let task = session.uploadTask(with: request, fromFile: localFileURL)
+task.resume()
+```
+
+Two details in there are not decoration. `fromFile:` is mandatory — background uploads read from a file on disk, never from an in-memory `Data` blob, because the daemon needs something durable to hand off. And the completion has to arrive through a delegate, not a closure.
+
+---
+
+## Why async/await can't just do this
+
+Every background session **must** use the delegate-based API. `URLSession.shared.upload(for:from:)` with `async`/`await`, or a completion-handler closure passed to `uploadTask(with:from:completionHandler:)` — both silently refuse to work with a background configuration. The response comes back through `URLSessionTaskDelegate` and `URLSessionDataDelegate` methods, full stop, because those callbacks are how the system can redeliver results to a **freshly launched process** that wasn't the one that started the request.
+
+That's the part that trips people up. Your original session, running in the process that called `task.resume()`, might not be alive when the transfer finishes. iOS relaunches your app in the background specifically to receive the result, and it does that by calling a method in your app delegate:
+
+```swift
+func application(
+    _ application: UIApplication,
+    handleEventsForBackgroundURLSession identifier: String,
+    completionHandler: @escaping () -> Void
+) {
+    backgroundCompletionHandler = completionHandler
+    // Re-create a session with the SAME identifier so it reattaches
+    // to the in-flight (or just-finished) task.
+    _ = URLSession(configuration: .background(withIdentifier: identifier), delegate: self, delegateQueue: nil)
+}
+```
+
+The session identifier is the whole mechanism. It's not a debug label — it's how a brand-new `URLSession` instance, created in a brand-new process launch, gets reconnected to work that started under a completely different instance. Reuse a random UUID per launch and you've built a system that can never reattach to anything.
+
+And you have to call that stored `completionHandler` — the one iOS hands you in `handleEventsForBackgroundURLSession` — after your delegate's `urlSessionDidFinishEvents(forBackgroundURLSession:)` fires, or iOS assumes your background work is hung and starts penalizing your app's background time budget for future launches.
+
+---
+
+## The gotcha that isn't in the happy path
+
+Here's the one that actually costs people time: **you can't set this up reactively.** If your app has already been terminated and a background transfer finishes while it's dead, iOS relaunches it specifically to handle that event — but only because you registered the session identifier and delegate *before* the app died, in a previous launch. There's no way to retroactively attach to a transfer you never told the system about. The setup has to run unconditionally, early, every launch — not gated behind "if the user is on the upload screen."
+
+That's a real architectural constraint, not a config flag. It means whatever object owns your background session identity needs to exist and register itself in `application(_:didFinishLaunchingWithOptions:)` regardless of what screen the user is on, because you don't get to choose when iOS wakes your app back up for this.
+
+If your app already has a networking layer with retry and resilience logic — something like [a `NetworkClient` wrapping request deduplication and token refresh](/blog/swift-networking-retry-token-refresh-request-deduplication) — background sessions don't fit cleanly into it. They're not "one more configuration option" on your existing session. They're a second, parallel transfer mechanism with their own lifecycle, and treating them as a drop-in replacement for your regular upload path is how you end up debugging why a completion handler you swear you wrote never fires.
+
+---
+
+**Takeaway:** a background `URLSession` isn't background-flavored networking, it's a handoff to a system daemon that can outlive your process and relaunch it later. Delegate-only, file-based bodies, a stable identifier you register on every launch whether or not anyone's using it — get any one of those wrong and the upload either never survives app termination, or it finishes and your app never finds out.
