@@ -1,0 +1,104 @@
+---
+title: "SwiftUI's .task(id:) Cancels for You. .onChange Doesn't. That Gap Is Where Your Duplicate Network Calls Live."
+description: ".task(id:) and .onChange(of:) both react to a value changing, but only one of them cancels the work it started. Here's the SwiftUI concurrency gotcha that ships silently duplicate requests."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift Concurrency", "Async Await", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1520962880247-cfaf541c8724?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Two runners on parallel tracks, one crossing ahead of the other"
+---
+
+{/*
+SEO keywords: SwiftUI task id vs onChange, task(id:) cancellation, onChange async task duplicate network call, SwiftUI structured concurrency gotcha, task modifier re-run, SwiftUI race condition async, Equatable task id SwiftUI.
+Internal links: swiftui-task-cancellation-isnt-automatic (direct prerequisite — that post covers .task not cancelling on view disappearance, this one covers a DIFFERENT cancellation gap: manual re-triggering via onChange), swift-networking-retry-token-refresh-request-deduplication (the dedup pattern that masks this bug), swiftui-view-identity-state-reset-bug (adjacent "SwiftUI re-runs something you didn't expect" bug class), asyncimage-caching-swiftui-scroll-performance (another async-in-a-list gotcha). Course lesson: /learn/swiftui-in-practice-13-swift-6-concurrency.
+Evergreen — not tied to any specific week's news, safe to sit in the queue.
+*/}
+
+Two SwiftUI modifiers do almost the same thing, and the "almost" is where I've watched three different apps ship a bug that looks like a flaky server.
+
+`.task(id:)` and `.onChange(of:)` both exist to react when a value changes. Search parameters, a selected filter, a user ID — you pick one, the view needs to refetch. Reach for either modifier and the code compiles, the happy path works, and the bug doesn't show up until someone types fast in a search bar or taps a filter twice before the first result lands.
+
+Here's the difference that actually matters, and it's not the one the naming suggests.
+
+---
+
+## What `.task(id:)` promises that `.onChange` doesn't
+
+`.task(id:)` runs an async closure, and when the `id` value changes, SwiftUI **cancels the in-flight task and starts a new one** — automatically, no code required from you:
+
+```swift
+struct SearchResultsView: View {
+    let query: String
+    @State private var results: [Result] = []
+
+    var body: some View {
+        List(results) { ResultRow(result: $0) }
+            .task(id: query) {
+                do {
+                    results = try await api.search(query)
+                } catch is CancellationError {
+                    // expected — a newer query superseded this one
+                } catch {
+                    // real error
+                }
+            }
+    }
+}
+```
+
+Type "swift", then "swiftui" a hundred milliseconds later, and the task for "swift" gets cancelled the instant `query` changes. If `api.search` is written to check `Task.isCancelled` or just propagates cancellation through `URLSession`, that in-flight request dies before it ever updates `results`. One request lands: the last one you asked for.
+
+`.onChange(of:)` gives you the notification. It does not give you the cancellation:
+
+```swift
+.onChange(of: query) { _, newQuery in
+    Task {
+        results = try await api.search(newQuery)   // nothing cancels the PREVIOUS one of these
+    }
+}
+```
+
+Every keystroke spawns a brand-new, completely independent `Task`. Nothing here knows or cares that an earlier one is still in flight. If "swift" resolves *after* "swiftui" — plausible, servers don't guarantee response order matches request order — your search box shows results for a query the user already replaced. That's not a network flake. That's the code doing exactly what you told it to.
+
+---
+
+## Why this one is easy to miss in review
+
+It's easy to miss because both versions look correct at a glance, and both work fine in the demo you show your team. The bug needs two specific things to line up: two triggers close enough together that both requests are in flight simultaneously, and a response order that doesn't match request order. On a fast wifi connection in the office, that almost never happens. On a real user's cellular connection with jittery latency, it happens constantly — which is exactly why this class of bug tends to surface in App Store reviews ("search is buggy, shows wrong results") instead of your own testing.
+
+I've seen the `.onChange` + bare `Task { }` pattern in code that had been shipping for months before anyone noticed, because the fix people reach for first — a debounce — reduces how often it fires without touching why it's wrong. Debouncing narrows the window. It doesn't close it.
+
+---
+
+## The fix, if you're stuck with `.onChange`
+
+Sometimes `.task(id:)` genuinely isn't the shape you need — maybe the trigger isn't a simple `Equatable` value change, or you need to react to something that isn't naturally expressible as a view's identity-adjacent modifier. When that's the case, you cancel it yourself:
+
+```swift
+@State private var searchTask: Task<Void, Never>?
+
+.onChange(of: query) { _, newQuery in
+    searchTask?.cancel()
+    searchTask = Task {
+        do {
+            results = try await api.search(newQuery)
+        } catch is CancellationError {
+            // expected
+        } catch {
+            // real error
+        }
+    }
+}
+```
+
+Store the handle, cancel the old one before starting the new one. This is exactly what `.task(id:)` does for you internally — which is the actual lesson here. `.task(id:)` isn't magic, it's this pattern, pre-written, attached to the value you tell it to watch. If you're using `.onChange` to kick off async work and you haven't written the cancel-the-old-handle line, you've quietly opted out of behavior you probably assumed you had.
+
+---
+
+## The gotcha inside the gotcha: what counts as "changed"
+
+One more thing worth knowing before you reach for `.task(id:)` as the universal fix: it re-runs when the `id` value is **not equal** to the previous one, per `Equatable`. That's usually what you want for a `String` or an `Int`. It gets less obvious with structs that wrap reference types, or with a `Hashable` enum where a case has an associated value you didn't expect to matter — like a `Filter` enum case carrying a `Date` computed at "now" every time the view rebuilds, which changes on every single re-render and cancels/restarts the task in a loop that never finishes. If your `.task(id:)` seems to restart way more often than your mental model says it should, checking exactly what's flowing into `id` — and whether its `Equatable` conformance means what you think — is the first place to look, in the same way [SwiftUI view identity biting you](/blog/swiftui-view-identity-state-reset-bug) usually traces back to a value changing more often than the code around it assumes.
+
+---
+
+Both modifiers are correct tools. They're just answering different questions — "notify me when this changes" versus "keep exactly one of these running, matching the latest value." Reach for the second one whenever the async work you're starting would be wrong to still be running once its trigger is stale. The [general shape of "in-flight work needs a way to know it's obsolete"](/blog/swift-networking-retry-token-refresh-request-deduplication) shows up all over concurrent Swift code — this is just the version that hides behind two modifiers that look interchangeable until you actually need the one you didn't pick.
