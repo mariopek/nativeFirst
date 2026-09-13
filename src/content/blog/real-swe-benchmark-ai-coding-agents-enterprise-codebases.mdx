@@ -1,0 +1,85 @@
+---
+title: "A New Benchmark Tested AI Coding Agents on Real Company Codebases. The Winning Score Was 38.8%."
+description: "Real-SWE benchmarks frontier coding agents against private, licensed enterprise codebases instead of public GitHub issues. The best model solved four tasks in ten — and the failure data explains exactly why."
+pubDate: 2026-09-13
+tags: ["AI Agents", "Coding Agents", "Benchmarks", "Xcode", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1454166155302-ef4863c27e70?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A red pen marking corrections on a graded exam paper"
+---
+
+{/*
+SEO keywords: Real-SWE benchmark, AI coding agent benchmark 2026, SWE-bench contamination, Claude Code resolution rate, enterprise codebase AI agent, coding agent failure taxonomy, MISSED_REQUIREMENT INTEGRATION_ERROR, AI agent cost vs performance, Xcode AI agent reliability, agentic coding benchmark private codebase.
+Internal links: ai-agents-bad-at-testing-tdd-study-2026 (a different study, same "naming the technique doesn't fix the behavior" theme), xcode-ai-agents-three-months-honest-review (my own lived version of the failure modes this benchmark quantifies), code-was-never-the-hard-part-hacker-news-debate-2026 (judgment as the bottleneck, not typing), your-prompts-are-not-skills-yet (agent behavior and trust calibration). Course lesson: /learn/debugging-with-ai.
+No app mention — didn't fit an agent-benchmark piece; last mention was 2026-09-11 anyway, within cadence.
+*/}
+
+Every coding agent benchmark I've read this year reports numbers in the 60s and 70s. Real software engineering, allegedly mostly solved. Then this week a company called Specific Labs published a benchmark where the best model in the world clears **38.8%**. Not a typo. Less than four correct answers out of ten.
+
+The difference isn't the models got worse. It's that this benchmark refused to use homework the models had already seen.
+
+---
+
+## Closed book, for once
+
+Here's the problem Real-SWE was built to fix. Most agent benchmarks — SWE-bench and its many descendants — pull tasks from public GitHub repositories: real issues, real pull requests, real fixes. Which sounds rigorous, until you remember that "public GitHub repository" is also roughly the training set for every frontier model. The benchmark and the exam key have a way of ending up in the same room.
+
+Real-SWE's fix is almost aggressively simple: license private, production codebases from real companies, and write tasks from problems their actual engineers actually worked on. Billing calculations. Customer identity migrations. A linearizable scan over a datastore. Code an agent has structurally never seen, with conventions it has to infer from the codebase itself instead of pattern-matching against a thousand similar public repos.
+
+That's the whole trick. No public code, no leakage, no partial credit for having memorized the answer key. Just: here's a real company's real code, here's a real problem, go.
+
+---
+
+## The leaderboard, and why it's lower than you'd guess
+
+Eight models, eight independent runs per task, averaged. Here's how it shook out:
+
+| Model | Harness | Resolution rate |
+|---|---|---|
+| Fable 5.1 | Claude Code | 38.8% |
+| GPT-6 Astra | Codex CLI | 33.8% |
+| Gemini 3.8 Flash | Gemini CLI | 31.2% |
+| GLM 5.3 | Claude Code | 28.8% |
+| Grok 4.6 | Grok Build | 23.8% |
+| Muse Spark 1.3 | Muse Code | 23.8% |
+| Kimi K3 | Kimi Code | 18.8% |
+| GPT-5.6 Sol | Codex CLI | 16.2% |
+
+The top model in the world, on this measure, gets it right a little more often than a coin flip gets it wrong twice. And "resolution rate" here is pass@1 averaged over eight tries — meaning even the winner's success is inconsistent run to run on the exact same task. No model solved every task. Not one.
+
+If your mental model of coding agents was calibrated on the 60-70% scores from public benchmarks, recalibrate. Those numbers were never measuring "can this thing do real engineering work." They were measuring "has this thing seen something like this before."
+
+---
+
+## The failures aren't wrong code. They're wrong understanding.
+
+This is the part I actually sat up for. Real-SWE doesn't just score pass/fail — it categorizes *how* each attempt failed, using a taxonomy borrowed from the DeepSWE paper. For the top model, the breakdown of failed runs looked roughly like this:
+
+- **Missed requirement** (~36%) — the agent solved a version of the problem, just not the one that was asked.
+- **Integration error** (~34%) — the fix is conceptually right and wired into the codebase wrong.
+- **Unverified assumption** (~24%) — the agent guessed at behavior it could have checked and didn't.
+- **Regression** (~4%) — the fix works, and breaks something else.
+
+Read that list again. Only a sliver of failures are "the agent doesn't understand how to code." Almost all of them are the agent not understanding the *codebase* — its conventions, its edge cases, the parts of the requirement that were implied rather than spelled out. One line from the report's analysis stuck with me: agents kept producing code that was, in their words, "right idea, wired into the surrounding system incorrectly."
+
+I've shipped that exact failure. Not from a benchmark — from my own Xcode AI agent, on my own code, more than once. Ask it to add a retry to a network call and it'll write a perfectly serviceable retry loop that ignores the `RequestDeduplicator` actor already sitting three files away, because nothing in the prompt told it that actor existed or that skipping it means two identical requests race each other. The code compiles. The code is even arguably correct in isolation. It's wrong for *this* codebase, in a way no amount of "write better prompts" fully closes, because the gap isn't instruction quality — it's context the agent had no way to know it was missing. I wrote about the same shape of problem back when [a testing study](/blog/ai-agents-bad-at-testing-tdd-study-2026) found agents write tests that check nothing meaningful even when explicitly told to do TDD: naming the technique doesn't install the judgment.
+
+---
+
+## Money doesn't buy you out of this
+
+The other chart worth staring at plots cost per task against resolution rate. If more expensive meant more capable, that'd be a straight line up and to the right. It is not.
+
+Gemini 3.8 Flash resolved 31.2% of tasks at roughly $2.50 per rollout. Grok 4.6 and Kimi K3 — both pricier, at $3.44 and $3.90 — resolved fewer: 23.8% and 18.8%. GPT-5.6 Sol, at a similar price point to Gemini, resolved a mere 16.2%. Paying more bought worse odds, twice, in the same table.
+
+For a solo developer picking which agent to run against a real codebase, that's the actionable part. The instinct to reach for the priciest model "because it's probably better" isn't backed by this data. What predicts resolution rate isn't spend — it's something about how well that specific model-plus-harness pairing navigates a codebase it's never seen. Which is a much harder thing to shop for than a price tag, and exactly why a benchmark like this is worth more than another vendor's blog post.
+
+---
+
+## Your codebase is the private codebase
+
+Here's the reframe I keep coming back to: every solo developer's app already *is* a Real-SWE task. Nobody trained a frontier model on your specific `NetworkClient`, your specific naming conventions, the specific reason you made that one view model own its own timer instead of injecting it. That context lives in your head and your git history, not in the model's weights — which is precisely the setup Real-SWE went out of its way to construct artificially for enterprise code, and which every indie iOS codebase has for free, on day one.
+
+That's not an argument against using agents. It's an argument for treating "missed requirement" and "integration error" as the *default* failure modes to watch for, not the exception — the same posture I laid out in [three months of pairing with Xcode's own agent](/blog/xcode-ai-agents-three-months-honest-review). Review the wiring, not just the diff. Check whether it found the existing pattern before it invented a new one. The benchmark's whole point is that this isn't a prompting problem you engineer your way out of — it's the actual, current shape of the tool, measured honestly for the first time on code that was never going to give the model a hint.
+
+Four out of ten, from the best model available, on real work. That's not a reason to stop using these things. It's a reason to stop being surprised when [the code was never actually the hard part](/blog/code-was-never-the-hard-part-hacker-news-debate-2026) — the understanding was.
