@@ -1,0 +1,109 @@
+---
+title: "Your private(set) Property Isn't as Private as You Think. Swift's Memberwise Init Still Lets Anyone Set It."
+description: "A fresh Swift Evolution pitch tackles a real gap: struct memberwise initializers ignore private(set) and let callers set properties you meant to protect. Here's the pitch, the pushback, and why the debate matters more than the syntax."
+pubDate: 2026-09-14
+tags: ["Swift", "Swift Evolution", "Structs", "API Design", "Memberwise Init"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1555529902-5261145633bf?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A brass keyhole in a locked wooden door"
+---
+
+{/*
+SEO keywords: swift memberwise initializer, private(set) swift, struct default initializer swift, swift evolution pitch 2026, @Init(.ignore) swift, @Memberwise init swift, SE-0546 memberwise init, swift struct encapsulation
+Internal linking plan: se-0546-memberwise-init-same-file-extensions (direct continuity, same saga), swift-testing-tasklocal-trait-st-0026-static-var-di (Point-Free/community pitch-debate pattern), swiftui-view-identity-state-reset-bug (invariants quietly broken), swiftpm-traits-test-target-configurations-pitch (another "explicit vs implicit" language debate), /learn/vibe-code-native course lesson
+No app mention this run — didn't fit naturally, last mention 2026-09-11 anyway (within weekly cadence).
+*/}
+
+I found a bug in an app three years ago that took me an embarrassing amount of time to track down. A `Session` struct had a `retryCount` that only ever got touched by one method, `recordRetry()`. Except one day it didn't start at zero. Somewhere, someone had written `Session(userID: "u1", retryCount: 100)` — and Swift let them.
+
+That's the whole story. No malice, no typo, just a struct doing exactly what Swift told it to do.
+
+---
+
+## private(set) protects less than you think
+
+Here's the setup. You write a struct, mark a property `private(set)` because you only want it mutated from inside the type:
+
+```swift
+struct Session {
+    var userID: String
+    private(set) var retryCount = 0
+
+    mutating func recordRetry() {
+        retryCount += 1
+    }
+}
+```
+
+`private(set)` does exactly what it says — it restricts the *setter*. Nobody outside `Session` can write `session.retryCount = 100`. Good.
+
+Except Swift's synthesized memberwise initializer doesn't check setter visibility at all. It just asks "does this property need a value," and `retryCount` has none of the usual outs (it's not a `let` with a default, it's not computed). So it lands in the initializer's parameter list anyway, and anyone can call:
+
+```swift
+Session(userID: "u1", retryCount: 100)
+```
+
+Your invariant — retries start at zero, only `recordRetry()` moves the counter — was never actually enforced. `private(set)` protected the *setter*. It said nothing about *construction*. Two different doors, and Swift only locked one of them.
+
+A Swift Forums [pitch posted this month](https://forums.swift.org/t/pitch-explicit-opt-out-for-memberwise-initialization/89439) by a contributor going by mini-min wants to close that gap.
+
+---
+
+## The pitch: mark it, skip it
+
+The original proposal is refreshingly simple — a placeholder attribute, `@Init(.ignore)`, that pulls a property out of the memberwise initializer entirely:
+
+```swift
+struct Session {
+    var userID: String
+
+    @Init(.ignore)
+    private(set) var retryCount = 0
+
+    mutating func recordRetry() {
+        retryCount += 1
+    }
+}
+```
+
+Now `Session(userID: "u1")` is the only way in. `retryCount` starts at its default, and the only path to changing it is the method you wrote for that purpose. The initializer still gets synthesized — you're not back to hand-writing `init(userID:)` and repeating every other property's assignment, which is the actual pain this pitch is solving. Today, excluding one property from the memberwise init means writing the whole initializer by hand. With five properties that's a chore. With fifteen it's a liability, because every time you add a property you have to remember to also add it to your hand-rolled `init`.
+
+That's the real motivation, and it's a legitimate one. I don't think anyone in the thread disputed that the current situation — all or nothing, synthesized or fully manual — is a bad trade-off.
+
+Where the thread got interesting was what came next.
+
+---
+
+## The pushback: this treats the symptom
+
+Reviewer allevato didn't argue against the goal. They argued the *shape* is wrong — that bolting an attribute onto individual properties to peel them off the initializer is patching around a deeper design gap, and proposed something closer to opting the whole type *in* to an explicit initializer signature instead:
+
+```swift
+struct Whatever {
+    let alreadyInitialized: UUID = UUID()
+    var x: Int
+    var y: String
+
+    @Memberwise init(x: Int, y: String)
+}
+```
+
+You write the parameter list. Swift synthesizes the *body*. Compare that to `@Init(.ignore)`, and the difference is about where the source of truth lives. With per-property exclusion, the initializer's actual signature is scattered across the type — you have to read every property declaration to know what `init` looks like. With `@Memberwise init(x:, y:)`, the signature is right there, in one place, in the order you chose.
+
+allevato listed the wins plainly: you get explicit control over the initializer's access level (no need to invent a way to spell "this init is public but this property isn't"), you get a natural place to hang a doc comment, and the parameter order stops being hostage to whatever order you declared your stored properties in.
+
+The original poster pushed on one more thing worth sitting with: what happens when you add a new stored property later and *forget* to add it anywhere? Under `@Memberwise init`, the compiler has no way to know you meant to expose it — it'll just silently keep defaulting. Under `@Init(.ignore)`, forgetting to mark a property means it silently *joins* the initializer instead. Either direction, the failure mode is the same shape: an omission that compiles cleanly and does the wrong thing. Nobody in the thread had a full answer for that yet, which tells you the pitch is exactly where it should be — pre-review, everyone still finding the edges.
+
+This is the second time this cycle Swift Evolution has poked at memberwise initializers. [SE-0546](/blog/se-0546-memberwise-init-same-file-extensions), reviewed back in August, let you define the memberwise init yourself in a same-file extension as long as it matches the synthesized signature exactly — useful for macro-generated structs that need a `public` init without losing synthesis. This pitch is the other side of the same coin: SE-0546 is about *where* you can write the initializer, this one is about *what gets left out of it*. Neither is finished business, and I'd bet the eventual answer borrows a little from both threads.
+
+---
+
+## Where I land, for what it's worth
+
+I like `@Memberwise init(x:, y:)` better on gut feel — explicit signatures read better to me than exclusion attributes scattered through a property list, for the same reason I'd rather see a function's full signature than infer it by scanning which parameters are missing. But that's a style preference, not a technical objection, and the pitch is nowhere near settled — no SE number yet, no accepted direction, just a contributor with a real problem and a reviewer with a real counter-design.
+
+What I'd actually take from this thread today, before any of it ships: `private(set)` on a struct property is not the invariant-guard you think it is. If a stored property has no default and no exclusion mechanism (because there currently isn't one), it's reachable through the memberwise initializer no matter what access control you put on its setter. If that property represents state a caller should never construct directly — a counter, a computed-looking cache, anything your type owns the lifecycle of — the only honest fix right now is to write the initializer by hand and eat the boilerplate. Not fun, but it's the one option Swift actually gives you today.
+
+---
+
+Cross-linked reading if you want more of this: [the SE-0546 same-file memberwise init post](/blog/se-0546-memberwise-init-same-file-extensions), [the ST-0026 taskLocal test trait pitch](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di) (another case of a Point-Free-adjacent pitch getting real pushback in review), [the SwiftPM traits pitch](/blog/swiftpm-traits-test-target-configurations-pitch) for a different flavor of the same "explicit vs. implicit" argument, and [the view-identity bug post](/blog/swiftui-view-identity-state-reset-bug) if "an invariant you thought was enforced actually wasn't" is a rabbit hole you enjoy falling down. If you're newer to Swift's initializer synthesis rules in general, [the vibe-code-native course lesson](/learn/vibe-code-native) covers the basics before you hit edge cases like this one.
