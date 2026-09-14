@@ -1,0 +1,98 @@
+---
+title: "Task.detached Isn't Task With Extra Steps. It Throws Away Everything Task Inherited For You."
+description: "Task.detached in Swift concurrency looks like a stronger version of Task, but it silently drops actor isolation, priority, and task-local values. Here's what actually breaks, and when detached is genuinely the right call."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Swift Concurrency", "Task", "Actors", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1517457373958-b7bdd4587205?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single rope cut cleanly with scissors, the two ends falling apart"
+---
+
+{/*
+SEO keywords: Task.detached swift, swift concurrency task inheritance, actor isolation task, task-local values swift, structured concurrency vs unstructured, when to use Task.detached, swift task priority inheritance
+Internal linking plan: swift-testing-tasklocal-trait-st-0026-static-var-di (task-local values explained), swift-custom-main-global-executors-mainactor-thread-myth (MainActor isolation is about serialization not threads), swiftui-task-cancellation-isnt-automatic (Task lifecycle gotchas), swift-networking-retry-token-refresh-request-deduplication (actor-based real code), course lesson /learn/swiftui-in-practice-13-swift-6-concurrency
+No app mention — evergreen technique post, didn't force it.
+*/}
+
+I used to think `Task.detached` was just `Task` for people who wanted to be extra sure their work wasn't tied to anything. Belt and suspenders. Turns out it's closer to cutting the belt off entirely and hoping your pants stay up on their own.
+
+Here's the mixup, and the bug it causes.
+
+---
+
+## What Task actually gives you for free
+
+When you write a plain `Task { }` inside an actor-isolated context, it inherits a surprising amount from the place it was created:
+
+```swift
+@MainActor
+final class SessionViewModel {
+    func refresh() {
+        Task {
+            // still @MainActor here — inherited automatically
+            let session = await fetchSession()
+            self.session = session
+        }
+    }
+}
+```
+
+That closure runs starting from `@MainActor` isolation, at the priority of the task that spawned it, and it inherits any task-local values currently in scope. None of that is magic — it's the deliberate design of *structured-ish* unstructured tasks (yes, `Task { }` is still unstructured — it doesn't get cancelled when its creator's scope exits — but it copies the *context* it was born into).
+
+That inheritance is usually exactly what you want. It's why you can call `self.session = session` on the next line without a compiler error: the closure is still `@MainActor`, so touching `@MainActor`-isolated state is fine.
+
+---
+
+## What Task.detached throws away
+
+`Task.detached` looks like a small variation. It isn't. From the standard library's own doc comment: it creates a task that is "detached from the current context — it doesn't inherit its priority, task-local storage, or actor context."
+
+```swift
+@MainActor
+final class SessionViewModel {
+    func refresh() {
+        Task.detached {
+            let session = await fetchSession()
+            self.session = session   // compiler error (or a warning, depending on your settings)
+        }
+    }
+}
+```
+
+That closure runs with *no* actor isolation at all. It's not on `@MainActor`, it's not on any actor — it's just a plain concurrent context. Assigning to `self.session` from inside it is a Sendable/isolation violation, because nothing guarantees it's safe. Under strict concurrency you'll get a compile error; under looser settings you might get a runtime warning or, worse, nothing until it flakes under load.
+
+I've seen this exact swap happen for a dumb reason: someone reaches for `.detached` because they read "detached" as "definitely async, definitely off the main thread, definitely safe" — a stronger guarantee, not a weaker one. It reads like the careful choice. It's the opposite.
+
+---
+
+## The priority drop is the sneaky one
+
+Isolation errors at least announce themselves at compile time if you have strict concurrency on. The priority story is quieter.
+
+A `Task { }` created from inside a user-initiated, high-priority task inherits that priority. `Task.detached` starts at the default priority — no matter what called it. If you fire a detached task from inside work the user is actively waiting on, it can get scheduled *behind* lower-priority background work, because the system has no idea it's supposed to be urgent. You don't get an error for this. You get an intermittent "why did this take three seconds today" bug report that never reproduces cleanly in a debugger, because attaching a debugger changes scheduling behavior enough to hide it.
+
+Task-local values vanish the same silent way. If you're using `@TaskLocal` for something like request tracing or [a test-scoped feature flag](/blog/swift-testing-tasklocal-trait-st-0026-static-var-di), a detached task simply won't see it — it reads whatever the default is, not what was actually in scope when you spawned it.
+
+---
+
+## When detached is actually the right tool
+
+None of this means `.detached` is a mistake to avoid entirely — it means it's a narrow tool for a narrow job: work that must be genuinely independent of the caller's context. The standard library's own example is a reasonable one — kicking off logging or a fire-and-forget side effect where you *want* default priority and *want* no isolation inheritance, because tying it to the caller's actor would be the actual bug (imagine a detached analytics ping that accidentally hops onto `@MainActor` just because its caller happened to be there, and now a background metrics call is contending with your UI).
+
+The test I use now: if the closure needs to touch anything the caller could touch — same actor's state, same priority expectations, same task-local context — reach for `Task { }`. If it's provably self-contained and you specifically don't want any of that inheritance, `.detached` is correct, and naming it that way in a wrapper function makes the intent legible to the next reader:
+
+```swift
+func fireAndForgetAnalytics(_ event: AnalyticsEvent) {
+    Task.detached(priority: .background) {
+        await AnalyticsClient.shared.send(event)
+    }
+}
+```
+
+Explicit priority, explicit detachment, a function name that says what it's for. That's a `.detached` call nobody has to squint at six months later.
+
+---
+
+The pattern underneath this is the same one that trips people up with [`@MainActor` and threads](/blog/swift-custom-main-global-executors-mainactor-thread-myth) — a Swift concurrency primitive that looks like a stronger version of something familiar turns out to be a *different* thing wearing a similar name. `detached` isn't `Task` plus independence. It's `Task` minus everything you were relying on without noticing.
+
+More on this family of bugs: [Task cancellation isn't as automatic as it looks either](/blog/swiftui-task-cancellation-isnt-automatic), and if you want the real actor-isolated code this post's examples are a simplified version of, [the request-deduplication networking post](/blog/swift-networking-retry-token-refresh-request-deduplication) is the closest thing on this blog to a production example. For the concurrency model from the ground up, [the Swift 6 course lesson](/learn/swiftui-in-practice-13-swift-6-concurrency) is the better starting point than this post.
