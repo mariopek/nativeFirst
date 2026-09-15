@@ -1,0 +1,123 @@
+---
+title: "Swift Testing Is About to Turn Off the One Field Your CI Script Actually Reads"
+description: "ST-0029 was accepted into Swift Testing on September 13, adding structured issue metadata to the JSON event stream. The quiet part: the human-readable messages field becomes opt-in, off by default. Here's what that means for anyone parsing test output in CI."
+pubDate: 2026-09-15
+tags: ["Swift Testing", "Swift Evolution", "Continuous Integration", "Testing", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1576078272433-22d3fb8ef5ff?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of small numbered evidence tags laid out in sequence"
+---
+
+{/*
+SEO target keywords: ST-0029 Swift Testing, Swift Testing event stream JSON schema, Swift Testing messages field opt-in, SWIFT_TESTING_EVENT_STREAM_MESSAGES_FIELD_ENABLED, Swift Testing issue metadata, parsing Swift Testing JSON output CI, Swift Evolution testing proposal accepted
+
+Internal linking plan:
+- /blog/st-0026-tasklocal-trait-accepted-withvalue-label — same "proposal accepted, here's what shipped" format, same Testing Workgroup
+- /blog/swift-testing-tasklocal-trait-st-0026-static-var-di — background on Swift Testing internals
+- /blog/swift-testing-framework-xctest-migration-guide — general Swift Testing migration background
+- /blog/ai-agents-bad-at-testing-tdd-study-2026 — testing-and-tooling continuity
+- /learn/swiftui-in-practice-15-swift-testing-view-models — tracked course lesson on Swift Testing basics
+*/}
+
+Two months ago I wired up a Slack bot for a client's CI pipeline. Nothing fancy — when a test suite failed, it posted the failure to a channel so nobody had to open Xcode Cloud to find out. The whole thing worked by reading Swift Testing's JSON event stream, finding `"kind": "issueRecorded"`, and grabbing the `messages` field to paste into the Slack message.
+
+It shipped in an afternoon. It also had a bug I didn't notice for two weeks: a thrown error and a failed `#expect` looked identical in the bot's output. Same emoji, same "Test failed" prefix, same vague blob of text. I couldn't tell, without clicking through to Xcode, whether a test crashed or just disagreed with a number.
+
+Turns out that wasn't my bug. It was the schema's.
+
+---
+
+## The event stream doesn't know what kind of issue it's looking at
+
+Swift Testing's JSON event stream is the stable interface that tools — Xcode, VS Code, your CI dashboard, my sad little Slack bot — use to read test results without scraping console output. When a test hits a problem, the stream emits an `issueRecorded` event.
+
+Here's the thing: until now, that event looked almost the same no matter what actually went wrong.
+
+```swift
+@Test func issueA() async throws {
+    Issue.record("Issue A")
+}
+
+@Test func issueB() async throws {
+    struct ErrorB: Error {}
+    throw ErrorB()
+}
+```
+
+Two completely different failures — one's a manual assertion, one's an uncaught error. The JSON for both comes back nearly identical:
+
+```json
+"issue": {
+  "isFailure": true,
+  "isKnown": false,
+  "severity": "error",
+  "sourceLocation": { ... }
+}
+```
+
+No error type. No expression that failed. No distinction between "you asserted this and it was wrong" and "something threw." If you wanted a human-readable explanation, you fell back to a `messages` array of free-text strings and hoped the format didn't change between Swift versions.
+
+[ST-0029](https://github.com/swiftlang/swift-evolution/blob/main/proposals/testing/0029-add-issue-metadata-event-stream.md), authored by Jerry Chen, [was accepted](https://forums.swift.org/t/accepted-st-0029-include-additional-issue-metadata-in-event-stream/89505) by the Testing Workgroup on September 13. Review feedback was light — the one substantive comment on the thread was a simple "+1, this is useful for debugging," and that was that. But the diff is bigger than the quiet review suggests.
+
+---
+
+## What actually gets added
+
+The issue schema (bumping to event stream version 6.5) grows four new fields, each tied to a specific failure shape:
+
+- **`error`** — when a test throws. Carries `domain`, `code`, `description`, and a `type` block with the fully qualified name, unqualified name, and mangled name.
+- **`confirmationMiscount`** — when a `confirmation { }` block fires more or fewer times than expected. Reports the actual count against the expected count (or range).
+- **`exceededTimeLimit`** — when a `.timeLimit(...)` trait trips, in seconds.
+- **`expression`** — the actual source code of a failed `#expect`, plus its runtime value and, recursively, its subexpressions.
+
+That last one is the good part. A failed `#expect(Bool(false), "message")` now comes back with the literal source text `"Bool(false)"`, its evaluated value, and a `children` array breaking down the subexpression — so a tool can reconstruct exactly what was compared to what, without re-parsing your source file.
+
+```json
+"issue": {
+  "expression": {
+    "sourceCode": "Bool(false)",
+    "value": "false",
+    "children": [
+      { "sourceCode": "false", "value": "()" }
+    ]
+  },
+  "isFailure": true,
+  "severity": "error"
+}
+```
+
+`isKnown` gets more useful too. It used to be a plain boolean. Now it can carry the human-readable comment you passed to `withKnownIssue(_:)` directly — so a dashboard can show *why* an issue is known, not just that it is.
+
+None of this is Swift-only by design, either. The `type` block is explicitly built to describe types from other languages ("`std::string`" is a valid `unqualifiedName`), because the Workgroup wants tools that consume this schema to eventually handle non-Swift test libraries through the same pipe.
+
+---
+
+## The part that'll actually bite you
+
+Here's the change that matters if you have anything — a script, a bot, a custom dashboard — reading this stream today.
+
+The `messages` field, the one full of ready-to-display strings, **becomes optional and is no longer included by default.** The proposal's reasoning is sound: now that issues carry structured data, generating and serializing a redundant human-readable summary on every single event is wasted work, especially in large suites running thousands of assertions. So it gets dropped from the default output.
+
+If you still want it, you opt back in with an environment variable:
+
+```bash
+SWIFT_TESTING_EVENT_STREAM_MESSAGES_FIELD_ENABLED=1 swift test
+```
+
+That's a one-line fix. But it's a one-line fix you only know to apply *after* your Slack bot starts posting empty failure messages, or your CI dashboard's "reason" column goes blank, on whatever toolchain ships this. The `messages` field isn't removed — it's just off by default — which is the kind of change that passes every existing test and breaks in production anyway, because the thing that broke wasn't a test.
+
+If you're consuming Swift Testing's JSON output anywhere — a custom CI reporter, a flaky-test tracker, anything grepping for `"messages"` — this is worth a five-minute audit before it ships in a stable toolchain. Either set the env var, or better, migrate to reading the structured fields directly. They're strictly more useful: `error.description` gives you the same text `messages` used to, but you also get `error.type.unqualifiedName` for free, without string-matching your way there.
+
+---
+
+## Why I'd take the migration over the flag
+
+It's tempting to just flip the environment variable and move on. I'd resist that. The whole point of ST-0029 is that "the test failed because X" is now a structured fact instead of a sentence you have to parse back apart. My Slack bot's real bug wasn't that it lacked pretty text — it's that it had no way to tell a thrown error from a failed assertion short of string-sniffing the message for the word "error." With `error` and `expression` as separate, typed fields, that branch becomes an actual `if let`, not a regex.
+
+Structured data beats formatted text every time a machine reads it before a human does. Your CI pipeline reads before you do.
+
+The implementation already merged into swift-testing ([swiftlang/swift-testing#1839](https://github.com/swiftlang/swift-testing/pull/1839)); expect it in an upcoming toolchain rather than the one on your Mac today. Worth building the migration now, on your own schedule, instead of debugging a suddenly-quiet Slack bot later.
+
+---
+
+If you're new to Swift Testing generally, [the migration guide from XCTest](/blog/swift-testing-framework-xctest-migration-guide) and [the course lesson on testing view models](/learn/swiftui-in-practice-15-swift-testing-view-models) are good starting points. And if ST-0029 sounds familiar in shape — proposal, light review, quiet acceptance — that's because it's the same Testing Workgroup process that [shipped ST-0026's `.taskLocal` trait](/blog/st-0026-tasklocal-trait-accepted-withvalue-label) last month, one parameter label at a time.
