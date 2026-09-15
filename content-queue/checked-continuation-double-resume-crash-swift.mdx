@@ -1,0 +1,130 @@
+---
+title: "A Continuation Can Only Be Resumed Once. Swift Won't Stop You From Trying Twice."
+description: "withCheckedContinuation bridges callback-based APIs into async/await, but resuming it twice crashes at runtime and resuming it zero times hangs forever — and the compiler catches neither. Here's the failure shape and the fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift Concurrency", "Async Await", "Swift", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1496060875531-64e305199ebf?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single closed door at the end of a long hallway"
+---
+
+{/*
+SEO target keywords: withCheckedContinuation Swift, CheckedContinuation resume twice crash, Swift async await callback bridging, SWIFT TASK CONTINUATION MISUSE, continuation never resumed hang, withCheckedThrowingContinuation gotcha
+
+Internal linking plan:
+- /blog/swift-networking-retry-token-refresh-request-deduplication — already uses a CheckedContinuation-based Gate in passing, natural continuity
+- /blog/swiftui-task-cancellation-isnt-automatic — same "async/await isn't as automatic as it looks" family
+- /blog/task-detached-breaks-isolation-inheritance-swift — same structured-concurrency-gotchas family, published same week
+- /blog/swift-custom-main-global-executors-mainactor-thread-myth — same concurrency-internals family
+- /learn/swiftui-in-practice-13-swift-6-concurrency — tracked course lesson on Swift 6 concurrency
+*/}
+
+A `CheckedContinuation` is a promise with exactly one keeping. You get to call `resume` on it precisely once — not zero times, not twice — and Swift's compiler has absolutely no interest in helping you keep that promise.
+
+I found this out the annoying way: a location-permission wrapper that worked fine in every manual test, then started silently crashing test runs in CI. Nobody touched the location code. What changed was the test suite started running requests in parallel, which meant the delegate callback my continuation depended on started firing under conditions the code had never seen before.
+
+---
+
+## What a continuation is actually for
+
+Plenty of iOS frameworks still hand you results through delegates or completion handlers — `CLLocationManagerDelegate`, old-school `URLSession` callback APIs, most Bluetooth and HealthKit code. `withCheckedContinuation` is the bridge: it suspends the current `async` function and hands you a `CheckedContinuation` object, which you stash somewhere and call `resume(returning:)` on whenever the callback-based API finally answers.
+
+```swift
+func requestLocation() async -> CLLocation? {
+    await withCheckedContinuation { continuation in
+        self.pendingContinuation = continuation
+        locationManager.requestLocation()
+        // delegate callback resumes it later
+    }
+}
+```
+
+Clean on paper. The catch is everything happens outside the type system's view. The continuation itself doesn't know how many delegate callbacks are coming, and Swift doesn't check that you resume it exactly once — it just tells you at runtime, after the fact, when you got it wrong.
+
+---
+
+## Resuming twice: a crash, eventually
+
+`CLLocationManagerDelegate` has two relevant methods: `didUpdateLocations` and `didFailWithError`. In ordinary operation only one fires per request. Under load — two requests racing, a stale delegate reference, a retry path added later by someone who didn't know a continuation was involved — both can fire for the same pending continuation.
+
+The second `resume` call doesn't fail quietly. It's a fatal error:
+
+```
+SWIFT TASK CONTINUATION MISUSE: requestLocation() tried to resume its
+continuation more than once, throwing away the previous result!
+```
+
+That message is doing you a favor — the runtime is loud about it precisely because silent double-resume would corrupt whatever's waiting on the other end. But "loud" means "crashes your app," and if it only reproduces when two specific delegate callbacks race each other, it might not show up until it's in someone's hands in production.
+
+The fix is boring in the best way: track whether you've already resumed, and guard the second callback path.
+
+```swift
+final class LocationBridge: NSObject, CLLocationManagerDelegate {
+    private var continuation: CheckedContinuation<CLLocation?, Never>?
+
+    func requestLocation() async -> CLLocation? {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            manager.requestLocation()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(returning: locations.first)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(returning: nil)
+    }
+}
+```
+
+Nil out the stored continuation the instant you resume it, and guard every other path that might try to resume it again. It's not elegant, but it's exactly as much ceremony as bridging an un-type-safe callback API deserves.
+
+---
+
+## Never resuming: no crash, just silence
+
+The opposite mistake is quieter and, in my experience, worse to debug. If your delegate callback never fires — permission denied without triggering `didFailWithError` on some OS version, a Bluetooth peripheral that just goes away, a completion handler an SDK forgot to call on one code path — the continuation just sits there. Forever.
+
+No crash. No log line most of the time (in debug builds, Swift Concurrency *will* eventually warn about a leaked continuation when the app exits, but that's cold comfort mid-session). What you get instead is a `Task` that never completes, an `await` that never returns, and a spinner that spins until the user force-quits. If that `await` was on the main actor behind a loading state, the screen is just stuck.
+
+The fix here isn't cleverness, it's paranoia: assume every external callback path can fail to fire, and give yourself a way out.
+
+```swift
+func requestLocation() async -> CLLocation? {
+    await withTaskGroup(of: CLLocation?.self) { group in
+        group.addTask {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                self.manager.requestLocation()
+            }
+        }
+        group.addTask {
+            try? await Task.sleep(for: .seconds(10))
+            return nil
+        }
+        let result = await group.next()!
+        group.cancelAll()
+        return result
+    }
+}
+```
+
+A timeout task racing the continuation isn't free — you're spinning up a second task for every call — but it turns "hangs forever" into "gives up after ten seconds," which is a trade worth making for anything the user is staring at a spinner for.
+
+---
+
+## The actual rule
+
+A continuation is a contract, not a type. `withCheckedContinuation` (and its throwing counterpart) will happily compile code that resumes zero times or five times — the "checked" part only checks for the *sloppiest* mistakes, like the compiler noticing an unused continuation at the syntax level, not the runtime paths that actually cause your bugs. Every completion handler and delegate callback you bridge needs exactly one guaranteed call to `resume`, and it's on you to guarantee it: track state, nil out after firing, and race a timeout against anything that might not fire at all.
+
+If a callback-based API is *always* going to call back exactly once, a continuation is the right tool and this is a non-issue. The failure only shows up at the edges — races, permission denials, hardware that goes away mid-request — which is exactly why it survives code review and waits for production to find it.
+
+---
+
+`withCheckedContinuation` is one of several places async/await's "automatic" cancellation and completion promises turn out to have edges — the same way [structured concurrency's cancellation doesn't propagate as automatically as it looks](/blog/swiftui-task-cancellation-isnt-automatic), and [`Task.detached` throws away more than most people expect](/blog/task-detached-breaks-isolation-inheritance-swift). If you're building the mental model for any of this from scratch, [the Swift 6 concurrency course lesson](/learn/swiftui-in-practice-13-swift-6-concurrency) is a good place to start before you hit these in the wild.
