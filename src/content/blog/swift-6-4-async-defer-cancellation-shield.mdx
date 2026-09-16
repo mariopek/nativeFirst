@@ -1,0 +1,97 @@
+---
+title: "Swift 6.4 Lets Your defer Block Await. withTaskCancellationShield Is Why That's Actually Safe."
+description: "Swift 6.4 ships async defer (SE-0493) and withTaskCancellationShield (SE-0504) together, finally letting cleanup code make network calls without racing cancellation. Here's what changes and why the pairing matters."
+pubDate: 2026-09-16
+tags: ["Swift", "Swift 6.4", "Concurrency", "async await", "Swift Evolution"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1443933223857-9ca346228f72?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A safety net stretched taut, catching something mid-fall"
+---
+
+{/*
+SEO keywords: Swift 6.4, async defer Swift, withTaskCancellationShield, SE-0493, SE-0504, Swift defer await, Swift structured concurrency cleanup, Swift task cancellation cleanup code
+Internal linking plan: swift-defer-scope-not-function-exit (direct sequel — same mechanism, new capability), swift-networking-retry-token-refresh-request-deduplication (actor cleanup pattern), swiftui-task-cancellation-isnt-automatic (cancellation propagation), task-detached-breaks-isolation-inheritance-swift (unstructured Task pitfalls, the old workaround this replaces), swift-testing-st-0029-messages-field-opt-in (another same-week Swift Evolution post, ties to "busy week for Swift" framing), course lesson /learn/swiftui-in-practice-13-swift-6-concurrency
+*/}
+
+I wrote a post a few weeks back about `defer` running at scope exit, not function exit — a small, specific gotcha that bit someone's request deduplication logic. Buried in the comments on that piece, more than one person asked the same follow-up: "cool, but why can't I just `await` something in there?"
+
+Fair question. Until yesterday, you couldn't. Swift 6.4 shipped on September 15, and one of the quieter changes fixes exactly that.
+
+---
+
+## The thing you couldn't do
+
+Here's the shape of the problem. Say you're closing out a file upload, and part of cleanup is flushing a metrics call over the network — not urgent, but you'd like it to happen before the function actually returns.
+
+```swift
+func processUpload(at url: URL) async throws {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer {
+        handle.closeFile()
+        // await flushMetrics(for: url)   ← compiler error, pre-6.4
+    }
+    try await sendContents(of: handle)
+}
+```
+
+That commented-out line has never compiled. `defer` blocks were synchronous-only, full stop. If your cleanup needed to do async work — a network flush, an actor hop, anything with a suspension point — you had exactly one workaround: fire off a detached `Task` from inside the `defer` and hope for the best.
+
+"Hope for the best" is doing a lot of work in that sentence. A `Task` spawned inside a `defer` isn't awaited by anything. The function you're deferring from can return, the whole call stack can unwind, and that orphaned task is now running on its own schedule with no guarantee it finishes — or even runs — before whatever comes next in your app assumes cleanup is done. It's the same structural trap [[we covered when Task.detached quietly drops isolation and priority|task-detached-breaks-isolation-inheritance-swift]]: you reach for an escape hatch to solve one problem and inherit a second one you didn't sign up for.
+
+## What SE-0493 actually changes
+
+[SE-0493](https://www.swift.org/blog/swift-6.4-released/) makes `defer` bodies allowed to contain `await`, and — this is the part that matters — the enclosing function **waits for that async work to finish** before it actually exits. Not fire-and-forget. Structured.
+
+```swift
+func processUpload(at url: URL) async throws {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer {
+        handle.closeFile()
+        await flushMetrics(for: url)
+    }
+    try await sendContents(of: handle)
+}
+```
+
+That now compiles, and `processUpload` won't return until `flushMetrics` has actually completed. No detached task, no orphaned work, no hoping. If `sendContents` throws, the network call still runs before the error propagates. That's the whole appeal — the same "defer always runs" guarantee you already trust, now honestly extended to cover async cleanup instead of quietly excluding it.
+
+## The catch, and why SE-0504 ships in the same release
+
+Here's where it gets interesting, and where the Swift team clearly saw the trap coming, because they shipped the fix for it in the same release rather than as a follow-up six months later.
+
+An `await` inside a `defer` block is still an `await`. It still hits a suspension point. And suspension points still check for cancellation. So picture this: the caller of `processUpload` gets cancelled mid-flight — maybe the user backgrounds the app, maybe a parent task group loses a race. Your `defer` block starts running as part of normal cleanup, hits `await flushMetrics(for: url)`, and that call throws `CancellationError` before it ever reaches the network. Cleanup you were counting on just silently didn't happen, and the only place you'd notice is a metrics dashboard with a gap in it three weeks from now.
+
+That's exactly the scenario `withTaskCancellationShield` ([SE-0504](https://www.swift.org/blog/swift-6.4-released/)) exists for. It wraps a block of async work and shields it from the ambient cancellation of the enclosing task — the work still runs to completion, on its own terms, regardless of what happened to whoever called it.
+
+```swift
+func processUpload(at url: URL) async throws {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer {
+        Task {
+            await withTaskCancellationShield {
+                await flushMetrics(for: url)
+                handle.closeFile()
+            }
+        }
+    }
+    try await sendContents(of: handle)
+}
+```
+
+Put the two together and you get what "cleanup" was always supposed to mean: it runs, it finishes, and cancellation upstream doesn't get to veto it partway through.
+
+## Where I'd actually reach for this
+
+I went back and looked at how our own request deduplication layer handles its teardown — an `actor` that tracks in-flight requests keyed by URL, with a `defer` that clears the entry once a request resolves. Today that cleanup is a single dictionary write, so it's synchronous and none of this applies. But it's a very short hop from there to "also log how long that request sat in flight, over the network, for observability" — and that's precisely the step that used to force you into an unstructured `Task` with no completion guarantee. [[We wrote about the actor-based version of that dedup pattern a while back|swift-networking-retry-token-refresh-request-deduplication]], and the honest update is: if I were adding telemetry to it today, in a 6.4 codebase, this is the pair of tools I'd use instead of detaching a task and crossing my fingers.
+
+The same logic applies anywhere your cleanup path touches something slower than a variable assignment: closing a background upload session, releasing a lock that's backed by a remote service, flushing an analytics batch before a view model deinits. [[Cancellation in Swift doesn't propagate the way people assume|swiftui-task-cancellation-isnt-automatic]] — it's cooperative, checked at suspension points, not preemptive — and async `defer` without a shield just gives you a new, more subtle place for that same assumption to bite you.
+
+## The rest of 6.4, briefly
+
+This wasn't the only thing in the release — Swift Package Manager now builds on Swift Build by default across platforms, `Subprocess` hit 1.0 for running external processes from Swift, and there's a new `@diagnose` attribute for controlling warning-to-error promotion right in your source instead of your build settings. All worth a look if you maintain package-heavy projects. But async `defer` plus its cancellation shield was the pairing that actually changed how I'd write a specific kind of code, so that's the one that got the full post.
+
+The takeaway is small but concrete: if you've been reaching for a detached `Task` inside a `defer` block to sneak async cleanup past the compiler, Swift 6.4 gives you a structured way to do the same thing — and a way to make sure cancellation doesn't quietly skip it.
+
+---
+
+*For more on structured concurrency gotchas, see our post on [why Task.detached breaks isolation inheritance](/blog/task-detached-breaks-isolation-inheritance-swift/) and the deep dive on [how defer's scope actually works](/blog/swift-defer-scope-not-function-exit/). For the fundamentals, the [Swift 6 concurrency lesson](/learn/swiftui-in-practice-13-swift-6-concurrency) in our course covers the isolation model this all builds on.*
