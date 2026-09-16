@@ -1,0 +1,67 @@
+---
+title: "Date() Subtraction Lies to You About Elapsed Time. Swift's ContinuousClock Doesn't."
+description: "Measuring elapsed time with Date() subtraction quietly breaks when the system clock changes mid-measurement. Swift's ContinuousClock and Duration fix it — here's the difference and when it actually matters."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Concurrency", "Performance", "async await"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1508960512160-5976980f6692?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up macro shot of a mechanical stopwatch face"
+---
+
+{/*
+SEO keywords: Swift ContinuousClock, Swift Duration, Date() elapsed time bug, Swift measure elapsed time, SuspendingClock Swift, Swift timing wall clock, DispatchTime vs Date
+Internal linking plan: swift-networking-retry-token-refresh-request-deduplication (real Duration-typed budget field, "already using the right primitive" tie-in), swift-withdeadline-se-0526-network-timeout (Duration-based timeout API, same family of types), swift-6-2-concurrent-nonisolated-mainactor-decision-tree (general Swift 6 concurrency series continuity)
+*/}
+
+Here's a bug that will never show up in your unit tests, will almost never show up in your crash logs, and will absolutely show up in a support ticket from someone in a country whose telecom just did a clock sync at 3 AM: your elapsed-time measurement went negative.
+
+I've seen this exact thing happen — a "request took -400ms" log line that made someone spend an afternoon convinced their instrumentation was broken. It wasn't. The code was doing exactly what it was told:
+
+```swift
+let start = Date()
+try await performRequest()
+let elapsed = Date().timeIntervalSince(start)
+```
+
+That looks completely reasonable. It's also measuring the wrong thing.
+
+---
+
+## Date() is wall-clock time, not a stopwatch
+
+`Date()` gives you a point in wall-clock time — the same clock that gets adjusted by NTP sync, corrected when your phone crosses a time zone, nudged by daylight saving transitions, or occasionally just stepped backward by the OS to correct drift. Most of the time nothing weird happens between your two `Date()` calls and the subtraction just works. But "most of the time" is exactly the kind of guarantee that turns into an intermittent, impossible-to-reproduce bug report.
+
+If the system clock gets corrected backward by even a few hundred milliseconds while your request is in flight, `Date().timeIntervalSince(start)` can come out negative. Your retry logic, your timeout math, your performance logging — anything downstream that assumes elapsed time is monotonically increasing now has to deal with a number that shouldn't exist.
+
+This isn't a hypothetical edge case reserved for embedded systems with flaky RTCs. It happens on ordinary iPhones, more often than you'd think, because the wall clock is never actually guaranteed to only move forward.
+
+## What you actually want is a monotonic clock
+
+Swift's concurrency library ships exactly the tool for this: `ContinuousClock`. Unlike `Date()`, it's backed by a monotonic time source — one that's guaranteed to only ever increase, immune to wall-clock adjustments, and it keeps ticking even while the device is asleep (that's the "continuous" part; there's also `SuspendingClock`, its sibling, which pauses while the system sleeps — useful if you specifically want elapsed *awake* time instead).
+
+```swift
+let clock = ContinuousClock()
+let start = clock.now
+try await performRequest()
+let elapsed = clock.now - start   // a Duration, never negative
+```
+
+`clock.now - start` isn't a `TimeInterval` (a bare `Double` of seconds) — it's a `Duration`, a proper type that represents a length of time rather than a point in time. That distinction is the whole reason a lot of these bugs exist in the first place: `TimeInterval` is just a type alias for `Double`, so nothing stops you from subtracting two unrelated timestamps, adding a duration to a duration and treating the result as a point in time, or drifting into unit confusion between seconds and milliseconds. `Duration` and `Instant` (the type `clock.now` returns) keep those two concepts — "when" and "how long" — from getting mixed up by the type system instead of by convention.
+
+There's also a convenience method that skips the manual subtraction entirely:
+
+```swift
+let elapsed = try await clock.measure {
+    try await performRequest()
+}
+```
+
+`measure` runs the closure and hands you back the `Duration` it took — no start variable to accidentally reuse, no risk of measuring the wrong two points.
+
+## Where this actually matters in an app
+
+Anywhere you're computing a timeout, a retry backoff, or a performance metric from two time samples, you're a candidate for this swap. [[We've covered the actual withDeadline timeout API built on this same Duration type|swift-withdeadline-se-0526-network-timeout]] — worth pairing with `ContinuousClock` if you're building this from scratch, since both speak the same currency instead of you converting between `TimeInterval` and `Duration` at the boundary.
+
+Our own retry layer already leans this direction — the request budget on the resilient client is typed as a plain `Duration` (`.seconds(8)`), not a raw `Double` of seconds, precisely so a call site can't accidentally hand it a millisecond count or a `Date` by mistake. [[The broader retry-and-deduplication pattern it's part of is worth a look|swift-networking-retry-token-refresh-request-deduplication]] if you haven't threaded `Duration` through your own networking layer yet — it's a small change with an outsized payoff the day your QA team is testing in a time zone eight hours from yours and your timeout math still needs to be right.
+
+`Date()` is still exactly the right tool for what it's for — timestamps you want to display, store, or compare against a specific calendar moment. Just stop reaching for it the moment the question changes from "when did this happen" to "how long did this take."
