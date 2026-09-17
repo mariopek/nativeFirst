@@ -1,0 +1,106 @@
+---
+title: "Your Username Has an Underscore. SwiftUI Just Rendered Half of It in Italics."
+description: "AttributedString and Text(_:) both parse Markdown by default in SwiftUI. That's great for your own copy and a landmine for anything that echoes user-generated text back onto the screen. Here's the actual fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift", "AttributedString", "iOS Development", "UI"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1455390582262-044cdead277a?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a typewriter with a sheet of paper, mid-sentence"
+---
+
+{/*
+SEO target keywords: AttributedString Markdown SwiftUI, Text LocalizedStringKey Markdown parsing, SwiftUI user-generated content Markdown bug, AttributedString markdown init options, escaping Markdown SwiftUI Text, AttributedString.MarkdownParsingOptions
+
+Internal linking plan:
+- /blog/swiftui-view-identity-state-reset-bug — same "SwiftUI does something reasonable-sounding that breaks in a specific way" format
+- /blog/string-catalogs-localization-swiftui-what-breaks — adjacent string-handling gotcha, same voice
+- /blog/codable-convert-snake-case-acronym-bug — same "free convenience feature has a sharp edge" shape, queue sibling
+- /blog/tdd-swiftui-observable-viewmodel-red-green-refactor — testing tie-in for the fix section
+- /learn/building-the-views — course lesson tie-in
+*/}
+
+A support ticket came in that made no sense. A user's display name — `cool_dev_99` — was showing up in our app as "cool dev 99" in italics, with the underscores just gone. Not escaped. Gone, and the word between them slanted.
+
+I checked the database. The name was stored correctly. I checked the network response. Also correct. The bug wasn't in how we stored the name or fetched it. It was in how SwiftUI *rendered* it.
+
+Turns out I'd handed a username straight to a `Text` view, and `Text` had quietly decided to interpret it as Markdown.
+
+---
+
+## SwiftUI reads Markdown by default, and it doesn't ask first
+
+Since iOS 15, `Text(_:)` initialized from a string literal or a `LocalizedStringKey` parses a subset of Markdown automatically. Type this:
+
+```swift
+Text("Tap **Save** to continue")
+```
+
+And "Save" renders bold, no extra code. It's a genuinely nice feature for your own UI copy — help text, onboarding screens, anything you write and control.
+
+The problem is the same mechanism fires on a plain `String`-backed `Text` too, once that string flows through `LocalizedStringKey` interpolation, and it *definitely* fires the moment you reach for `AttributedString`:
+
+```swift
+let name = "cool_dev_99"
+Text(AttributedString(markdown: name))
+```
+
+`_dev_` is valid Markdown for italic emphasis. Markdown doesn't know or care that this string is a username, not a document. It sees underscores wrapping text and does exactly what Markdown is supposed to do: renders `dev` in italics and drops the underscores as syntax, not content.
+
+Swap in a name with asterisks, brackets, or backticks and you get the same class of surprise — bold text that shouldn't be bold, or in the worst case, a thrown error, because `AttributedString(markdown:)` is a throwing initializer by default and malformed Markdown can make it throw rather than silently degrade.
+
+---
+
+## Why this bites specifically on user-generated content
+
+Your own copy is Markdown-safe because you wrote it knowing it'd be parsed. A bio, a comment, a chat message, a display name — anything that came from a user was written with zero awareness that it's about to pass through a Markdown parser. People don't format their usernames for you. They just happen to type characters that mean something else to a parser you didn't tell them about.
+
+This is the same shape of bug as [Codable's snake_case conversion](/blog/codable-convert-snake-case-acronym-bug) breaking on the one field that doesn't fit the pattern it assumes — a convenience feature that's safe for the case Apple optimized for (your own strings) and a landmine for the case Apple didn't (someone else's).
+
+---
+
+## The actual fix: tell it not to parse
+
+`AttributedString` has an initializer built exactly for this — one that treats the whole string as plain text, formatting characters included:
+
+```swift
+let name = "cool_dev_99"
+let attributed = AttributedString(
+    markdown: name,
+    options: AttributedString.MarkdownParsingOptions(
+        interpretedSyntax: .inlineOnlyPreservingWhitespace
+    )
+)
+```
+
+That option set still parses inline Markdown constructs technically, so it's not actually what you want here — the option that matters is skipping Markdown parsing entirely, which is what the plain, non-throwing initializer does:
+
+```swift
+let attributed = AttributedString(name)
+```
+
+No `markdown:` label, no parsing, no throwing. `_dev_` stays exactly as typed. This is the initializer you want for anything that isn't Markdown source — which, for user-generated content, is almost always the case.
+
+If you're using plain `Text` rather than `AttributedString`, the equivalent fix is to make sure you're constructing it from a `String`, not letting it get treated as a `LocalizedStringKey`:
+
+```swift
+// Dangerous: LocalizedStringKey interpolation, Markdown-aware
+Text("\(name)")
+
+// Safe: explicit String, not Markdown-parsed
+Text(String(name))
+Text(verbatim: name)
+```
+
+`Text(verbatim:)` exists specifically for this — it skips both localization lookup and Markdown parsing, which is exactly what you want for a value you're echoing back, not authoring.
+
+---
+
+## The rule of thumb
+
+If you wrote the string, Markdown parsing is a feature. If a user wrote the string, it's an attack surface for garbled formatting at best and a thrown error at worst. Draw the line at *who authored the text*, not at *where it appears in your UI* — a username in a settings screen and a username in a chat bubble have the same risk, even though one feels like "just a label."
+
+Audit for this by searching your codebase for `AttributedString(markdown:` and `Text("\(` — both are worth a second look anywhere the interpolated or converted value came from a database, a network response, or a text field, rather than a string literal you typed yourself.
+
+---
+
+SwiftUI's Markdown support is one of those features that makes demos look great and support tickets look confusing. The fix costs one word — `verbatim`, or dropping the `markdown:` label — but only once you know which side of the line your string is standing on.
