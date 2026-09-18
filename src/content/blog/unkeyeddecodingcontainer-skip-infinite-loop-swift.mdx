@@ -1,0 +1,138 @@
+---
+title: "One Bad Element in Your JSON Array Can Freeze Your App Forever. Swift Wants to Fix It."
+description: "A fresh Swift Evolution pitch adds skip() to UnkeyedDecodingContainer, fixing a real Codable footgun: the 'decode what you can, skip what you can't' loop that looks correct and hangs at runtime."
+pubDate: 2026-09-18
+tags: ["Swift", "Codable", "Swift Evolution", "JSON", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1488272690691-2636704d6000?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A broken metal chain link isolated against a plain background"
+---
+
+{/*
+SEO target keywords: UnkeyedDecodingContainer skip, Swift Codable skip element, Swift decode array partial failure, Codable infinite loop currentIndex, Swift Evolution skip pitch, decode try? array hang, JSON decoding unknown enum case Swift
+
+Internal linking plan:
+- /blog/swift-testing-st-0029-messages-field-opt-in — same "fresh pitch/proposal, here's the real-world motivation" format
+- /blog/swiftpm-traits-test-target-configurations-pitch — recent Swift Forums pitch coverage, same beat
+- /blog/swift-networking-retry-token-refresh-request-deduplication — Codable/networking layer continuity, same file family
+- /blog/swift-defer-scope-not-function-exit — same "looks correct, isn't" Swift gotcha genre
+- /learn/vibe-code-native — course lesson tie-in
+*/}
+
+Last year I shipped a "resilient" feed parser. Server sends a list of items, client decodes what it can, ignores the junk, moves on. Solid plan. Then a beta tester's app just... stopped responding. Not crashed. Not an error in the console. Just spinning, forever, on a screen that used to load in under a second.
+
+I want to tell you I found the bug in five minutes. I did not.
+
+---
+
+## The loop that looks completely reasonable
+
+Here's the shape of the code, boiled down to something you'd actually write:
+
+```swift
+struct Feed: Decodable {
+    let items: [Item]
+}
+
+struct Item: Decodable {
+    let title: String
+    let kind: Kind
+
+    enum Kind: String, Decodable {
+        case article, video
+    }
+}
+```
+
+Now the server ships a new `kind` your app doesn't know about yet — say, `"podcast"`. With synthesized `Decodable` conformance, that one bad value throws, and it takes the entire `items` array down with it. One unrecognized enum case, and your whole feed is empty.
+
+So you do the sensible thing. You decode item by item, and skip the ones that fail:
+
+```swift
+init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    var elements = try container.nestedUnkeyedContainer(forKey: .items)
+
+    var items: [Item] = []
+    while !elements.isAtEnd {
+        if let item = try? elements.decode(Item.self) {
+            items.append(item)
+        }
+        // looks fine. isn't.
+    }
+    self.items = items
+}
+```
+
+This compiles. It reads correctly. It is, in fact, exactly what every "graceful degradation" blog post tells you to do. And it hangs forever the moment a bad element shows up.
+
+## The thing nobody tells you about `currentIndex`
+
+Here's the part that got me: `UnkeyedDecodingContainer` tracks its position with `currentIndex`, and that index only advances on a **successful** decode. A failed `try?` doesn't move the cursor — it just quietly fails and leaves you sitting on the exact same element.
+
+So your `while !elements.isAtEnd` loop hits the `"podcast"` item, fails to decode it as `Item`, doesn't append anything, loops back around, and tries to decode the exact same `"podcast"` item again. Forever. `isAtEnd` never becomes true because you're stuck on element 1 for the rest of time.
+
+This is genuinely one of the meaner footguns in `Codable`, because the failure mode isn't a crash or a thrown error you can catch — it's a silent infinite loop on the main actor, which in a SwiftUI app means a frozen screen with no console output pointing at the cause. I burned an embarrassing chunk of an afternoon adding print statements before I even suspected the container itself, because everything about the code *read* as correct — the same way a misplaced [`defer`](/blog/swift-defer-scope-not-function-exit/) reads as correct right up until you check exactly when it fires.
+
+## The workaround everyone eventually finds
+
+If you've hit this before, you probably already know the fix, because it's the thing every Stack Overflow answer and blog post about this converges on: decode a placeholder type that ignores its input, purely to advance the cursor.
+
+```swift
+private struct SkippedElement: Decodable {
+    init(from decoder: any Decoder) {}  // ignores everything
+}
+
+while !elements.isAtEnd {
+    if let item = try? elements.decode(Item.self) {
+        items.append(item)
+    } else {
+        _ = try elements.decode(SkippedElement.self)  // burn the cursor forward
+    }
+}
+```
+
+It works. It also has three problems, and a [fresh Swift Evolution pitch](https://forums.swift.org/t/pitch-add-a-skip-function-to-unkeyeddecodingcontainer/89626) from Oleksandr Bambuliak (posted this week, building on a [2019 pitch](https://forums.swift.org/t/pitch-unkeyeddecodingcontainer-movenext-to-skip-items-in-deserialization/22151) that stalled and eventually closed as stale in 2022 — the same slow-motion path SwiftPM traits and [test target configurations](/blog/swiftpm-traits-test-target-configurations-pitch/) are on right now) lays them out plainly:
+
+- **It isn't discoverable.** You find this trick after you've already shipped the bug, usually while frantically searching for why your app hangs.
+- **It hides intent.** "Decode a value and throw it away" doesn't read as "skip this element" — it reads as a workaround, because it is one.
+- **It's not reliable across decoders.** Whether the placeholder even succeeds against a `null` element depends on the decoder's behavior, and different decoders handle post-failure cursor advancement differently. Some quietly advance even on a throw, which can make this exact loop skip the *next*, perfectly valid element too.
+
+That last one is the sneaky part. You could ship this workaround, watch it work fine in your tests, and still lose good data in production because a different decoder in your dependency chain behaves slightly differently than Foundation's.
+
+## The actual fix: let the container tell you it's moving on
+
+The pitch proposes adding `skip()` directly to `UnkeyedDecodingContainer`, as a protocol requirement with a default implementation — meaning it works immediately with decoders that don't override it, and format-specific decoders can implement something smarter (or throw, if their format genuinely can't skip a value).
+
+```swift
+var items: [Item] = []
+while !elements.isAtEnd {
+    if let item = try? elements.decode(Item.self) {
+        items.append(item)
+    } else {
+        try elements.skip()
+    }
+}
+```
+
+Same shape as before, but now the code says exactly what it means. `skip()` moves past one element — including `null` and nested containers — without ever decoding it into anything. No placeholder type, no reliance on undocumented decoder quirks, no "why does this struct with an empty initializer exist" comment three months from now.
+
+It's a small API. It's also the kind of small API that only earns a proposal because enough people independently reinvented the same slightly-wrong workaround and, apparently, at least one team's app hung in front of a beta tester because of it.
+
+## Where this actually bites
+
+You don't need a "resilient feed parser" for this to matter — the same "keep going after a partial failure" instinct is exactly what [retry-and-dedup networking layers](/blog/swift-networking-retry-token-refresh-request-deduplication/) are built around, just one level up the stack. Any place you're decoding an array where you don't fully trust every element falls into the same trap:
+
+- A paginated API response where one malformed record shouldn't tank the whole page.
+- Feature-flagged fields — the server ships a new variant before your app update is out, and old clients need to just ignore it instead of dying.
+- Anywhere you're using `try?` inside a decode loop as a "best effort" strategy, which, it turns out, is a much more common pattern than the `Codable` docs make it look.
+
+If you've written that `try?` loop, go check whether you're also incrementing past the failure. If you're not, you don't have a bug yet — you have a bug waiting for the first server response that doesn't match your model.
+
+---
+
+This pitch is fresh — day one, no revision number, nowhere near a Swift Evolution review yet, the same stage [ST-0029](/blog/swift-testing-st-0029-messages-field-opt-in/) was at before it actually shipped. It could change shape before it ships, or stall the way the 2019 version did. But the motivation section alone is worth reading if you maintain anything that decodes arrays from a server you don't fully control, if only so you recognize the shape of this bug before it teaches itself to you at 2 AM.
+
+If you're still building out your Codable fundamentals, the [SwiftUI at Scale course](/learn/vibe-code-native/) covers the networking-layer patterns this kind of bug tends to hide inside.
+
+Until it lands, the `SkippedElement` trick is still the least-bad option — just know its edges, and don't assume every decoder in your stack treats a failed decode the same way.
