@@ -1,0 +1,109 @@
+---
+title: "You're Creating a New DateFormatter on Every Cell Scroll. That's the Lag You Can't Explain."
+description: "DateFormatter and ISO8601DateFormatter are expensive to initialize — locale and calendar setup included — and creating one inside a loop or a SwiftUI view body is a quiet, common performance bug. Here's the actual cost and the fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Performance", "Foundation", "SwiftUI", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1545697729-0ab8f5b1954c?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of intricate pocket watch gears and mechanisms"
+---
+
+{/*
+SEO target keywords: DateFormatter performance Swift, ISO8601DateFormatter expensive, DateFormatter reuse cache Swift, Swift date formatting slow list scroll, DateFormatter thread safety, FormatStyle Swift performance, Swift static let DateFormatter
+
+Internal linking plan:
+- /blog/continuousclock-date-elapsed-time-swift — same Foundation-date-API-gotcha family, most directly related post
+- /blog/swiftui-image-downsampling-decode-cost — same genre: an innocent-looking per-cell operation that's secretly expensive
+- /blog/observable-vs-observableobject-1000-row-redraw-benchmark — same "the thing slowing your list down isn't what you think" angle
+- /blog/swift-networking-retry-token-refresh-request-deduplication — same file, general Swift performance/correctness continuity
+- /learn/vibe-code-native — course lesson tie-in
+*/}
+
+I once spent an entire afternoon convinced my list view had a SwiftUI diffing problem. Instruments kept pointing somewhere else, and I kept not believing it, because the code looked so boring. Boring code doesn't get to be the bottleneck. Except it was.
+
+The culprit was a single line, called once per row, every time the row scrolled into view:
+
+```swift
+let formatter = DateFormatter()
+formatter.dateStyle = .medium
+```
+
+---
+
+## It looks like a struct. It behaves like a small factory
+
+`DateFormatter` reads like it should be cheap — you set two properties and call `string(from:)`. But under the hood, initializing one triggers locale resolution, calendar setup, and time zone data loading. It's not a lightweight value type doing a lightweight job. It's closer to opening a small factory, running it once, and immediately tearing it down.
+
+Same story for `ISO8601DateFormatter`, which you'll find all over networking code because it's the natural fit for API timestamps. Both are meaningfully expensive to create — cheap to *use*, expensive to *stand up*.
+
+The bug is almost never dramatic. Nobody writes:
+
+```swift
+for _ in 0..<10_000 {
+    let f = DateFormatter()
+}
+```
+
+They write this, which is far more innocent-looking and far more common:
+
+```swift
+struct BrewRow: View {
+    let brew: Brew
+
+    var body: some View {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        return Text(formatter.string(from: brew.date))
+    }
+}
+```
+
+Nothing here looks wrong. It's four lines. It compiles. It's *correct*. And it re-creates a `DateFormatter` from scratch on every single body evaluation — which, in a `List` or `LazyVStack`, means every scroll, every state change anywhere in the view tree that happens to re-run this body, every time.
+
+## Why this one's easy to miss
+
+Two things make this bug quietly persistent instead of loudly obvious:
+
+**It doesn't show up as a spike.** A single `DateFormatter()` init takes low-single-digit milliseconds, not seconds. You won't see a beachball. You'll see something vaguer — scrolling that feels slightly gummy, a list that never quite hits 60fps, a profile trace with a wide, shallow plateau instead of one obvious tall bar. It's the kind of cost that's easy to shrug off in isolation and easy to forget about in aggregate, which is exactly [the same trap oversized images fall into](/blog/swiftui-image-downsampling-decode-cost/) when nobody downsamples them before display.
+
+**It reads as correct.** There's no compiler warning, no runtime error, no obviously wasteful pattern jumping out at code review. It's just... doing the work it was asked to do, repeatedly, when once would've been enough.
+
+## The fix is almost embarrassingly simple
+
+Create the formatter once, reuse it everywhere:
+
+```swift
+private extension DateFormatter {
+    static let mediumDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        return f
+    }()
+}
+
+struct BrewRow: View {
+    let brew: Brew
+
+    var body: some View {
+        Text(DateFormatter.mediumDate.string(from: brew.date))
+    }
+}
+```
+
+`static let` gives you lazy, one-time initialization for free — the formatter gets built exactly once, the first time it's touched, and every subsequent call reuses the same instance.
+
+**One caveat worth knowing:** `DateFormatter` is not thread-safe for concurrent *mutation*. If you're only reading (`string(from:)`, `date(from:)`) against a formatter you configured once and never touch again, sharing a static instance across threads is fine — that's the standard pattern and Apple's own docs describe formatters as safe for concurrent read access once configured. What you shouldn't do is mutate a shared formatter's properties (like flipping `dateStyle`) from multiple places, since that mutation isn't synchronized.
+
+## The modern alternative: skip `DateFormatter` entirely
+
+If you're targeting recent OS versions, Foundation's `FormatStyle` API (`Date.FormatStyle`, used via `date.formatted(...)`) sidesteps the whole problem — it's designed to be created fresh cheaply, since it doesn't carry the same locale/calendar bootstrapping cost as the older formatter classes:
+
+```swift
+Text(brew.date.formatted(date: .abbreviated, time: .omitted))
+```
+
+This is genuinely fine to call inline in a view body — no static caching needed, no thread-safety asterisk to remember. If you're writing new code and don't need `DateFormatter` for a specific compatibility reason, `formatted()` is the better default. The static-instance pattern above still matters for existing `DateFormatter`/`ISO8601DateFormatter` code, and for anywhere you're stuck supporting an older deployment target.
+
+---
+
+None of this is exotic. It's the most Foundation-101 gotcha there is, which is exactly why it survives in production codebases for years — it never looks like the problem until someone finally profiles the thing everyone assumed was fine.
