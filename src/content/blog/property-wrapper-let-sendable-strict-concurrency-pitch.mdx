@@ -1,0 +1,156 @@
+---
+title: "Swift's let Never Meant 'Never Changes.' A New Pitch Wants Property Wrappers to Admit It."
+description: "A fresh Swift Evolution pitch lets property wrappers live on let declarations, fixing the real Swift 6 strict concurrency error that rejects thread-safe wrappers in Sendable types, static properties, and nonisolated members."
+pubDate: 2026-09-19
+tags: ["Swift", "Swift Evolution", "Concurrency", "Sendable", "Property Wrappers"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1485761954900-f9a29f318567?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A padlock and chain wrapped around a metal surface"
+---
+
+{/*
+SEO target keywords: Swift property wrapper let declaration, Sendable property wrapper error, Swift 6 strict concurrency stored property mutable, nonisolated wrapped property, OSAllocatedUnfairLock property wrapper, Swift Evolution pitch property wrappers let
+
+Internal linking plan:
+- /blog/swift-actor-reentrancy-not-a-lock — same concurrency-correctness beat, locks vs actors
+- /blog/swift-networking-retry-token-refresh-request-deduplication — actor-based reference-semantics pattern in a real BrewLog-adjacent file
+- /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree — nonisolated deep dive, directly relevant to one of this pitch's motivating cases
+- /blog/swift-custom-main-global-executors-mainactor-thread-myth — same "pitch-stage, here's what it actually changes" format
+- /learn/swiftui-in-practice-13-swift-6-concurrency — course lesson tie-in
+*/}
+
+I spent an embarrassing chunk of an afternoon last year arguing with the Swift 6 compiler over a property wrapper I was sure was thread-safe. It *was* thread-safe. The compiler just didn't care. It saw a `var`, and a `var` in a `Sendable` class is a data race waiting to happen, no matter what's actually guarding it.
+
+Turns out I wasn't alone, and there's now a pitch that names the actual problem instead of making you work around it.
+
+---
+
+## The wrapper that was safe the whole time
+
+Here's the setup. You write a property wrapper around a lock, something like this:
+
+```swift
+import os
+
+@propertyWrapper
+public struct Locked<Value: Sendable>: Sendable {
+    private let lock: OSAllocatedUnfairLock<Value>
+
+    public init(wrappedValue: Value) {
+        lock = OSAllocatedUnfairLock(initialState: wrappedValue)
+    }
+
+    public var wrappedValue: Value {
+        get { lock.withLock { $0 } }
+        nonmutating set { lock.withLock { $0 = newValue } }
+    }
+}
+```
+
+That `nonmutating set` is the whole point. `OSAllocatedUnfairLock` owns heap-allocated storage, so copying the wrapper doesn't copy the lock — every copy shares the same underlying state. Mutating through it doesn't need `mutating`, because nothing about the wrapper's own memory layout changes. This is a completely legitimate, fully `Sendable` pattern.
+
+Now use it in a `Sendable` class:
+
+```swift
+final class Counter: Sendable {
+    @Locked var count = 0
+    // error: stored property '_count' of 'Sendable'-conforming class 'Counter' is mutable
+}
+```
+
+Rejected. Not because the wrapper is unsafe — because property wrappers always synthesize their backing storage as `var`, and Swift 6's `Sendable` checking flags any mutable stored property on a `Sendable` class, full stop. It doesn't matter that nothing ever reassigns `_count` itself. It doesn't matter that every actual mutation goes through `Locked`'s own synchronized setter. The compiler is reacting to the shape of the storage, not the behavior of the wrapper.
+
+## The compiler already accepts the answer — just not the shorthand
+
+Here's the part that makes this feel less like a fundamental limitation and more like a paperwork problem. Write the exact same thing out by hand, without the `@Locked` attribute:
+
+```swift
+final class Counter: Sendable {
+    private let _count = Locked(wrappedValue: 0)
+    var count: Int {
+        get { _count.wrappedValue }
+        set { _count.wrappedValue = newValue }
+    }
+}
+```
+
+This compiles. Full `Sendable` checking, no `@unchecked`, no global actor, nothing turned off. The language has apparently decided this pattern is fine — it just won't let you spell it with `@Locked var count`, because the macro-expansion-adjacent sugar behind property wrappers insists on `var` storage even when you never asked it to.
+
+A fresh [pitch on the Swift forums](https://forums.swift.org/t/pitch-property-wrappers-on-let-declarations-with-reference-backed-setters/89569), posted a few days ago by ThuyetLN, closes that gap: let property wrappers live on `let` declarations. The backing storage becomes `private let _count`, immutable after init. If the wrapper's `wrappedValue` has a `nonmutating set`, the wrapped property still gets a real setter — it just forwards through the wrapper instead of reassigning storage:
+
+```swift
+final class Counter: Sendable {
+    @Locked let count = 0
+}
+
+let counter = Counter()
+counter.count = 5      // OK — forwards to Locked.wrappedValue's nonmutating set
+print(counter.count)   // 5
+```
+
+Same behavior you already get from the hand-written version. Just with the attribute back.
+
+## It's not only about Sendable classes
+
+The `let`-backing-storage trick quietly fixes three other spots where Swift 6 currently says no for the same underlying reason.
+
+**`nonisolated` on wrapped properties** doesn't work today, even when the wrapper is fully thread-safe:
+
+```swift
+@MainActor
+final class ViewModel {
+    @Locked nonisolated var requestCount = 0
+    // error: 'nonisolated' is not supported on properties with property wrappers
+}
+```
+
+A `let` of `Sendable` type is exactly what `nonisolated` wants to see. With `var` storage, it's a non-starter regardless of what the wrapper actually does.
+
+**Static properties** hit the same wall: `@Locked static var cache = [String: Data]()` gets flagged as nonisolated global mutable state, even though the wrapper serializes every access. A `static let` of a `Sendable` type is already considered safe under Swift 6 — the pitch just lets a wrapped property claim that status.
+
+**Captured locals in `@Sendable` closures** are the third case, and it's the one that actually bit me:
+
+```swift
+@Locked var progress = 0
+await withTaskGroup(of: Void.self) { group in
+    for _ in 0..<10 {
+        group.addTask { progress += 1 }
+        // error: mutation of captured var in concurrently-executing code
+    }
+}
+```
+
+The closure isn't capturing your synchronized wrapper — it's capturing the synthesized local `var _progress`, and mutable captures in concurrent code are exactly what strict concurrency exists to catch. With `let` backing storage, the closure captures a `Sendable` constant instead, and the whole error disappears.
+
+In every one of these cases, today's workaround is `@unchecked Sendable`, a global actor you didn't otherwise need, or writing the expansion by hand and giving up the property wrapper syntax entirely. None of them fix anything — they just move the trust somewhere the compiler can't check it.
+
+## No, this doesn't break what let means
+
+If your reaction is "wait, doesn't this let people write `let count = 0; count.count = 5`, which sounds insane" — the pitch spends real time on exactly that objection, and the answer is worth internalizing because it applies more broadly than this one proposal.
+
+`let` in Swift has only ever guaranteed that the *binding* can't be reassigned. It's never guaranteed that the value observed through that binding is immutable — reference types have been quietly violating that intuition for years:
+
+```swift
+let object = SomeClass()
+object.property = 42   // already legal, always has been
+```
+
+A wrapped `let` property only gets a setter when the wrapper's author explicitly declares `nonmutating set` — which is a deliberate, visible statement that "this type has reference semantics, mutating it doesn't require exclusive access." Wrappers with ordinary value semantics get a read-only property when applied to `let`, which is exactly the behavior you'd already expect.
+
+The one thing worth flagging: this doesn't make `+=` atomic. `counter.count += 1` still expands to a get and a set, exactly like the hand-written version does today. That's not a data race — every read and write goes through the wrapper's own synchronization — but it can still lose updates under contention if two increments interleave between get and set. The pitch is explicit that this is out of scope; a wrapper that needs real read-modify-write atomicity should expose it through a projected value, something like `$count.withLock { $0 += 1 }`.
+
+## One thing not to copy from the pitch
+
+There's a useful correction buried in the thread's two replies. Jon Shier points out that the `Locked` wrapper used as the motivating example — the exact one I quoted above — is the same pattern that got popular after the original 2019 property wrapper proposal, then had to be dug back out of codebases because it's unsafe when you access properties *of* the wrapped value rather than replacing it wholesale. Locking around a whole-value get/set doesn't protect compound operations on that value once you've pulled it out.
+
+It's a fair catch, and it doesn't undercut the pitch's actual mechanism — the `let`-storage change is orthogonal to which wrapper you use it with. But it's a good reminder that a Swift Evolution pitch being accepted doesn't mean every code sample inside it should end up in your app. If you want a wrapper like this for real, reach for something that locks around the operation, not just the fetch and the store.
+
+## Where this actually lands
+
+This is genuinely early — a few days old, one substantive reply, no SE number yet, nothing implemented. It builds on a 2022 pitch that stalled specifically because it didn't address the concurrency motivation, and it's explicit that the `@unchecked Sendable`, hand-written-expansion, and global-actor workarounds you're using right now aren't going anywhere until this ships, if it ships at all.
+
+But the shape of it is the interesting part regardless of outcome: another example of Swift 6 strict concurrency finding real, previously-invisible gaps between "the compiler can prove this is safe" and "the syntax lets you say so." [A recent pitch on custom executors](/blog/swift-custom-main-global-executors-mainactor-thread-myth) separated `@MainActor`'s isolation guarantee from thread identity. This one separates `let`'s immutability guarantee from the value it observes. Both are the same kind of correction: the rule was always narrower than the folk understanding of it, and strict concurrency is what's finally forcing the folk understanding to catch up. If you're still building intuition for where `nonisolated` actually applies, [this decision tree](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree) covers the cases this pitch is trying to unblock.
+
+---
+
+*Curious how far the "the lock is the safe part, the wrapper is the sugar" idea goes? [Retry logic, token refresh, and request deduplication](/blog/swift-networking-retry-token-refresh-request-deduplication) walks through an actor doing the same synchronization job this pitch wants property wrappers to do — and [why an actor isn't automatically the safer choice either](/blog/swift-actor-reentrancy-not-a-lock).*
