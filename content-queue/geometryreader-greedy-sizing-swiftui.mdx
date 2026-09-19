@@ -1,0 +1,98 @@
+---
+title: "GeometryReader Doesn't Report Your View's Size. It Reports the Size It Forced On Everything Inside It."
+description: "GeometryReader looks like a harmless way to read a view's size in SwiftUI, but it's a greedy layout container that overrides its children's sizing — here's the gotcha, and the modern alternatives that avoid it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Layout", "iOS Development", "Swift"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1509228468518-180dd4864904?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A tape measure stretched across a wooden surface"
+---
+
+{/*
+SEO target keywords: GeometryReader gotcha, SwiftUI GeometryReader greedy sizing, onGeometryChange iOS 18, containerRelativeFrame vs GeometryReader, SwiftUI read view size without GeometryReader, GeometryReader breaks layout
+
+Internal linking plan:
+- /blog/swiftui-view-identity-state-reset-bug — same "SwiftUI does something structurally different from what the API name suggests" genre
+- /blog/swiftui-state-bindable-environment-decision-map — companion "pick the right SwiftUI primitive" reference piece
+- /blog/appstorage-does-not-observe-what-you-think-it-does — same "the property wrapper's name oversells what it does" beat
+- /blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree — same "here's the decision tree for picking the right tool" format
+- /learn/building-the-views — course lesson tie-in
+*/}
+
+The first time I used `GeometryReader`, I dropped it into a `VStack` to measure a label's width. The label vanished. Not resized — gone, collapsed to nothing, like the view never rendered at all.
+
+I assumed I'd made some dumb mistake with padding. I hadn't. `GeometryReader` had done exactly what it always does, and what it always does isn't what its name suggests.
+
+---
+
+## It's not a sensor. It's a layout container.
+
+The name implies something passive — a little probe that reports back the size SwiftUI already decided on, the way you'd read `frame.size` on a `UIView` after layout. That's not what it is.
+
+`GeometryReader` is a real view in the layout tree, and it has its own sizing behavior like every other SwiftUI view: **it takes all the space its parent offers it**, no matter how big that is. Then it reports *that* size to its content through the `GeometryProxy`, not the size the content would have chosen for itself.
+
+```swift
+VStack {
+    Text("Hello")
+        .background(Color.red) // fills the available width — not the text's width
+}
+```
+
+Put a `Text` alone in a `VStack`, and it sizes to fit its content — that's why the red background hugs the word "Hello" and nothing more, in a normal layout. Wrap it in a `GeometryReader`, and the story changes completely:
+
+```swift
+VStack {
+    GeometryReader { geo in
+        Text("Hello")
+            .background(Color.red) // now fills the GeometryReader's full size
+    }
+}
+```
+
+`GeometryReader` greedily claims all the space the `VStack` gives it — which, for a flexible child in a `VStack`, can be the entire remaining height. Your `Text` is now free-floating inside a much bigger box than it needs, and depending on alignment, it can look squashed to a corner or just plain missing if the box collapsed to zero height because nothing else in the stack gave it a size to expand into.
+
+That's the trap I hit. A single `Text` in a `VStack` with no other sizing information collapses `GeometryReader` to a height of zero, and a height-zero container clips everything inside it. The label wasn't gone. It was rendered inside a box with no height.
+
+## Why this catches people specifically with GeometryReader
+
+Every SwiftUI container negotiates size with its children in some way, so why does this one feel like a special trap?
+
+Because most containers you reach for — `HStack`, `VStack`, `Text`, `Image` — size themselves to fit their content by default, and only expand when you explicitly ask them to with a `.frame(maxWidth: .infinity)` or a `Spacer()`. `GeometryReader` inverts that default. It's greedy from the start, with no equivalent of "size to fit" available. There's no `.fixedSize()` escape hatch that gives it back content-based sizing — expanding to fill is the entire mechanism by which it can report a size back to you in the first place. It has to occupy the space before it can tell you how big that space is.
+
+So the moment you drop it into a layout that wasn't already designed around a fully flexible child, it changes the layout around it — not just for itself, but for its siblings, since a `VStack` divides its space among children based on their sizing behavior, and one greedy `GeometryReader` can absorb space a sibling was expecting to get.
+
+## The two situations that actually need it
+
+`GeometryReader` earns its place in two real cases: building a custom layout that's genuinely a function of the available space (a chart that fills its container, a parallax effect keyed to scroll offset), or reading a size you need to react to elsewhere, via `.preference(key:value:)` or a bound state variable. In both cases, the greediness isn't a bug — it's the point. You *want* the full available space, because the layout you're building is defined in terms of it.
+
+The trap is reaching for it as a generic "tell me this view's size" utility when you don't actually want the sizing behavior that comes attached.
+
+## What to reach for instead, most of the time
+
+If you're on iOS 18 or later, `onGeometryChange(for:of:action:)` does the specific thing people actually want from `GeometryReader` half the time — read a size or frame without hijacking the layout:
+
+```swift
+Text("Hello")
+    .onGeometryChange(for: CGSize.self) { proxy in
+        proxy.size
+    } action: { newSize in
+        labelSize = newSize
+    }
+```
+
+The view keeps its own natural sizing behavior. You just get notified when its geometry changes, without wrapping it in anything that changes how it lays out.
+
+For the "make this fill a portion of its container" case — the one people also frequently misuse `GeometryReader` for — `containerRelativeFrame` is usually the more direct tool:
+
+```swift
+Image("cover")
+    .containerRelativeFrame(.horizontal) { width, _ in width * 0.8 }
+```
+
+No proxy, no closure capturing a size into a view builder, no risk of a zero-height collapse — you're describing a relationship to the container's size declaratively, and SwiftUI resolves it as part of normal layout instead of as a side effect of an oversized reader view.
+
+`GeometryReader` isn't deprecated and isn't going anywhere — for actual custom-layout work, particularly anything predating iOS 18 or needing per-frame values `onGeometryChange` doesn't expose, it's still the right call. But if you've reached for it just to read a number, there's now very likely a smaller tool for the job — one that doesn't rearrange your view hierarchy to get it.
+
+---
+
+*If GeometryReader burned you because a view's identity or sizing changed underneath it, [SwiftUI's view identity rules](/blog/swiftui-view-identity-state-reset-bug) are the deeper mechanism worth understanding next — and if you're still mapping which state primitive to reach for in a modern `@Observable` view, [this decision map](/blog/swiftui-state-bindable-environment-decision-map) covers that ground.*
