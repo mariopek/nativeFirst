@@ -1,0 +1,108 @@
+---
+title: "Thread Sanitizer Just Flagged Your Correct Code as a Race. Swift Might Finally Let You Say 'I Know.'"
+description: "SE-0550 proposes a @noSanitize attribute for Swift functions, letting you opt individual functions out of ASan/TSan instrumentation. Here's the real problem it solves, and the sharp edges it comes with."
+pubDate: 2026-09-20
+tags: ["Swift", "Concurrency", "Debugging", "Xcode", "Swift Evolution"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1532106753298-e7b431b26dae?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A red warning light glowing in a dark room"
+---
+
+{/*
+SEO keywords: SE-0550, @noSanitize Swift, Thread Sanitizer false positive Swift, TSan Xcode, Swift sanitizer attribute, disable sanitizer Swift function, Swift Evolution review September 2026, ASan false positive Swift, sanitized compilation condition Swift
+Internal linking plan: swift-actor-reentrancy-not-a-lock (actors don't eliminate races the way people assume), swift-networking-retry-token-refresh-request-deduplication (concurrency-heavy real code), swift-6-2-concurrent-nonisolated-mainactor-decision-tree (concurrency debugging context), task-detached-breaks-isolation-inheritance-swift (isolation subtleties). Course lesson: /learn/swiftui-in-practice-13-swift-6-concurrency.
+*/}
+
+I turned on Thread Sanitizer once, on a whim, just to see what it would find. It found a "race condition" in code I'd stared at for twenty minutes and could not have been more sure was fine.
+
+That's the sanitizer experience in one sentence. Not "it found nothing" — that would be boring. Not "it found a real bug" — that would be satisfying. It found something in between: a warning that's *technically* about your code, but not actually a bug, because the sanitizer can't see the thing that makes it safe.
+
+A fresh Swift proposal wants to give you a way to tell it to stop looking.
+
+---
+
+## What Thread Sanitizer actually watches
+
+TSan and ASan work by instrumenting your compiled code — wrapping memory accesses with checks against a shadow memory map that tracks who touched what, when, and from where. It's how they catch data races and memory corruption that would otherwise show up as a crash three weeks later in a TestFlight build, with a stack trace that lies to you.
+
+It's a genuinely great tool. It's also a tool that only understands the memory model it was built to understand. The moment you step outside that — an `UnsafeMutablePointer` bridging into a C library that does its own locking, a hand-rolled lock-free structure, memory-mapped hardware registers that don't behave like normal heap memory — the sanitizer doesn't say "I don't understand this." It says "race condition," confidently, every single time.
+
+You can't fix code that isn't broken. So you're left with three bad options: silence the whole file, wrap the specific access in something that quiets the sanitizer without actually changing behavior, or just... leave TSan off for that build and hope you don't need it for the code three functions away that's actually broken.
+
+[SE-0550](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0550-nosanitize-attribute.md) — currently in **active review through September 30, 2026** — proposes a fourth option: tell the compiler exactly which function to leave alone.
+
+---
+
+## The shape of it
+
+```swift
+@noSanitize(address)
+func readsMMIO(_ p: UnsafePointer<UInt32>) -> UInt32 {
+    p.pointee
+}
+
+@noSanitize(address, thread)
+func hotPath() -> Int {
+    // opted out of both ASan and TSan instrumentation
+    ...
+}
+```
+
+Each sanitizer kind opts out independently — `@noSanitize(address)` on a function has zero effect if you're only running with Thread Sanitizer enabled. You list what you actually want silenced.
+
+It's not limited to top-level functions either. Methods, initializers, deinitializers, property accessors, subscripts, and even explicit closures can carry it:
+
+```swift
+struct Device: ~Copyable {
+    @noSanitize(address) init() { ... }
+    @noSanitize(address) deinit { ... }
+
+    var status: UInt32 {
+        @noSanitize(address) get { ... }
+        @noSanitize(address) set { ... }
+    }
+}
+
+registerCallback { @noSanitize(address) in
+    readsMMIO()
+}
+```
+
+That closure detail matters more than it looks. `@noSanitize` on an enclosing function does **not** propagate into closures nested inside it — you opt out exactly what you mean to opt out, nothing more. Good default. The alternative — silent propagation into every closure you happen to write inside a marked function — is the kind of thing that quietly disables sanitizer coverage for code you never meant to exempt.
+
+---
+
+## The part that's actually clever: inlining
+
+Here's a failure mode you'd only think of if you'd already been burned by it. Say you mark a function `@noSanitize(address)` because you know exactly what it's doing with that raw pointer. The compiler inlines it into a caller that's *still* being instrumented — because that's what compilers do with small functions. Congratulations, your carefully-opted-out code just got re-instrumented anyway, silently, because it now lives inside someone else's function body.
+
+The proposal closes that door directly: Swift won't heuristically inline a `@noSanitize(<kind>)` callee into a caller that doesn't carry the same attribute, when that sanitizer is active for the build. The opt-out actually holds.
+
+That creates a real tension with `@inline(always)`, though — one attribute demands "always inline me everywhere," the other demands "never fold me into an instrumented body." SE-0550 doesn't try to split that difference. Combining both on the same declaration is a compile error, full stop. If you need a function to be aggressively inlined in normal builds but left alone under sanitizers, you write the branch yourself with a new compilation condition:
+
+```swift
+#if !sanitized(address)
+@inline(always)
+#else
+@noSanitize(address)
+#endif
+func f() { ... }
+```
+
+`sanitized(<kind>)` evaluates true when that specific sanitizer is enabled for the current build. It's a small addition, but it's the difference between "here's an attribute" and "here's an attribute that actually composes with the rest of the language."
+
+---
+
+## Read this as an escape hatch, not a fix
+
+Nothing about `@noSanitize` makes a race condition go away. It makes the *sanitizer* go away, for exactly the function you tell it to ignore. If you reach for this because a warning is annoying rather than because you've actually proven the flagged access is safe, you've just built yourself a blind spot with a name on it.
+
+The honest use case is narrow: code that talks to memory the sanitizer's model doesn't cover — MMIO, commpage, a C library with its own internal locking that TSan can't instrument through — where you've already reasoned about the safety by hand. That's a real and recurring problem, especially at the systems-and-embedded edge of Swift, which is exactly why the motivation section reads the way it does.
+
+It's also not settled yet. The proposal's still under review, and the first reply in the thread was already pushing back on the name — `@noSanitize` reads awkwardly, and alternatives like `@disableSanitizers(address, thread)` were floated within hours of the review opening. Don't build tooling around the exact spelling yet.
+
+---
+
+If you've been quietly living with `-fno-sanitize` on a whole target because one function in it trips a false positive, this is the proposal to watch. It won't make Thread Sanitizer smarter. It'll finally let you stop arguing with it about the one function you've already checked by hand — which, if you've spent any time debugging real concurrency bugs, you know is most of the fight in the [first place](/blog/swift-actor-reentrancy-not-a-lock).
+
+For more on where Swift's concurrency tooling does and doesn't catch what it claims to, see [Task.detached and isolation inheritance](/blog/task-detached-breaks-isolation-inheritance-swift), the [nonisolated/MainActor decision tree](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree), and a real concurrency-heavy [retry and deduplication pattern](/blog/swift-networking-retry-token-refresh-request-deduplication) that's exactly the kind of code you'd want TSan watching closely — everywhere except the one function that needs to lie to it. If you're building up Swift 6 concurrency fundamentals from scratch, [lesson 13 of SwiftUI in Practice](/learn/swiftui-in-practice-13-swift-6-concurrency) covers the ground this proposal assumes you already have.
