@@ -1,0 +1,105 @@
+---
+title: "Your Pull-to-Refresh Spinner Vanishes Instantly. Your .refreshable Closure Isn't Actually Async."
+description: "SwiftUI's .refreshable modifier hides its spinner the moment your closure returns — not when your data arrives. Here's the fire-and-forget Task bug that causes it, and the fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Async Await", "Concurrency", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1431499012454-31a9601150c9?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A stopwatch resting on a wooden surface"
+---
+
+{/*
+SEO keywords: SwiftUI refreshable, pull to refresh SwiftUI, refreshable modifier async, SwiftUI refreshable not working, refreshable spinner disappears, refreshable Task fire and forget, SwiftUI List refreshable bug
+Internal linking plan: swiftui-task-cancellation-isnt-automatic (async/await + SwiftUI lifecycle), swiftui-task-id-vs-onchange-cancellation-race (Task vs structured concurrency in views), swift-networking-retry-token-refresh-request-deduplication (real async networking code), task-detached-breaks-isolation-inheritance-swift (Task semantics). Course lesson: /learn/swiftui-in-practice-13-swift-6-concurrency.
+*/}
+
+You pull down on a list. The spinner shows up, does its little spin, and vanishes — and then, a full second later, the actual new data pops in. Not smoothly. Not tied to the spinner at all. Just a jump-cut, after the fact.
+
+That's not a rendering glitch. That's `.refreshable` doing exactly what you told it to do, which is not what you meant.
+
+---
+
+## What .refreshable actually waits for
+
+`.refreshable` takes an async closure. The system shows the spinner when the user pulls, calls your closure, and — this is the part that matters — hides the spinner the moment that closure **returns**. Not when your data finishes loading. When the `async` function you handed it completes.
+
+That sounds obvious written out like that. It is obvious. And it's exactly the assumption that breaks the first time you wire this up against existing code that predates `async/await`, because the easiest thing to write is this:
+
+```swift
+.refreshable {
+    viewModel.refresh()
+}
+```
+
+If `refresh()` isn't `async`, this doesn't compile — SwiftUI requires the closure to actually be `async`. So you go fix it, and the fix that feels natural if you're used to completion handlers is:
+
+```swift
+func refresh() {
+    Task {
+        let items = try? await api.fetchItems()
+        self.items = items ?? []
+    }
+}
+```
+
+...and then you make the call site `async` just to satisfy the compiler:
+
+```swift
+.refreshable {
+    await viewModel.refresh()
+}
+
+// on the view model
+func refresh() async {
+    Task {
+        let items = try? await api.fetchItems()
+        self.items = items ?? []
+    }
+}
+```
+
+This compiles. It runs. And it's wrong, in a way that's easy to miss because nothing crashes — the spinner just stops meaning anything.
+
+---
+
+## The bug is the inner Task
+
+Look at `refresh()` again. It's marked `async`, but its body doesn't actually `await` anything of substance — it spawns a **new, independent `Task`** and returns immediately. `.refreshable` awaits `refresh()`, `refresh()` returns as soon as the `Task {}` line finishes scheduling, and the spinner disappears on schedule, right on cue, while the actual network call is still in flight completely unsupervised.
+
+This is the exact same shape as the fire-and-forget mistake covered in [Task.detached breaking isolation inheritance](/blog/task-detached-breaks-isolation-inheritance-swift) and the `.task(id:)` vs `.onChange` race — an unstructured `Task {}` is a promise with no one holding the other end. `.refreshable` doesn't know it exists. It can't wait for something it was never told about.
+
+The fix is almost insultingly simple once you see it: **don't spawn a Task inside the refresh closure — await the real work directly.**
+
+```swift
+.refreshable {
+    await viewModel.refresh()
+}
+
+// on the view model
+func refresh() async {
+    let items = try? await api.fetchItems()
+    self.items = items ?? []
+}
+```
+
+No `Task {}` anywhere in `refresh()`. The `async` function's body itself suspends on the network call, `.refreshable` is awaiting that same suspension, and the spinner now genuinely tracks the work instead of tracking "however long it took the compiler to schedule a Task."
+
+---
+
+## Why this is easy to miss in review
+
+The bug hides well because everything *looks* async-correct. There's an `await` at the call site. There's an `async` keyword on the function. Nothing about the signature tells you that the actual I/O happens inside an unstructured child task that nobody's watching. You have to actually read the function body and ask "does this function suspend on the thing I care about, or does it just suspend on scheduling something else that will?"
+
+That question is worth asking anywhere you see `async func` wrapping a `Task {}` — not just in `.refreshable`. It shows up in button actions, `.onAppear` shims left over from pre-concurrency code, and anywhere someone bridged an old completion-handler API into `async/await` by hand instead of using `withCheckedContinuation`. If the function's own body doesn't `await` the thing that matters, marking it `async` is decoration, not a guarantee.
+
+---
+
+## The part people don't expect: no manual state needed
+
+Once the closure is correctly structured, you can delete whatever `@State private var isRefreshing = false` flag you were manually flipping before and after the call. `.refreshable` already tracks its own in-flight state from the closure's lifetime — that's the entire point of giving it an `async` function instead of a fire-and-forget callback. If you find yourself manually managing a refresh boolean next to a `.refreshable` modifier, that's usually a sign the closure underneath isn't structured correctly either — the two symptoms tend to travel together.
+
+---
+
+`.refreshable` is one of the cleanest pieces of API SwiftUI ships for tying UI state to real async work — when the closure is honest about what it's waiting for. The moment it isn't, you get a spinner that's technically present and functionally decorative. Trace every `async` function back to what it actually suspends on, not what it's named, and this bug stops happening by construction.
+
+For more on where SwiftUI's structured concurrency does and doesn't protect you automatically, see [why .task cancellation isn't automatic everywhere you'd assume](/blog/swiftui-task-cancellation-isnt-automatic), the [.task(id:) vs .onChange cancellation gap](/blog/swiftui-task-id-vs-onchange-cancellation-race), and a real-world async networking pattern in [retry, token refresh, and request deduplication](/blog/swift-networking-retry-token-refresh-request-deduplication). If you're building up Swift concurrency fundamentals from the ground up, [lesson 13 of SwiftUI in Practice](/learn/swiftui-in-practice-13-swift-6-concurrency) is the place to start.
