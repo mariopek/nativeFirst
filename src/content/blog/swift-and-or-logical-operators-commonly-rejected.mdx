@@ -1,0 +1,72 @@
+---
+title: "Someone Pitched 'and' and 'or' for Swift. The Rejection Was Already Written in 2015."
+description: "A fresh Swift Forums pitch to replace && and || with and/or got shut down in two replies — pointing to a document that's been saying no since Swift's early years. Here's the real technical reason, not just 'we don't like it.'"
+pubDate: 2026-09-21
+tags: ["Swift", "Swift Evolution", "Language Design", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1538758414587-f5e9255b9a13?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A red rejected stamp mark"
+---
+
+{/*
+SEO keywords: Swift and or operators, Swift logical operators, Swift commonly rejected changes, Swift && vs and, Swift operator grammar, Swift Evolution rejected proposals, Swift word operators, Swift readable syntax
+Internal linking plan: st-0026-tasklocal-trait-accepted-withvalue-label (a review that came down to naming bikeshedding), property-wrapper-let-sendable-strict-concurrency-pitch (a fresh pitch thread), swift-defer-scope-not-function-exit (a genuine Swift syntax subtlety), swift-nosanitize-attribute-thread-sanitizer-false-positive (a proposal currently in review). No course lesson — language-design piece, not a coding tutorial.
+*/}
+
+I was reading Swift Forums this morning like it's the sports page, and someone had just asked, with complete sincerity, whether Swift could recognize `and` and `or` as alternatives to `&&` and `||`.
+
+The whole thread was three posts long. The second reply was a link to a GitHub file. Case closed, nine hours after it opened.
+
+---
+
+## The pitch, in one sentence
+
+The idea itself isn't unreasonable on its face: make Swift read a little more like plain English, match languages like Python that already do this, and lower the bar for newcomers coming from a non-C-family background. The poster framed it as a genuine gap — they'd searched past proposals and found nothing that had formally addressed it.
+
+Fair question. Wrong assumption that it was new.
+
+---
+
+## The document that already answered it
+
+The reply that ended the thread pointed to [`commonly_proposed.md`](https://github.com/swiftlang/swift-evolution/blob/main/commonly_proposed.md) in the swift-evolution repo — a running list titled, without any attempt at diplomacy, "Commonly Rejected Changes." It exists specifically so the core team doesn't have to re-litigate the same handful of ideas every few months. Renaming `guard` to `unless` is on it. Garbage collection instead of ARC is on it. And right near the top, under "Basic Syntax and Operators," so is this:
+
+> Replace logical operators (`&&`, `||`, `!`, etc.) with words like "and", "or", "not"... and allow non-punctuation operators and infix functions: The operator and identifier grammars are intentionally partitioned in Swift, which is a key part of how user-defined overloaded operators are supported.
+
+That's the whole answer, and it's been sitting there since a forum thread from **2015** first raised it. A decade of "has anyone thought about—" and the document just says, politely, yes.
+
+---
+
+## Why "intentionally partitioned" isn't a shrug
+
+It's worth actually sitting with the technical reason, because it's more interesting than "the core team doesn't like word operators."
+
+Swift splits its grammar into two non-overlapping character sets: one for identifiers (`foo`, `myArray`, `and` if it were a variable name) and one for operators (`+`, `&&`, `<~>` if you've ever defined a custom one). Because those sets never overlap, the parser can look at a token and immediately know, without any semantic analysis, whether it's looking at a name or an operator. That sounds like a small convenience. It isn't.
+
+It's the reason you can define your own infix operators in Swift — `<+>`, `~=`, whatever your library needs — without the compiler needing to have already parsed every file that might declare one, just to know how to tokenize the file it's currently reading. Swift can parse a single file in isolation and know its grammar shape without first resolving every import. That property is load-bearing for tooling: syntax highlighting, `swift-format`, IDE indexing, anything that wants to understand a file's structure fast, without running the whole build graph first.
+
+Turn `and` into an operator, and you've just made an ordinary identifier ambiguous with an operator token. The clean split is gone, and everything downstream that depended on it — tooling included — inherits the mess.
+
+---
+
+## The near-miss that didn't make it either
+
+The same rejected entry is honest about the one word operator that actually came closest to justifying itself: `not`. Unlike `and`/`or`, `not` doesn't need infix parsing — it's prefix, same shape as `!`. So why doesn't Swift have it?
+
+Because it would still need operator-or-keyword status to drop the parentheses the way `!` does, and even then, the readability case falls apart on contact with real code. `not somePredicate()` visually binds far more loosely than `!somePredicate()` — your eye has to travel further to figure out what the `not` actually applies to, especially once you chain conditions. The "more like English" argument, which sounds airtight in a forum post, turns out to lose to "sits tighter against what it negates" the moment you write real code with it.
+
+That's the pattern across most of `commonly_proposed.md`, honestly. Almost none of the rejected ideas are "we just don't want this." Nearly all of them are "we tried reasoning through this and the tradeoff loses" — `unless` for `guard` fails because `guard` isn't actually an inverted `if`, closure literal syntax changes keep losing to the carefully-debated original, and pattern matching in `if let` was **actually tried and reverted** after real developer feedback. It's less a wall and more a graveyard with headstones that explain the cause of death.
+
+---
+
+## The part that's actually a little funny
+
+The original poster did their homework — they searched for prior proposals before posting, found nothing formal, and asked in good faith. They just searched Swift Evolution proposals specifically, and this fight never made it that far. It died in a forum thread eleven years ago, got written down once, and has been quietly deflecting the exact same question ever since without anyone having to type a fresh paragraph.
+
+There's something almost admirable about a rejection so well-documented it doesn't need a human to enforce it anymore. Most engineering orgs I've seen re-litigate the same tabs-vs-spaces argument every eighteen months because nobody wrote it down the first time. Swift wrote it down once, in public, with reasons attached — and now the document does the arguing for them.
+
+---
+
+If you ever find yourself mid-pitch for something that feels obviously missing from Swift — a word operator, a renamed keyword, garbage collection — check `commonly_proposed.md` before you write the paragraph. There's a real chance someone already fought that exact fight for you and left the transcript.
+
+For more on how Swift Evolution proposals actually get decided — sometimes over something as small as a parameter label — see [ST-0026's review coming down to one naming choice](/blog/st-0026-tasklocal-trait-accepted-withvalue-label), a fresh pitch still working through the same process in [property wrappers on let declarations](/blog/property-wrapper-let-sendable-strict-concurrency-pitch), another proposal currently in active review in [the @noSanitize attribute](/blog/swift-nosanitize-attribute-thread-sanitizer-false-positive), and a genuine Swift syntax subtlety that has nothing to do with proposals at all in [why defer fires on scope exit, not function exit](/blog/swift-defer-scope-not-function-exit).
