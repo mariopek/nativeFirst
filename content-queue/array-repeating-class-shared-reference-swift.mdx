@@ -1,0 +1,110 @@
+---
+title: "Array(repeating:) Looks Like It Makes Five Objects. It Makes One, Five Times."
+description: "Array(repeating:count:) copies its value into every slot — which is exactly why it silently breaks the moment that value is a class instance. Here's the reference-sharing bug and how to actually get five independent objects."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Value Semantics", "Reference Types", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1503694978374-8a2fa686963a?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A photocopier machine mid-copy"
+---
+
+{/*
+SEO keywords: Array repeating Swift, Array(repeating:count:) bug, Swift reference type array gotcha, Swift class array shared reference, Swift value semantics vs reference semantics, Swift Array init repeating class instance
+Internal linking plan: swift-memberwise-init-private-set-blind-spot (struct/reference internals), observable-vs-observableobject-1000-row-redraw-benchmark (reference-type behavior in practice), property-wrapper-let-sendable-strict-concurrency-pitch (value vs reference-backed storage), swift-actor-reentrancy-not-a-lock (state you assumed was independent, wasn't). No course lesson — this is a language-fundamentals gotcha, not tied to a specific lesson.
+*/}
+
+I once spent twenty minutes convinced my grid view had a rendering bug. Every cell in a five-by-five board was updating together, like they were wired in series. They weren't. They were the same object.
+
+The line that caused it looked completely innocent:
+
+```swift
+var cells = Array(repeating: Cell(), count: 25)
+```
+
+If `Cell` is a `struct`, that line does exactly what it looks like it does. If `Cell` is a `class`, it does something else entirely — and the difference is invisible at the call site.
+
+---
+
+## What Array(repeating:) actually does
+
+`Array(repeating:count:)` takes one value and copies it into every slot. That's the entire contract. It evaluates the `repeating` argument **once**, then fills the array with `count` copies of that single result.
+
+For a value type, "copy" means what you'd hope. Structs, enums, `Int`, `String` — each slot gets its own independent value, because that's what value semantics means: assignment and copying duplicate the actual data, not a reference to it.
+
+```swift
+struct Point { var x = 0, y = 0 }
+
+var points = Array(repeating: Point(), count: 5)
+points[0].x = 99
+print(points[1].x) // 0 — untouched, genuinely independent
+```
+
+Exactly one `Point()` gets constructed, and the initializer's result gets copied five times. Five independent structs. No surprises.
+
+---
+
+## The part that breaks
+
+Now swap `struct` for `class`:
+
+```swift
+class Cell {
+    var isRevealed = false
+}
+
+var cells = Array(repeating: Cell(), count: 25)
+cells[0].isRevealed = true
+print(cells[1].isRevealed) // true
+```
+
+Same API. Same mental model, if you're not thinking about it. Completely different result.
+
+`Cell()` is constructed exactly once — that part hasn't changed. What gets copied into each of the 25 slots isn't the object; it's the **reference** to that one object. A class instance in Swift lives on the heap, and every variable that "holds" one is actually holding a pointer to it. Copying the reference 25 times doesn't create 25 objects. It creates 25 names for the same object.
+
+Mutate `cells[0]`, and you're not touching slot 0's private state — you're mutating the one and only `Cell` that all 25 slots happen to point at. Every other slot sees the change immediately, because there was never anything else to see.
+
+---
+
+## Why this hides so well
+
+It hides because the line reads as if it's describing five things. `count: 25` is right there in the initializer, doing its job, producing an array with 25 elements. The *array* is genuinely 25 slots long — that part is completely correct. What's missing is 25 *distinct objects* behind those slots, and nothing about the syntax hints at that gap.
+
+It also hides because it usually shows up with types that feel like they should obviously be independent — grid cells, game pieces, list rows, anything you're about to iterate over and configure individually. The bug doesn't announce itself with a crash. It announces itself as "why did every cell flip at once," which looks like a logic error somewhere else in your code, not a one-line construction mistake.
+
+---
+
+## The fix
+
+You need the initializer to actually run once per slot, not once total. The direct way:
+
+```swift
+var cells = (0..<25).map { _ in Cell() }
+```
+
+`map` calls the closure 25 separate times, so `Cell()` genuinely executes 25 times, producing 25 distinct instances with 25 distinct addresses. Verbose compared to `Array(repeating:)`, but it says what it means.
+
+If you're doing this often enough that the closure syntax gets tedious, a small extension makes the intent explicit at the call site instead of relying on people remembering the gotcha:
+
+```swift
+extension Array {
+    init(makingCount count: Int, _ factory: () -> Element) {
+        self = (0..<count).map { _ in factory() }
+    }
+}
+
+var cells = Array(makingCount: 25) { Cell() }
+```
+
+Now the name itself tells the reader "this constructs N things," rather than looking like the same shape as `Array(repeating:)` and quietly meaning something different.
+
+---
+
+## The one-line rule that actually generalizes
+
+This isn't really an `Array(repeating:)` quirk — it's `Array(repeating:)` exposing a much bigger fact about Swift that's easy to forget once you've internalized "structs are safe, this is fine." Any API that takes a single value and duplicates it — a default parameter evaluated once and reused, a cached instance handed out from multiple call sites, a "template" object you intend to clone — inherits this exact split. Value types duplicate cleanly under copying. Reference types duplicate the *reference*, and only the reference.
+
+The question worth asking before you reach for any "repeat this N times" API is not "does this compile," but "is what I'm repeating a value or a pointer to one." Swift's syntax won't ask that question for you — the eight extra characters in `.map { _ in ... }` are a small price for actually getting an answer.
+
+---
+
+For more on where Swift's storage model is stricter — or looser — than it looks, see the reference-backed setters proposal in [Swift's let never meant "never changes"](/blog/property-wrapper-let-sendable-strict-concurrency-pitch), how memberwise init quietly bypasses assumptions about your own storage in [private(set) isn't as private as you think](/blog/swift-memberwise-init-private-set-blind-spot), a real measured comparison of reference-type observation behavior in [@Observable vs ObservableObject](/blog/observable-vs-observableobject-1000-row-redraw-benchmark), and another case where state you assumed was isolated wasn't in [an actor isn't a lock](/blog/swift-actor-reentrancy-not-a-lock).
