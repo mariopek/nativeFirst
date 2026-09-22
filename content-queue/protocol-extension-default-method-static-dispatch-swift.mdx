@@ -1,0 +1,111 @@
+---
+title: "Your Protocol Extension's Default Method Isn't Overridable. It Just Looks Like It Is."
+description: "A conforming type can 'override' a protocol extension's default method and still not get called — because Swift picks that method by the variable's static type, not the object's actual type. Here's the static dispatch trap and how to avoid it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Protocols", "Dispatch", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1540521612419-0280e83433c6?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Theatrical comedy and tragedy masks side by side"
+---
+
+{/*
+SEO keywords: Swift protocol extension dispatch, Swift static dispatch vs dynamic dispatch, protocol extension default implementation override bug, Swift existential type method resolution, protocol witness table Swift, Swift protocol oriented programming pitfalls
+Internal linking plan: swift-actor-reentrancy-not-a-lock (another "looks safe, isn't" language-semantics bug), swiftui-observable-retain-cycles-weak-self-doesnt-always-work (another case where the obvious fix doesn't do what it looks like), swift-memberwise-init-private-set-blind-spot (a storage-level assumption that quietly breaks), swift-6-2-strict-concurrency-migration-invoize-before-after (another real migration story with a surprise-semantics punchline). No course lesson — this is a language-fundamentals gotcha.
+*/}
+
+I once "fixed" a bug by adding a method. The method already existed on the type. Xcode autocompleted it, the override keyword wasn't required so I didn't think to check, and the app kept doing the exact wrong thing anyway. Turns out I hadn't overridden anything. I'd just written a second copy of a method that was never going to get called from where it mattered.
+
+The setup was a `Loggable` protocol with a default `describe()` in an extension. One conforming type needed different behavior. I gave it its own `describe()`. Compiled fine. Ran fine. Printed the wrong thing, every time, only when the value traveled through an array typed as `[Loggable]`.
+
+---
+
+## The setup
+
+```swift
+protocol Loggable {
+    func describe() -> String
+}
+
+extension Loggable {
+    func describe() -> String {
+        "a loggable thing"
+    }
+}
+
+struct Payment: Loggable {
+    let amount: Int
+    func describe() -> String {
+        "payment of \(amount)"
+    }
+}
+```
+
+Call `Payment().describe()` directly and you get `"payment of 42"`. That's the version everyone tests first, and it's correct — which is exactly what makes the next part surprising.
+
+```swift
+let items: [Loggable] = [Payment(amount: 42)]
+items[0].describe() // "a loggable thing"
+```
+
+Same object. Same method. Different answer, just because it's sitting in an array typed as `[Loggable]` instead of `[Payment]`.
+
+---
+
+## Why this isn't a bug
+
+`Payment`'s `describe()` isn't overriding the extension's `describe()`. There's nothing to override — protocol extensions don't participate in inheritance, and `describe()` in the extension isn't a base implementation waiting for a subclass to replace it. It's a **default**, and defaults and overrides resolve completely differently.
+
+A method declared **in the protocol itself** gets dispatched dynamically, through the type's witness table, based on the object's actual runtime type. That's the mechanism that makes protocols feel like lightweight interfaces — call it through any box, get the real implementation.
+
+A method that exists **only in an extension**, with no matching requirement in the protocol, isn't part of that witness table at all. The compiler resolves it statically, at compile time, based on the **declared type of the variable you're calling it through** — not the value inside it. `items` is declared `[Loggable]`. The compiler sees `Loggable.describe()` at that call site and reaches for the extension's version, because as far as static typing is concerned, that's the only `describe()` it can prove exists on "something conforming to `Loggable`."
+
+`Payment`'s own `describe()` is real. It's reachable. It's just invisible from a call site that only knows the value as a `Loggable`.
+
+---
+
+## The one-line fix that changes everything
+
+Move the method's signature into the protocol:
+
+```swift
+protocol Loggable {
+    func describe() -> String
+}
+```
+
+It already was there in the example above — and that's the point worth sitting with. The instant a requirement is declared in the protocol, any conforming type's implementation becomes part of the witness table, and calls dispatch dynamically no matter what the static type of the box is. Same code, same array, correct output:
+
+```swift
+items[0].describe() // "payment of 42"
+```
+
+The bug in my actual case wasn't a missing protocol requirement — it was a method I'd added to the extension *later*, after the protocol was already frozen with a smaller set of requirements, without going back to widen the protocol itself. It compiled cleanly because Swift has no way to warn you "this conforming method will silently stop being reachable through the interface type." From the type checker's point of view, nothing is wrong. `Payment.describe()` exists, is callable, and does what it says — just not from here.
+
+---
+
+## Where this actually bites
+
+Nobody hits this from a toy example with one struct and one array. It shows up in code that looks completely reasonable:
+
+- **Plugin or strategy patterns.** A `[Renderer]`, `[Validator]`, or `[Middleware]` array where each conforming type is meant to customize one hook that only lives in an extension.
+- **Retrofitting a protocol.** You add a protocol to an existing type hierarchy for testability or abstraction, keep the "shared" behavior in an extension to avoid repeating it everywhere, and one conforming type needs to diverge — quietly, incorrectly.
+- **Generic code that boxes to the protocol type.** Even if you originally called the method on the concrete type and it worked, refactoring a function to accept `some Loggable` instead of `Payment` can flip which `describe()` gets picked at the exact call sites the refactor touched, with zero visible diff at the call site itself.
+
+That last one is the nastiest, because the method call doesn't change. The type of the thing it's called through does, somewhere upstream, and the dispatch quietly follows.
+
+---
+
+## The rule that actually generalizes
+
+Protocol extensions do two unrelated jobs, and Swift lets you write both with identical syntax:
+
+1. **Fill in a requirement already declared in the protocol** — dynamic dispatch, real polymorphism, behaves the way you expect from any other language with interfaces.
+2. **Add a method that exists nowhere in the protocol** — static dispatch, resolved at compile time from the variable's declared type, and never overridden by a conforming type no matter how convincingly that type's version compiles.
+
+Both look like `extension Loggable { func describe() -> String { ... } }`. Nothing at the extension's declaration site tells you which behavior you're getting — you have to go check the protocol's own requirement list. If you want a conforming type to ever be able to customize a method when it's accessed through the protocol type — an array of it, a generic parameter constrained to it, a function argument typed as it — that method has to be a real requirement, not a convenience living only in the extension.
+
+The extension is for genuinely shared behavior nobody needs to vary. The moment "nobody needs to vary this" turns out to be wrong, the fix isn't in the conforming type. It's one line up, in the protocol.
+
+---
+
+For more on Swift behavior that looks like one thing at the call site and does another, see [an actor isn't a lock](/blog/swift-actor-reentrancy-not-a-lock), where reentrancy hides in a suspension point the same way dispatch hides in an extension; [weak self doesn't always fix retain cycles](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work), another case where the "obvious" fix doesn't do what it looks like; [private(set) isn't as private as you think](/blog/swift-memberwise-init-private-set-blind-spot) for a similar storage-level assumption that quietly breaks; and [migrating a real app to Swift 6.2 strict concurrency](/blog/swift-6-2-strict-concurrency-migration-invoize-before-after) for another case where the compiler stayed quiet right up until a race condition that had been there the whole time.
