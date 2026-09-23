@@ -1,0 +1,72 @@
+---
+title: "Float.pi Has Been Slightly Wrong Since 2016. Swift Is Finally Fixing the Rounding."
+description: "SE-0552, in active review through October 6, 2026, changes how Float.pi rounds — undoing a Swift 3-era decision to always round toward zero. Here's the actual bit that moves, why it was ever rounded down on purpose, and whether your code needs to care."
+pubDate: 2026-09-23
+tags: ["Swift Evolution", "Swift", "Floating Point", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1625186823734-e581d48b7ce6?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A pi symbol written on a chalkboard"
+---
+
+{/*
+SEO keywords: SE-0552, Float.pi, Swift floating point, FloatingPoint protocol pi, Swift rounding, IEEE 754, Swift Evolution review, floating point precision iOS
+Internal linking plan: se-0543-inlinearray-hashable-accepted, se-0546-memberwise-init-same-file-extensions, swift-withdeadline-se-0526-network-timeout, embedded-swift-existentials-discipline-2026, course lesson /learn/vibe-code-native (didn't end up fitting the flow, dropped)
+*/}
+
+In 1897, the Indiana General Assembly nearly passed a bill that would have legislated the value of pi. Bill 246 didn't say 3.14159. It implied, through some genuinely deranged geometry, that pi equals roughly 3.2. It sailed through the House 67–0. A math professor happened to be in the lobby that day, got to a state senator before the Senate vote, and the bill died quietly in committee.
+
+I'm telling you this because the guy proposing Swift's newest floating-point change opens his own proposal with that exact story. And then says, deadpan, "I figure it's time to try again."
+
+He's not legislating pi to 3.2. He's fixing one bit.
+
+---
+
+## The actual change
+
+[SE-0552](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0552-float-pi-rounding.md) is in active review right now, through October 6, 2026. It changes `Float.pi` from `0x1.921fb4p1` to `0x1.921fb6p1`. That's it. One hex digit. In decimal terms:
+
+```swift
+// today
+Float.pi // 3.1415925025939941...
+
+// after SE-0552
+Float.pi // 3.1415927410125732...
+```
+
+Real pi is `3.141592653589793...`. Do the subtraction and the old value sits about `1.51e-7` *below* pi. The new value sits about `8.74e-8` *above* it. The new value is closer. That's the whole proposal: `Float.pi` currently isn't the best `Float` approximation of pi that exists, and SE-0552 makes it one.
+
+## Why it was ever wrong on purpose
+
+Here's the part that actually makes this interesting. It wasn't a bug. It was a deliberate choice, made back when the `FloatingPoint` protocol was designed for Swift 3 under [SE-0067](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0067-floating-point-protocols.md). The old doc comment on `pi` said this, more or less verbatim:
+
+> This value is rounded toward zero to keep user computations with angles from inadvertently ending up in the wrong quadrant.
+
+The reasoning: if you write code that checks `angle < Float.pi` to decide "am I still in the first half of the circle," you want that check to behave the way it looks like it should. Round pi *up* even slightly, and a value that's mathematically exactly at pi could compare as less than `Float.pi` — landing you in the wrong branch, the wrong quadrant, the wrong half of whatever you were dividing at pi. Rounding down was supposed to be a small act of defensive design.
+
+It's a reasonable instinct. I've written that exact style of angle-clamping code — normalize a rotation into `-Float.pi...Float.pi`, then branch on which side of zero it lands. If you're relying on `Float.pi` being *slightly under* the true value to keep that logic honest, this change is worth actually reading, not skimming.
+
+## Why that instinct lost
+
+The IEEE 754 working group — the people who define what floating-point arithmetic means, across every language that touches a CPU's FPU — has since converged on a different principle: **a language's floating-point constants should always be the best available approximation.** Not "rounded to preserve some downstream invariant." Just, the closest representable value. Full stop.
+
+The logic is that forcing a directional rounding to protect one specific pattern of code (`angle < Float.pi`) quietly makes the constant *wrong* for every other pattern of code that just wants pi. Trigonometric identities that are supposed to be symmetric around pi stop being symmetric. Code ported from C, where `M_PI` uses the closest-value convention, produces subtly different results than the "same" Swift code. You're paying a small, invisible accuracy tax across the entire language to protect one narrow idiom — and that idiom was never guaranteed in the first place, because ULP-level float comparisons near a boundary are fragile no matter which way you round.
+
+SE-0552 undoes the original tradeoff. Doug Gregor's review thread frames it as Swift falling in line with where IEEE 754 landed after Swift 3 shipped.
+
+## Does your code need to change?
+
+For almost everyone: no. If you're using `Float.pi` or `Double.pi` for the normal things — converting degrees to radians, driving a `Canvas` rotation, animating a dial — a shift of eight hundred-millionths is not a thing you'll ever see with your eyes or feel in a demo.
+
+The proposal's own ABI compatibility section is honest about the one place it might bite: code that depends on the *exact bit pattern* of the old value. That's a narrower group than "does float math" — think golden-file tests that hardcode expected output to the last decimal, or code deliberately matching another platform's specific (rounded-down) constant for bit-for-bit determinism. If that's you, the fix the proposal names outright is to stop using `Float.pi` and hardcode `0x1.921fb4p1` yourself.
+
+Everyone else gets a marginally more accurate constant and never notices the difference — which, honestly, is exactly what you want from a language-level constant. The fact that noticing required someone to read the IEEE 754 spec and Swift's original design rationale side by side tells you how narrow the affected surface actually is.
+
+## The actual takeaway
+
+The interesting thing here isn't the bug — there isn't one, not really. It's that `Float.pi` felt like the kind of thing that could never change. A named constant, baked into the standard library, meaning the one thing math has meant since before Swift existed. And it still moved, nine years after it shipped, because someone decided the *reason* it was defined that way didn't hold up anymore.
+
+That's worth remembering the next time you lean on a language-provided constant to do double duty as a defensive coding trick. The constant isn't yours. It belongs to whatever the language currently believes is correct — and "currently" has an expiration date.
+
+---
+
+*Curious what else is moving through Swift Evolution review right now? I covered [`InlineArray` finally getting Hashable](/blog/se-0543-inlinearray-hashable-accepted/) and [Swift's new deadline-based timeout API](/blog/swift-withdeadline-se-0526-network-timeout/) — both smaller-than-they-look proposals with the same flavor of "here's the tradeoff nobody questioned until now." If same-file memberwise inits are still tripping you up, [SE-0546 fixed that too](/blog/se-0546-memberwise-init-same-file-extensions/). And if you want to see what happens when Swift actually *enforces* discipline instead of just documenting it, [Embedded Swift is the extreme version](/blog/embedded-swift-existentials-discipline-2026/).*
