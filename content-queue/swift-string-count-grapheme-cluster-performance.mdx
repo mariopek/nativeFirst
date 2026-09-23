@@ -1,0 +1,87 @@
+---
+title: "Swift's String.count Isn't O(1). It Walks the Whole String Every Time."
+description: "Swift's String.count looks like a free property access, but it's not — Unicode-correct grapheme cluster counting makes it O(n). Here's why Swift made that trade, where it actually costs you, and the isEmpty habit that sidesteps most of it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Performance", "Strings", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1461360370896-922624d12aa1?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a long stretch of string or rope"
+---
+
+{/*
+SEO keywords: Swift String.count performance, grapheme cluster, extended grapheme cluster Swift, String count O(n), NSString length vs Swift String count, Swift Unicode correctness, Character Swift performance
+Internal linking plan: dateformatter-recreated-every-call-swift-performance, swiftui-image-downsampling-decode-cost, observable-vs-observableobject-1000-row-redraw-benchmark, string-catalogs-localization-swiftui-what-breaks
+*/}
+
+I once put `.count` inside a `TextField`'s `onChange` to enforce a character limit. Ran fine in every test I threw at it — until someone pasted a paragraph copied from a group chat, emoji reactions and all, and the app started stuttering on every keystroke.
+
+The `.count` wasn't the bug. My assumption about what `.count` costs was.
+
+---
+
+## The assumption everyone brings from every other language
+
+In most languages, "how long is this string" is a stored integer somewhere, or at worst a count of fixed-width units. `strlen` in C walks bytes, sure, but it's simple bytes. Objective-C's `NSString.length` is O(1) — it counts UTF-16 code units, and that count is cached.
+
+Swift's `String.count` looks like the same kind of property. It reads like one. It is not one.
+
+```swift
+let text = "Hello, world!"
+print(text.count) // 13 — feels instant, and for a string this short, it basically is
+```
+
+For a short ASCII string you'd never notice. Do it in a loop over a big string, or in a hot path that re-runs on every keystroke, and you will.
+
+## Why: Character means something different in Swift
+
+Swift's `String` is a collection of `Character` values, and a `Character` isn't a byte or a code point — it's an **extended grapheme cluster**, Unicode's definition of what a person would call "one visible character." That sounds pedantic until you look at what it actually covers:
+
+```swift
+let e1 = "é"            // could be ONE scalar (U+00E9)
+let e2 = "e\u{0301}"    // or TWO scalars: "e" + combining acute accent (U+0301)
+print(e1 == e2)          // true — Swift treats both as the same Character
+print(e1.count, e2.count) // 1, 1
+
+let family = "👨‍👩‍👧‍👦"
+print(family.count)      // 1 — one Character
+print(family.unicodeScalars.count) // 7 — man, ZWJ, woman, ZWJ, girl, ZWJ, boy
+```
+
+That family emoji is one visible glyph made of seven Unicode scalars joined by zero-width joiners. Swift's `String` gets this right — `"👨‍👩‍👧‍👦".count == 1` matches what a human sees on screen. `NSString.length` for the same string returns 11, because it's counting UTF-16 code units, which has nothing to do with what's rendered.
+
+Getting this right is genuinely valuable — it's why string reversal, truncation, and substring operations in Swift don't split emoji or accented characters in half the way careless UTF-16 slicing can. But correctness here has a cost: to know where one grapheme cluster ends and the next begins, Swift has to apply the Unicode grapheme-breaking algorithm and actually walk the string. There's no shortcut to "how many clusters are in this string" other than finding all the cluster boundaries. So `.count` is **O(n)** — linear in the string's length, every single time you call it.
+
+## Where this actually bites
+
+Not in normal body copy, message text, or config strings — those are short enough that O(n) is indistinguishable from free. It bites in the same handful of patterns every time:
+
+- **A `TextField` limit checked on every keystroke.** `.onChange(of: text) { if text.count > limit { ... } }` re-walks the entire string on every character typed, so the cost grows as the user types more — right when you'd expect a character-limit UI to stay snappy.
+- **Length checks inside a `List` or `LazyVStack` row.** Anything that calls `.count` per row, per redraw, multiplies a small cost by however many rows are visible times however often SwiftUI re-evaluates that body.
+- **Repeated calls where one would do.** Calling `.count` three times to check three different thresholds walks the string three times instead of once.
+
+None of these are exotic. They're the default way most people write a character counter or a truncation check.
+
+## The fixes, in order of how often you'll reach for them
+
+**Use `isEmpty`, not `count == 0`.** This one's free and you should just always do it:
+
+```swift
+if text.isEmpty { ... }       // O(1) — no walk needed
+if text.count == 0 { ... }    // O(n) — walks the string just to prove it's empty
+```
+
+`isEmpty` only needs to check whether the collection has a first element, not count all of them. Same idea applies to `count > 5` vs. `prefix(6).count > 5` for a "does this have at least N characters" check — the `prefix` version stops walking as soon as it has enough.
+
+**Cache the count instead of recomputing it.** If a string isn't changing every frame, compute `.count` once and store it, the same way you'd hoist a `DateFormatter` out of a loop instead of rebuilding it per call.
+
+**Decide if you actually need grapheme correctness.** If you're limiting input to something like a username where emoji and combining marks genuinely don't matter, `.utf8.count` or `.unicodeScalars.count` are cheaper — though be honest with yourself about whether "cheaper but occasionally wrong for emoji" is actually an acceptable tradeoff for your product before you reach for it.
+
+## The takeaway
+
+Swift didn't make `.count` slow by accident — it made a choice that Unicode correctness matters more than a free O(1) property, and mostly, that's the right call for a language people write user-facing text in. But it means one of the most reached-for properties on the most reached-for type in the language doesn't behave the way a decade of `NSString.length` and `strlen` trained you to expect.
+
+The lesson generalizes past strings: any time a property reads like a stored value, it's worth a beat to check whether it's actually computed — because "looks free" and "is free" aren't the same claim, and Swift will let you find out the hard way in production if you don't check first.
+
+---
+
+*This is the same shape of lesson as [caching a DateFormatter instead of rebuilding it per call](/blog/dateformatter-recreated-every-call-swift-performance/) and [downsampling images instead of decoding them at full size](/blog/swiftui-image-downsampling-decode-cost/) — cheap-looking calls that hide real work. If you're chasing SwiftUI redraw costs more broadly, [the 1,000-row @Observable benchmark](/blog/observable-vs-observableobject-1000-row-redraw-benchmark/) is a good next stop. And if Unicode correctness in strings interests you beyond performance, [String Catalogs have their own sharp edges](/blog/string-catalogs-localization-swiftui-what-breaks/).*
