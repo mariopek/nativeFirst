@@ -1,0 +1,108 @@
+---
+title: "SwiftUI's .onAppear Doesn't Mean 'First Appearance.' It Means 'Any Appearance.'"
+description: "onAppear fires every time a SwiftUI view becomes visible again, not just once — including every time you pop back to it in a NavigationStack. Here's why that duplicates network calls and how to fix it with .task(id:) or a one-shot flag."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "iOS Development", "Swift", "Navigation", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1445907187532-485d1578cf52?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A doorway seen from inside a dim hallway, suggesting the same threshold crossed again and again"
+---
+
+{/*
+SEO keywords: SwiftUI onAppear fires multiple times, onAppear NavigationStack pop, onAppear vs task SwiftUI, SwiftUI duplicate network call navigation, onAppear called again, SwiftUI view lifecycle onAppear onDisappear.
+Internal linking plan: swiftui-task-cancellation-isnt-automatic, swiftui-task-id-vs-onchange-cancellation-race, refreshable-spinner-not-async-swiftui, swiftui-view-identity-state-reset-bug. No course lesson link (no exact match found for this narrow lifecycle topic).
+*/}
+
+I had a detail screen that reloaded its data every single time you backed into it. Tap a row, view loads, hit back, tap the same row again — loads again. Same data. Same network call. Every time.
+
+I spent twenty minutes assuming it was a caching bug. It wasn't. `.onAppear` was doing exactly what it's documented to do. I just didn't want to believe the documentation.
+
+---
+
+## What onAppear actually promises
+
+The name is the trap. `onAppear` sounds like it means "this view just came into existence." It doesn't. It means "this view just became visible on screen" — and those are very different events.
+
+A `NavigationStack` doesn't destroy the view you pushed away from. It keeps it parked underneath the new one. So when you tap back, SwiftUI doesn't create your detail view again — it just brings the existing one back into view. And `.onAppear` fires again, because from the framework's point of view, the view **did** appear again. It's telling the truth. You're the one who misread it.
+
+The same thing happens with tab switches, sheets being dismissed, and `ScrollView` recycling in some layouts. Any time a view transitions from not-visible to visible, `.onAppear` runs — first time, tenth time, doesn't matter.
+
+```swift
+struct BrewDetailView: View {
+    let brewID: String
+    @State private var brew: Brew?
+
+    var body: some View {
+        content
+            .onAppear {
+                Task {
+                    brew = try? await BrewStore.shared.fetch(brewID)
+                }
+            }
+    }
+}
+```
+
+Looks completely reasonable. Fires on the first push. Fires again on every pop-back. If `fetch` hits your API, you just paid for the same request three times because the user was indecisive about which brew to look at.
+
+---
+
+## The fix that doesn't fix it
+
+The instinctive patch is a guard flag:
+
+```swift
+@State private var hasLoaded = false
+
+.onAppear {
+    guard !hasLoaded else { return }
+    hasLoaded = true
+    Task { brew = try? await BrewStore.shared.fetch(brewID) }
+}
+```
+
+This works, technically. It also means you now own a piece of manual state whose only job is to compensate for a lifecycle event that doesn't mean what its name implies. Every added `@State private var hasLoaded` is a small confession that the tool you reached for wasn't the right one.
+
+It gets worse if the view can represent *different* data over its lifetime — say a `List` row view reused for different IDs, or a detail screen where the ID can change without the view being torn down (`NavigationStack` value-based navigation loves to do this). The flag now has to be keyed to the ID too, and you've built a tiny cache invalidation system by hand to route around one modifier.
+
+---
+
+## The fix that actually fixes it
+
+Swift already has a modifier whose entire purpose is "run this when the relevant identity shows up, and only then": [`.task(id:)`](/blog/swiftui-task-id-vs-onchange-cancellation-race). Pair it with the view's own identity and the problem stops existing instead of getting patched.
+
+```swift
+struct BrewDetailView: View {
+    let brewID: String
+    @State private var brew: Brew?
+
+    var body: some View {
+        content
+            .task(id: brewID) {
+                brew = try? await BrewStore.shared.fetch(brewID)
+            }
+    }
+}
+```
+
+`.task(id:)` runs once when the view's task starts, and runs **again only if `brewID` changes** — not on every reappearance of the same view with the same identity. Pop back to the same brew, nothing re-fires. Push to a *different* brew reusing the same view instance, it correctly reloads. No flag, no manual bookkeeping, and you get [structured cancellation](/blog/swiftui-task-cancellation-isnt-automatic) as a bonus — if the view disappears mid-fetch, the task actually stops.
+
+If there's genuinely no natural "identity" to key on — a pure onboarding-style one-time side effect with nothing that varies — a `@State` flag is fine. That's the honest case for it. The trap is reaching for it as the default answer to "why does this run twice," when the real answer is that `.onAppear` was never a one-time event in the first place.
+
+---
+
+## Where this actually bites
+
+This isn't a beginner mistake living only in tutorial code. It shows up in:
+
+- **Analytics events** — a screen-view log firing on every back-navigation, quietly inflating your funnel numbers.
+- **Refresh-on-appear patterns** — re-fetching a list every time a user backs out of a detail screen and back in, which feels like lag they can't explain.
+- **Focus and animation triggers** — an entrance animation that's supposed to play once, replaying every time you return to a tab.
+
+None of these crash. All of them are the kind of subtly-wrong behavior that survives code review because the code reads fine — it's the framework's naming that misleads you, not the syntax.
+
+---
+
+## The takeaway
+
+`.onAppear` tracks visibility, not creation. If what you actually want is "run this once per identity," reach for `.task(id:)` and let SwiftUI do the bookkeeping it already knows how to do. The bug isn't that SwiftUI re-runs your code. It's that the modifier's name lets you assume it won't.
