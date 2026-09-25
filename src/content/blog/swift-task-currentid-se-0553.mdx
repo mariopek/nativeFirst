@@ -1,0 +1,96 @@
+---
+title: "Every Swift Task Already Has an ID. You Just Couldn't Read It Cheaply."
+description: "SE-0553 adds Task.currentID to Swift — a process-unique, never-reused task identifier that costs nanoseconds instead of the 15x-slower withUnsafeCurrentTask dance. Here's why that gap existed and what it unlocks for tracing and logging."
+pubDate: 2026-09-25
+tags: ["Swift", "Concurrency", "Swift Evolution", "Performance"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1627368020956-a6584fe2b9eb?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a blank identification badge on a lanyard"
+---
+
+{/*
+SEO keywords: Swift Task.currentID, SE-0553, Task Identity Swift, Task.ID Swift, withUnsafeCurrentTask performance, Swift structured logging task id, Swift concurrency tracing
+Internal linking plan: swift-actor-reentrancy-not-a-lock, task-detached-breaks-isolation-inheritance-swift, checked-continuation-double-resume-crash-swift, swift-withdeadline-se-0526-network-timeout
+*/}
+
+I once tried to tag every log line in a networking layer with "which `Task` produced this," so I could reconstruct what actually happened during a flaky retry storm. Reasonable idea. Then I looked at how to get a task identifier out of Swift Concurrency, and the answer was: `withUnsafeCurrentTask`, a closure, and an `unsafeBitCast` if you want something you can actually hash.
+
+That's not an identifier API. That's a workaround wearing an identifier-shaped costume.
+
+[SE-0553](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0553-task-identity.md), currently in review through October 7th, finally gives every task a real one — and the reason it took this long is more interesting than the feature itself.
+
+---
+
+## The thing that was always there, just not for you
+
+Every `Task` the Swift runtime creates already has an internal 64-bit identifier. It's not new. The runtime uses it for its own bookkeeping. What SE-0553 does is expose it:
+
+```swift
+@inline(__always)
+func emit(_ event: Event) {
+  let id = Task.currentID  // a few nanoseconds, no allocations
+  buffer.append(event, taskID: id)
+}
+```
+
+`Task.currentID` returns `Task.ID?` — `nil` if you're calling from outside the concurrency runtime entirely, like a plain synchronous function. You can also read the same identifier off a task you're already holding, or off an `UnsafeCurrentTask`:
+
+```swift
+extension Task {
+  public var id: Task.ID { get }
+}
+
+extension UnsafeCurrentTask {
+  public var id: Task.ID { get }
+}
+```
+
+The design target, according to the proposal, is single-digit nanoseconds — "comparable to a thread-local read." Compare that to going through `withUnsafeCurrentTask` and converting the result to something hashable, which the authors measured at roughly **15x slower** on Apple Silicon. Not because the runtime call itself is slow — it isn't — but because the generic, closure-shaped API pays for existential boxing, dynamic stack allocation, and witness-table indirection before your code even runs.
+
+That gap is the whole story. The data was one call away. The API to reach it cheaply didn't exist.
+
+## Why you'd actually want this
+
+If you've never needed a task identifier, this might sound like a nanosecond-shaving exercise for people who benchmark their benchmarks. It isn't, and the proposal is specific about who hits the wall:
+
+- **Structured logging and tracing**, where every emitted event needs to carry "which task was this" as metadata, cheaply enough to leave the instrumentation on in production instead of switching it on only when something's already broken.
+- **Profilers and dev tools** that attribute samples to tasks without measurably slowing down the thing they're profiling.
+- **Lock-free data structures** that want to key state per-task — where using the task's *pointer* as a key is a real hazard, because the runtime can reuse a freed task's heap address for a new one.
+- **Custom executors** maintaining per-task accounting in a side table.
+
+That third one is worth sitting with. If you've ever been tempted to `unsafeBitCast` a task reference into something you use as a dictionary key, `Task.ID` is the guarantee you actually wanted: **process-unique, and never reused**, even after the original task is gone. Pointer identity gives you neither guarantee — it just happens to work until the allocator hands the same address to something else and your side table quietly starts lying to you.
+
+## The type is a wrapper, on purpose
+
+`Task.ID` isn't a bare `UInt64`, even though that's all it wraps:
+
+```swift
+@frozen
+public struct TaskID: Sendable, Hashable {
+  public var rawValue: UInt64 { get }
+}
+
+extension Task {
+  public typealias ID = TaskID
+}
+```
+
+The proposal's authors considered returning `UInt64?` directly and rejected it, for a reason that generalizes past this one API: a bare integer doesn't tell you anything at the call site. `UInt64` is also what a thread ID, a file descriptor, a byte offset, and a sequence number look like. Wrapping it in `Task.ID` costs nothing at runtime — `@frozen` with a single trivial payload compiles down to the same machine code as the raw integer — and it buys you a type the compiler will stop you from adding to, comparing ordinally, or passing where a different kind of ID was expected. `ObjectIdentifier` and `Duration` already do the same trick in the standard library.
+
+There's also, deliberately, no way to construct one yourself. No `init(rawValue:)`, no `RawRepresentable` conformance. `rawValue` is a one-way door for serialization — put it on the wire, log it, join it against other data — not a way to manufacture an ID that doesn't correspond to a real task. That's a small design choice, but it's the right instinct: an identifier type is only trustworthy if the only way to get one is from the thing it identifies.
+
+## What it's not for
+
+The proposal is upfront about the boundary. This identifier is **process-local**. It says nothing across process or host boundaries, and it isn't ordered — `Task.ID` deliberately doesn't conform to `Comparable`, even though the runtime happens to allocate them monotonically today. That's an implementation detail, not a contract, and a future runtime is free to shard the counter or mix in a startup nonce without breaking anyone, as long as "unique" and "never reused" still hold.
+
+If you're doing distributed tracing across services, this doesn't replace `swift-distributed-tracing` or whatever's generating your globally-unique trace IDs today — it's the cheap, in-process building block those systems can now build on instead of reinventing.
+
+## The takeaway
+
+This is a small proposal — one accessor, one wrapper type, purely additive, no source-breaking changes anywhere. But it's a good example of a pattern worth recognizing in general: sometimes the feature you're missing isn't a capability the runtime lacks, it's a **cheap path to a capability the runtime already has**. The expensive, generic, closure-shaped API was never actually about safety — it was the only door available, and it happened to be a slow one.
+
+Next time you're reaching for `unsafeBitCast` to get something the standard library "almost" gives you, it's worth asking whether that's a sign a cheaper, honest version of that API is just missing — not that you need to get cleverer with the unsafe one.
+
+---
+
+*Task identity sits right next to the other sharp edges of Swift Concurrency this blog keeps returning to: [actor reentrancy isn't the lock you think it is](/blog/swift-actor-reentrancy-not-a-lock/), [Task.detached throws away more than you'd expect](/blog/task-detached-breaks-isolation-inheritance-swift/), and [a checked continuation resumed twice crashes, no exceptions](/blog/checked-continuation-double-resume-crash-swift/). If you want another recent example of Swift finally shipping the API everyone was duct-taping around, [the real timeout API from SE-0526](/blog/swift-withdeadline-se-0526-network-timeout/) is the same shape of fix.*
