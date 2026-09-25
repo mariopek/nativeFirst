@@ -1,0 +1,119 @@
+---
+title: "NSCache Looks Like a Dictionary With a Size Limit. It Isn't Promising You That."
+description: "NSCache's countLimit and totalCostLimit read like hard caps, but Apple's docs never promise them as guarantees, and eviction can happen for reasons you can't predict. Here's what NSCache actually contracts to do — and the one gotcha that breaks lookups silently."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Performance", "Memory Management"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of empty library shelving, some sections cleared out"
+---
+
+{/*
+SEO keywords: NSCache Swift, NSCache countLimit, NSCache totalCostLimit, NSCache eviction policy, NSCache vs Dictionary, NSCache custom key hash, NSCacheDelegate
+Internal linking plan: asyncimage-caching-swiftui-scroll-performance, swiftui-image-downsampling-decode-cost, observable-vs-observableobject-1000-row-redraw-benchmark, dateformatter-recreated-every-call-swift-performance
+*/}
+
+I set `countLimit = 100` on an `NSCache`, watched it cache maybe thirty items, and then watched it evict half of them anyway while the app was sitting comfortably under memory pressure. My first instinct was that I'd misconfigured something.
+
+I hadn't. `NSCache` was doing exactly what it promises to do. The problem was what I'd assumed it promised.
+
+---
+
+## What the docs actually say
+
+Here's the sentence in Apple's documentation that matters, and it's easy to skim past: `NSCache` "combines the behavior of a mutable dictionary with automatic eviction policies." Not "a dictionary with a hard cap." Automatic eviction policies — plural, unspecified, and entirely up to the system.
+
+```swift
+let cache = NSCache<NSString, UIImage>()
+cache.countLimit = 100
+cache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
+```
+
+Both of those properties read like guarantees. They aren't. Apple's own docs describe them as values the cache "uses as a guideline for the number of objects to keep" — a hint the system takes into account, not a ceiling it enforces. Under real memory pressure, `NSCache` can evict entries well before you hit either limit. It can also, less intuitively, evict entries when you're nowhere near either limit, because eviction is also tied to system-wide memory pressure notifications that have nothing to do with your specific cache's size.
+
+The eviction policy itself — what gets removed first when something has to go — is unspecified. It behaves roughly LRU-ish in practice on current OS versions, but that's an observation about the current implementation, not a contract you're allowed to build logic on. A future OS release could change it without breaking any documented promise.
+
+## Why this actually matters
+
+None of this is a reason to stop using `NSCache`. It's still the right tool for an in-memory cache — it auto-purges under memory pressure the way a plain `[Key: Value]` dictionary never will, and that's genuinely valuable, as the [AsyncImage caching post](/blog/asyncimage-caching-swiftui-scroll-performance/) on this blog covers. The point isn't "don't use it." The point is what you're allowed to assume about it:
+
+**Correctness can never depend on a cache hit.** If your code only works because an item happens to still be in the cache, that's not a caching layer — that's a hidden dependency on an unspecified eviction policy, and it will break in a way that's miserable to reproduce, because it only shows up under memory pressure you can't easily simulate in a debugger.
+
+**`countLimit` and `totalCostLimit` are tuning knobs, not budgets.** Setting `totalCostLimit` to 50 MB does not mean your app's memory footprint from that cache is bounded at 50 MB. It's a hint that helps the cache decide *when* to prefer evicting, especially when you're setting real costs per entry (bytes, not just "1" per item) so the cache can tell a 4 MB image from a 40 KB thumbnail. Treat it as advice you're giving the system, not a contract the system is giving you.
+
+**Eviction timing is not yours to predict.** Don't build UI logic, analytics, or retry behavior around "this item should still be cached because I just added it thirty seconds ago." It might be. It might not.
+
+## The gotcha that actually bites: custom keys
+
+Here's the one that's easy to hit and hard to diagnose. `NSCache` keys have to be objects — `NSCache<KeyType: AnyObject, ObjectType: AnyObject>` — and it looks up entries the same way `NSDictionary` does: via `isEqual(_:)` and `hash`. If you use `NSString` or `NSURL` as your key type, you're fine, because those already implement value-based equality and hashing correctly.
+
+The trap shows up when you reach for a custom key object and don't override both:
+
+```swift
+final class CacheKey: NSObject {
+    let userID: String
+    let size: CGSize
+    init(userID: String, size: CGSize) {
+        self.userID = userID
+        self.size = size
+    }
+    // No isEqual(_:) or hash override
+}
+```
+
+Two `CacheKey` instances constructed with identical `userID` and `size` values are **not equal** here, because `NSObject`'s default `isEqual(_:)` falls back to pointer identity. Every lookup you do with a freshly-constructed key misses, even if you cached an item under an "equal" key five seconds ago — the cache just silently behaves like it's always empty, and you'll spend an afternoon convinced your eviction policy is unreasonably aggressive when it's actually working perfectly and your keys were never matching in the first place.
+
+The fix is the same as making a custom type work correctly in a plain `Dictionary`:
+
+```swift
+final class CacheKey: NSObject {
+    let userID: String
+    let size: CGSize
+    init(userID: String, size: CGSize) {
+        self.userID = userID
+        self.size = size
+    }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? CacheKey else { return false }
+        return userID == other.userID && size == other.size
+    }
+
+    override var hash: Int {
+        var hasher = Hasher()
+        hasher.combine(userID)
+        hasher.combine(size.width)
+        hasher.combine(size.height)
+        return hasher.finalize()
+    }
+}
+```
+
+Or, more simply: compose a plain `String` or `NSString` key out of the parts you need (`"\(userID)-\(Int(size.width))x\(Int(size.height))"`) and skip the custom class entirely. It's less elegant but it sidesteps the whole class of bug.
+
+## If you need to react to eviction
+
+`NSCache` supports a delegate that gets notified right before an object is evicted:
+
+```swift
+final class CacheEvictionLogger: NSObject, NSCacheDelegate {
+    func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
+        print("Evicting: \(obj)")
+    }
+}
+
+let cache = NSCache<NSString, UIImage>()
+cache.delegate = CacheEvictionLogger()
+```
+
+This is useful for debugging or for cleanup work (closing a file handle tied to a cached object, say), but don't lean on it for anything correctness-critical either — it tells you an eviction happened, not that you can predict when the next one will.
+
+## The takeaway
+
+`NSCache`'s whole value proposition is that it knows more about system memory state than you do, and it's willing to act on that without asking. That's exactly what you want from a cache. But it means the properties that look like configuration — `countLimit`, `totalCostLimit` — are really just opinions you're handing to a system that's allowed to override them whenever it decides your app needs to give some memory back.
+
+Design around a cache that can be empty at any moment, including the moment right after you filled it, and `NSCache`'s unpredictability stops being a footgun and just becomes the deal you already agreed to.
+
+---
+
+*This is the same discipline as [caching a DateFormatter instead of rebuilding it](/blog/dateformatter-recreated-every-call-swift-performance/) or [downsampling images before they hit a `List` row](/blog/swiftui-image-downsampling-decode-cost/) — know exactly what a "free" layer is actually promising you. If you're chasing memory or redraw costs more broadly, [the 1,000-row @Observable benchmark](/blog/observable-vs-observableobject-1000-row-redraw-benchmark/) is a good next stop, and the [AsyncImage caching post](/blog/asyncimage-caching-swiftui-scroll-performance/) shows `NSCache` used correctly end to end.*
