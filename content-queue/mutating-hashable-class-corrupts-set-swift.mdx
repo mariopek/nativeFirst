@@ -1,0 +1,129 @@
+---
+title: "You Can Mutate an Object Sitting Inside a Set. Swift Won't Stop You. It Should Terrify You."
+description: "Swift's Set and Dictionary assume a value's hash never changes after you insert it. Mutate a class instance that's already stored in one, and the collection silently corrupts — contains() returns false for an object you can see right there when you iterate. Here's why, and how to actually avoid it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Data Structures", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1591653475320-d27c4b116d37?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of cracked, dry ground splitting apart"
+---
+
+{/*
+SEO keywords: Swift Set mutation bug, Hashable contract Swift, mutating class in Set Swift, Dictionary key mutation bug, hash(into:) Swift, Set contains returns false, Swift Hashable class reference type
+Internal linking plan: nscache-not-a-dictionary-with-a-limit, swift-actor-reentrancy-not-a-lock, observable-vs-observableobject-1000-row-redraw-benchmark, swift-memberwise-init-private-set-blind-spot
+*/}
+
+A `Set` in Swift is basically a bag of buckets. Every value gets hashed, the hash tells the set which bucket to drop it in, and lookups work by re-hashing whatever you're searching for and checking the matching bucket. Fast, elegant, works great.
+
+It also works great right up until you mutate something that's already inside.
+
+---
+
+## The setup
+
+Say you're tracking a set of "seen" objects — user IDs you've already processed, tasks you've already dispatched, whatever. You reach for a class because you want reference semantics: one canonical object, updated in place, visible everywhere it's referenced.
+
+```swift
+final class Task: Hashable {
+    let id: UUID
+    var isComplete: Bool
+
+    init(id: UUID = UUID(), isComplete: Bool = false) {
+        self.id = id
+        self.isComplete = isComplete
+    }
+
+    static func == (lhs: Task, rhs: Task) -> Bool {
+        lhs.id == rhs.id && lhs.isComplete == rhs.isComplete
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(isComplete)
+    }
+}
+```
+
+Reasonable-looking `Hashable` conformance. Two tasks are equal if their id and completion state match. Nothing here looks dangerous.
+
+```swift
+var activeTasks: Set<Task> = []
+let task = Task()
+activeTasks.insert(task)
+
+// ...later, somewhere else in the codebase...
+task.isComplete = true
+
+activeTasks.contains(task) // false
+```
+
+That last line isn't a typo. `task` is a reference. It's the exact same object sitting in `activeTasks` right now. If you iterate the set, you'll find it. `contains()` still says no.
+
+---
+
+## Why this happens
+
+`Set` and `Dictionary` don't re-check hashes on every access — that would defeat the entire point of hashing. They compute a value's hash **once**, at insertion, and use it to decide which bucket the value lives in. Every future lookup re-hashes the *search key* and goes straight to that bucket, expecting to find a match there.
+
+The moment you mutate `task.isComplete`, its hash changes. But nobody tells the set to move it. The object physically sits in the bucket for its *old* hash, while every future lookup with the *new* hash goes searching in a completely different bucket. The task isn't lost — it's just filed under an address that no longer matches its own name.
+
+This is why `Hashable`'s documentation is blunt about it: a value's hash must stay constant while it participates in a hash-based collection. Not "should." Must. Swift can't enforce that at compile time — hashing is just a method call, and mutation is just a property set, and the type system has no idea the two are connected. It's a contract you keep by discipline, not one the compiler checks for you.
+
+Structs dodge this more often by accident, not by design. A struct's value gets copied into the set at insertion time, so mutating your *local* struct variable afterward doesn't touch the copy living inside the collection — you're mutating a completely different piece of memory. That accident of copy semantics is the only thing protecting you, and it evaporates the instant a struct's stored property is itself a class, or the moment you swap the struct for a class because you wanted shared mutable state (which, if you're reaching for `Set<SomeClass>` at all, you probably did).
+
+---
+
+## The failure mode is worse than a crash
+
+A crash tells you where to look. This doesn't crash. It just quietly lies.
+
+- `contains()` returns false for something that's there.
+- `remove()` fails silently — it hashes the value, checks the wrong bucket, finds nothing, and reports "not found" without touching anything.
+- Iterating the set still shows the object, so a debugger session where you print `activeTasks` looks completely fine, which is exactly what makes this maddening to track down.
+- If the mutation changes which bucket a *second* value collides into, you can end up with genuine duplicates or two "equal" objects living in the same set at once, because the set's own invariant — no two values that compare equal — has already been broken by the time anyone checks.
+
+I've seen this exact shape of bug hide inside a "processed items" set that fed a UI badge count. The badge would occasionally overcount, someone would add a `print` to sanity-check, the print showed the count looked *fine* in the moment they checked, and the bug would slink back into hiding for another week. That's the tell: state that looks correct when observed and wrong when relied on.
+
+---
+
+## The fix
+
+**Don't put mutable objects in a Set (or use them as Dictionary keys) if any of their `Hashable` properties can change after insertion.** That's the whole rule. Everything else is just how you enforce it.
+
+The cleanest version: hash and compare on something immutable, and keep it that way on purpose.
+
+```swift
+final class Task: Hashable {
+    let id: UUID
+    var isComplete: Bool
+
+    init(id: UUID = UUID(), isComplete: Bool = false) {
+        self.id = id
+        self.isComplete = isComplete
+    }
+
+    static func == (lhs: Task, rhs: Task) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+```
+
+Now `isComplete` can change freely — it was never part of the hash, so mutating it can never move the object to a bucket it no longer belongs in. The set only ever cares about identity (`id`), which is `let` and genuinely never changes.
+
+If you actually need to look things up by their full state — including the mutable fields — that's a sign you don't want a `Set` at all. A `Dictionary<UUID, Task>` keyed by the stable identifier, with the full object as the value, gets you the same O(1) lookup without smuggling mutable state into the part of the type that a hash-based collection is quietly trusting to hold still.
+
+And if you inherit a codebase where a class's `Hashable` conformance really does hash every stored property, including the mutable ones — the real fix isn't a workaround, it's removing the property from `hash(into:)` and `==` and asking what identity was actually supposed to mean for that type.
+
+---
+
+## The takeaway
+
+A `Set` doesn't ask "are you the same value you were a second ago?" It asks once, files you accordingly, and trusts you not to change your answer. Swift's type system won't catch you breaking that promise — it can't, because `hash(into:)` is just a function, and nothing marks the properties inside it as "these are now frozen." The contract exists entirely between you and the collection, and the only way to honor it is to make sure whatever you hash on can't move once it's in.
+
+If you're storing class instances in a `Set` or as `Dictionary` keys, ask yourself right now: which of these properties feed `hash(into:)`, and is there any code path, anywhere, that mutates one after the object's already inserted? If the answer is "I'm not sure," that's the bug you haven't found yet.
+
+Same underlying lesson as [`NSCache`'s key equality gotcha](/blog/nscache-not-a-dictionary-with-a-limit) — hash-based lookup is only as trustworthy as the stability of what you hand it. And if the mutation you're worried about is happening from a different task or actor entirely, [actor reentrancy](/blog/swift-actor-reentrancy-not-a-lock) is the other classic way a value quietly changes out from under code that assumed it wouldn't.
