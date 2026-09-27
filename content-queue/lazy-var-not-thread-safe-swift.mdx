@@ -1,0 +1,118 @@
+---
+title: "Swift's lazy var Looks Like Free Optimization. It's Also a Free Data Race."
+description: "lazy var defers a property's initialization until first access — but Swift never promised that first access is safe from two threads at once. Here's what actually happens when it isn't, and how to fix it without giving up the laziness."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Concurrency", "Data Races", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1628787333461-9de5910002f7?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Runners crouched at the starting line of a track, waiting for the gun"
+---
+
+{/*
+SEO keywords: Swift lazy var thread safety, lazy var data race Swift, Swift lazy property concurrency bug, is lazy var thread safe Swift, Swift lazy var race condition fix, Swift Synchronization Mutex lazy property
+Internal linking plan: swift-actor-reentrancy-not-a-lock (actors don't save you from every concurrency assumption), checked-continuation-double-resume-crash-swift (another "compiles fine, still a race" bug), mutating-hashable-class-corrupts-set-swift (queue sibling — subtle invariant violation with no crash), observable-vs-observableobject-1000-row-redraw-benchmark (same reference-type/threading cluster), swift-6-2-concurrent-nonisolated-mainactor-decision-tree (where to actually put isolation instead). No course lesson — this is a language-fundamentals gotcha.
+*/}
+
+Two background tasks hit the same `lazy var` for the first time, half a millisecond apart. The initializer runs twice. Nobody crashes. Nothing throws. And somewhere in your analytics, a counter that should only ever increment once now shows up twice, on two different days, for two different users, and you will never figure out why by reading the stack trace, because there isn't one.
+
+That's the whole problem with `lazy var` and threads: it fails quietly, or it doesn't fail at all until it does.
+
+---
+
+## What lazy var actually compiles to
+
+`lazy var` reads like a feature: defer the work until someone actually needs it. And it does exactly that — for a single thread.
+
+```swift
+class ReportGenerator {
+    lazy var formatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.maximumFractionDigits = 2
+        return f
+    }()
+}
+```
+
+Strip away the sugar and this is roughly what the compiler gives you: a hidden optional backing store, plus a getter that checks it, computes if needed, and assigns.
+
+```swift
+var _formatter: NumberFormatter?
+
+var formatter: NumberFormatter {
+    if let f = _formatter { return f }
+    let f = { /* the closure body */ }()
+    _formatter = f
+    return f
+}
+```
+
+Read that getter again. It's a check, then a compute, then a set. Nothing about it is atomic. Nothing about it takes a lock. There's no `dispatch_once` under the hood the way there was for Objective-C's `static` initializers — Swift dropped that guarantee entirely when it introduced `lazy`.
+
+So when two threads call `formatter` for the first time at nearly the same moment, both can see `_formatter == nil`, both run the initializer, and both write their own result to `_formatter`. One write wins. The other `NumberFormatter` instance is simply discarded — usually harmless for something stateless like a formatter.
+
+Usually.
+
+---
+
+## Where "usually harmless" turns into a real bug
+
+The failure mode isn't the wasted work. It's when the lazy initializer has a side effect that isn't supposed to happen twice.
+
+```swift
+class SessionMetrics {
+    private(set) var startCount = 0
+
+    lazy var sessionID: String = {
+        startCount += 1
+        return UUID().uuidString
+    }()
+}
+```
+
+Run this from one thread and `startCount` ends at 1, exactly once, exactly as intended. Run it from two threads racing to read `sessionID` for the first time, and you can end up with `startCount == 2` — a session that, according to your own metrics, started twice. Nobody called `start()` twice. Nobody wrote a bug in the obvious place. The bug is in the *access pattern*, not the logic.
+
+This is the same shape as the ["nscache-not-a-dictionary-with-a-limit"](/blog/nscache-not-a-dictionary-with-a-limit/) trap and the ["mutating-hashable-class-corrupts-set-swift"](/blog/mutating-hashable-class-corrupts-set-swift/) one before it: the code looks correct because you're reading it top-to-bottom, on one thread, in your head. The actual failure only shows up when two pieces of *time* overlap — and Swift's type system has no way to warn you, because a plain `class` with a `lazy var` isn't `Sendable`-checked into silence. It compiles. It just isn't safe.
+
+Turn on Thread Sanitizer and run this under real concurrent access, and it will flag the race immediately — a genuinely useful five minutes if you've never seen what TSan calls a "data race on lazy var backing storage" before. It's one of the more common false-negative-in-testing, true-positive-in-production bugs in Swift, because single-threaded unit tests never exercise the interleaving that breaks it.
+
+---
+
+## "But mine isn't a class, it's fine"
+
+Structs don't save you here either, and this is the part that trips people up. If a `struct` holding a `lazy var` is captured by a closure or held inside a class, that lazy storage lives on the heap the moment it's boxed — same race, different container. The property that matters isn't "is this a struct or a class," it's "can two threads reach this specific storage before it's been computed once." [[observable-vs-observableobject-1000-row-redraw-benchmark]] covers a related lesson: reference semantics show up in places you didn't explicitly reach for a class.
+
+And actors don't automatically fix it the way you'd hope, either — with one specific exception that's worth knowing. A `lazy var` *inside* an actor is safe from the concurrent-first-access race, because the actor serializes access to its own state; two tasks can't both be inside the getter at once. But if that lazy initializer itself contains an `await`, you're reentrant during that suspension, and a second task can observe the property mid-computation. That's a different bug with the same root cause — assuming "isolated" means "atomic across the whole operation." [swift-actor-reentrancy-not-a-lock](/blog/swift-actor-reentrancy-not-a-lock/) walks through exactly that gap if you haven't hit it yet.
+
+---
+
+## The fix, three ways
+
+**1. Compute it eagerly, in `init`.** The simplest fix is usually to stop being lazy. If the value isn't genuinely expensive or genuinely optional, a regular stored property initialized in `init` sidesteps the entire problem — there's no window where two threads can race to create it, because it already exists before anyone else has a reference to `self`.
+
+**2. Isolate it.** If the type is already meant to live on one queue or actor, put the lazy var there and access it only through that isolation domain. This is the right call for anything UI-adjacent — mark the type `@MainActor` if that's genuinely its home, per the sort of decision [swift-6-2-concurrent-nonisolated-mainactor-decision-tree](/blog/swift-6-2-concurrent-nonisolated-mainactor-decision-tree/) walks through — rather than bolting on manual locking for something that should never have been reachable from a background thread in the first place.
+
+**3. Lock it, if it genuinely needs to be created lazily *and* shared across threads.** Swift 6's `Synchronization` module gives you a real primitive for this without reaching for `NSLock` and hand-rolled double-checked locking:
+
+```swift
+import Synchronization
+
+final class SessionMetrics: Sendable {
+    private let _sessionID = Mutex<String?>(nil)
+
+    var sessionID: String {
+        _sessionID.withLock { value in
+            if let value { return value }
+            let id = UUID().uuidString
+            value = id
+            return id
+        }
+    }
+}
+```
+
+It's more code than `lazy var`. It's also the version that's actually correct when more than one thread can reach it first.
+
+---
+
+`lazy var` was never a promise about concurrency — it was only ever a promise about *when*, not *how safely*. The moment your "when" is "whichever thread gets there first," you've quietly opted into a race the type system was never going to catch for you. Check who's actually calling that property before you trust it to run exactly once.
