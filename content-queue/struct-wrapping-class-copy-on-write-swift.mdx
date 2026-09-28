@@ -1,0 +1,124 @@
+---
+title: "Your Struct Looks Like It Copies When You Assign It. If It Wraps a Class, It Might Just Be Sharing."
+description: "Array gets copy-on-write for free because it checks isKnownUniquelyReferenced before every mutation. Build your own struct around a class-based buffer without that check, and 'independent copies' quietly become one shared object."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Value Semantics", "Reference Types", "Performance"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1515625309226-9ae119957a37?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Two people sharing one umbrella in the rain"
+---
+
+{/*
+SEO keywords: Swift copy-on-write, isKnownUniquelyReferenced, custom copy-on-write struct Swift, Swift value semantics reference type, Swift struct wrapping class bug, build your own CoW Swift, Swift struct shared buffer bug
+Internal linking plan: mutating-hashable-class-corrupts-set-swift (reference semantics leaking through a value-shaped API), swift-memberwise-init-private-set-blind-spot (memberwise init doesn't know your intent), swiftui-observable-retain-cycles-weak-self-doesnt-always-work (assumptions about ownership that don't hold), lazy-var-not-thread-safe-swift (a Swift convenience that looks safe until you look at what it actually does). No course lesson — this is a language-internals piece, not tied to a specific lesson.
+*/}
+
+I once wrote a "fast" data structure that was fast for a reason nobody wants: it wasn't actually copying anything.
+
+I'd built a little `struct Grid` around a class that held a big flat buffer — the classic performance move, avoid `Array`'s own overhead, roll your own. I copied the struct, mutated the copy, and watched the original change too. Two grids, one buffer, no warning.
+
+---
+
+## The trick Array is quietly doing
+
+Everyone learns that Swift's arrays, dictionaries, sets, and strings have **value semantics** — assign one to a new variable and you get an independent copy. Mutate the copy, the original doesn't move.
+
+Everyone also eventually learns that Swift doesn't actually copy the underlying storage every time you do this, because that would be absurd. Pass a 10,000-element array into a function and Swift isn't memcpy-ing 10,000 elements just because the parameter is a value type.
+
+Instead, `Array` uses **copy-on-write (CoW)**: the struct itself just holds a reference to a class that owns the actual buffer. Assign the array to a new variable and you copy the struct — which is cheap, because all it contains is that one reference. Nothing about the buffer moves yet. Both variables point at the same storage.
+
+The copying only happens the moment one of them tries to **mutate**. Right before it writes, `Array` asks a question: *am I the only one holding this buffer, or is someone else still looking at it?* If it's the only owner, it mutates in place — free. If someone else is holding the same storage, it copies the buffer first, then mutates its own private copy. The other variable never sees the change.
+
+That question — "am I the only owner?" — is not a language feature. It's a function call: `isKnownUniquelyReferenced(&storage)`. Array runs it before every mutating operation. It is the entire mechanism. Nothing else is doing this for you.
+
+---
+
+## What happens when you skip it
+
+Here's the shape of what I'd written, simplified:
+
+```swift
+final class Buffer {
+    var values: [Int]
+    init(values: [Int]) { self.values = values }
+}
+
+struct Grid {
+    private var storage: Buffer
+
+    init(values: [Int]) {
+        storage = Buffer(values: values)
+    }
+
+    mutating func set(_ index: Int, to value: Int) {
+        storage.values[index] = value
+    }
+}
+```
+
+`Grid` looks like a value type. It's a `struct`. Assign it, and Swift performs a memberwise copy — same as it would for any struct.
+
+But the only stored property is `storage`, a class reference. A memberwise copy of a reference doesn't duplicate what it points to. It duplicates the pointer. Copy a `Grid`, and you now have two structs holding the exact same `Buffer` instance.
+
+```swift
+var original = Grid(values: [1, 2, 3])
+var copy = original
+copy.set(0, to: 99)
+
+print(original.values) // [99, 2, 3] — "original" moved too
+```
+
+`copy` mutated `storage.values` directly, through the reference. `original` was never touched — because there was nothing to touch separately. There's one `Buffer`, and both structs are just names for it.
+
+This isn't a bug in Swift. `Grid` is behaving exactly like a value type containing a reference should. The bug is that it *looks* like `Array`, and doesn't do what `Array` does.
+
+---
+
+## The fix is one check, in one place
+
+The fix isn't "add a deep copy everywhere." That gives you correctness back but throws away the entire performance reason you built a custom buffer in the first place — you'd be copying on every mutation, unique owner or not, exactly the cost CoW exists to avoid.
+
+The actual fix is the same question `Array` asks:
+
+```swift
+final class Buffer {
+    var values: [Int]
+    init(values: [Int]) { self.values = values }
+    func copy() -> Buffer { Buffer(values: values) }
+}
+
+struct Grid {
+    private var storage: Buffer
+
+    init(values: [Int]) {
+        storage = Buffer(values: values)
+    }
+
+    mutating func set(_ index: Int, to value: Int) {
+        if !isKnownUniquelyReferenced(&storage) {
+            storage = storage.copy()
+        }
+        storage.values[index] = value
+    }
+}
+```
+
+`isKnownUniquelyReferenced` looks at the reference count on `storage` and tells you, truthfully, whether this `Grid` is the only thing in the program holding that `Buffer`. If it is, mutate in place — nobody else can observe it. If it isn't — because some other `Grid` copy exists and is holding the same instance — copy the buffer first, point `storage` at the new one, and mutate that instead.
+
+Run the same test again and `original` stays `[1, 2, 3]`. `copy` gets its own buffer the moment it actually diverges, not before. You've rebuilt exactly what `Array` gives you — cheap copies until a real mutation forces a real one.
+
+---
+
+## Why this only bites custom types
+
+You won't hit this with `Array`, `Dictionary`, `Set`, or `String` — the standard library already does the check for you, on every one of them, every time. That's precisely why value semantics feels automatic in everyday Swift: you've never had to think about ownership, because something else already did.
+
+You hit it the moment you build your own wrapper around a class-based buffer — which is a completely normal thing to do. It's the standard pattern for a custom collection, a manual ring buffer, a growable typed array with different storage rules than `Array` gives you, anything where you want value semantics at the API but reference-backed storage underneath for speed. WWDC has taught this exact pattern for a decade. The pattern is correct. The step people skip is the ownership check, because nothing forces you to write it — the struct compiles, the types line up, and it only breaks the first time two copies actually diverge in a way you notice.
+
+`isKnownUniquelyReferenced` isn't an obscure API. It's the one line standing between "value type" and "value-shaped type that quietly shares state" — and it's worth checking for the moment you hold a class inside a struct and call it done.
+
+---
+
+Value semantics in Swift was never "the compiler deep-copies everything for you." It was always "the type decides what counts as a copy" — `Array` just decided that carefully, and checks its work. If you build the same shape yourself, that check is yours to write too. Skip it, and your struct isn't copying. It's just letting two names share one object and hoping neither of you notices.
+
+If you've hit the mirror-image version of this — a class stored *inside* a `Set`, mutated after insertion — [mutating a hashable class after it's in a collection](/blog/mutating-hashable-class-corrupts-set-swift) breaks for the same underlying reason: a reference type's identity leaking through an API that promised you something more contained. And if you're relying on Swift's synthesized memberwise init to protect invariants like this one, it's worth knowing [where that synthesis quietly stops helping](/blog/swift-memberwise-init-private-set-blind-spot).
