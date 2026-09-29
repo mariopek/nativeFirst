@@ -1,0 +1,114 @@
+---
+title: "String(format: \"%.2f\", price) Works Perfectly on Your Phone. It Breaks the Moment Someone's Set to German."
+description: "String(format:) and Double(String) both quietly assume a decimal point. Set your device region to Germany, France, or half of Europe and that assumption flips to a comma — and your price parsing breaks in ways your test suite never sees."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Localization", "Locale", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1550133881-13e70aa00bae?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A pile of euro coins next to a receipt"
+---
+
+{/*
+SEO keywords: Swift decimal separator bug, String(format:) locale bug, Double(String) locale parsing, Swift locale comma vs period, NSNumberFormatter locale price parsing, iOS app breaks in Germany decimal, Swift Locale.current gotcha
+Internal linking plan: codable-convert-snake-case-acronym-bug (queue sibling — "free convenience feature has a sharp edge" shape), dateformatter-recreated-every-call-swift-performance (same Foundation formatter family, adjacent gotcha), string-catalogs-localization-swiftui-what-breaks (localization cluster), attributedstring-markdown-user-content-swiftui (queue sibling, same "looks fine until user input" shape). Course lesson: /learn/error-handling-loading-states (validating and handling malformed user input).
+*/}
+
+A user in Munich emails you a screenshot. Your app says their coffee subscription costs "12,99 €" — which is correct, that's how Germany writes twelve euros and ninety-nine cents. Then they tap "confirm" and your app tells them the amount is invalid.
+
+You can't reproduce it. Your simulator is set to English (United States). You type `12.99` into your own test field, it works, you close the ticket as "can't repro," and three weeks later it comes back from four more users, all in Europe.
+
+Here's the thing nobody told you when you wrote that text field: `Double("12.99")` and `Double("12,99")` are not the same call with a typo. They're two completely different, both-correct-in-context ways of writing the same number, and Swift's `Double.init?(String)` only understands one of them.
+
+---
+
+## The part everyone assumes and nobody checks
+
+`Double.init?(_:)` is **locale-invariant**. It always expects a period, no matter what region the device is set to. That's actually the right default for parsing something like JSON or a config file — you don't want `1,234` from an API response turning into one thousand two hundred thirty-four because someone's phone thinks a comma is a thousands separator.
+
+But it's the wrong default the moment that string came from a `UITextField` or SwiftUI `TextField` that a human typed into. Because the keyboard itself is locale-aware. Set your device to German, French, Italian, Dutch, Finnish, or a dozen other regions, and the number pad literally has a comma where the period used to be. Your user isn't making a typo. They're using the punctuation their keyboard gave them.
+
+```swift
+// Device locale: de_DE
+let input = "12,99"
+
+let price = Double(input) // nil — this parse just failed
+```
+
+That `nil` is the bug ticket. Not because your code is wrong in isolation — `Double(String)` is doing exactly what it's documented to do — but because you fed it a string from a place where "what the user typed" and "what this initializer expects" quietly stopped being the same thing.
+
+---
+
+## The formatting side breaks too, just more embarrassingly
+
+The parsing bug at least fails loudly — you get `nil`, you can catch it. `String(format:)` fails the opposite way: silently, and sometimes in the wrong direction entirely.
+
+```swift
+let total = 12.99
+let label = String(format: "%.2f", total)
+```
+
+`String(format:)` **does** respect the current locale for float specifiers, which sounds like a feature until you remember your own code is often the thing reading that string back later — logging it, sending it to an API, comparing it against a cached value. If one code path formats with the user's locale and another parses assuming a period, you've built a bug that only exists at the seam between the two, which is exactly the kind of bug that survives code review, because no single line looks wrong.
+
+```swift
+// Device locale: de_DE
+let label = String(format: "%.2f", 12.99)   // "12,99"
+let roundTrip = Double(label)               // nil — same trap, other direction
+```
+
+You formatted a number for display, then handed it right back to the one initializer that doesn't speak the language you just formatted it in.
+
+---
+
+## Why the simulator hides this from you
+
+Xcode's default simulator locale is almost always U.S. English, and most of us build, test, and screen-record in that state without a second thought. `12.99` parses fine, formats fine, round-trips fine — because under U.S. English, `Double(String)`'s period-only assumption and your formatting both happen to line up. The bug isn't in the code you're testing. It's in the twenty-six other regions you're not.
+
+This is the same shape as a bug we've written about before with [Codable's snake_case conversion](/blog/codable-convert-snake-case-acronym-bug) — a Foundation convenience that's correct 95% of the time, and the other 5% shows up in production because nobody's local test environment happens to exercise it.
+
+---
+
+## The actual fix
+
+Stop treating "parse this as a number" and "format this for a label" as the same problem, because Foundation gives you two different tools for two different intents:
+
+**For anything a human typed** — reach for `NumberFormatter`, which is locale-aware in both directions and stays in sync:
+
+```swift
+let formatter = NumberFormatter()
+formatter.numberStyle = .decimal
+formatter.locale = .current
+
+// Parsing user input — respects their keyboard's punctuation
+if let number = formatter.number(from: input) {
+    let price = number.doubleValue
+}
+
+// Formatting for display — same rules, same direction
+let display = formatter.string(from: NSNumber(value: 12.99))
+```
+
+**For anything that crosses a wire** — JSON, a server payload, a cache key, a URL query param — stay locale-invariant on purpose:
+
+```swift
+// Explicit, not implicit — this Double came from a machine, not a human
+let raw = Double("12.99") // always period, always predictable
+```
+
+The rule that actually sticks: if a human's fingers touched the string, use `NumberFormatter` with `.current`. If only machines touched it, use the plain initializer and never let a locale near it. The bug isn't that Swift picked the wrong default — it's using one code path for both jobs and assuming they were ever the same job.
+
+---
+
+## Test it the honest way
+
+Don't just eyeball the German number pad in a screenshot. Force the locale in your test target and actually assert on it:
+
+```swift
+let formatter = NumberFormatter()
+formatter.locale = Locale(identifier: "de_DE")
+formatter.numberStyle = .decimal
+
+let parsed = formatter.number(from: "12,99")?.doubleValue
+#expect(parsed == 12.99)
+```
+
+Run that once, and "works on my machine" stops being a defense — because now your machine tested Germany too. A price field that only round-trips correctly in one locale isn't a finished feature. It's a bug that's currently on vacation.
