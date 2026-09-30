@@ -1,0 +1,106 @@
+---
+title: "ArraySlice Doesn't Give You a Piece of the Array. It Gives the Whole Array a Reason to Stay Alive."
+description: "ArraySlice and Substring look like lightweight, independent copies of part of a collection, but they hold a reference to the entire original storage. Here's the real memory-retention bug that causes, and how ~Escapable and Span are about to make it a compile-time guarantee instead of a docs warning."
+pubDate: 2026-09-30
+tags: ["Swift", "Memory Management", "Performance", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1554933054-0b679a7982ca?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A single slice cut from a whole loaf of bread"
+---
+
+{/*
+SEO keywords: ArraySlice memory leak Swift, ArraySlice holds reference to array, Substring memory retention, Swift slice storage lifetime, ~Escapable Span Swift, Swift ownership non-escaping types
+Internal linking plan: struct-wrapping-class-copy-on-write-swift, swiftui-observable-retain-cycles-weak-self-doesnt-always-work, swift-string-count-grapheme-cluster-performance, nscache-not-a-dictionary-with-a-limit
+*/}
+
+I once "fixed" a memory spike by throwing away a 40,000-element array the second I was done with it. Instruments didn't care. The array I'd already nulled out was still sitting in memory, fat as ever, because I'd handed a *slice* of it to a view model three screens back and forgotten all about it.
+
+The array was gone. The array's storage was not. Those are two different things in Swift, and nothing about the syntax tells you so.
+
+---
+
+## The setup that looks completely safe
+
+You load something big, you want a small piece of it, you take a slice. It reads like you'd expect:
+
+```swift
+func recentEntries(from all: [LogEntry]) -> ArraySlice<LogEntry> {
+    all.suffix(20)
+}
+
+let all = loadTenThousandEntries()
+let recent = recentEntries(from: all)
+// `all` goes out of scope here... or does it?
+```
+
+`recent` is 20 elements. It looks like 20 elements' worth of memory. It behaves like an independent little collection — you can iterate it, index it, pass it around. Nothing about `ArraySlice<LogEntry>` as a type signature warns you that it's holding hands with something much bigger.
+
+## What a slice actually is
+
+An `ArraySlice` isn't a copy. It's not even really "20 elements plus a pointer to where they start." It's a *view*: a range of indices, plus a reference to the entire original array's backing storage. All 10,000 entries. Apple's own documentation says it plainly — long-term storage of a slice can prolong the lifetime of elements that are otherwise unreachable, and that can look exactly like a memory leak.
+
+It's not a bug. It's the tradeoff that makes slicing an O(1) operation instead of an O(n) copy. Slicing is supposed to be cheap, and it is — the storage-sharing is *how* it stays cheap. The catch is that "cheap to create" and "cheap to keep around" are two completely different promises, and only one of them is true here.
+
+```swift
+var recent: ArraySlice<LogEntry>?
+
+func cacheRecent(from all: [LogEntry]) {
+    recent = all.suffix(20) // looks like you cached 20 items
+}
+// you actually just kept the entire array alive, indefinitely,
+// as long as `recent` is set — even after `all` is gone
+```
+
+Nobody writes that second version on purpose. Everybody writes something that reduces to it once the slice crosses a function boundary and outlives the array it was cut from.
+
+---
+
+## It's not just arrays
+
+`Substring` plays the exact same game, and it's the one people trip over more often because string slicing is everywhere — trimming whitespace, splitting on a delimiter, pulling a token out of a larger blob of text:
+
+```swift
+func firstWord(of text: String) -> Substring {
+    text.split(separator: " ").first ?? text[...]
+}
+
+let hugeLogLine = loadMegabyteOfText()
+let word = firstWord(of: hugeLogLine)
+// `word` might be three characters long.
+// It's also keeping the entire megabyte-long String's storage alive.
+```
+
+If you stash that `Substring` somewhere long-lived — a cache, a view model property, an array you're building up over a long-running import — you've quietly pinned down every megabyte-long string you ever touched, three characters at a time. This is the same underlying mechanism that makes `.count` walk the whole string instead of reading a stored value — Swift's `String` and its slices share machinery, and both hand you convenience with a footnote nobody reads.
+
+The fix, when you actually need to keep the piece and not the whole: convert it back to an owning type before you store it.
+
+```swift
+let word = String(firstWord(of: hugeLogLine)) // copies just the 3 characters
+```
+
+That single `String(...)` or `Array(...)` wrapper is the entire fix. It trades the free O(1) slice for an O(k) copy of just what you're keeping — worth it the moment "just what you're keeping" is a lot smaller than "everything you sliced it from."
+
+---
+
+## The language is starting to make this a compile-time fact, not a warning
+
+A Swift Forums thread from a couple days ago asked the obvious follow-up question: now that Swift has `~Escapable` types — values the compiler can tie to a specific lifetime and refuse to let outlive their source — why isn't a slice one of them? A slice is *semantically* non-escaping already. It's meant to be transient. It just predates the tooling that could enforce that.
+
+The answer from the thread lines up with where the standard library is actually headed: if you need something that keeps the original storage alive on purpose, that's still what `ArraySlice`/`Substring` are for. But if you just need a scoped, read-only view for the length of one function call and don't want to accidentally retain anything, that's what `Span` is for — a non-escaping, non-owning view the compiler will refuse to let you smuggle out of the scope it was created in. Where a slice trusts you not to hold onto it too long, a `Span` doesn't give you the option.
+
+That's the real shift underway: a mistake that today only shows up as "why does Instruments say this array is still alive" is on its way to becoming a mistake the compiler catches before you ship it — the same trajectory Swift's ownership model has been on since `~Copyable` first shipped.
+
+---
+
+## What to actually do about it today
+
+You don't need `~Escapable` slices to exist yet to avoid this. Two rules cover almost every case:
+
+- **A slice or substring that lives inside one function, for the length of that function, is completely fine.** That's the case it's designed for, and the storage-sharing costs you nothing you'd notice.
+- **The moment you're about to store a slice in a property, an array, a cache, or anything with a lifetime longer than "this function call," convert it first.** `Array(slice)` or `String(substring)` costs you a copy you can actually reason about, instead of a retention you'll find by accident in Instruments six weeks later.
+
+The mental model that holds up: a slice is a *view*, and a view's honest lifetime is the scope it was born in. Anything longer than that, and you're not storing a piece of the collection — you're storing a reason for the whole thing to stick around.
+
+---
+
+*This is the same "looks independent, secretly shares storage" shape as [a struct that wraps a class and copies the reference instead of the value](/blog/struct-wrapping-class-copy-on-write-swift/) — different mechanism, same lesson: sharing is the fast path, and it's invisible until something holds on too long. If you're hunting a retention bug that isn't a slice, [weak self doesn't always fix what you think it fixes in `@Observable`](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work/) is worth a read, and if strings specifically are giving you grief, [`String.count`'s O(n) walk](/blog/swift-string-count-grapheme-cluster-performance/) is the other place Swift's string internals surprise people.*
