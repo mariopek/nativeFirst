@@ -1,0 +1,127 @@
+---
+title: "Your Table View Cell Shows the Wrong Image. The Network Call Was Right — The Cell Just Wasn't."
+description: "UITableView and UICollectionView reuse cell views to stay fast, but an async image load or network callback that fires after a cell has been recycled writes into the wrong row. Here's why it happens, why it's so hard to reproduce, and the three fixes that actually close it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["UIKit", "iOS Development", "Swift Concurrency", "Performance"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1438012940875-4bf705025a8a?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Empty chairs arranged in a circle, evoking musical chairs and mismatched seats"
+---
+
+{/*
+SEO keywords: UITableViewCell reuse bug, UICollectionViewCell stale image, cell reuse async race condition, prepareForReuse cancel task, wrong image wrong cell UIKit, cell reuse identifier bug Swift
+Internal linking plan: asyncimage-caching-swiftui-scroll-performance, swiftui-observable-retain-cycles-weak-self-doesnt-always-work, swift-networking-retry-token-refresh-request-deduplication, task-detached-breaks-isolation-inheritance-swift
+*/}
+
+Scroll a feed fast enough and you'll catch it: someone's avatar flashes on the wrong row for half a second before snapping to the right one. Or worse — it never snaps. The wrong face just sits there, and the bug report says "images are mixed up" like that's a small thing.
+
+It's not a data bug. Your API returned the right thing every time. The cell just didn't wait around to hear it.
+
+---
+
+## Why cells get reused at all
+
+`UITableView` and `UICollectionView` don't create a new cell for every row you scroll past — that would mean allocating and destroying views constantly, which is exactly the kind of cost these APIs were built to avoid. Instead they keep a small pool of cell views and hand the same physical view back to you over and over through `dequeueReusableCell(withIdentifier:for:)`, just repointed at a new row's data.
+
+That's the entire point of reuse, and it's why table and collection views stay smooth scrolling through ten rows or ten thousand. The tradeoff is that a cell object has no fixed relationship to a row. The cell showing row 4 right now might be the exact same object that showed row 200 three seconds ago.
+
+Most of the time that's invisible, because you set every property synchronously in `cellForRowAt`:
+
+```swift
+func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    let cell = tableView.dequeueReusableCell(withIdentifier: "PostCell", for: indexPath) as! PostCell
+    let post = posts[indexPath.row]
+    cell.titleLabel.text = post.title   // finishes before the cell is on screen
+    return cell
+}
+```
+
+Synchronous work finishes before the cell is reused again, so there's no window for it to go wrong. Asynchronous work doesn't get that guarantee.
+
+## Where it actually breaks
+
+Add a network call — loading an avatar image is the classic case — and you've created a gap between "I started this" and "this finished" that the user can scroll straight through:
+
+```swift
+func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    let cell = tableView.dequeueReusableCell(withIdentifier: "PostCell", for: indexPath) as! PostCell
+    let post = posts[indexPath.row]
+    cell.titleLabel.text = post.title
+
+    loadImage(from: post.avatarURL) { image in
+        cell.avatarView.image = image   // fires whenever the network decides to
+    }
+    return cell
+}
+```
+
+Scroll past row 4 while its avatar is still loading, and the runtime happily recycles that same `PostCell` object for row 19. When row 4's image finally arrives — a second later, five seconds later, whenever the network feels like it — the closure still has a live reference to the cell, and it still runs `cell.avatarView.image = image`. Nobody told it the cell now belongs to someone else. Row 19 gets row 4's photo, until *its own* image call eventually lands and overwrites it — if it ever does.
+
+This is the part that makes it miserable to debug: it reproduces exactly as often as the network is slow relative to your scroll speed. Fast wifi and a slow scroll, and you'll never see it in your own testing. Real-world cellular on a fast scroll, and every user sees it constantly.
+
+---
+
+## Fix 1: tag the request, check it on arrival
+
+The cheapest fix needs no new infrastructure — just remember what you asked for, and throw away answers that no longer match:
+
+```swift
+final class PostCell: UITableViewCell {
+    private var currentURL: URL?
+
+    func configure(with post: Post) {
+        currentURL = post.avatarURL
+        loadImage(from: post.avatarURL) { [weak self] image in
+            guard let self, self.currentURL == post.avatarURL else { return }
+            self.avatarView.image = image
+        }
+    }
+}
+```
+
+By the time row 19's request has reused this cell, `currentURL` has already been overwritten to row 19's URL. Row 4's stale callback checks, finds a mismatch, and quietly does nothing. It costs one stored property and one guard.
+
+## Fix 2: cancel the old work in prepareForReuse
+
+Checking on arrival stops the wrong write, but the original request for row 4 is still running for no reason — wasted bandwidth, wasted decode work. `prepareForReuse` is the hook built for exactly this: it's called every time a cell is about to be recycled, before the new row's data comes in.
+
+```swift
+final class PostCell: UITableViewCell {
+    private var imageTask: Task<Void, Never>?
+
+    func configure(with post: Post) {
+        imageTask = Task {
+            let image = try? await loadImage(from: post.avatarURL)
+            avatarView.image = image
+        }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        imageTask?.cancel()
+        avatarView.image = nil
+    }
+}
+```
+
+Structured concurrency makes this one cleaner than the completion-handler version: a cancelled `Task` that checks `Task.isCancelled` (or just lets `URLSession`'s own cancellation propagate through `await`) stops doing work instead of merely being ignored. Combine that with `prepareForReuse` clearing the image immediately, and you also kill the other half of the bug — the old photo lingering on screen for a beat before the new one arrives.
+
+## Fix 3: do both
+
+In practice, use them together. `prepareForReuse` cancellation handles the common case and saves the wasted work. The identity check in the completion is your safety net for anything that can't be cancelled cleanly — a shared image cache lookup, a request already past the point where cancellation takes effect, or a completion-handler-based SDK you don't control. Belt and suspenders costs you four lines and closes both failure paths.
+
+---
+
+## The version of this that isn't about images
+
+The mechanism generalizes past `UIImageView`. Any time a cell (or a SwiftUI row view backed by identity that gets reused conceptually — a `LazyVStack` cell recycled by a `List`'s diffing) kicks off async work and writes the result back into itself later, you have the same shape of bug: *the view is not the same thing as the row it currently represents, and async work doesn't know that changed out from under it.* Network calls, database fetches, even a `DispatchQueue.main.asyncAfter` timer that fires late — all of them can land in a cell that's since moved on.
+
+The fix is always some version of "check you're still relevant when you wake up," whether that's a URL comparison, a cancelled task, or a generation counter you bump every time a cell gets reconfigured.
+
+## The takeaway
+
+Cell reuse is a pooling optimization, and pooling optimizations always come with the same catch: the object you're holding a reference to might not mean what it meant when you grabbed it. Synchronous code never notices. The moment you add a callback, a `Task`, or anything that outlives a single run of `cellForRowAt`, you've signed up to check that the world hasn't moved on without you — because UIKit isn't going to check for you.
+
+---
+
+*This bug is a first cousin of [the retain-cycle traps hiding behind `@Observable`](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work/) — same theme of "async work outliving the thing that started it," different mechanism. If you're building the image-loading layer itself, [AsyncImage's caching behavior during scroll](/blog/asyncimage-caching-swiftui-scroll-performance/) is the SwiftUI-side version of this problem, and [request deduplication for retrying network calls](/blog/swift-networking-retry-token-refresh-request-deduplication/) covers the layer underneath. For the concurrency side of "who owns this task now," [Task.detached breaking isolation inheritance](/blog/task-detached-breaks-isolation-inheritance-swift/) is worth reading next.*
