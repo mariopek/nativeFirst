@@ -1,0 +1,133 @@
+---
+title: "SwiftUI's Purple Warning Isn't Cosmetic. 'Publishing Changes From Within View Updates' Means You Raced Your Own Render."
+description: "Xcode's console warns 'Publishing changes from within view updates is not allowed, this will cause undefined behavior' and most developers just scroll past it. Here's what SwiftUI is actually telling you, the three common ways you trigger it, and why ignoring it eventually costs you a view that won't stop re-rendering."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift", "State Management", "Debugging", "iOS Development", "Observable", "Tutorial"]
+author: "Mario"
+coverImage: "https://images.unsplash.com/photo-1476136236990-838240be4859?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A microphone close to a speaker, the setup that causes audio feedback loops"
+---
+
+{/*
+SEO keywords: SwiftUI publishing changes from within view updates, SwiftUI purple warning, undefined behavior SwiftUI, modifying state during view update, SwiftUI infinite render loop, @State mutation body, SwiftUI runtime warning explained
+Internal linking plan: swiftui-view-identity-state-reset-bug (another "SwiftUI state bug that looks cosmetic but isn't"), appstorage-does-not-observe-what-you-think-it-does (state-observation surprises), swiftui-observable-retain-cycles-weak-self-doesnt-always-work (same "the obvious fix doesn't fully work" shape), swiftui-onappear-fires-every-navigation-pop (lifecycle-timing bug cluster), course lesson /learn/swiftui-foundations-06-state-and-binding
+*/}
+
+I ignored this warning for about a year.
+
+Xcode's console would print `Publishing changes from within view updates is not allowed, this will cause undefined behavior.` in purple, I'd glance at it, the screen would look fine, and I'd keep going. No crash. No visual glitch. Just a sentence sitting in the console like a parking ticket I'd decided not to pay.
+
+Then one day the screen *didn't* look fine. A list view started re-rendering on every scroll frame, CPU usage climbed, and the fan on my test device kicked in. Same warning. I'd just finally hit the case where it mattered.
+
+---
+
+## What the warning actually means
+
+SwiftUI's render cycle has a strict shape: it reads your state, computes a `body`, diffs it against the last one, and commits the result to the screen. That's "a view update."
+
+The warning fires when you **write** to an `@State`, `@Published`, or `@Observable` property *during* that read-compute-diff cycle, instead of safely outside it. You're handing SwiftUI a new input while it's still processing the last one.
+
+Think of it like a microphone next to its own speaker. The system is supposed to be: sound goes in, gets processed, comes out. Feed the output back into the input before the first pass finishes, and you don't get silence — you get a screech that feeds itself.
+
+SwiftUI's version of that screech is a render loop: state change triggers a body recompute, which triggers the same state change, which triggers another recompute. Sometimes it settles after one extra pass and you never notice. Sometimes it doesn't settle, and your UI turns into a space heater.
+
+---
+
+## The three ways people actually trigger this
+
+### 1. Mutating state inside the view's own `body`
+
+```swift
+struct ScoreView: View {
+    @State private var score = 0
+    @State private var displayText = ""
+
+    var body: some View {
+        // Looks harmless. It's a write happening during a read.
+        displayText = "Score: \(score)"
+
+        return Text(displayText)
+    }
+}
+```
+
+This one's usually an accident — someone reached for a computed-looking line inside `body` instead of a real computed property. The fix is almost always to stop storing the derived value at all:
+
+```swift
+struct ScoreView: View {
+    @State private var score = 0
+
+    var body: some View {
+        Text("Score: \(score)")
+    }
+}
+```
+
+If `displayText` can be computed from `score`, it doesn't need to be state. Storing a value that's just a transformation of another value is how you end up with two sources of truth that have to be kept in sync — and "keeping them in sync" is exactly the write-during-read pattern that trips this warning.
+
+### 2. A derived `@Published` set inside `willSet`/`didSet` of another `@Published`
+
+```swift
+class FilterModel: ObservableObject {
+    @Published var query = "" {
+        didSet {
+            // Firing during the same publish cycle that triggered this didSet.
+            resultCount = computeResultCount(for: query)
+        }
+    }
+    @Published var resultCount = 0
+}
+```
+
+`query` changing publishes. SwiftUI starts processing that. `didSet` fires and writes `resultCount`, which publishes *again*, inside the view update that the first publish kicked off. This one's sneaky because it often doesn't warn immediately in the simulator — it shows up under load, or on a slower device, which is a fun way to find out in a demo instead of in testing.
+
+The fix is to break the chain with a deferred dispatch, or better, compute `resultCount` as a derived value instead of stored state — same lesson as case one, just dressed up in `ObservableObject` instead of `@State`.
+
+### 3. Updating state from `.onAppear` or `.onChange` during the *same* layout pass
+
+```swift
+.onAppear {
+    isLoading = true  // fine, usually
+}
+.onChange(of: items) { _, newItems in
+    selectedItem = newItems.first  // can race if it fires mid-update
+}
+```
+
+These two are usually safe — `.onAppear` and `.onChange` normally run after the view update commits, not during it. Where this bites is when the state write inside them triggers a *second* dependent update that cascades back into a view still settling from the first one, often with `@Observable` objects shared across several views that all react to the same property. If you're seeing the warning fire from a modifier closure and not from `body` directly, this cascading case — not a mistake in the closure itself — is usually where to look.
+
+---
+
+## Why "it looks fine" is the trap
+
+Apple calls this **undefined behavior** on purpose. Not "a performance warning." Not "a style suggestion." SwiftUI doesn't document a guaranteed outcome for what happens when you do this — on one OS version you might get an extra silent re-render, on another you might get a visibly dropped frame, and there is no contract that next year's update won't give you a hang instead.
+
+I'd treat "the view update warning that didn't crash" the same way I'd treat [SwiftUI's view-identity state reset bug](/blog/swiftui-view-identity-state-reset-bug/) — a bug that reads as fine in the common case and only tells on itself under a specific, re-creatable condition you haven't hit yet. The absence of a crash is not the same as the absence of a bug.
+
+---
+
+## The actual fix, in order of preference
+
+**First choice: don't store the derived value.** If a piece of state can be computed from another piece of state, make it a computed property, not stored state. No write, no race, nothing to warn about. This kills most instances of this warning outright.
+
+**Second choice: defer the write outside the current update.** When the value genuinely needs to be stored — maybe it's expensive to recompute on every render — push the write to the next run loop turn:
+
+```swift
+didSet {
+    DispatchQueue.main.async {
+        self.resultCount = self.computeResultCount(for: self.query)
+    }
+}
+```
+
+This isn't a hack. You're explicitly telling SwiftUI "do this after you're done with the update you're currently on," which is the actual rule the warning is enforcing. `Task { @MainActor in }` works the same way for async contexts.
+
+**Third choice: question why two observable objects are reacting to each other at all.** If object A's `didSet` always triggers a write on object B, and vice versa, you've built a feedback loop in your architecture, not just in one property. That's usually a sign a single source of truth belongs somewhere else — a pattern I lean on the same reasoning for in [@AppStorage doesn't observe what you think it does](/blog/appstorage-does-not-observe-what-you-think-it-does/), where the fix was also "stop treating a side-effecting layer like a dumb variable."
+
+---
+
+## Takeaway
+
+The purple warning isn't SwiftUI being pedantic. It's catching the one architectural smell that's genuinely hard to catch any other way — a state write that happens while the last one is still being processed. It won't always show up as a bug today. It will always be a bug waiting for the right device, the right iOS version, or the right frame timing to become visible. Fix it when you see it, not when the fan turns on.
+
+If you want the fuller mental model for when state changes are safe to observe versus when they fight each other — including the `@Observable`/`ObservableObject` retain-cycle traps that live right next door to this one — [swiftui-observable-retain-cycles-weak-self-doesnt-always-work](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work/) and the [State and Binding](/learn/swiftui-foundations-06-state-and-binding) lesson in the SwiftUI Foundations course go deeper on both sides of that boundary.
