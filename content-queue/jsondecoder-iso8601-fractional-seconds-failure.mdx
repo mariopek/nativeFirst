@@ -1,0 +1,120 @@
+---
+title: "Your Date Decoding Worked for a Year. Then the Backend Added Milliseconds."
+description: "JSONDecoder's .iso8601 date strategy rejects fractional seconds, so the day your API starts sending 2026-10-05T09:31:00.482Z every request fails to decode. Here's why the strict parser exists and the custom strategy that handles both shapes."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Networking", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1559819614-8e87b90b8e9b?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A precision vernier caliper measuring a small component, jaws closed on a fine measurement"
+---
+
+{/*
+SEO keywords: JSONDecoder iso8601 fractional seconds, dataCorrupted date not ISO8601, ISO8601DateFormatter withFractionalSeconds, JSONDecoder custom date decoding strategy, Swift decode date milliseconds, API added milliseconds decoding failed
+Internal linking plan: dateformatter-recreated-every-call-swift-performance, codable-convert-snake-case-acronym-bug, decimal-separator-locale-string-format-swift-bug, swift-networking-retry-token-refresh-request-deduplication, course: networking-with-ai
+*/}
+
+The app broke on a Thursday afternoon and nobody had deployed anything. Every screen that loaded data showed the error state. The API was returning 200s with perfectly good JSON.
+
+The backend team had switched a timestamp column to a type with higher resolution. One migration, zero API contract changes as far as they were concerned. Every date in every response went from `2026-10-05T09:31:00Z` to `2026-10-05T09:31:00.482Z`, and my decoder refused all of it.
+
+---
+
+## `.iso8601` is stricter than ISO 8601
+
+This is the line in basically every networking layer:
+
+```swift
+let decoder = JSONDecoder()
+decoder.dateDecodingStrategy = .iso8601
+```
+
+It reads like "handle ISO 8601 dates," and the name encourages that. What it actually means is "parse with a default-configured `ISO8601DateFormatter`," and that formatter's default option set does **not** include `.withFractionalSeconds`.
+
+So `.iso8601` accepts exactly one shape and rejects a string that any reasonable person — and the actual ISO 8601 standard — would call valid. Fractional seconds are permitted by the spec. The parser just doesn't opt into them by default, and the strategy name doesn't hint at that at all.
+
+The failure is total rather than partial, which is the part that turns a formatting nit into an outage. A date that won't decode throws `DecodingError.dataCorrupted`, which fails the whole `Codable` object, which fails the array containing it, which fails the entire response. One extra `.482` and a 200 response with complete, correct data lands in your error path.
+
+The error message is at least honest about it, once you find it under the layers:
+
+```
+dataCorrupted(Swift.DecodingError.Context(
+  codingPath: [_JSONKey(stringValue: "Index 0"), CodingKeys(stringValue: "createdAt")],
+  debugDescription: "Expected date string to be ISO8601-formatted.",
+  underlyingError: nil))
+```
+
+"Expected date string to be ISO8601-formatted" — about a string that is ISO 8601 formatted. You can see why people stare at it for a while.
+
+---
+
+## Why it's a trap rather than just a bug
+
+Three things conspire to make this land in production rather than in review.
+
+**Your fixtures agree with your decoder.** Test JSON usually gets hand-written or captured once, early, from an endpoint that wasn't emitting fractional seconds. The tests pass forever because they're asserting against a snapshot of the old shape.
+
+**It's not your change.** Adding resolution to a timestamp is invisible from the backend's side — same field, same type, same ISO 8601 format, strictly more precise. Nobody files a breaking-change notice for it, so there's no deploy of yours to correlate. It's the same debugging problem as [any SDK or service that changes under a binary you already shipped](/blog/third-party-sdk-crash-no-app-release-ios/).
+
+**It can arrive per-field or per-row.** If only some rows were written after the migration, you get intermittent decode failures on the same endpoint, which reads exactly like a flaky network and sends you looking in completely the wrong place.
+
+---
+
+## The fix that handles both
+
+The temptation is to flip on fractional seconds and move on:
+
+```swift
+let formatter = ISO8601DateFormatter()
+formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+```
+
+Don't stop there — that just moves the brittleness. Now you reject dates *without* fractional seconds, so you break on any endpoint that hasn't migrated, any cached payload written before the change, and any date your own app persisted earlier.
+
+Accept both:
+
+```swift
+extension JSONDecoder.DateDecodingStrategy {
+    static let flexibleISO8601: Self = {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+
+        return .custom { decoder in
+            let string = try decoder.singleValueContainer().decode(String.self)
+            if let date = withFraction.date(from: string) ?? plain.date(from: string) {
+                return date
+            }
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unparseable ISO8601 date: \(string)"
+            ))
+        }
+    }()
+}
+
+decoder.dateDecodingStrategy = .flexibleISO8601
+```
+
+Three details in there are deliberate:
+
+**Both formatters are created once**, in the closure that initializes the static property, not inside the decoding closure. `ISO8601DateFormatter` is genuinely expensive to construct, and the decode closure runs once per date in the payload — build them per-call and you've turned a parsing fix into [the allocation cost I measured when a formatter gets recreated on every row](/blog/dateformatter-recreated-every-call-swift-performance/).
+
+**The error includes the offending string.** The built-in message tells you a date failed but not which value, which is most of the work when the payload has four hundred objects.
+
+**Fractional is tried first**, because a string with `.482` fails the plain parser outright, while trying it the other way around costs you nothing. Either order is correct; this one just fails less often on the first attempt.
+
+`ISO8601DateFormatter` is thread-safe for parsing, so sharing these two instances across concurrent decodes is fine.
+
+---
+
+## The habit worth taking from this
+
+Every `Codable` date strategy is a contract with a server you don't control, written in a place where it's easy to forget it exists. Strictness in a parser isn't safety when the input can legitimately widen — it's a scheduled outage with no deploy attached.
+
+So when you set a date strategy, write down what shapes you actually accept, and ask whether a more precise, still-valid version of that string would break you. It's the same class of wrongness as [an acronym mangled by `.convertFromSnakeCase`](/blog/codable-convert-snake-case-acronym-bug/) or [a decimal separator that depends on the user's locale](/blog/decimal-separator-locale-string-format-swift-bug/): the code is right about a format, and the format was never as fixed as the code assumed.
+
+Decode leniently, serialize strictly, and make your error messages name the value that broke. More on structuring that layer in [networking with AI](/learn/networking-with-ai) and [retry and token refresh](/blog/swift-networking-retry-token-refresh-request-deduplication/).
+
+Your parser doesn't need to be picky to be correct. It needs to be specific about what it rejects, and loud about why.

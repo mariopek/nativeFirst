@@ -1,0 +1,105 @@
+---
+title: "Your Timer Stops Every Time the User Scrolls. Timer Is Working Exactly as Documented."
+description: "A scheduled Timer silently stops firing the moment a user touches a scroll view, because scheduledTimer adds itself to the run loop's default mode and scrolling switches to tracking mode. Here's the mechanism, and why reaching for .common isn't automatically the right fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["iOS Development", "Swift", "UIKit", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1552920753-706417ef9531?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "The brass pendulum and gears of an old clock mechanism, stopped mid-swing"
+---
+
+{/*
+SEO keywords: Timer stops while scrolling iOS, Timer not firing scroll view, RunLoop.Mode.common vs default, scheduledTimer tracking mode, UITrackingRunLoopMode timer, Timer run loop mode Swift, countdown timer pauses scrolling
+Internal linking plan: dateformatter-recreated-every-call-swift-performance, swiftui-image-downsampling-decode-cost, swift-custom-main-global-executors-mainactor-thread-myth, course: performance-optimization
+*/}
+
+The bug report said "the countdown freezes sometimes." Not helpful. Countdowns don't freeze sometimes.
+
+Took me an embarrassingly long time to notice that "sometimes" meant "while I'm scrolling the list." The timer wasn't freezing. It was being politely asked to wait, and it was complying.
+
+---
+
+## What `scheduledTimer` actually signs you up for
+
+This is the line almost everyone writes:
+
+```swift
+timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    self?.secondsRemaining -= 1
+}
+```
+
+Convenient, and it does something you didn't explicitly ask for: it creates the timer *and* adds it to the current run loop in `RunLoop.Mode.default`. That mode choice is the entire bug, and it's invisible at the call site.
+
+A run loop isn't just an event queue — it's an event queue with *modes*. At any moment the loop is running in exactly one mode, and it will only service sources that were registered for that mode. Think of it like a radio receiver: the loop is tuned to one frequency at a time, and your timer is broadcasting on `default`.
+
+Most of the time the main run loop sits in `default`, so everything works and you never learn any of this.
+
+Then the user puts a finger on a `UITableView`.
+
+---
+
+## Scrolling changes the channel
+
+While a scroll view is actively tracking a touch, UIKit runs the main run loop in `UITrackingRunLoopMode` instead. This is deliberate and it's good engineering: during a drag, the highest priority is feeding the scroll animation smoothly, so the loop switches to a mode where only the sources that matter for tracking get serviced.
+
+Your timer was registered for `default`. The loop is now in tracking mode. So the timer does not fire. Not "fires late" — does not fire at all, for the entire duration of the drag.
+
+Lift the finger, the loop returns to `default`, and the timer resumes. And here's the part that makes it genuinely nasty to diagnose: **a repeating `Timer` does not fire the missed ticks when it comes back.** It just continues on its schedule. So a one-second countdown that a user scrolled through for eight seconds is now eight seconds behind the wall clock, permanently, with no error, no log, and nothing in the debugger to look at.
+
+It also means the bug is almost impossible to catch while you're debugging, because the moment you stop scrolling to look at Xcode, everything is working perfectly again.
+
+---
+
+## The fix everybody reaches for
+
+You can register the timer for more than one mode. The `.common` pseudo-mode is a set that includes both `default` and tracking:
+
+```swift
+let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+    self?.secondsRemaining -= 1
+}
+RunLoop.main.add(timer, forMode: .common)
+self.timer = timer
+```
+
+Note the shape change: `Timer(timeInterval:...)` constructs an unscheduled timer, and you add it to the run loop yourself with the mode you actually want. `scheduledTimer` gives you no opportunity to make that choice.
+
+For a countdown display, a clock, or a progress label, this is the right fix and you should take it.
+
+---
+
+## But think before you make everything `.common`
+
+`.common` means "do this work even while the user is mid-drag," and the scroll loop is the most latency-sensitive place in your app. You're volunteering to run your closure on the main thread during the exact window where a few milliseconds of overrun turns into a visible stutter.
+
+That's fine for decrementing an integer and updating a label. It is not fine for anything that does real work. If your timer callback parses JSON, touches the disk, recalculates a layout, or constructs a `DateFormatter`, you've now scheduled that cost into every frame of every scroll — which is precisely the kind of self-inflicted scroll jank I wrote about in [the DateFormatter-per-cell piece](/blog/dateformatter-recreated-every-call-swift-performance/) and [image decoding at full size](/blog/swiftui-image-downsampling-decode-cost/).
+
+So the decision is actually two questions, in order:
+
+**1. Does this need to fire during a drag at all?** A lot of timers don't. Polling for new data, flushing an analytics buffer, checking a token's expiry — if that slips by a second or two while someone scrolls, nothing is wrong. Leave those in `default` and move on.
+
+**2. If it does, is the callback cheap enough to run mid-scroll?** Keep it to arithmetic and assigning a published property. Anything heavier belongs on a background executor, with only the result hopping back to the main actor.
+
+---
+
+## The version that sidesteps run loops entirely
+
+If you're in async/await code already, you can skip this whole category of problem, because structured concurrency doesn't use the main run loop's mode system for scheduling:
+
+```swift
+countdownTask = Task { @MainActor in
+    while secondsRemaining > 0 {
+        try await Task.sleep(for: .seconds(1))
+        secondsRemaining -= 1
+    }
+}
+```
+
+`Task.sleep` resumes via the cooperative thread pool, not a run-loop source, so a scroll drag doesn't gate it. You also get cancellation for free — `countdownTask?.cancel()` in `onDisappear` or `deinit`, and no `invalidate()` to forget.
+
+It's worth being precise about what this does and doesn't buy you, though, because "concurrency fixed my timer" is the kind of claim that turns into cargo cult. It is not more *accurate* than a `Timer`: `Task.sleep` guarantees a minimum duration, not an exact one, so drift accumulates across many iterations the same way it does elsewhere. For anything where the displayed value has to match real elapsed time, don't count ticks at all — store an end `Date` up front and compute the remaining interval from it on every update. Then a missed tick, a backgrounded app, or a slow frame costs you nothing, because the next update recomputes from the truth rather than from a running total.
+
+The broader point is that `Timer` is a Core Foundation run-loop API wearing a Swift coat, and it carries run-loop semantics with it. Those semantics aren't a legacy wart — [the main thread does a lot more than people assume](/blog/swift-custom-main-global-executors-mainactor-thread-myth/), and mode switching is part of how scrolling stays smooth at all. Worth understanding rather than working around blindly; the same kind of main-thread accounting shows up throughout [performance optimization](/learn/performance-optimization).
+
+A timer that stops when the user touches the screen isn't broken. It's doing exactly what you registered it to do, on a channel nobody told you existed.

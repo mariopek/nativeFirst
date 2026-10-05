@@ -1,0 +1,110 @@
+---
+title: "Swift's sorted() Makes No Promise About Equal Elements. Your List Reshuffles for Free."
+description: "Swift's sort is not documented as stable, so two elements that compare equal can swap places between runs. Here's why that silently breaks SwiftUI list animations and paginated APIs, and how to make your sort total instead of hoping for the best."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "SwiftUI", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1501003878151-d3cb87799705?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A deck of playing cards spread and shuffled across a surface"
+---
+
+{/*
+SEO keywords: Swift sorted not stable, Swift stable sort guarantee, sorted(by:) equal elements order, SwiftUI list rows jump sorting, stable sort Swift workaround, introsort Swift standard library, tie-breaker sort comparator
+Internal linking plan: mutating-hashable-class-corrupts-set-swift, array-repeating-class-shared-reference-swift, arrayslice-holds-entire-array-memory-swift, swift-memberwise-init-private-set-blind-spot, course: debugging-with-ai
+*/}
+
+Two users with the same name swapped places in a list. Not during a refresh — between two launches of the app, with identical data.
+
+I assumed I'd introduced a race somewhere. I hadn't. I'd just assumed something about `sorted(by:)` that the standard library never agreed to.
+
+---
+
+## The guarantee that isn't there
+
+Here's the sort everyone writes:
+
+```swift
+let sorted = users.sorted { $0.lastName < $1.lastName }
+```
+
+Ask what happens to two users who share a last name, and most people — me included, for years — will say "they stay in the order they were already in." That property has a name: a sort is **stable** if elements that compare equal keep their original relative order.
+
+Swift's `sort()` and `sorted(by:)` are not documented as stable. The standard library deliberately does not promise it.
+
+This isn't a gotcha hidden in a footnote; it's a design decision. Guaranteeing stability constrains which algorithms the implementation is allowed to use and generally costs either extra memory or extra time. By leaving it unspecified, the standard library keeps the freedom to change the algorithm later — and it has, more than once.
+
+And this is the important bit: **the current implementation is, as it happens, stable.** Swift's sort is a modified timsort, which preserves equal elements' order in practice today. So if you test this, you'll probably observe stability and conclude the docs are being overly cautious.
+
+That's the trap. You're depending on an implementation detail that happens to hold. It isn't part of the contract, no test of yours asserts it, and the compiler will never tell you that you're leaning on it.
+
+---
+
+## Where it actually bites
+
+Pure-Swift sorting of a fixed in-memory array is the case least likely to hurt you. The damage shows up where sort order is load-bearing for something else.
+
+**SwiftUI list animations.** `List` and `ForEach` diff by identity. If two equal-comparing rows trade places on a re-sort, SwiftUI sees two rows that *moved* and animates them accordingly. The user watches two rows slide past each other for no reason, triggered by an unrelated state change. Nothing in your code says "move." The sort just returned a different permutation of the same data.
+
+**Paginated APIs.** If a server sorts by a non-unique column and your client requests page 2 with an offset, a row that tied with another can land on both pages or neither — an item duplicated and a different item silently missing. This one is brutal to debug because the data is correct, each individual response is correct, and the bug only exists in the seam between two requests.
+
+**Snapshot and golden-file tests.** A test that asserts an exact array order passes for a year, then fails on a Swift toolchain upgrade with a diff showing two identical-looking elements in swapped positions. The honest diagnosis — "we upgraded the compiler and the sort changed" — sounds like an excuse, which is why people usually spend a day looking for a real bug first.
+
+**Anything deriving an index.** "The third item in the sorted array" is a meaningless phrase if the third and fourth items tie.
+
+---
+
+## The fix: make the comparison total
+
+Don't look for a stable-sort API. Make the ordering unambiguous, so stability stops mattering:
+
+```swift
+let sorted = users.sorted {
+    if $0.lastName != $1.lastName {
+        return $0.lastName < $1.lastName
+    }
+    return $0.id.uuidString < $1.id.uuidString   // tie-breaker on stable identity
+}
+```
+
+Now no two distinct elements compare equal, so there is exactly one correct output and every sort implementation in existence must produce it. The order is reproducible across runs, across devices, across toolchain versions, and across your client and your backend.
+
+For multiple keys, Swift's tuple comparison keeps this readable, since tuples compare lexicographically:
+
+```swift
+let sorted = users.sorted {
+    ($0.lastName, $0.firstName, $0.id.uuidString) <
+    ($1.lastName, $1.firstName, $1.id.uuidString)
+}
+```
+
+Two rules make this reliable in practice:
+
+**Always end on something unique.** A UUID, a primary key, a creation timestamp with enough resolution. The last component's job isn't to be meaningful — it's to guarantee totality.
+
+**Pick a tie-breaker that doesn't change.** This matters more than it sounds. Breaking a tie on a mutable property gets you a sort order that reorders itself when an unrelated field is edited, which is a weirder version of the bug you started with. It's the same discipline as [hashing on immutable identity rather than mutable state](/blog/mutating-hashable-class-corrupts-set-swift/): derive ordering from what identifies the thing, not from what describes it right now.
+
+One caveat worth stating: if you're sorting by a `Double` that could be `NaN`, `<` is false in every direction and your comparator is no longer a valid strict weak ordering at all — which is a correctness problem well beyond ties. Filter or coalesce those before sorting.
+
+---
+
+## If you genuinely need stability
+
+Sometimes the original order *is* the meaningful tie-breaker — a user-arranged list being re-sorted by one column, where you want manual ordering preserved within groups. Make that explicit instead of hoping:
+
+```swift
+let sorted = users.enumerated()
+    .sorted { ($0.element.lastName, $0.offset) < ($1.element.lastName, $1.offset) }
+    .map(\.element)
+```
+
+Zipping in the original index turns "preserve existing order" from an assumption into a value you're actually sorting on. It costs an allocation, and it's correct under any sort implementation.
+
+---
+
+## The pattern underneath
+
+This belongs to a family of Swift surprises where a type or function does more than it promises, and the extra behavior quietly becomes part of your app's logic — like [`Array(repeating:)` constructing one object instead of five](/blog/array-repeating-class-shared-reference-swift/), or [a slice keeping an entire array's storage alive](/blog/arrayslice-holds-entire-array-memory-swift/). The code works. It works for a reason you never wrote down and the library never agreed to.
+
+The useful habit is small: whenever you write a comparator, ask what happens when it returns false in both directions. If the answer matters to your UI, your API, or your tests, add the tie-breaker now — while it costs one line instead of an afternoon with [a debugger and a diff that makes no sense](/learn/debugging-with-ai).
+
+An unstable sort isn't wrong. You just asked a question with more than one correct answer.
