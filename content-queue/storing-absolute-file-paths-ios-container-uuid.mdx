@@ -1,0 +1,162 @@
+---
+title: "Your Saved File Paths Break When the User Gets a New iPhone. The Files Never Moved."
+description: "Storing an absolute file URL in your database works perfectly until a device restore or iCloud sync hands your app a new container path. Here's why the bug survives every test you run, and how to store paths that keep working."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "SwiftData"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1559057287-ce0f595679a8?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A stack of envelopes with handwritten addresses, one marked as returned to sender"
+---
+
+{/*
+SEO keywords: iOS store absolute file path bug, app container UUID changes, file not found after restore backup iOS, store relative path Documents directory Swift, security scoped bookmark iOS, SwiftData file path CloudKit sync, URL.documentsDirectory Swift, NSFileReadNoSuchFileError after device migration
+Internal linking plan: swiftdata-two-years-later-migration-test, sqlite-wal-reset-bug-swiftdata-core-data-ios, appstorage-does-not-observe-what-you-think-it-does, keychain-vs-in-memory-token-storage-swift, course: swiftui-foundations-17-swiftdata-basics
+*/}
+
+The email said "all my photos are gone." The app said otherwise: forty entries, every single one intact, every thumbnail a gray placeholder.
+
+The database was fine. The files were fine. The only broken thing was the string I'd used to connect them.
+
+---
+
+## The line that causes it
+
+Here's the code. You've written this code. I've written this code in three apps.
+
+```swift
+let filename = "\(UUID().uuidString).jpg"
+let fileURL = URL.documentsDirectory.appending(path: filename)
+try imageData.write(to: fileURL)
+
+entry.photoPath = fileURL.path   // the bug is this line
+try modelContext.save()
+```
+
+Reading it back is the obvious mirror image:
+
+```swift
+let url = URL(fileURLWithPath: entry.photoPath)
+let data = try Data(contentsOf: url)
+```
+
+This works. It works in the simulator, it works on your device, it works for every user for as long as they keep the phone they installed it on. Which is why it ships.
+
+Look at what actually got written into that column:
+
+```
+/var/mobile/Containers/Data/Application/9C8A2F41-6B3E-4F52-8D17-2A9E7C4B1D06/Documents/3F2A8E71-....jpg
+```
+
+That UUID in the middle isn't your file's name. It isn't your app's bundle ID. It's the identifier iOS assigned to **your app's data container at install time** — and nothing anywhere promises it will be the same tomorrow.
+
+You saved a street address. iOS reserves the right to renumber the street.
+
+---
+
+## Why your tests never catch it
+
+This is the part that took me embarrassingly long to work out, and it's the part worth remembering.
+
+Your first instinct for reproducing it is to delete the app and reinstall. That gives you a brand-new container UUID, so the old paths should break, right?
+
+They don't. Deleting an iOS app **deletes the whole container** — your database goes with it. On reinstall there is no old row holding a stale path, because there is no old row at all. Fresh container, fresh database, fresh paths, everything consistent. The test passes.
+
+For this bug to fire you need a very specific combination: **persisted data that survives, paired with a container path that doesn't.** There are exactly two common ways to get there, and they are two things almost nobody tests.
+
+**One: the user restores from a backup, or migrates to a new iPhone.** Your app gets reinstalled and its container contents get restored into a *newly created* container with a *new* UUID. The database comes back perfectly. Every absolute path inside it now points into a directory that belongs to a previous installation and no longer exists.
+
+**Two: the data syncs between devices.** If you're running SwiftData with CloudKit, or Core Data with `NSPersistentCloudKitContainer`, or honestly any sync at all, a path written on the iPhone is pure fiction on the iPad. Different install, different container, different UUID. The record arrives; the file it names was never there.
+
+So the bug's whole life cycle is: invisible during development, invisible in TestFlight, invisible in production for however long users keep their hardware — then a wave of reports every September when people set up new phones.
+
+That's not an edge case. That's a delayed fuse.
+
+---
+
+## What it looks like when it goes off
+
+The failure is quiet, which makes it worse. `Data(contentsOf:)` throws `NSFileReadNoSuchFileError` (Cocoa error 260), and if your image-loading path does the very reasonable thing —
+
+```swift
+let image = (try? Data(contentsOf: url)).flatMap(UIImage.init(data:))
+```
+
+— then a missing file and a corrupt file and a path from a dead container all collapse into the same `nil`. You render a placeholder. You log nothing. The user concludes your app ate their photos.
+
+If you ever find yourself staring at a database row that looks completely valid next to a file that is definitely on disk, check whether the path in the row and the path of the file differ **only** in that one UUID segment. That's the whole diagnosis, and it takes five seconds once you know to look.
+
+---
+
+## The fix: store the part you own
+
+The container path is Apple's to change. The path *inside* the container is yours. So only persist yours, and recompute the rest at read time.
+
+Writing:
+
+```swift
+let filename = "\(UUID().uuidString).jpg"
+let fileURL = URL.documentsDirectory.appending(path: filename)
+try imageData.write(to: fileURL)
+
+entry.photoFilename = filename   // just the filename
+try modelContext.save()
+```
+
+Reading:
+
+```swift
+let url = URL.documentsDirectory.appending(path: entry.photoFilename)
+let data = try Data(contentsOf: url)
+```
+
+`URL.documentsDirectory` (iOS 16+) resolves against whatever container the app is living in *right now*, so it's correct after a restore, correct on the synced iPad, correct forever. On older deployment targets:
+
+```swift
+let documents = FileManager.default
+    .urls(for: .documentDirectory, in: .userDomainMask)[0]
+```
+
+If you organize files into subdirectories, store the relative subpath rather than flattening it:
+
+```swift
+entry.relativePath = "attachments/\(entryID)/original.jpg"
+// later
+let url = URL.documentsDirectory.appending(path: entry.relativePath)
+```
+
+Two things not to do while you're in there. Don't cache the Documents URL into `UserDefaults` or `@AppStorage` — you've just reintroduced the same stale absolute path with extra steps, which is its own flavor of [@AppStorage not behaving like the state container people assume it is](/blog/appstorage-does-not-observe-what-you-think-it-does). And don't write the container path into a sync-backed field for the same reason it broke the first time.
+
+---
+
+## Files outside your container need a different tool
+
+Everything above assumes the file is yours, inside your sandbox. If the user picked it with `.fileImporter` or a document picker, it lives somewhere you don't control, and a relative path is meaningless — there's no stable base to resolve it against.
+
+For those, the right mechanism is **bookmark data**: an opaque blob that tracks the file even if it gets moved or renamed.
+
+```swift
+// Save
+let bookmark = try url.bookmarkData()
+entry.fileBookmark = bookmark
+
+// Restore
+var isStale = false
+let url = try URL(
+    resolvingBookmarkData: entry.fileBookmark,
+    bookmarkDataIsStale: &isStale
+)
+guard url.startAccessingSecurityScopedResource() else { return }
+defer { url.stopAccessingSecurityScopedResource() }
+```
+
+Mind the two parts people skip. `isStale` coming back `true` means you should re-create and re-save the bookmark from the resolved URL. And the `startAccessingSecurityScopedResource()` / `stopAccessingSecurityScopedResource()` pair is not optional on a picked file — without it you get permission failures that look exactly like a missing file, sending you straight back down the wrong diagnostic path. (On macOS you also want the `.withSecurityScope` option when creating the bookmark; on iOS the plain call is what you want.)
+
+One more option worth knowing: if the binary data is small enough to live in the store, Core Data's **allows external storage** flag lets the framework own the file placement entirely, and framework-managed placement survives restores because you never wrote a path down. That's a genuinely good trade for thumbnails and avatars — less so for a hundred full-resolution photos. Deciding where binary data lives is one of those schema calls that's cheap now and expensive in a year, which is the same lesson as [what actually broke across two years of SwiftData migrations](/blog/swiftdata-two-years-later-migration-test), and why [the database's own on-disk behavior is worth understanding before you trust it](/blog/sqlite-wal-reset-bug-swiftdata-core-data-ios). If you're still mapping out how your models and their files fit together, [SwiftData basics](/learn/swiftui-foundations-17-swiftdata-basics) is the place to start.
+
+---
+
+## The actual rule
+
+A file path is not an identifier. It's a *route* — accurate only from a specific starting point, at a specific moment, on a specific installation.
+
+Persist the destination, never the route. Then recompute the route every time you need it, because the route is the only part that was ever going to change.
