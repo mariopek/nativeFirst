@@ -1,0 +1,122 @@
+---
+title: "enumerated() Gives You an Offset, Not an Index. On a Slice Those Are Different Numbers."
+description: "for (i, item) in collection.enumerated() reads like it hands you an index, and on a plain Array it happens to. Feed it an ArraySlice and the same loop crashes with Index out of range. Here's the distinction Swift is actually drawing, and the two fixes."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Collections", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1542707067-91f05e1ac1fe?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A row of empty theater seats, each with a small brass number plate"
+---
+
+The crash said `Fatal error: Index out of range` and pointed at a line I'd written a hundred times. It was a `for (i, item) in items.enumerated()` loop, and inside it, `items[i]`.
+
+The loop was fine for a year. Then I changed the function to take `items: ArraySlice<Brew>` instead of `[Brew]`, because I was passing it the back half of a bigger array and didn't want the copy. Same loop, same body, instant crash on the first iteration.
+
+---
+
+## What enumerated() actually promises
+
+Here's the signature, and the word that matters:
+
+```swift
+func enumerated() -> EnumeratedSequence<Self>
+```
+
+It yields pairs of `(offset, element)`. **Offset.** Not index. The docs have said offset for years and the compiler will happily let you name it `index` anyway, because it's just a tuple label you're free to ignore.
+
+An offset is "how many elements have gone by." It starts at zero and counts up. Always. For every sequence, including ones that have no indices at all.
+
+An index is a position *in that specific collection*, and `startIndex` is only zero if the collection says so.
+
+For `Array`, `startIndex` is always 0 and indices are contiguous integers. So offset and index are the same number, every time, and the distinction is invisible. That's the trap: Array makes the wrong mental model work perfectly.
+
+```swift
+let items = ["a", "b", "c", "d"]
+Array(items.indices)   // [0, 1, 2, 3]
+```
+
+Now take a slice:
+
+```swift
+let slice = items[2...]
+Array(slice.indices)   // [2, 3]
+slice.startIndex       // 2
+slice.count            // 2
+```
+
+`slice` has two elements, at indices 2 and 3. `enumerated()` hands me offsets 0 and 1. So `slice[0]` isn't the first element — it's out of range entirely, because 0 isn't one of this slice's indices.
+
+A slice keeps the indices of the collection it came from. That's deliberate: it means an index you got from the parent stays meaningful in the slice, which is exactly what you want when you're doing recursive or divide-and-conquer work on subranges. It also means `[0]` is a lie. (While you're here: a slice sharing indices with its parent is related to a sharper problem — it also [keeps the parent's entire storage alive](/blog/arrayslice-holds-entire-array-memory-swift).)
+
+---
+
+## It's not only slices
+
+Slices are where this bites hardest because the crash is immediate. But the offset/index gap shows up anywhere `startIndex` isn't zero or indices aren't integers:
+
+```swift
+let text = "héllo"
+for (i, char) in text.enumerated() {
+    // i is an Int offset: 0, 1, 2, 3, 4
+    // text's Index is String.Index — this doesn't even compile:
+    // print(text[i])
+}
+```
+
+With `String` you get a compile error, which is the good kind of failure. `Dictionary` and `Set` give you offsets into an iteration order that isn't stable across launches. For those, the offset is almost never a number you want to keep.
+
+The pattern is: `enumerated()` is safe to *read* the number and unsafe to *subscript* with it, unless you have already proven you're holding an Array.
+
+---
+
+## The two fixes
+
+**If you want the element, you already have it.** Most of these loops don't need the index at all. The element is right there in the tuple.
+
+```swift
+for (i, item) in slice.enumerated() {
+    print("\(i + 1). \(item.name)")   // numbering a list — offset is correct here
+}
+```
+
+Offsets are the right tool for display numbering, progress counters, and "every third row." Keep using them for that.
+
+**If you genuinely need the index, ask the collection for its indices.**
+
+```swift
+for i in slice.indices {
+    slice[i].brew()        // i is a valid index by construction
+}
+```
+
+Or zip them together when you want both:
+
+```swift
+for (i, item) in zip(slice.indices, slice) {
+    print(i, item)         // i is an index, item is the element
+}
+```
+
+That `zip` is what people usually mean when they write `enumerated()`. It's three characters longer and it's correct for every collection, not just the one that happens to start at zero.
+
+---
+
+## Why the compiler can't save you
+
+The frustrating part is that `slice[0]` is perfectly well-typed. `ArraySlice<Brew>.Index` is `Int`, so passing an `Int` offset where an `Int` index belongs type-checks cleanly. The types are identical; only the *meaning* differs.
+
+This is the same class of bug as passing a user ID where a product ID was expected — both `Int`, both fine to the compiler, wrong at runtime. Swift has a cure for that one, which is wrapping each in its own type, and `Collection` deliberately doesn't do it because generic index arithmetic would become unbearable.
+
+So it's on you. The guardrail I use is a small rule: **the moment a function signature takes a slice, `enumerated()` is suspicious.** If I'm indexing inside the loop, I switch to `.indices` right then, before I find out the hard way.
+
+A related habit worth building, since it comes from the same place: when you hand a subrange to a function, decide whether the function needs positions or just elements. If it only needs elements, take a `some Sequence<Element>` and the question disappears.
+
+---
+
+## The takeaway
+
+`enumerated()` counts how many elements have passed. It does not know where they live.
+
+On an Array those two facts coincide, which is why this bug waits patiently in working code until the day someone changes a parameter type from `[T]` to `ArraySlice<T>` for perfectly good performance reasons. Then it fires on the first iteration.
+
+Name the variable `offset`. You'll stop subscripting with it.
