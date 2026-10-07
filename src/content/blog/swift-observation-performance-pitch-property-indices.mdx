@@ -1,0 +1,135 @@
+---
+title: "Every @Observable Mutation Builds a Key Path. Even the Ones Nobody Is Watching."
+description: "A new Swift pitch for Observation puts real numbers on something most of us never measured: mutating an unobserved property of an observed object costs 70-115ns, almost all of it key path formation and lock contention. The proposed fix is a small integer. Here's the mechanism, and the part of the pitch I'd actually use tomorrow."
+pubDate: 2026-10-07
+tags: ["Swift", "SwiftUI", "Observable", "Performance", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1544906210-073c36ccee65?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A wall of numbered wooden pigeonholes in an old postal sorting office"
+---
+
+I have an `@Observable` model with about forty properties and one view that reads four of them. I always assumed the other thirty-six were free. They are not, and yesterday Philippe Hausler posted a pitch to the Swift forums that puts a number on exactly how not-free they are.
+
+The number is 70 to 115 nanoseconds. Per write. To a property nobody is observing.
+
+---
+
+## What your setter is actually doing
+
+Here's the thing about `@Observable` that's easy to forget because the macro hides it: the identity of a property, as far as the registrar is concerned, is its key path.
+
+Every single mutation of a tracked property goes through `willSet(_:keyPath:)` and `didSet(_:keyPath:)`. To find out whether anyone cares, the registrar needs that key path. So the setter forms one — that's a `swift_getKeyPath` call plus a retain and a release — then takes the registrar's lock and hashes the key path to look it up. Twice. Once on the way in, once on the way out.
+
+Then, most of the time, it discovers nobody is observing that property and does nothing.
+
+That's the shape of the waste. It isn't the notification that's expensive. It's **asking the question**.
+
+And it's the common case, not an edge case. A SwiftUI view reads a handful of properties off a model that the app writes to constantly. I wrote about the cost of @Observable versus ObservableObject a while back using [a redraw counter and a thousand rows](/blog/observable-vs-observableobject-1000-row-redraw-benchmark) — that post measured the thing you can see, the redraws. This is the thing you can't see, happening under every `=` in your model layer.
+
+---
+
+## The numbers
+
+The pitch includes a table measured on an M-series Mac, release builds, as library-evolution dylibs. Three scenarios, three columns: Swift 6.4 today, with runtime-only improvements, and with the proposal's property indices.
+
+| scenario | Swift 6.4 | runtime-only | with indices |
+|---|---|---|---|
+| mutate a property of a never-observed object | 34 ns | 23 ns | 23 ns |
+| observe one property, then mutate it | 790 ns | 260 ns | 260 ns |
+| mutate an unobserved property of an observed object | 70-115 ns | 75-115 ns | 19-24 ns |
+
+Look at the middle column. A lot of this is just implementation work that needs no API at all — a lock-free "never observed" check, a lazily created observer table, one fewer allocation per registrar. 790 nanoseconds down to 260 for the plain observe-and-mutate path, for free, no source changes.
+
+Now look at the last row. That's the one runtime changes can't touch, because the cost **is** the key path. You can't make forming a key path and hashing it cheap. You can only stop doing it.
+
+---
+
+## The fix is an integer
+
+The proposal's core move is almost boring, which is usually a sign it's right.
+
+`@Observable` already knows each tracked property's position in the type. Property zero, property one, property two. So pass that along:
+
+```swift
+registrar.access(self, keyPath: \.name, propertyIndex: 0)
+registrar.withMutation(of: self, keyPath: \.name, propertyIndex: 0) { _name = newValue }
+```
+
+The registrar keeps a 64-bit `observedMask`. Bit `s` clear means no observer is watching anything that's been mutated with index `s`. On a write, it does one relaxed atomic load, checks the bit, and if it's clear it just runs your mutation and returns. No key path, no lock.
+
+Three details I like a lot here:
+
+**The index is a hint, never the truth.** The key path remains the property's identity. A wrong index, a conflicting index, an out-of-range index — you lose the fast path, you never lose correctness. That's a very different risk profile from most performance work.
+
+**It back-deploys.** The overloads are `@_alwaysEmitIntoClient`. On older runtimes they call the key-path-only entry points. So this reaches shipping apps on current OS versions.
+
+**You get it by recompiling.** The macro numbers the properties for you. No annotation, no migration, no new spelling in your model. That's the whole adoption story for the thing in that last table row.
+
+Properties declared inside an `#if` block get no index and fall back to the key path form. Which is a fun little detail: a conditional compilation block in the middle of your model quietly opts those properties out of the fast path.
+
+---
+
+## The part I'd actually use tomorrow
+
+Property indices are the headline, but they're invisible. The thing in this pitch I've genuinely wanted is `@ObservationDerived`.
+
+You know the problem. A computed property on an `@Observable` type is observable for free, because reading it reads the stored properties it depends on. Lovely. It is also recomputed on **every read, by every reader, whether or not anything changed**.
+
+```swift
+@Observable final class Library {
+  var books: [Book] = []
+  var query = ""
+
+  var results: [Book] {
+    books.filter { $0.title.localizedStandardContains(query) }
+  }
+}
+```
+
+Three views read `results`. That's three filters. Scroll and it's three filters per frame. And caching it by hand is genuinely awkward: a cache in an `@ObservationIgnored` property has no idea when to invalidate, and invalidating from `didSet` on each input means you recompute eagerly on every write even when nobody's looking.
+
+The proposed spelling:
+
+```swift
+@Observable final class Library {
+  var books: [Book] = []
+  var query = ""
+
+  @ObservationDerived var results: [Book] {
+    input { (books, query) }
+    update { books, query in
+      books.filter { $0.title.localizedStandardContains(query) }
+    }
+  }
+}
+```
+
+`input` is the cheap part that reads what you depend on. `update` is the expensive, pure part. Reading `results` runs neither if nothing observable has been written since the last computation. If something has, it runs `input`, and only runs `update` if what `input` read actually changed. And if the value is `Equatable` and recomputes to an equal value, things downstream of it don't recompute at all.
+
+Someone on the thread asked the obvious question — why two closures, why not just let `update` capture its own dependencies like `withObservationTracking` does? Hausler's answer is the design in one line: the split is the point. `input` is meant to be cheap and high-frequency, `update` expensive and rare. A cached value plus a specialized dirty bit, with you deciding where the line is.
+
+---
+
+## Two more things worth knowing
+
+**Event resolution.** Some types are always read whole. A color's three components. A settings record rendered as one unit. Per-property tracking there is pure overhead — one registration per property read, one notification per property written, for nothing. Installing one observer that reads all properties of a 2,048-property object took 1.6ms and 2,203 allocations. Now you can say `@Observable(resolution: .object)`, or group a subset with `@ObservationTracked(group: 1)`. The trade is precision: `Event.matches(\.width)` becomes true when `height` changes, because grouped properties share a representative key path. Know that before you reach for it.
+
+**Synchronous listeners.** If you've written a `willSet` observer that re-registers from its own `onChange` handler — a snapshot observer, basically — you've written something quadratic. Write to N models in a loop and the observer fires N times, each firing reading all N models. At N=1600 the pitch measured 2,560,000 reads and 287µs per write. The new `ObservationTracking.Listener` with `.coalesced` fires once for the whole burst. It's also a `~Copyable` handle — dropping it cancels it, which is a much nicer lifecycle story than the [weak-self-and-hope dance that Observation retain cycles currently require](/blog/swiftui-observable-retain-cycles-weak-self-doesnt-always-work).
+
+Oh, and `@Observable` can now be applied to a `~Copyable` struct, and Observation builds for Embedded Swift. Both fall out of the same property-index work, because once you don't need key paths for identity, you don't need key paths.
+
+---
+
+## What to do with this now
+
+Nothing, mostly. It's a pitch, not an accepted proposal. The forum thread is one day old.
+
+But it changes how I'd think about two decisions I make all the time.
+
+First: **stop treating a wide `@Observable` model as free**. It isn't today. If you have a forty-property model being written to in a tight loop, that's real nanoseconds, and the "just recompile" fix isn't here yet. Splitting hot write paths off a widely-observed object is still worth doing.
+
+Second: **stop hand-rolling derived caches**. If you're about to write an `@ObservationIgnored` cache with manual invalidation, know that a proper answer is coming, and that whatever you write now you'll want to delete. A plain computed property you can delete in one line is a better bet than a cache you'll have to unpick.
+
+If you're still working out which property wrapper belongs where in all of this, [the `@State` / `@Bindable` / `@Environment` decision map](/blog/swiftui-state-bindable-environment-decision-map) is the practical version, and the course covers the model layer from scratch in [Observable and observation](/learn/swiftui-foundations-07-observable). And if your model is currently fighting your view rather than feeding it, the [purple "publishing changes from within view updates" warning](/blog/swiftui-publishing-changes-within-view-updates-warning) is usually the first symptom.
+
+The best performance pitches don't add a feature. They notice you were paying for something you never asked for.
