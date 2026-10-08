@@ -1,0 +1,145 @@
+---
+title: "@MainActor on Your Class Does Not Cover deinit. That's Where Your Last Data Race Lives."
+description: "You marked the whole class @MainActor, the compiler went quiet, and you assumed every member was protected. deinit isn't. It runs wherever the final release happens, which can be any thread — and Swift will happily let you touch main-actor state from it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Concurrency", "Swift 6", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1582262653838-601f57e8e09e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A closed shop at night with the interior lights still burning"
+---
+
+I spent two days chasing a crash that happened maybe once in four hundred app launches. Thread Sanitizer finally caught it, and the race was in a `deinit` — inside a class I had marked `@MainActor` at the top, which I had assumed meant *done, protected, stop thinking about it*.
+
+It doesn't mean that. `deinit` is the one member a global actor annotation does not isolate.
+
+---
+
+## The code that looks fine
+
+Here's the shape of it, cleaned up:
+
+```swift
+@MainActor
+final class BrewTimerController {
+    private var ticker: Timer?
+    private var activeBrewCount = 0
+
+    func start(for brew: Brew) {
+        activeBrewCount += 1
+        ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            // ...
+        }
+    }
+
+    deinit {
+        ticker?.invalidate()
+        activeBrewCount = 0        // <- this line
+    }
+}
+```
+
+Every method here is main-actor isolated because the class is. Calling `start(for:)` from a background context is a compile error. Good.
+
+`deinit` is not. It is **nonisolated**, always, and you cannot make it otherwise by annotating the type. So `activeBrewCount = 0` is a write to main-actor-protected state from whatever thread happened to drop the last reference.
+
+And here's the part that got me: in Swift 6 language mode, **the compiler does not stop you.** `deinit` gets a carve-out that lets it access the stored properties of the instance it's tearing down, on the theory that by definition nothing else holds a reference, so nothing else can be touching them. That reasoning is sound for *the memory*. It says nothing about whether the code you call from there is thread-safe.
+
+---
+
+## Why it's nonisolated, and why that's not a bug
+
+Think about what `deinit` actually is. It's not a method you call. It's a thing that happens at the exact instant the retain count hits zero, synchronously, inside whatever release the runtime is executing.
+
+To make it main-actor isolated, Swift would have to either block that thread until the main actor is free — a deadlock generator — or hop to the main actor and return, which would mean deallocation happens *later*, at some unspecified point, and `deinit` would no longer be a reliable "this object is gone now" signal.
+
+Neither is acceptable. So `deinit` runs where the release runs. Which thread is that? Whichever one let go last. You usually don't know, and it changes between runs — which is exactly why this bug shows up once every four hundred launches instead of every time.
+
+A `Task` holding a closure that captures your object is a great way to make the last release land on a cooperative thread pool worker:
+
+```swift
+// Somewhere else entirely
+Task.detached {
+    await controller.doSomething()
+    // if this Task outlives every other reference,
+    // deinit runs on a pool thread when the closure is released
+}
+```
+
+---
+
+## What actually breaks
+
+Three categories, in increasing order of how long they'll take you to find.
+
+**1. Writing shared state.** The `activeBrewCount = 0` line. If anything else reads that count from the main actor — a SwiftUI view, a badge count — you have an unsynchronized write racing a read. Thread Sanitizer catches this, eventually, if you're lucky enough to hit it under instrumentation.
+
+**2. Calling main-thread-only APIs.** This is the loud one. `Timer.invalidate()` must be called on the thread that scheduled the timer. `UIView` and most of UIKit is main-thread-only. Core Data's `NSManagedObjectContext` is bound to its queue. Call these off-main and you get anything from a silently leaked timer that keeps firing forever to an assertion failure with a stack trace that makes no sense because the top frame is `swift_release`.
+
+That leaked timer is the genuinely nasty one. `invalidate()` on the wrong thread doesn't crash. It just quietly fails to remove the timer from the run loop, so your "deallocated" controller's closure keeps running on a schedule, holding whatever it captured, forever.
+
+**3. Observers and notification tokens.** `NotificationCenter.removeObserver` is thread-safe, so that one's fine. But the modern block-based observers return a token, and the handler can be called *while you are deregistering it* from another thread. Tearing that down from `deinit` means the handler might be mid-flight with a half-deallocated object.
+
+---
+
+## The fix, in order of preference
+
+**Don't do work in deinit.** This is the real answer and the one worth internalizing. `deinit` is for releasing memory the runtime can't release for you — raw pointers, file descriptors, C handles. It is the wrong place for "clean up my app state," because you don't control when or where it runs.
+
+Give the object an explicit teardown that someone calls at a moment you chose:
+
+```swift
+@MainActor
+final class BrewTimerController {
+    private var ticker: Timer?
+    private var activeBrewCount = 0
+
+    func stop() {           // isolated, synchronous, called on purpose
+        ticker?.invalidate()
+        ticker = nil
+        activeBrewCount = 0
+    }
+}
+```
+
+In SwiftUI, `.onDisappear` or the cancellation of a `.task` is usually the right trigger. In UIKit, `viewDidDisappear` or wherever the owner is torn down. The point is that *you* picked the thread and the moment.
+
+**If you must schedule work from deinit, capture values, never self.** The temptation is:
+
+```swift
+deinit {
+    Task { @MainActor in
+        self.cleanUp()      // ❌ won't compile, and shouldn't
+    }
+}
+```
+
+You can't capture `self` in an escaping closure from `deinit` — the object is already dying, and resurrecting it is undefined behavior. Swift blocks it. What you *can* do is copy out the plain values you need first:
+
+```swift
+deinit {
+    let ticker = self.ticker        // local copy, no self capture
+    Task { @MainActor in
+        ticker?.invalidate()
+    }
+}
+```
+
+This compiles and is safe, but notice what you gave up: the invalidation now happens at some arbitrary later point. If anything depends on the timer being dead *now*, this doesn't give you that. It's a mitigation, not a design.
+
+**For raw resources, deinit is correct.** Closing a file descriptor or freeing a `malloc`'d buffer is thread-agnostic and genuinely belongs here. That's what the carve-out is for.
+
+---
+
+## How to go find yours
+
+Grep is unreasonably effective on this one:
+
+```bash
+grep -rn -A6 "deinit" --include="*.swift" . | grep -iE "invalidate|removeObserver|UIView|context|MainActor|\.shared"
+```
+
+Any hit is worth a look. Then turn on Thread Sanitizer (Product → Scheme → Diagnostics) and actually exercise teardown paths — push and pop the same screen thirty times, background and foreground the app, kill network mid-request. Teardown races hide because nobody tests teardown as a feature.
+
+The clean mental model: **`@MainActor` on a type is a promise about the code you write and call. `deinit` is code the runtime calls, on its schedule, on its thread.** The annotation never reached it, and once you see that, the carve-out stops feeling like a loophole and starts feeling like a warning label.
+
+Everything in a `deinit` should be something you'd be comfortable running on a random thread at a random time. If it isn't, it doesn't belong there.
