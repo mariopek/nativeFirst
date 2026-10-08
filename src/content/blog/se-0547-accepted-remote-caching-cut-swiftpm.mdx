@@ -1,0 +1,157 @@
+---
+title: "SwiftPM Compilation Caching Is Accepted. The Part Your CI Actually Needed Got Cut."
+description: "SE-0547 landed today, accepted with modifications: the remote cache configuration was removed before acceptance. Local caching is real and it's good. But the shared cache that would make your clean CI builds fast got deferred to a future proposal."
+pubDate: 2026-10-08
+tags: ["Swift", "Swift Evolution", "SwiftPM", "Build Time", "CI", "Xcode"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1573014089159-8ee711dc5a8e?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A container ship loaded only halfway, the rest of the deck empty"
+---
+
+{/*
+SEO keywords: SE-0547 accepted, SwiftPM compilation caching, swift package build-cache configure, remote caching Swift,
+SwiftPM CAS cache, Swift build cache CI, SE-0545 trace events file, swift build --enable-build-caching
+
+Internal linking plan: /blog/se-0547-swiftpm-compilation-caching (our September coverage of the proposal under review),
+/blog/xcode-build-time-optimization-solo-ios-developer (the DerivedData-era version of this fight),
+/blog/swiftpm-embedincode-object-file-span-fix (the other SwiftPM compile-time bug that got fixed this year),
+/blog/swiftpm-traits-test-target-configurations-pitch (SwiftPM config that silently skips your tests),
+/learn/performance-optimization (course lesson on measuring before optimizing).
+*/}
+
+SE-0547 got accepted today. It was accepted **with modifications**, and the modification is the whole story: the remote caching configuration was pulled out of the proposal before it passed.
+
+So SwiftPM is getting real compilation caching — content-addressed, CAS-backed, genuinely fast. On your laptop. The version that would make your CI stop paying for the same compile a hundred times a week is now a "future direction."
+
+---
+
+## What actually shipped
+
+I wrote about [SE-0547 back in September](/blog/se-0547-swiftpm-compilation-caching) when it went up for review, and the core of it survived intact. Worth restating, because it's good:
+
+SwiftPM can now ask the compiler to hash a compile task's real inputs — sources, command line, imported modules — look that hash up in a content-addressable store, and replay the output instead of recompiling. Not timestamps. Content.
+
+That distinction is the point. Timestamp-based incremental builds are useless the moment your build directory is empty, which is exactly when you're suffering: a fresh worktree, a branch switch that invalidates half the module graph, a CI runner that clean-builds every single time.
+
+The proposal's own numbers, on a 12-core machine, fully warm cache versus cold:
+
+- SwiftPM itself: **68% faster**
+- SwiftSyntax: **75% faster**
+- Vapor: **67% faster**
+
+Those aren't marketing numbers. Those are the numbers for the workload that incremental builds have never been able to touch.
+
+Caching is opt-in. You turn it on per build:
+
+```bash
+swift build --enable-build-caching
+```
+
+Or persistently, which is what you actually want:
+
+```bash
+# For this package only (lands in .swiftpm/configuration/build-cache-config.json)
+swift package build-cache configure --enable-caching --size-limit 20G
+
+# For everything you build on this machine
+swift package build-cache configure --global --enable-caching --size-limit 10%
+```
+
+Three levels of config — global, package-local, per-build — each overriding the last, and additive. Enable it globally, then override just the path for one package. The package-local file goes into `.swiftpm/configuration/`, which `swift package init` now gitignores by default.
+
+A few more knobs worth knowing:
+
+```bash
+# Where it lives (defaults under ~/Library/Caches/org.swift.swiftpm/ on macOS)
+swift package build-cache configure --path /Volumes/Fast/swiftcache
+
+# Tell me when you hit and when you miss
+swift package build-cache configure --enable-diagnostic-remarks
+
+# How big is this thing
+swift package build-cache info
+
+# Nuke it
+swift package build-cache clean
+```
+
+Turn on the diagnostic remarks the first week. You will want them, because a cache that silently misses looks exactly like a cache that isn't installed.
+
+And one detail that quietly does a lot of work: **prefix mapping**, on by default when you enable caching. It canonicalizes absolute paths on compiler command lines, so the same package checked out at two different paths can share cache entries. Without it, every worktree is its own island and the whole worktree use case evaporates. With it, five worktrees share one cache.
+
+---
+
+## The part that got cut
+
+Here's the modification, straight from the acceptance:
+
+> The feedback regarding remote caching was addressed by removing the remote caching configuration options from the proposal.
+
+The original SE-0547 included options for pointing SwiftPM at a remote cache service or a custom LLVM CAS plugin library. The Ecosystem Steering Group took that out. The stated reason, in the proposal's Future Directions, is that they want to come back with a different approach — remote caching "consistently available across all Swift's supported host platforms via a default cache plugin shipped as part of the toolchain."
+
+Which is, honestly, a defensible call. A remote cache API that only works where someone happened to build a plugin is a worse foundation than one the toolchain ships everywhere. I get it.
+
+But let's be clear about who loses in the meantime.
+
+A local cache helps the person with the laptop. It helps me a lot — I switch branches constantly, I keep three worktrees, and my cold builds are about to stop being coffee breaks.
+
+It does approximately nothing for a fresh CI container. Your runner boots with an empty disk. The cache is on disk. The cache is empty. You compile everything, you compile it from scratch, and then the container is destroyed along with the cache you just spent four minutes populating.
+
+You can hack around it — most CI providers let you tar up a directory and restore it on the next run, and now that there's a stable cache path you can point at, that hack is at least *possible*:
+
+```yaml
+# GitHub Actions, roughly
+- uses: actions/cache@v4
+  with:
+    path: ~/Library/Caches/org.swift.swiftpm/
+    key: swiftpm-cache-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+    restore-keys: swiftpm-cache-${{ runner.os }}-
+```
+
+That works. It is also a fifteen-gigabyte tarball round-tripping through a cache service on every job, which is its own kind of slow, and it shares nothing between your machine and the runner. A real remote CAS would let the runner fetch exactly the twelve entries it missed. Tarball-restore makes you fetch all of them or none.
+
+The gap is real enough that people are already building their own. There's [a CLI tool for remote compilation caching in Xcode](https://www.reddit.com/r/swift/comments/1wv80p5/i_made_a_cli_tool_for_remote_compilation_caching/) making the rounds on r/swift this week. When the community ships the missing half of a proposal before the proposal is even implemented, that tells you where the pain is.
+
+---
+
+## The quieter acceptance from the same day
+
+SE-0545 was accepted today too, and nobody's going to write a headline about it. They should.
+
+It adds two flags to any SwiftPM subcommand that builds:
+
+```bash
+swift build --trace-events-file build.json
+```
+
+That writes a Chrome Trace Event Format file. Drop it into [Perfetto](https://perfetto.dev), [speedscope](https://www.speedscope.app), or `about://tracing`, and you get a timeline of every task in your build, laid out in parallel lanes. You can *see* where your build serializes. You can see the one task that forty other tasks are waiting on.
+
+And:
+
+```bash
+swift build --trace-events-file build.json --enable-task-backtraces
+```
+
+Task backtraces tell you *why* a task ran. Its arguments changed. One of its outputs got deleted out from under the build. The previous build was cancelled before it got there. That's the question you've been guessing at every time an "incremental" build rebuilt the world for no visible reason.
+
+The flags are experimental in nightly toolchains right now (`--experimental-trace-events-file`, `--experimental-task-backtraces`) and they lose the prefix on release. Backtraces cost a little performance, so they're opt-in on top of the trace.
+
+Pair them in that order: trace first, cache second. [Measure before you optimize](/learn/performance-optimization) isn't a slogan here, it's the actual workflow. If your build is slow because one module is a serialization bottleneck, a cache full of hits won't save you — you'll just wait on the same critical path, slightly faster.
+
+---
+
+## What I'm doing on Monday
+
+Turning on local caching globally with a 10% size limit, and leaving diagnostic remarks on for a week to see whether my hit rate is real. That's cheap, it's opt-in, and nothing about it can change my build outputs — the proposal is explicit that caching shouldn't affect what comes out the other end.
+
+Not touching CI yet. The tarball dance is a lot of ceremony for an uncertain win, and I'd rather wait for the toolchain plugin than build infrastructure I'll delete in a year. If your CI bill is big enough that four minutes a job is real money, the tarball is worth prototyping — just measure it against your current baseline before you commit, because restoring fifteen gigs isn't free either.
+
+One thing from the proposal I want to flag, because it's buried in a section people skip: the Security section notes that anyone who can modify the cache can tamper with your build artifacts, which is roughly the same power as being able to modify your source. On your laptop, fine. On a **shared CI node where several projects write to one cache directory**, that's a real threat model and you should think about permissions before you point six repos at one path. This is the same class of problem as [SwiftPM config that silently changes what gets built](/blog/swiftpm-traits-test-target-configurations-pitch) — build configuration is code, and it deserves the same suspicion.
+
+---
+
+SwiftPM has had a genuinely good year on build performance. [The embedded-resources bug that could turn one 165KB file into 200 seconds of type checking](/blog/swiftpm-embedincode-object-file-span-fix) got fixed. Now caching and tracing both land. That's three real wins on the thing that eats the most of my day, after years of [me fighting DerivedData with shell scripts and superstition](/blog/xcode-build-time-optimization-solo-ios-developer).
+
+The remote half will come. It'll probably be better for having waited.
+
+I just wish the thing that burns the most compute in our industry — clean builds on disposable machines, over and over, forever — weren't the use case that got deferred.
