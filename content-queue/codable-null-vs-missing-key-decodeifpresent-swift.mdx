@@ -1,0 +1,164 @@
+---
+title: "Codable Can't Tell You the Difference Between null and a Missing Key. Your PATCH Endpoint Can."
+description: "decodeIfPresent collapses an explicit JSON null and an absent key into the same nil, which makes 'clear this field' and 'leave it alone' indistinguishable. Here's the three-state wrapper that keeps them apart, and when you actually need it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Networking", "Codable"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1525261774241-4a83714af514?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A wall of brass post office boxes, one standing open and empty among the closed doors"
+---
+
+{/*
+SEO keywords: Swift Codable null vs missing key, decodeIfPresent explicit null,
+Swift JSON tri-state optional, Codable PATCH partial update Swift, Swift double optional JSON,
+contains key decoder Swift, Codable optional nil missing, Swift JSON patch semantics
+Internal linking plan: codable-convert-snake-case-acronym-bug (Codable's conveniences
+that aren't), jsondecoder-iso8601-fractional-seconds-failure (the same decode path breaking),
+unkeyeddecodingcontainer-skip-infinite-loop-swift (decoder internals),
+swift-networking-retry-token-refresh-request-deduplication (request layer design),
+course /learn/swiftui-in-practice-05-protocol-network-layer
+*/}
+
+A user cleared their bio and it came back. They cleared it again. It came back again.
+
+The app was sending the right thing. The backend was doing the right thing. The bug lived in a single line of `Codable` that treated two completely different pieces of JSON as identical — and it's a line I'd written a hundred times without thinking about it.
+
+---
+
+## Two different payloads, one Swift value
+
+Here's the problem in full. These are not the same JSON:
+
+```json
+{ "name": "Mario", "bio": null }
+{ "name": "Mario" }
+```
+
+The first says **"bio has no value — clear it."** The second says **"I'm not telling you anything about bio — leave whatever's there."** That distinction is the entire basis of `PATCH` semantics, and it's load-bearing in any partial-update API.
+
+Now decode both into this:
+
+```swift
+struct ProfileUpdate: Decodable {
+    let name: String?
+    let bio: String?
+}
+```
+
+Both give you `bio == nil`. Synthesized `Codable` conformance uses `decodeIfPresent` for optional properties, and `decodeIfPresent` returns `nil` for an explicit `null` *and* for an absent key. Two meanings, one representation, no warning.
+
+Encoding has the matching problem in reverse. By default, a `nil` optional is simply omitted from the output. So when your user clears their bio and you send `bio: nil`, the key vanishes, the server reads "no instruction for bio," and the old bio stays exactly where it was. Hence: the bio that wouldn't die.
+
+---
+
+## When you can safely ignore this
+
+Let me be clear, because this can turn into a cargo-cult thing: **most of your models do not need to care.**
+
+If you're decoding a `GET` response, `null` and absent almost always mean the same thing — there's no value. If your API only does full-document `PUT`, there's no "leave it alone" state to express. Reaching for a three-state wrapper everywhere makes every model and every call site worse to read for a distinction you never use.
+
+The cases where it genuinely matters are specific:
+
+- **`PATCH`-style partial updates** where omitting a field and clearing a field are different operations.
+- **Optimistic local caching** where you merge a server response into an existing object and need to know which fields the server actually spoke about.
+- **Sync protocols** where "unchanged" and "deleted" have to travel differently.
+- **Audit or form logic** where "user left this blank" differs from "user never saw this field."
+
+If you're not in one of those, stop here. If you are, the rest of this is the part nobody writes down.
+
+---
+
+## Representing three states
+
+You need a type with three cases, because you have three states: absent, present-and-null, present-with-a-value.
+
+The trick people reach for first is the double optional, `String??`. It technically holds three states, and it kind of works on decode if you write the container code by hand — but it's miserable to read, the compiler's optional-flattening makes it easy to collapse by accident, and `if case .some(.none)` at a call site communicates nothing. Skip it and write the type you mean:
+
+```swift
+enum Patchable<Value> {
+    case absent                // key wasn't in the JSON
+    case null                  // key was present, explicitly null
+    case value(Value)          // key was present with a value
+}
+```
+
+The decode side needs the container directly, because the question "was this key present at all" is a container question:
+
+```swift
+extension Patchable: Decodable where Value: Decodable {
+    init(from decoder: Decoder) throws {
+        // Reached only when the key exists, so this is never .absent here.
+        let container = try decoder.singleValueContainer()
+        self = container.decodeNil() ? .null : .value(try container.decode(Value.self))
+    }
+}
+
+struct ProfileUpdate: Decodable {
+    var name: Patchable<String> = .absent
+    var bio: Patchable<String> = .absent
+
+    enum CodingKeys: String, CodingKey { case name, bio }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // decodeIfPresent runs the initializer above only if the key exists;
+        // the ?? .absent is what captures "key was missing entirely".
+        name = try c.decodeIfPresent(Patchable<String>.self, forKey: .name) ?? .absent
+        bio  = try c.decodeIfPresent(Patchable<String>.self, forKey: .bio)  ?? .absent
+    }
+}
+```
+
+That's the whole mechanism. `decodeIfPresent` handles presence; `decodeNil()` inside the wrapper handles null-ness. The two questions get asked at the two different levels that can actually answer them.
+
+Encoding is where you have to be deliberate, because the default behavior is the thing that caused the bug:
+
+```swift
+extension Patchable: Encodable where Value: Encodable {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .absent: break                        // see the warning below
+        case .null:   try container.encodeNil()
+        case .value(let v): try container.encode(v)
+        }
+    }
+}
+
+// In the parent type — encodeIfPresent is NOT enough here.
+func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: CodingKeys.self)
+    if case .absent = bio {} else {
+        try c.encode(bio, forKey: .bio)            // emits null or the value
+    }
+}
+```
+
+**The gotcha inside the gotcha:** that `case .absent: break` in a `singleValueContainer` is a trap on its own. A single-value container that gets encoded without ever being written to will throw at runtime — you have to skip the key in the *parent* container, which is what the `if case .absent` check does. Handle absence one level up, where you still have the option of not writing the key at all.
+
+---
+
+## The simpler option you should consider first
+
+Before you adopt a generic wrapper across your whole network layer, ask whether you need a *diff* instead of a *document*.
+
+A lot of teams get this right by never building the ambiguous object in the first place: track which fields the user actually edited, and construct the request body from just those. A `[String: JSONValue]` assembled from a changed-fields set has no absent-vs-null ambiguity, because you only ever put in keys you mean.
+
+```swift
+var body: [String: AnyEncodable] = [:]
+if edited.contains(.bio) { body["bio"] = AnyEncodable(bio) }   // bio may be nil -> null
+```
+
+That's less elegant and much easier to reason about at 2 AM. The wrapper is the right call when the three-state model is genuinely part of your domain and flows through several layers. The diff is the right call when one screen sends one partial update. Pick based on how far the distinction has to travel.
+
+---
+
+## The theme
+
+`Codable`'s synthesized conformance is a very good default that quietly makes decisions for you, and every one of those decisions is a place your API contract can be subtly misrepresented.
+
+It decides `nil` means "omit the key." It decides absent and null are the same. It [converts snake_case in a way that breaks on the first acronym](/blog/codable-convert-snake-case-acronym-bug). It [picks a strict ISO 8601 parser that rejects fractional seconds](/blog/jsondecoder-iso8601-fractional-seconds-failure). None of those are bugs — they're defaults, and they're right most of the time. They just aren't a specification of your API, and the moment your API has opinions, you have to write them down yourself.
+
+When you do go under the hood, go in knowing the decoder has sharp edges of its own — [a container that doesn't advance can hang your app outright](/blog/unkeyeddecodingcontainer-skip-infinite-loop-swift). And where this logic lives matters as much as whether it's correct; the [protocol-oriented network layer lesson](/learn/swiftui-in-practice-05-protocol-network-layer) covers keeping it out of your views, which is the difference between one careful type and the same bug in nine places.
+
+Two different payloads should not become one Swift value. If your API distinguishes them, your model has to.

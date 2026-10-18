@@ -1,0 +1,142 @@
+---
+title: "Adding 86,400 Seconds Isn't Adding a Day. Twice a Year Your Streak Counter Finds Out."
+description: "A day isn't always 86,400 seconds long. Daylight saving transitions make it 23 or 25 hours, which quietly breaks streak counters, 'last 7 days' queries, and repeating reminders. Here's why Calendar exists and how to do date math that survives March."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Foundation"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1439754389055-9f0855aa82c2?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A large clock tower face seen from below against a pale sky, hands frozen mid-afternoon"
+---
+
+{/*
+SEO keywords: Swift date arithmetic, addingTimeInterval 86400 bug, Swift daylight saving bug,
+Calendar date by adding day Swift, Swift startOfDay DST, Swift streak counter bug,
+Foundation Calendar vs TimeInterval, Swift date math timezone
+Internal linking plan: continuousclock-date-elapsed-time-swift (wall clock vs monotonic —
+the sibling problem), jsondecoder-iso8601-fractional-seconds-failure (dates arriving wrong),
+dateformatter-recreated-every-call-swift-performance (Foundation date APIs cost more than
+you think), decimal-separator-locale-string-format-swift-bug (locale assumptions in general),
+course /learn/error-handling-loading-states
+*/}
+
+There's a specific kind of bug report that arrives twice a year, and it always sounds unhinged.
+
+"My streak reset even though I logged in every day." "The app says my 7-day chart covers 8 days." "My 9 AM reminder fired at 8 AM." All of them filed in late March or late October. All of them from one line of code that looked completely reasonable:
+
+```swift
+let tomorrow = today.addingTimeInterval(86400)
+```
+
+Sixty times sixty times twenty-four. That's a day. Except twice a year, in most of the world, it isn't.
+
+---
+
+## A day is not a fixed length
+
+`Date` is a point on a timeline — an offset in seconds from a reference instant. It knows nothing about days, calendars, or where the user is standing. `addingTimeInterval(86400)` adds exactly 86,400 seconds of elapsed physical time. That's it.
+
+A **calendar day** is a totally different concept. It's "from midnight to the next midnight in this time zone," and that interval is:
+
+- 86,400 seconds normally
+- **82,800 seconds** (23 hours) on the spring-forward day
+- **90,000 seconds** (25 hours) on the fall-back day
+
+So on the morning the clocks jump forward, adding 86,400 seconds to 9:00 AM gets you 10:00 AM the next day. Fall back, and you land at 8:00 AM. Your code isn't drifting by a rounding error — it's off by a full hour, and it stays wrong for everything downstream.
+
+And it gets worse than DST. Some time zones have changed their offset by 30 or 45 minutes. Lord Howe Island shifts by *half an hour*. Countries change their DST rules by legislation, which is exactly why Foundation ships a time zone database instead of a formula.
+
+---
+
+## What this actually breaks
+
+**Streak counters.** The classic. You compute "did the user log yesterday" by subtracting 86,400 and comparing day boundaries. On the 25-hour day, "yesterday" lands back inside today, and the streak either double-counts or resets. The user did everything right and your app punished them for it.
+
+**"Last 7 days" windows.** `now.addingTimeInterval(-7 * 86400)` is not seven calendar days ago when a transition sits in that window. Your chart silently covers 6 days and 23 hours, which pulls one extra or one fewer row into the bucket at the edge. Nobody notices until someone adds up the numbers.
+
+**Repeating reminders.** Schedule by adding seconds and the whole series walks by an hour at the transition, and then stays walked.
+
+The reason this survives code review is that it's correct 363 days a year, in every test you wrote, on your simulator, in your time zone. It's not a logic error you can spot by reading. It's a wrong model of what a day is.
+
+---
+
+## Let Calendar do it
+
+`Calendar` exists precisely because this is hard. It owns the time zone, the DST rules, and the knowledge that months have different lengths and some years have leap days.
+
+```swift
+let calendar = Calendar.current
+
+// Wrong: adds a fixed number of seconds
+let bad = today.addingTimeInterval(86400)
+
+// Right: asks for the next calendar day, whatever that costs in seconds
+let good = calendar.date(byAdding: .day, value: 1, to: today)!
+```
+
+`date(byAdding:value:to:)` handles the 23- and 25-hour days, month lengths, and leap years for free. Same call, `value: -7`, gets you an honest seven calendar days back.
+
+For "is this the same day as that" — the actual question behind most streak logic — don't compare timestamps at all:
+
+```swift
+// Did the user log today?
+let didLogToday = calendar.isDateInToday(lastLogDate)
+
+// Are these two logs on the same calendar day?
+let sameDay = calendar.isDate(a, inSameDayAs: b)
+
+// How many calendar days between two dates?
+let days = calendar.dateComponents([.day],
+                                   from: calendar.startOfDay(for: start),
+                                   to: calendar.startOfDay(for: end)).day ?? 0
+```
+
+Note the `startOfDay` calls in that last one. `dateComponents` counts *elapsed* components between two instants, so two dates 20 hours apart that straddle midnight give you `0` days. Normalizing both to their day boundary first is what turns it into the calendar question you meant.
+
+---
+
+## Three details that bite after you've fixed the obvious part
+
+**`date(byAdding:)` returns an optional, and not just for ceremony.** Ask for 2:30 AM on the spring-forward morning and that wall-clock time does not exist in that time zone. Foundation will usually snap you to a nearby valid instant, but the optional is there because some requests genuinely have no answer. Don't reflexively `!` it in anything that matters.
+
+**Use one calendar, deliberately.** `Calendar.current` reads the user's time zone, which is correct for anything the user sees. For anything you *store*, compare across devices, or send to a server, pin it explicitly:
+
+```swift
+var utc = Calendar(identifier: .gregorian)
+utc.timeZone = TimeZone(identifier: "UTC")!
+```
+
+Mixing the two on one code path is how you get a streak that's correct on the device and wrong on the backend.
+
+**Test the transition explicitly.** This is the part everyone skips. Don't trust `Calendar.current` in tests — construct the hazard:
+
+```swift
+import Testing
+
+@Test func streakSurvivesSpringForward() {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "Europe/Berlin")!   // DST, 02:00 -> 03:00
+
+    // 2026-03-29 is the spring-forward day in Berlin: a 23-hour day.
+    let before = cal.date(from: DateComponents(year: 2026, month: 3, day: 28, hour: 9))!
+    let next   = cal.date(byAdding: .day, value: 1, to: before)!
+
+    #expect(cal.component(.hour, from: next) == 9)        // still 9 AM
+    #expect(next.timeIntervalSince(before) == 82_800)     // but only 23 hours later
+}
+```
+
+That second assertion is the whole lesson in one line. The wall-clock hour held. The elapsed seconds didn't. A fixed-interval version of this code fails the first assertion and passes the second, which is exactly backwards from what a user expects.
+
+---
+
+## The rule
+
+**If the unit has a name a human would use — day, week, month, year — ask `Calendar`. If it's genuinely a duration in seconds, use seconds and don't call it a day.**
+
+That split covers almost everything. A 15-minute timeout is seconds. "Tomorrow at 9" is a calendar question. The bugs happen in the middle, where somebody writes a duration and means a calendar.
+
+It's the same shape as a problem I've written about before from the other direction: [`Date()` subtraction lies to you about *elapsed* time](/blog/continuousclock-date-elapsed-time-swift), because the wall clock gets corrected under you. One API, two jobs, and the wrong one is always more convenient. Dates stay a reliable source of this kind of thing — [the day your backend adds milliseconds to its timestamps](/blog/jsondecoder-iso8601-fractional-seconds-failure) is the same genre of surprise, and [Foundation's date formatters cost more than they look like they do](/blog/dateformatter-recreated-every-call-swift-performance) on top of it.
+
+The broader habit is distrusting any constant that encodes an assumption about the world. `86400` is one. [A decimal point](/blog/decimal-separator-locale-string-format-swift-bug) is another. Both are true where you're sitting and false somewhere you ship. If you want the testing discipline that catches this class of thing, the [error handling and loading states lesson](/learn/error-handling-loading-states) covers constructing the hazard instead of hoping for it.
+
+Delete `86400` from your codebase. There is no correct use of it that wouldn't read better as a `Calendar` call or an honest number of seconds.
