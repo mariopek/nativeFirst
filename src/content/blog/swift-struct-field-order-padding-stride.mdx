@@ -1,0 +1,150 @@
+---
+title: "Swift Never Reorders Your Struct's Fields. Move One Line and Your Array Gets a Third Smaller."
+description: "Swift lays out stored properties in declaration order and never rearranges them, so a Bool declared before an Int64 silently costs 8 bytes of padding per element. A new Swift Evolution pitch wants the compiler to warn you. Here's the mechanism, the real numbers, and what to do about it today."
+pubDate: 2026-10-18
+tags: ["Swift", "Performance", "iOS Development", "Swift Evolution"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1465844880937-7c02addc633b?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Shipping containers stacked tightly together in a port, packed with no wasted space between them"
+---
+
+{/*
+SEO keywords: Swift struct padding, Swift memory layout, MemoryLayout stride Swift,
+Swift struct field order performance, AvoidablePadding warning, Swift struct alignment,
+reduce struct size Swift, Swift frozen type layout, struct stride vs size Swift
+Internal linking plan: arrayslice-holds-entire-array-memory-swift (memory you didn't
+know you were holding), struct-wrapping-class-copy-on-write-swift (struct internals that
+don't match intuition), observable-vs-observableobject-1000-row-redraw-benchmark (where
+per-element costs multiply), swift-memberwise-init-private-set-blind-spot (memberwise init
+is why there's no fix-it), property-wrapper-let-sendable-strict-concurrency-pitch (another
+pitch-stage post), course /learn/performance-optimization
+*/}
+
+These two structs hold exactly the same three values. One of them takes 24 bytes per element in an array, the other takes 16.
+
+```swift
+struct Bad {
+    var isActive: Bool
+    var value: Int64
+    var isVisible: Bool
+}
+
+struct Good {
+    var value: Int64
+    var isActive: Bool
+    var isVisible: Bool
+}
+```
+
+That's it. That's the whole change. I moved one line up and the array got a third smaller.
+
+I've been writing Swift for years and I knew this in the abstract — "alignment, padding, sure." I did not know the penalty was 50% on a struct this small, and I definitely didn't know that absolutely nothing in the toolchain will mention it to you. A [pitch that landed on the Swift forums yesterday](https://forums.swift.org/t/pitch-an-opt-in-warning-for-avoidable-struct-padding/90128) wants to change the second part.
+
+---
+
+## Swift lays your fields out in the order you typed them
+
+This is the bit that surprises people. Swift does not rearrange your stored properties. It walks them in declaration order, inserts whatever padding each one's alignment demands, and that's your layout.
+
+`Int64` needs 8-byte alignment. So in `Bad`:
+
+- `isActive` takes byte 0.
+- `value` can't start at byte 1 — it needs an offset divisible by 8 — so the compiler inserts **7 bytes of padding** and puts it at byte 8.
+- `isVisible` lands at byte 16.
+
+Size: 17 bytes. But the whole struct now has 8-byte alignment, so the *stride* — the distance from one element to the next in an array — rounds up to 24. You pay 24 bytes to store 10 bytes of actual data.
+
+In `Good`, the big field goes first. `value` at byte 0, `isActive` at 8, `isVisible` at 9. Size 10, stride 16. Same data, same semantics, same API surface. Six bytes of waste instead of fourteen.
+
+The general rule falls out of this: **declare your stored properties from largest alignment to smallest.** Int64s and Doubles first, then Int32s, then Bools and Int8s. That single habit removes most avoidable padding you'll ever create.
+
+---
+
+## The part where it actually costs you something
+
+Here's my honest take: for one struct sitting in one variable, who cares. Eight wasted bytes is nothing. This is not a reason to go reorder every type in your app tonight.
+
+It starts mattering the moment you multiply.
+
+The pitch includes measurements from an Apple M4 running Swift 6.4 in release mode: summing the `value` field across **2 million elements** took 0.33 ns per element for `Bad` and 0.22 ns for `Good`. Roughly 1.5× — and the author notes the slowdown tracks the stride ratio (24/16 = 1.5) across runs, landing between 1.5× and 1.7×.
+
+That ratio is the tell. The loop isn't doing more arithmetic in the `Bad` case. It's doing the *exact same* arithmetic while waiting on memory. You made every cache line carry two useful elements instead of three, so you pay 50% more trips to RAM for the same work. I haven't run these numbers on my own machine — they're from the pitch, and I'm quoting them rather than pretending I benchmarked an M4 this morning — but the mechanism is textbook and the ratio is exactly what you'd predict.
+
+So the question isn't "is my struct padded." It's **"how many of these do I have, and does anything iterate them?"** A settings struct: ignore it. A 50,000-row dataset you filter on every keystroke, a particle buffer, a decoded API response you map over — that's where a third of your memory bandwidth is sitting in holes.
+
+It's the same shape as a lot of iOS performance work: a per-element cost that's invisible until the element count gets real. Same reason [image decoding looks free until you scroll a list of them](/blog/swiftui-image-downsampling-decode-cost), and the same reason [redraw costs that don't register at 10 rows wreck you at 1,000](/blog/observable-vs-observableobject-1000-row-redraw-benchmark).
+
+---
+
+## Nothing tells you this is happening
+
+This is the part that genuinely annoyed me, and it's the pitch's strongest argument.
+
+**The compiler knows.** It computed your layout. It could trivially compute the better one. It says nothing, because declaration order is deliberately the contract.
+
+**SwiftLint can't help.** It's working on syntax. It has no idea how big an `Int64` is on your target, let alone what your custom nested type strides to.
+
+**The C tools don't work.** You might reach for `pahole`, which has done exactly this job for C structs for twenty years. The pitch's author checked with `dwarfdump`: Swift's debug info doesn't carry member offsets for Swift structs. There's nothing there to read.
+
+Which leaves exactly one safeguard available today, and it's manual:
+
+```swift
+import Testing
+
+@Test func brewRecordLayoutIsPacked() {
+    // 16, not 24 — field order matters here, this type ships in a 50k-element array
+    #expect(MemoryLayout<BrewRecord>.stride == 16)
+}
+```
+
+That works. I like it more than I expected to, actually — it's a cheap test that documents intent and fails loudly when someone adds a `Bool` in the wrong place. But you have to know to write it, for each type, which means you have to already know about the problem. Pure survivorship bias: the people who'd benefit most are the people who've never heard of `MemoryLayout.stride`.
+
+---
+
+## What the pitch proposes
+
+A new diagnostic group, `AvoidablePadding`, **off by default**, that you opt into with `-Wwarning AvoidablePadding` or your SwiftPM warning settings.
+
+The rule is narrow in a way I appreciate. Take the stride as declared. Take the stride the compiler's own layout algorithm would produce with the properties sorted by alignment, largest first. Warn only if the second is smaller:
+
+```
+warning: reordering the stored properties of 'Bad' would reduce its
+stride from 24 to 16 bytes [#AvoidablePadding]
+note: for example: value, isActive, isVisible
+```
+
+Two details worth calling out. It compares **stride, not size** — stride is what arrays and `UnsafeMutablePointer.allocate(capacity:)` actually pay for, and padding that no ordering can remove never gets reported. That's a direct swipe at C's `-Wpadded`, which is famous for being too noisy to leave on.
+
+And there's deliberately **no fix-it**, for a reason that'll be familiar if you've ever been bitten by the synthesized initializer: reordering stored properties reorders the memberwise init's parameters. That's a source-breaking change at every call site, so the pitch leaves it to you. The synthesized init quietly deriving its shape from your declarations is the same mechanism behind [a different memberwise-init blind spot I've written about](/blog/swift-memberwise-init-private-set-blind-spot) — it's convenient right up until your field declarations turn out to be API.
+
+For layouts that are padded on purpose — fields you read together kept on one cache line, or a producer and consumer index deliberately kept apart to dodge false sharing — you opt out per type with `@diagnose` and a written reason, using the SE-0522 machinery that shipped in Swift 6.4.
+
+---
+
+## "Why doesn't the compiler just do it?"
+
+That was the first reply on the thread, and it's the right question.
+
+The answer from the Swift side is more interesting than I expected. For non-frozen types, reordering storage is apparently fine in principle — one core team member said it "should absolutely be possible" and has been suggested before, blocked mostly on compiler engineering time rather than anything fundamental. Another suggested making it explicit opt-in (`@reorderableFields` was floated) specifically to dodge Hyrum's law and avoid reasoning about the cross product of availability, language mode, library evolution and frozenness. Worth noting the same reply also called a diagnostic "overly noisy," so this is a real disagreement, not a rubber stamp.
+
+But here's the piece that matters for us specifically. **Frozen types on ABI-stable platforms — which is to say, Apple's — can't be reordered after the fact.** Their layout is the ABI. If you're shipping a library with library evolution enabled, your struct's field order is a promise you made on day one.
+
+Which makes the warning more useful on our platform than anywhere else. Automatic reordering, if it ever lands, helps the non-frozen case. For a frozen type, a warning *before your first release* is the only thing that can save you — after that, the layout is load-bearing forever.
+
+---
+
+## What to do on Monday
+
+Don't go refactoring. Do three things:
+
+**Sort by alignment when you write a new struct.** Biggest first. It's free and it's a habit, not a project.
+
+**Find your hot one.** You probably have one or two types that exist in the tens of thousands. Print `MemoryLayout<T>.size` and `MemoryLayout<T>.stride` for them. If stride is meaningfully bigger than size, reorder and pin it with a test.
+
+**Don't optimize the cold ones.** Reordering a struct that exists twice buys you nothing and reshuffles a memberwise initializer for free. That's a worse trade than the padding.
+
+And while you're in there: struct memory is full of things that don't match intuition. [A small slice can pin an entire array's storage in memory](/blog/arrayslice-holds-entire-array-memory-swift), and [a struct wrapping a class can share storage with its own copies](/blog/struct-wrapping-class-copy-on-write-swift). Field order is just the one with a measurable number attached. If per-element costs are your current problem, the [performance optimization lesson](/learn/performance-optimization) walks the measurement side properly.
+
+The pitch is a day old and already arguing with itself about scope, so don't expect this flag in your next Xcode. It's at the stage where [other pitches I've covered](/blog/property-wrapper-let-sendable-strict-concurrency-pitch) sat for months before anything happened.
+
+Doesn't matter. The mechanism is true today, in every version of Swift you've ever shipped. Your struct's field order isn't style. It's layout — and in an array, layout is bandwidth.
