@@ -14,6 +14,13 @@
 #   0  today already has a post, OR one was successfully promoted
 #   1  nothing shipped and the queue is EMPTY  (loud failure — needs a human)
 #   2  a post was promoted but validation failed (it is put back in the queue)
+
+# The site build OOMs with the default Node heap once the blog passes ~130 posts.
+# This silently cost six consecutive published days (2026-10-12..10-17): the build
+# died mid-prerender with a misleading "Cannot find module .../chunks/X.mjs", every
+# run fell back to the queue, and the queue drained to zero.
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
+
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 

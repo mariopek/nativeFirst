@@ -4,6 +4,13 @@
 # Exits non-zero with a specific message on the first problem found.
 #
 # Every check here corresponds to a real failure that has cost a published day.
+
+# The site build OOMs with the default Node heap once the blog passes ~130 posts.
+# This silently cost six consecutive published days (2026-10-12..10-17): the build
+# died mid-prerender with a misleading "Cannot find module .../chunks/X.mjs", every
+# run fell back to the queue, and the queue drained to zero.
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
+
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
