@@ -1,0 +1,163 @@
+---
+title: "Your Set Iterates in a Different Order Every Launch. That's Not a Bug, It's a Security Feature."
+description: "Swift randomizes its hash seed on every process launch, so Set and Dictionary iteration order changes between runs. Here's why that exists, the three places it silently breaks your app, and how to get stable order without giving up the hash table."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Testing"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1501003878151-d3cb87799705?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A deck of playing cards scattered across a table in no particular order"
+---
+
+{/*
+SEO keywords: Swift Set iteration order, Dictionary order random Swift, Swift hash seed randomized, SWIFT_DETERMINISTIC_HASHING, Swift snapshot test flaky order, stable dictionary order Swift
+Internal linking plan: mutating-hashable-class-corrupts-set-swift, swift-struct-field-order-padding-stride, enumerated-offset-is-not-an-index-swift, se-0543-inlinearray-hashable-accepted, learn: swiftui-foundations
+*/}
+
+A test passed 40 times, then failed on CI, then passed again when I reran it. The diff was two lines in the expected output, swapped.
+
+I did what everybody does. I reran it. It passed. I shipped. Three weeks later the same test failed on a different machine and I finally stopped pretending it was a fluke.
+
+The culprit was a `Set`. Specifically, that I'd assumed iterating one twice would give me the same order twice.
+
+---
+
+## Swift picks a new hash seed every time your process starts
+
+`Set` and `Dictionary` are hash tables. Where an element lands in the underlying storage depends on its hash value, and iteration just walks that storage front to back. So iteration order is a function of hash values.
+
+Here's the part people miss: Swift's `Hashable` doesn't produce a stable hash value. `Hasher` is seeded with a per-process random value, chosen when your app launches. Same element, same code, different launch, different hash.
+
+```swift
+let tags: Set<String> = ["swift", "ios", "swiftui", "xcode", "spm"]
+print(Array(tags))
+```
+
+Run that in a command line tool five times and you'll get something like:
+
+```
+["xcode", "swift", "spm", "swiftui", "ios"]
+["swiftui", "ios", "xcode", "spm", "swift"]
+["spm", "swift", "swiftui", "ios", "xcode"]
+["ios", "xcode", "swift", "spm", "swiftui"]
+["swift", "swiftui", "spm", "ios", "xcode"]
+```
+
+Five runs, five orders, zero code changes. The set is identical every time. Only the seed moved.
+
+This is documented behavior, not a quirk of your Xcode version. The standard library deliberately randomizes the seed.
+
+---
+
+## Why would anyone want this?
+
+Because the alternative got a lot of web servers knocked over.
+
+If hashing is deterministic and an attacker knows your hash function, they can craft thousands of keys that all hash to the same bucket. Your `O(1)` dictionary lookup degrades to `O(n)` as everything piles into one collision chain. Send enough of those as, say, JSON keys or form fields, and you've turned a cheap parse into a CPU bonfire. These are called hash-flooding attacks, and they were a real, widely exploited class of bug around 2011.
+
+Randomizing the seed per process kills it. The attacker can't precompute collisions because they don't know your seed, and it changes next launch anyway.
+
+So Swift made the tradeoff on purpose: unpredictable order, in exchange for not handing attackers a denial-of-service primitive in the standard library. Python, Ruby, and Rust made the same call.
+
+The cost lands on you only when you depended on something you were never promised.
+
+**Unordered means unordered.** The type told you up front; it just didn't make a scene about it.
+
+---
+
+## Where this actually bites
+
+It's rarely the dramatic failure. It's three quiet ones.
+
+**Snapshot and equality tests.** You build a `Set` or iterate a `Dictionary`, join it into a string, and compare against a recorded fixture. Passes locally all week. Fails on CI, once, for no reason you can reproduce. You rerun. It passes. Congratulations, you now have a test nobody trusts.
+
+**"Just take the first one."** This one is my favorite because it looks so reasonable:
+
+```swift
+// Pick a server to talk to
+let endpoint = availableEndpoints.first!   // availableEndpoints is a Set
+```
+
+`first` on a `Set` is not "the first one added." It's "whatever element the storage happens to hand back." That's a different server on every launch. Works fine in dev with one endpoint. Gets interesting in production with three, one of which is slow.
+
+**Anything that becomes a cache key or a file name.** Build a string out of dictionary iteration, hash it, use it as a cache key, and you get a fresh cache key every launch. Your cache has a 0% hit rate and you spend a day profiling the network layer.
+
+---
+
+## Getting stable order back
+
+The fix is not to abandon `Set`. It's to be explicit at the moment you need an order, because that's the moment you actually have an opinion about what the order should be.
+
+**Sort when you need determinism:**
+
+```swift
+let tags: Set<String> = ["swift", "ios", "swiftui", "xcode", "spm"]
+
+// Stable across launches, machines, and OS versions
+let stable = tags.sorted()
+print(stable)  // ["ios", "spm", "swift", "swiftui", "xcode"]
+```
+
+For dictionaries, sort by key and you get a deterministic sequence of pairs:
+
+```swift
+let counts = ["swift": 12, "ios": 3, "xcode": 7]
+
+for (key, value) in counts.sorted(by: { $0.key < $1.key }) {
+    print("\(key): \(value)")
+}
+// ios: 3
+// swift: 12
+// xcode: 7
+```
+
+**For tests, compare sets to sets.** If order genuinely doesn't matter to the behavior you're testing, don't flatten to an array and compare strings. `Set` equality ignores order, which is the whole point:
+
+```swift
+#expect(Set(result) == Set(["ios", "swift", "xcode"]))
+```
+
+That test can't flake on ordering, because it never looked at ordering.
+
+**If insertion order is the requirement, say so with the type.** No amount of sorting recovers insertion order — it's information a `Set` never stored. Keep an `Array` (and a `Set` alongside it if you need fast membership checks):
+
+```swift
+struct OrderedTags {
+    private(set) var items: [String] = []
+    private var seen: Set<String> = []
+
+    mutating func insert(_ tag: String) {
+        guard seen.insert(tag).inserted else { return }
+        items.append(tag)
+    }
+
+    func contains(_ tag: String) -> Bool { seen.contains(tag) }
+}
+```
+
+Array for order, set for `O(1)` lookups, and `seen.insert(_:).inserted` does the dedupe check and the insert in one pass. Boring, explicit, correct.
+
+---
+
+## The debugging flag worth knowing
+
+When you're chasing a flaky test and want to rule ordering in or out, Swift has an escape hatch: set the `SWIFT_DETERMINISTIC_HASHING=1` environment variable and the standard library uses a fixed seed instead of a random one.
+
+Add it to your scheme's Run or Test arguments, or export it before running `swift test`.
+
+This is a **debugging tool only**. It exists so the standard library's own tests are reproducible, and so you can bisect a heisenbug. Two warnings:
+
+It does not make iteration order match any order you'd call natural — it just makes the arbitrary order the *same* arbitrary order every time. And shipping with it reintroduces exactly the hash-flooding vulnerability the randomization prevents.
+
+Use it to confirm your diagnosis, then fix the code and take it back out. If a test only passes with deterministic hashing on, the test is still broken.
+
+---
+
+## The actual lesson
+
+My test wasn't flaky. It was lying, consistently, about a dependency it had on undefined behavior — and the random seed just happened to expose it one run in forty.
+
+That's the thing about ordering bugs in hash tables. The randomization doesn't create the bug. It finds it. A deterministic seed would have let that same wrong assumption sit in the codebase for years, until the day an OS update changed the hash function and broke it on every device at once.
+
+Swift is shaking the box on every launch so you find the loose part now.
+
+Related reading: [mutating a Hashable class corrupts your Set](/blog/mutating-hashable-class-corrupts-set-swift) covers what happens when a hash value changes while an element is *inside* the table, [field order changes your struct's size](/blog/swift-struct-field-order-padding-stride) is another case of the layout being nobody's promise, [enumerated() gives you an offset, not an index](/blog/enumerated-offset-is-not-an-index-swift) is the same shape of wrong assumption about collections, and [InlineArray gets Hashable](/blog/se-0543-inlinearray-hashable-accepted) is worth a look if you're hashing fixed-size buffers. If you're still building your mental model of Swift's value types and collections, start with [SwiftUI Foundations](/learn/swiftui-foundations).
