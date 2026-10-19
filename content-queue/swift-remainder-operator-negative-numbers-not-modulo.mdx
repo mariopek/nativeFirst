@@ -1,0 +1,201 @@
+---
+title: "Swift's % Isn't Modulo. -1 % 7 Is -1, and Your Carousel Just Crashed."
+description: "Swift's % operator is a remainder, not a modulo: its result takes the sign of the left-hand side, so -1 % 7 is -1, not 6. Here's why wraparound indexes crash on the back button, why Double has no % at all, and the one-line helper that fixes it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Swift Basics"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1542824850-ef5251a18564?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a round clock face with numbers arranged in a circle, the kind of wraparound that modular arithmetic is supposed to model"
+---
+
+{/*
+SEO keywords: Swift modulo negative number, Swift remainder operator, Swift % negative result,
+Swift modulo vs remainder, Swift wraparound index, truncatingRemainder vs remainder Swift,
+Swift Double modulo, Swift index out of range negative index, Swift positive modulo helper
+Internal linking plan: enumerated-offset-is-not-an-index-swift (indexes that lie to you),
+swift-sorted-is-not-a-stable-sort (stdlib doing exactly what it says, not what you assume),
+arrayslice-holds-entire-array-memory-swift (more index assumptions that bite),
+swift-string-count-grapheme-cluster-performance (another "basic" operator with a surprise),
+course /learn/debugging-with-ai
+*/}
+
+The crash report said `Fatal error: Index out of range`, and the line it pointed at had been untouched for eight months.
+
+It was a photo carousel. Swipe right, next photo. Swipe left, previous photo. Tap past the last one, it wraps back to the first. Every QA pass had tried the forward direction to death. Nobody had ever pressed "previous" on the very first photo, because who goes backward from the start?
+
+A user did. On day one of the release, apparently.
+
+```swift
+func showPrevious() {
+    currentIndex = (currentIndex - 1) % photos.count
+    imageView.image = photos[currentIndex]   // 💥 currentIndex == -1
+}
+```
+
+I'd written that line with total confidence. It's modular arithmetic. Clocks do it. Every math class I ever sat through promised me that `-1 mod 7` is `6`.
+
+Swift disagrees. And Swift is not wrong, it's just answering a different question.
+
+---
+
+## % is a remainder. It was never modulo.
+
+**Swift's `%` is the remainder operator**, and the Swift book is upfront about it: the sign of the result follows the left-hand side. So:
+
+```swift
+ 7 %  3   //  1
+-7 %  3   // -1
+ 7 % -3   //  1
+-1 %  7   // -1   ← the carousel bug
+```
+
+The mental model that makes this click: Swift's integer division **truncates toward zero**. `-7 / 3` is `-2`, not `-3`. The remainder is whatever's left over so that `(a / b) * b + (a % b) == a` holds. With `-7 / 3 == -2`, that leftover has to be `-1`.
+
+A true mathematical modulo works with **floored** division instead, where `-7 / 3` rounds down to `-3` and the leftover is a cheerful, always-positive `2`. Same inputs, different rounding rule, different answer.
+
+Think of it like a parking garage. Modulo says "you're on level 2 of the next floor down." Remainder says "you're 1 level below where you started." Both are true. Only one of them is a valid array index.
+
+---
+
+## Who else does this (and who doesn't)
+
+If you came to Swift from Python, this one is especially sneaky, because Python does the thing your math teacher promised:
+
+```python
+-1 % 7    # 6   (Python floors)
+-7 // 3   # -3
+```
+
+C, C++, Objective-C, Java, JavaScript, Kotlin, Rust and Swift all truncate. So your Objective-C code had this exact behavior too. You just maybe never hit it, because Objective-C codebases were full of `NSUInteger` indexes that would have wrapped to 18 quintillion instead of going negative, and crashed in a far more confusing way.
+
+The takeaway: **"modulo" in your head and `%` in your code are only the same thing when the left side is non-negative.** Every wraparound that can go backward is a suspect.
+
+---
+
+## The fix is one line. Write it once.
+
+The classic positive-modulo trick: take the remainder, add the divisor, take the remainder again.
+
+```swift
+extension BinaryInteger {
+    /// Mathematical modulo: the result always has the sign of `modulus`.
+    /// `(-1).modulo(7) == 6`
+    func modulo(_ modulus: Self) -> Self {
+        precondition(modulus != 0, "modulo by zero")
+        let r = self % modulus
+        return r != 0 && (r < 0) != (modulus < 0) ? r + modulus : r
+    }
+}
+```
+
+The fancy condition handles negative divisors properly. If you only ever wrap around a positive count (which is 99% of iOS code), the readable version is fine:
+
+```swift
+let wrapped = ((index % count) + count) % count
+```
+
+And the carousel becomes:
+
+```swift
+func showPrevious() {
+    guard !photos.isEmpty else { return }
+    currentIndex = (currentIndex - 1).modulo(photos.count)
+    imageView.image = photos[currentIndex]
+}
+```
+
+Note the `isEmpty` guard. `% 0` traps in Swift, and an empty photo array is exactly the kind of state that shows up the day the API returns nothing. I've watched one crash get fixed by introducing the other.
+
+---
+
+## Where else this hides in iOS code
+
+The carousel is the obvious one. The sneakier ones look like math you'd never question:
+
+**Day-of-week offsets.** `Calendar` gives you `weekday` as `1...7`, starting on Sunday. Shifting to a Monday-first week means subtracting, and subtracting means negatives:
+
+```swift
+let weekday = calendar.component(.weekday, from: date)   // 1 = Sunday
+let mondayFirst = (weekday - 2) % 7                       // Sunday → -1 😬
+let fixed = (weekday - 2).modulo(7)                       // Sunday → 6 ✓
+```
+
+That `-1` won't crash. It'll just put Sunday's data in a column that doesn't exist, or silently drop it from a chart. The quiet bugs are worse than the crashy ones.
+
+**Rotating through themes, tabs, or onboarding pages** with a "back" gesture. Same shape as the carousel.
+
+**Circular buffers.** A ring buffer with a read head that can step backward is a carousel wearing a lab coat.
+
+**Angles.** Normalizing a rotation gesture to `0..<360` with `%` gives you `-90` for a counterclockwise quarter turn. Which brings us to the second half of this mess.
+
+---
+
+## Double doesn't even have %
+
+Try it:
+
+```swift
+let angle = -90.0
+let normalized = angle % 360   // error: '%' is unavailable: For floating point numbers use truncatingRemainder instead
+```
+
+Swift removed `%` for floating point back in Swift 3, and replaced it with two methods that **do different things**. Picking the wrong one is its own little adventure.
+
+```swift
+(-90.0).truncatingRemainder(dividingBy: 360)  // -90.0  (same rule as Int's %)
+(7.0).truncatingRemainder(dividingBy: 3)      //   1.0
+
+(7.0).remainder(dividingBy: 3)                //   1.0
+(5.0).remainder(dividingBy: 3)                //  -1.0  ← wait, what?
+```
+
+`truncatingRemainder` behaves like integer `%`: truncate the quotient toward zero, sign follows the left side.
+
+`remainder(dividingBy:)` is the **IEEE 754 remainder**, which rounds the quotient to the *nearest* integer instead. `7 / 3` is about 2.33, which rounds to 2, so you get `7 - 6 = 1`. Fine. But `5 / 3` is about 1.67, which rounds up to 2, so you get `5 - 6 = -1`. **The result can be negative even when both inputs are positive.**
+
+I'll be honest: the first time I saw that, I assumed it was a bug and went looking for a radar. It's not. It's what the IEEE spec defines, and it's genuinely useful in numerical code. It's just a terrible default for "wrap this value into a range."
+
+For angles you want neither one raw. You want the same positive-modulo trick:
+
+```swift
+extension FloatingPoint {
+    func modulo(_ modulus: Self) -> Self {
+        let r = truncatingRemainder(dividingBy: modulus)
+        return r < 0 ? r + modulus : r
+    }
+}
+
+(-90.0).modulo(360)   // 270.0 ✓
+(450.0).modulo(360)   //  90.0 ✓
+```
+
+The rule of thumb: **`truncatingRemainder` when you want integer-style behavior, `remainder(dividingBy:)` almost never unless you know you need IEEE semantics** (signal processing, some numerical algorithms), and a `modulo` helper for anything that wraps.
+
+---
+
+## One more trap: Int.min
+
+This one's a fun-fact more than a daily risk, but it's earned a mention. `Int.min / -1` would be one larger than `Int.max`, which doesn't fit, so Swift traps. And because `%` is defined in terms of that division, `Int.min % -1` traps too, even though the mathematically correct answer is a perfectly representable `0`.
+
+If you're doing arithmetic on untrusted input (parsing, hashing, anything from the network), the stdlib has an escape hatch:
+
+```swift
+let (result, overflow) = Int.min.remainderReportingOverflow(dividingBy: -1)
+// result == 0, overflow == true, no crash
+```
+
+You'll probably never need it. But now you'll know why it exists.
+
+---
+
+## Why this keeps biting experienced developers
+
+Because `%` is one of the first operators you learn, and you learned it with positive numbers. Every tutorial example is `10 % 3`. Every FizzBuzz is positive. By the time negatives show up, your brain filed `%` under "solved" years ago.
+
+It's the same family as [enumerated() offsets that aren't indexes](/blog/enumerated-offset-is-not-an-index-swift), [sorted() not being stable](/blog/swift-sorted-is-not-a-stable-sort), and [String.count walking the whole string](/blog/swift-string-count-grapheme-cluster-performance): the stdlib does exactly what the docs say, and the docs say something slightly different from what you assumed in 2014. Swift is precise. Your memory of Swift is a summary. (And if you've been bitten by [ArraySlice indexes](/blog/arrayslice-holds-entire-array-memory-swift) not starting at zero, you already know how much damage one wrong index assumption can do.)
+
+If you hand this kind of crash to an AI assistant, give it the input that failed, not just the stack trace. "Index out of range on line 42" gets you a bounds check slapped on top. "Index out of range when `currentIndex` is 0 and the user goes back" gets you the actual fix. I wrote more about framing crashes that way in [Debugging with AI](/learn/debugging-with-ai).
+
+So here's my suggestion for this week: search your project for `% ` and look at every left-hand side that involves a subtraction. Ask one question each time: **can this ever be negative?**
+
+If the answer is "only if the user does something weird," the answer is yes. Users do something weird on day one.
