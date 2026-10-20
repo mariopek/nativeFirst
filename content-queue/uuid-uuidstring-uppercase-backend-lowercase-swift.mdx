@@ -1,0 +1,192 @@
+---
+title: "Swift's uuidString Is Uppercase. Your Backend's UUIDs Aren't. Every String Comparison Between Them Fails."
+description: "UUID().uuidString returns uppercase hex while Postgres, JavaScript and Python emit lowercase, so string comparisons, dictionary keys, cache file names and Set deduplication silently miss. Here's where it bites in iOS apps and how to keep UUIDs typed until the boundary."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Networking", "Codable", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1436918898788-ebce04d38e46?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A tray of metal letterpress type blocks, capital and lowercase letters sorted side by side"
+---
+
+{/*
+SEO keywords: Swift uuidString uppercase, UUID lowercase Postgres Swift, UUID string comparison fails Swift,
+Swift UUID Codable lowercase, iOS UUID case sensitive, uuidString lowercased, UUID(uuidString:) case insensitive,
+simulator case-insensitive file system device case-sensitive, Swift UUID dictionary key string
+Internal linking plan: codable-convert-snake-case-acronym-bug (another Codable default that disagrees with your backend),
+storing-absolute-file-paths-ios-container-uuid (UUIDs in file paths, different trap),
+mutating-hashable-class-corrupts-set-swift (Set lookups that silently miss),
+swift-sorted-is-not-a-stable-sort (works-in-testing-not-in-contract shape),
+course /learn/swiftui-in-practice-05-protocol-network-layer
+*/}
+
+The "mark as read" button worked perfectly. You tapped it, the dot disappeared, and then the next sync put the dot right back. Every time.
+
+The request succeeded. The server stored the right ID. The app received the right ID back. And the comparison that decided whether this message was "the one you just read" said no, because one side said `E621E1F8-C36C-495A-93FC-0C247A3E6E5F` and the other said `e621e1f8-c36c-495a-93fc-0c247a3e6e5f`.
+
+Same UUID. Same 128 bits. Different strings. And `==` on `String` doesn't care what you meant.
+
+---
+
+## Swift Shouts, Everyone Else Whispers
+
+Here's the whole bug in two lines:
+
+```swift
+let id = UUID()
+print(id.uuidString) // "E621E1F8-C36C-495A-93FC-0C247A3E6E5F"
+```
+
+Foundation's `uuidString` is **uppercase hex**, and so is the string `JSONEncoder` writes when it encodes a `UUID`, because `UUID`'s `Codable` conformance goes through the same representation.
+
+Now look at what the rest of the world produces:
+
+- **Postgres** stores `uuid` as 16 bytes and prints it back in lowercase.
+- **JavaScript's** `crypto.randomUUID()` returns lowercase.
+- **Python's** `str(uuid.uuid4())` returns lowercase.
+- The UUID spec itself says implementations should **output lowercase** and accept either case on input.
+
+So Apple's platform is the odd one out. That's not a bug in Foundation, and it's not quite wrong either, since the spec explicitly allows case-insensitive input. But it means a Swift app talking to almost any backend is holding two spellings of the same value, and every place you compare them **as text** is a coin flip that always lands tails.
+
+The sneaky part is that the parser is forgiving:
+
+```swift
+let a = UUID(uuidString: "E621E1F8-C36C-495A-93FC-0C247A3E6E5F")
+let b = UUID(uuidString: "e621e1f8-c36c-495a-93fc-0c247a3e6e5f")
+print(a == b) // true
+```
+
+Decoding works in both directions. Your `Codable` models round-trip happily. That's exactly why nobody notices. The disagreement only shows up once a UUID **stops being a UUID and becomes a String**, and that happens in more places than you'd think.
+
+---
+
+## Where It Actually Bites
+
+**String-typed IDs in your models.** Somebody, at some point, decided `id: String` was simpler than `id: UUID`. Maybe the API docs said "string". Now locally created objects get `UUID().uuidString` (uppercase) and server objects arrive lowercase, and a merge-by-ID loop treats them as strangers:
+
+```swift
+struct Message: Codable {
+    let id: String
+    var isRead: Bool
+}
+
+// Created locally, optimistically
+let pending = Message(id: UUID().uuidString, isRead: true)
+
+// Same message, echoed back by the server
+let fromServer = Message(id: pending.id.lowercased(), isRead: false)
+
+pending.id == fromServer.id // false. Enjoy your duplicate row.
+```
+
+**Dictionary keys and Sets.** `[String: Message]` and `Set<String>` hash the string, not the UUID inside it. A dedupe pass happily keeps both spellings. If you've read about [Set lookups silently missing objects whose hash changed](/blog/mutating-hashable-class-corrupts-set-swift), this is its quieter cousin: nothing mutated, the keys just never matched to begin with.
+
+**Cache file names.** This is the one that gets truly nasty. You write an image cache to `Caches/\(id.uuidString).jpg`, and later look it up using an ID that came from the server. On the **simulator** it works. On a **device** it misses every time.
+
+Why? The simulator's files live on your Mac's disk, and macOS volumes are case-insensitive by default. iOS devices use a case-sensitive file system. So the bug exists only on real hardware, where you have the fewest debugging tools and the most annoyed users. It's the same flavor of trap as [storing absolute file paths that break on the next launch](/blog/storing-absolute-file-paths-ios-container-uuid): the path looks fine and the file is right there, but the lookup still misses.
+
+**Anything the backend treats as an opaque string.** Firestore document IDs, S3 object keys, Redis keys, analytics event properties, HMAC signatures over a request body. None of these know the string is a UUID, all of them compare case-sensitively, and a signature computed over `"E621..."` will not verify against `"e621..."`.
+
+**Your own tests.** Fixtures captured from the real API are lowercase. Objects your tests create are uppercase. If your assertions compare `.id` strings, some tests pass by accident and others fail for reasons that look completely unrelated. I've seen a team "fix" that with a `.lowercased()` in the test helper, which made the tests green and left the production bug exactly where it was.
+
+---
+
+## The Fix: Stay Typed Until the Last Possible Moment
+
+The real fix isn't `.lowercased()` sprinkled everywhere. It's refusing to let a UUID become a String until it has to leave your process.
+
+**1. Model IDs as `UUID`, not `String`.** If the API sends UUIDs as strings, `Codable` already decodes them into `UUID` for you, in either case:
+
+```swift
+struct Message: Codable, Identifiable {
+    let id: UUID   // decodes "e621e1f8-..." or "E621E1F8-..." just fine
+    var isRead: Bool
+}
+```
+
+Now `==`, `Hashable`, `Set<UUID>` and `[UUID: Message]` compare the 16 bytes. Case stops existing as a concept. This alone kills most of the bugs above.
+
+**2. When a string has to go out, pick one spelling and own it.** File names, cache keys, document IDs, signed payloads: route them all through a single property so there's exactly one place that decides:
+
+```swift
+extension UUID {
+    /// The canonical spelling used anywhere a UUID becomes text:
+    /// file names, cache keys, remote document IDs.
+    var canonicalString: String { uuidString.lowercased() }
+}
+
+let url = cachesDirectory.appendingPathComponent("\(message.id.canonicalString).jpg")
+```
+
+Lowercase is the right default because it's what the spec recommends and what nearly every backend already produces. The point isn't which case you choose. The point is that **`uuidString` is never called directly** outside that extension. Write it once, grep for strays in code review.
+
+**3. If your backend compares UUIDs as strings, encode them its way.** Most servers parse UUIDs properly and won't care. But if yours stores them in a `text` column, or uses them as document IDs, you want the JSON to match what the server already has. A tiny wrapper does it without touching every model:
+
+```swift
+@propertyWrapper
+struct LowercaseUUID: Codable, Hashable {
+    var wrappedValue: UUID
+
+    init(wrappedValue: UUID) {
+        self.wrappedValue = wrappedValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let uuid = UUID(uuidString: raw) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid UUID string: \(raw)"
+            )
+        }
+        wrappedValue = uuid
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wrappedValue.canonicalString)
+    }
+}
+
+struct Message: Codable {
+    @LowercaseUUID var id: UUID
+    var isRead: Bool
+}
+```
+
+Your Swift code still sees a plain `UUID`. Only the wire format changes. This is the same family of fix as [Codable's snake-case conversion tripping over acronyms](/blog/codable-convert-snake-case-acronym-bug): Foundation's default encoding is a reasonable opinion, but it's Foundation's opinion, not your backend's.
+
+**4. Normalize at the boundary when you can't change the type.** Sometimes `id: String` is load-bearing and a migration isn't happening this sprint. Fine. Normalize once, at decode time, in the one place data enters the app, not at every comparison site. Twelve scattered `.lowercased()` calls are twelve chances to forget the thirteenth.
+
+---
+
+## A Test That Would Have Caught It
+
+The test that catches this compares across sources, which is exactly what most suites skip:
+
+```swift
+import Foundation
+import Testing
+
+@Test func serverEchoMatchesLocallyCreatedMessage() throws {
+    let local = Message(id: UUID(), isRead: true)
+
+    // Simulate what a lowercase-emitting backend sends back
+    let json = #"{"id":"\#(local.id.uuidString.lowercased())","isRead":false}"#
+    let echoed = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+
+    #expect(echoed.id == local.id)
+}
+```
+
+With `id: UUID` it passes. Write the same test against the old `id: String` model, with the local ID created from `UUID().uuidString`, and it fails immediately, which is the whole point: it pins down the mismatch on your machine instead of on a user's phone. If you're building out the request layer anyway, the [protocol-based network layer lesson](/learn/swiftui-in-practice-05-protocol-network-layer) is a good place to hang tests like this, since it already has the seam where server JSON enters the app.
+
+---
+
+## The Takeaway
+
+A UUID is a number. Its string form is a rendering, and Swift renders it differently from nearly everyone else. Every bug in this post comes from comparing renderings instead of values.
+
+It's the same shape as [relying on sort stability that was never promised](/blog/swift-sorted-is-not-a-stable-sort): everything agrees right up until two systems that never talked about it have to agree.
+
+So keep the type. Let `UUID` be a `UUID` all the way to the edge of your app, and when it has to become text, make it become the same text every single time. The bits never disagreed. The strings were the problem.
