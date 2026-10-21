@@ -1,0 +1,179 @@
+---
+title: "You Switched Your Prices to Decimal. Decimal(0.1) Still Went Through a Double First."
+description: "Swift's Decimal fixes binary floating-point money bugs, until you build one from a Double or a float literal. Here's why Decimal(0.1) can carry the exact error you were trying to escape, and the initializers that actually give you exact cents."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Foundation", "Decimal"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1512075135822-67cdd9dd7314?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A scattered pile of coins on a table, the kind of small change a rounding error is made of"
+---
+
+{/*
+SEO keywords: Swift Decimal precision, Decimal(0.1) Swift, Decimal from Double imprecision,
+Swift money type Decimal, Decimal float literal Swift, Decimal(string:) locale,
+Swift currency rounding NSDecimalRound, store cents as Int Swift, JSONDecoder Decimal precision
+Internal linking plan: decimal-separator-locale-string-format-swift-bug (locale breaks number parsing),
+swift-remainder-operator-negative-numbers-not-modulo (another arithmetic assumption that lies),
+jsondecoder-iso8601-fractional-seconds-failure (decode path surprises),
+swift-6-2-strict-concurrency-migration-invoize-before-after (Invoize context),
+course /learn/debugging-with-ai, app /apps/invoize
+*/}
+
+An invoice came out one cent off. Just one, on a total of a few hundred euros, and only on some invoices.
+
+I'd already "fixed" money in that codebase. Every `Double` was gone, every price was a `Decimal`, and I'd written a smug little commit message about it. The cent was still missing. It turned out I had moved the bug instead of fixing it: the code was converting a `Double` into a `Decimal` instead of storing one.
+
+---
+
+## The bug you thought you killed
+
+Everyone learns this one eventually:
+
+```swift
+let a = 0.1 + 0.2
+print(a == 0.3)   // false
+print(a)          // 0.30000000000000004
+```
+
+`Double` is binary floating point. It can't represent 0.1 exactly, for the same reason you can't write 1/3 in decimal without running out of paper. Money is decimal, so storing it in binary gives you tiny errors, and enough tiny errors add up to a missing cent.
+
+The standard advice is to use `Decimal`. Foundation's `Decimal` is a base-10 type with a 38-digit mantissa, so 0.1 really is 0.1. Good advice. Then people write this:
+
+```swift
+let price: Decimal = 0.1
+let other = Decimal(0.1)
+```
+
+**Both of those go through a `Double` first.**
+
+---
+
+## Why a float literal can't save you
+
+`Decimal` conforms to `ExpressibleByFloatLiteral`. That sounds great until you look at how the protocol is declared: the conforming type gets the literal as its `FloatLiteralType`, and for `Decimal` that type is `Double`.
+
+So when you write `let price: Decimal = 0.1`, the compiler doesn't hand `Decimal` the characters "0.1". It hands over the closest `Double` to 0.1, which is roughly 0.1000000000000000055511151231257827. The binary error has been baked in before `Decimal`'s initializer runs.
+
+`Decimal(0.1)` is the same thing with more typing. You're calling `init(_ value: Double)`, and the argument was rounded to binary at compile time.
+
+For years the result looked like this:
+
+```swift
+print(Decimal(0.1))
+// 0.1000000000000000512
+```
+
+That's not even the true value of the `Double`. It's the conversion's own approximation of an approximation. Newer Foundation releases have reworked parts of `Decimal`, and depending on your OS and toolchain the conversion may round more gracefully now. **I wouldn't build a billing system on "may."** The issue isn't any one version's output. Once you write a float literal, the number has already gone through binary, and whatever comes out of the conversion is a guess about what you meant.
+
+It's like faxing a contract so you can scan it into a PDF. The PDF format is fine. The fax already blurred the text.
+
+---
+
+## How this turns into a missing cent
+
+Let's be fair: `0.1000000000000000512` displayed with two decimal places is still `0.10`. One conversion won't hurt you. The damage comes when you multiply, sum, and then round once at the end, which is exactly what an invoice does.
+
+```swift
+let unitPrice = Decimal(19.99)        // via Double
+let quantity: Decimal = 3
+let vatRate = Decimal(0.075)          // via Double
+let net = unitPrice * quantity
+let vat = net * vatRate
+```
+
+Values like 0.075 or 2.675 sit almost exactly on a rounding boundary. In binary they land slightly below it or slightly above it, and that "slightly" decides whether your half-cent rounds up or down. Every line item has its own coin flip, and the bookkeeper finds out which way they went.
+
+This is also why the bug only showed up on some invoices. It depended on the specific prices, so I couldn't reproduce it with my favorite test value of 10.00.
+
+---
+
+## Four ways to get an exact Decimal
+
+**1. Parse from a string, with a fixed locale.**
+
+```swift
+let posix = Locale(identifier: "en_US_POSIX")
+let price = Decimal(string: "19.99", locale: posix)!   // exactly 19.99
+```
+
+The `locale` parameter matters. Without it, `Decimal(string:)` uses the current locale's decimal separator, so on a German device "19.99" stops parsing where you'd expect. That's the [same locale trap that breaks `String(format:)`](/blog/decimal-separator-locale-string-format-swift-bug), coming at you from the input side this time. Use `en_US_POSIX` for machine-readable strings and save locale-aware parsing for text users type.
+
+**2. Build it from integer parts.**
+
+```swift
+// 1999 × 10^-2 = 19.99, no floating point anywhere
+let price = Decimal(sign: .plus, exponent: -2, significand: 1999)
+```
+
+It's verbose but unambiguous, and handy when you get prices in minor units from somewhere else.
+
+**3. Divide integers.**
+
+```swift
+let price = Decimal(1999) / 100   // exact
+let vatRate = Decimal(75) / 1000  // exactly 0.075
+```
+
+Integer literals are fine. `Decimal` is also `ExpressibleByIntegerLiteral`, and integers convert exactly. Only the fractional literal causes trouble.
+
+**4. Don't use Decimal for storage at all.**
+
+This one's unfashionable but battle-tested. Store money as an `Int` count of minor units (cents) along with a currency code:
+
+```swift
+struct Money: Codable, Hashable {
+    var minorUnits: Int      // 1999
+    var currencyCode: String // "EUR"
+}
+```
+
+Integer math is exact, fast, and `Codable` with no surprises. Use `Decimal` only for the in-between steps, like applying a percentage, and convert back to minor units with a rounding rule you choose deliberately. Watch out for currencies like the Japanese yen (zero decimal places) and the Kuwaiti dinar (three), so the number of minor units per major unit belongs to the currency, not a hardcoded 100.
+
+---
+
+## Round once, on purpose
+
+Getting the inputs exact is half the job. The other half is deciding when and how you round. Foundation has had a precise tool for this for ages:
+
+```swift
+func rounded(_ value: Decimal, scale: Int = 2,
+             mode: NSDecimalNumber.RoundingMode = .plain) -> Decimal {
+    var input = value
+    var result = Decimal()
+    NSDecimalRound(&result, &input, scale, mode)
+    return result
+}
+
+let vat = rounded(net * vatRate)   // .plain: 0.005 rounds up
+```
+
+`.plain` is the "round half up" you learned in school. `.bankers` rounds halves to the nearest even digit, which some accounting rules require. Pick one and write down why, because "we rounded however the formatter felt like it" doesn't go over well in an audit.
+
+Also decide whether you round per line item or on the total. These can differ by a cent, and **neither is wrong**, but the PDF and the backend have to agree. My one-cent bug in [Invoize](/apps/invoize) ended up having both causes at once: `Double`-sourced rates and the app and server rounding at different steps. If you remember the [Swift 6.2 migration post](/blog/swift-6-2-strict-concurrency-migration-invoize-before-after), yes, it's the same app. Invoicing apps are mostly a list of ways to be wrong by a cent.
+
+---
+
+## Your JSON layer can sneak the Double back in
+
+There's one more place a `Double` can slip in: decoding.
+
+When you decode a `Decimal` property from a JSON number like `19.99`, the value goes through the decoder's number parsing. Historically `JSONDecoder` read numbers as floating point on the way in, and people saw values like `19.989999999999998` show up in fields that were declared `Decimal`. Newer Foundation decodes `Decimal` more carefully, but if you ship to older OS versions, check what your minimum deployment target actually does instead of assuming.
+
+The belt-and-braces approach is to have the backend send money as a string (`"19.99"`) or as integer minor units (`1999`) and decode that explicitly. If your API docs are full of `"amount": 19.99`, it's worth a conversation with your backend team. JSON numbers have the [same kind of "works until it doesn't" edge cases as dates](/blog/jsondecoder-iso8601-fractional-seconds-failure), and the fix is the same: agree on an explicit format and stop letting the parser guess.
+
+---
+
+## A five-minute audit
+
+Search your project for these and look at every hit:
+
+- `Decimal(` followed by a variable of type `Double`, or by a literal with a decimal point
+- `: Decimal = ` followed by a literal with a decimal point
+- `NSDecimalNumber(value:` with a `Double` argument (same problem, older API)
+- `.doubleValue` on any money value, which is the trip back the other way
+
+Grep is the easiest tool here, though an AI assistant does a decent job too if you ask it specifically to "find every place a Double becomes a Decimal." The [debugging with AI lesson](/learn/debugging-with-ai) covers how to phrase that kind of hunt so you get a list instead of a lecture.
+
+Like [Swift's `%` operator](/blog/swift-remainder-operator-negative-numbers-not-modulo), `Decimal` works exactly as documented. The surprise is in what you assumed it did.
+
+**Switching to Decimal only helps if the number never passed through a Double on the way in.**
