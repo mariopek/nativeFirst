@@ -1,0 +1,232 @@
+---
+title: "Your DateFormatter Says It's Next Year. Capital YYYY Isn't the Year You Think It Is."
+description: "In a DateFormatter pattern, YYYY is the week-based year, not the calendar year. For a few days around New Year it prints the wrong year, breaking receipts, filenames, cache keys, and API payloads. Here's why, which dates it hits per locale, and how to catch it before December does."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Foundation"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1484981184820-2e84ea0af397?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A paper calendar page with dates and a pen resting on it, ready for a new year of plans"
+---
+
+{/*
+SEO keywords: DateFormatter YYYY vs yyyy, Swift week-based year bug, dateFormat YYYY wrong year,
+iOS date shows next year December, yyyy-MM-dd Swift, week of year ICU pattern,
+en_US_POSIX DateFormatter, Date.FormatStyle year, Swift date format bug New Year
+Internal linking plan: dateformatter-recreated-every-call-swift-performance (the other
+DateFormatter trap), decimal-separator-locale-string-format-swift-bug (locale assumptions),
+jsondecoder-iso8601-fractional-seconds-failure (dates crossing the wire),
+continuousclock-date-elapsed-time-swift (Date isn't what you think, part N),
+course /learn/debugging-with-ai
+*/}
+
+Every year, somewhere around December 28th, a handful of apps quietly time-travel.
+
+Receipts get dated a year in the future. Exported files get named `backup-2027-12-29.json`. A sync endpoint rejects every request because the timestamp is "too far ahead." And the developer, who is on vacation eating leftovers, gets a crash-free, error-free, completely baffling bug report that says: **"Why does my order say next year?"**
+
+The cause is one character. Specifically, its capitalization.
+
+```swift
+let formatter = DateFormatter()
+formatter.dateFormat = "YYYY-MM-dd"
+```
+
+That looks like "four-digit year, month, day." It's not. Capital `Y` is a different field, and it agrees with the real year for about 360 days out of 365. Which is exactly long enough to ship it.
+
+---
+
+## Two Kinds of Year
+
+Date format patterns in Foundation come from Unicode's date pattern spec (the same one ICU uses), and that spec has two separate year fields:
+
+- **`yyyy`**: the calendar year. January 1st starts it. It's the one you want.
+- **`YYYY`**: the **week-based year**. It's the year that owns the *week* the date falls in.
+
+The week-based year exists for "week of year" numbering, the thing accountants and factories use when they say "we ship in week 52." If a week straddles New Year's Eve, the whole week has to belong to one year or the other. So a few days at the edge get reassigned.
+
+Think of it like a hotel that bills by the night. You checked in on December 31st, but the hotel files your stay under January because that's where most of the booking falls. Correct for the hotel's bookkeeping. Very confusing on your credit card statement.
+
+`YYYY` is the hotel's bookkeeping. You almost never want it.
+
+---
+
+## Which Days Get Hit Depends on Where Your User Lives
+
+Here's the part that makes this bug so slippery. *Which* week counts as week 1 isn't universal. It depends on the locale, through two settings: the first day of the week, and the minimum number of days a week needs in the new year to count as week 1.
+
+Let's use the next boundary. January 1st, 2027 is a Friday.
+
+**In the US** (`en_US`: weeks start Sunday, and week 1 is whichever week contains January 1st), the week of Sunday December 27th through Saturday January 2nd belongs to 2027. So:
+
+```swift
+let f = DateFormatter()
+f.locale = Locale(identifier: "en_US")
+f.timeZone = TimeZone(identifier: "UTC")
+f.dateFormat = "YYYY-MM-dd"
+
+// December 30, 2026
+let date = DateComponents(
+    calendar: Calendar(identifier: .gregorian),
+    timeZone: TimeZone(identifier: "UTC"),
+    year: 2026, month: 12, day: 30
+).date!
+
+print(f.string(from: date)) // "2027-12-30"
+```
+
+Not even a year off in a tidy way. It's **2027 with December's month and day**, a date almost a full year in the future. That's what blows up your "is this timestamp in the future?" validation.
+
+**In much of Europe** (ISO 8601 rules: weeks start Monday, and week 1 needs at least four days in the new year), that same straddling week has only three days in 2027. So it belongs to **2026**, and the bug flips direction:
+
+```swift
+f.locale = Locale(identifier: "de_DE")
+
+// January 2, 2027
+// f.string(from: jan2) → "2026-01-02"
+```
+
+Now the date is almost a year in the *past*.
+
+So the same line of code, in the same week, produces "next year" for your American users and "last year" for your German ones. Your QA team, testing in October from one country, sees nothing. And some years, depending on which weekday January 1st lands on, the affected window shrinks to zero for a given locale, so it can pass a whole holiday season and bite the next one.
+
+---
+
+## This Has Taken Down Real Products
+
+This is not a theoretical footgun. In late December 2014, Twitter's Android app started logging users out en masse, and the widely shared explanation was a `YYYY` in a date format. Dates around December 29th were being formatted as 2015, requests looked like they came from the future, and the server rejected them.
+
+That's the general shape of the damage, and it's worth listing where a wrong year actually hurts:
+
+- **API payloads.** Servers that validate timestamps or signatures reject "future" requests. That means auth failures, which look like logouts.
+- **Cache keys and filenames.** `cache-2027-12-30` never gets invalidated, or overwrites something it shouldn't.
+- **Receipts and invoices.** A document dated next year is a support ticket at best and a legal headache at worst.
+- **Sorting.** If you sort by a formatted string (please don't), December 30th suddenly sorts after next summer.
+
+What makes it nasty is that nothing crashes. Every value is a perfectly valid, well-formed date string. It's just the wrong one.
+
+---
+
+## Its Cousins in the Pattern Alphabet
+
+Once you know that case matters, you start noticing the rest of the family. The two you'll actually trip over:
+
+| You meant | You typed | What you get |
+|---|---|---|
+| `dd`, day of month | `DD` | **Day of year.** February 3rd prints as `34`. |
+| `HH`, 24-hour clock | `hh` | 12-hour clock with no AM/PM. 14:00 prints as `02`. |
+
+`DD` is at least loud: it breaks on February 1st, so you'll probably catch it in a month. `YYYY` is the quiet one. It waits until you're on vacation.
+
+---
+
+## The Fix
+
+Step one is a one-character change:
+
+```swift
+formatter.dateFormat = "yyyy-MM-dd"
+```
+
+But if this string is going anywhere other than a human's eyeballs (an API, a filename, a database key), fix the locale too. A fixed-format date for machines should use `en_US_POSIX`. Otherwise the user's calendar settings can still get involved; someone with a Buddhist or Japanese calendar set will produce a year you didn't expect.
+
+```swift
+let machineFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = TimeZone(identifier: "UTC")
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+}()
+```
+
+Notice that's a stored, reused formatter. Creating one per call is its [own performance trap](/blog/dateformatter-recreated-every-call-swift-performance), and while you're in the area, the same "the user's locale changes my output" lesson applies to [number formatting too](/blog/decimal-separator-locale-string-format-swift-bug).
+
+Better still, for ISO timestamps, stop hand-writing the pattern:
+
+```swift
+// Full ISO 8601 timestamp, no pattern string to typo
+let stamp = date.formatted(.iso8601)
+
+// Or for decoding API responses
+let decoder = JSONDecoder()
+decoder.dateDecodingStrategy = .iso8601
+```
+
+(`.iso8601` has its own sharp edge with fractional seconds, [which I wrote about separately](/blog/jsondecoder-iso8601-fractional-seconds-failure).)
+
+And for anything a human reads, let the system build the format:
+
+```swift
+Text(date, format: .dateTime.year().month().day())
+```
+
+`Date.FormatStyle`'s `.year()` is the calendar year. There's no capital-letter trap to fall into because there's no pattern string at all.
+
+---
+
+## The One Legit Use of YYYY
+
+To be fair to capital Y: it's not a bug in Foundation. It's a feature with a terrible name collision.
+
+If you're actually displaying ISO week numbers, say a fitness app showing "Week 53 of 2026," then `YYYY` paired with `ww` is exactly right. Use `yyyy` with `ww` instead and you'd print "Week 53 of 2027" for January 2nd, which is the same bug in the other direction.
+
+```swift
+var iso = Calendar(identifier: .iso8601)
+iso.timeZone = TimeZone(identifier: "UTC")!
+
+let weekFormatter = DateFormatter()
+weekFormatter.calendar = iso
+weekFormatter.locale = Locale(identifier: "en_US_POSIX")
+weekFormatter.dateFormat = "YYYY-'W'ww" // "2026-W53"
+```
+
+Or skip the formatter and ask the calendar directly with `iso.component(.yearForWeekOfYear, from: date)` and `.weekOfYear`. If you're writing `YYYY` on purpose, you'll know. If you're not sure whether you meant it, you didn't.
+
+---
+
+## Catching It Before December Does
+
+The trick to testing this is that one boundary date isn't enough, because the bug goes forward in one locale and backward in another. Test both sides of New Year:
+
+```swift
+import Testing
+import Foundation
+
+@Test(arguments: ["en_US", "de_DE", "en_GB"])
+func exportDateKeepsCalendarYear(localeID: String) {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "UTC")!
+
+    let dec31 = cal.date(from: DateComponents(year: 2026, month: 12, day: 31))!
+    let jan1 = cal.date(from: DateComponents(year: 2027, month: 1, day: 1))!
+
+    let f = DateFormatter()
+    f.locale = Locale(identifier: localeID)
+    f.timeZone = TimeZone(identifier: "UTC")
+    f.dateFormat = ExportFormat.dayPattern // your real pattern
+
+    #expect(f.string(from: dec31).hasPrefix("2026"))
+    #expect(f.string(from: jan1).hasPrefix("2027"))
+}
+```
+
+With `YYYY`, `en_US` fails on December 31st and `de_DE` fails on January 1st. With `yyyy`, everything passes, in any year, in any country.
+
+The cheaper safety net is a grep. Run it in CI and fail the build on a hit:
+
+```bash
+grep -rn --include='*.swift' 'YYYY' Sources/ | grep -v 'ww' && exit 1 || exit 0
+```
+
+It's crude. It'll flag a comment now and then. That's a fine trade for never shipping this again.
+
+This is also a good one to hand an AI assistant: "find every `dateFormat` in this project and tell me which ones use week-based fields." It's tedious pattern-matching across files, which is exactly what they're good at. Just verify the answers with the test above, which is the core idea of [debugging with AI](/learn/debugging-with-ai) without letting it be the last word.
+
+---
+
+## The Takeaway
+
+`Date` in Swift is a moment in time. Everything else, including days, weeks, years, and even [how long an interval took](/blog/continuousclock-date-elapsed-time-swift), is an interpretation layered on top, and every interpretation has rules you didn't write.
+
+`YYYY` is the purest example. It's correct, documented, and deliberate. It's also a time bomb set for the last week of December.
+
+Go grep your project now. It takes ten seconds, and December is closer than it looks.
