@@ -1,0 +1,185 @@
+---
+title: "URLComponents Leaves the + in Your Query Alone. Your Server Reads It as a Space."
+description: "URLComponents.queryItems percent-encodes spaces and ampersands but leaves + untouched, and most servers decode + as a space. Here's why mario+test@gmail.com arrives as 'mario test@gmail.com', and the one-line fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Networking", "URLSession"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1566231949857-42a46fe5752d?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A vintage ink bottle resting on an old postmarked envelope with a handwritten address"
+---
+
+{/*
+SEO keywords: URLComponents plus sign not encoded, Swift queryItems plus sign space,
+URLQueryItem + encoding, percentEncodedQuery replacingOccurrences %2B, Swift URL query
+email plus address, application/x-www-form-urlencoded plus space Swift, URLSession query parameter bug
+Internal linking plan: custom-networking-layer-swift-urlsession-async-await (the URLComponents
+request builder this fixes), uuid-uuidstring-uppercase-backend-lowercase-swift (another
+client/server string mismatch), decimal-separator-locale-string-format-swift-bug (strings that
+look fine on your machine), codable-convert-snake-case-acronym-bug (Foundation conveniences that
+aren't quite), course /learn/swiftui-in-practice-05-protocol-network-layer
+*/}
+
+A support ticket came in that said, word for word: "your app says my account doesn't exist, but I'm literally logged in on the website."
+
+Their email was `mario+receipts@gmail.com`. By the time it reached our lookup endpoint, it was `mario receipts@gmail.com`. The space was the whole bug, and it came from a Foundation API I'd been using for years.
+
+---
+
+## The code that looks correct
+
+This is the request builder I've written in some form in every app I've shipped. It's in the [networking layer post](/blog/custom-networking-layer-swift-urlsession-async-await) too:
+
+```swift
+var components = URLComponents(string: "https://api.example.com/users/lookup")!
+components.queryItems = [
+    URLQueryItem(name: "email", value: "mario+receipts@gmail.com")
+]
+print(components.url!)
+// https://api.example.com/users/lookup?email=mario+receipts@gmail.com
+```
+
+Notice what's missing in that output: a `%2B`. The `+` went out exactly as typed.
+
+Now look at what `URLComponents` *does* encode:
+
+```swift
+components.queryItems = [
+    URLQueryItem(name: "q", value: "salt & pepper")
+]
+print(components.url!)
+// https://api.example.com/users/lookup?q=salt%20%26%20pepper
+```
+
+It encodes spaces. It encodes `&`, because otherwise the value would bleed into a second parameter. So it clearly *knows* it's building a query string. It just doesn't think `+` is dangerous.
+
+**And by its own rules, it isn't.**
+
+---
+
+## Two standards, one character
+
+Here's the annoying part: nobody here is buggy. Each side follows a different spec.
+
+**RFC 3986**, the URI spec, says `+` is a perfectly legal character in a query. It's a "sub-delimiter," and it means nothing special. `URLComponents` follows RFC 3986 to the letter, and Apple's docs for `queryItems` say outright that it doesn't encode characters the RFC allows there.
+
+**`application/x-www-form-urlencoded`**, the format HTML forms have used since the '90s, says `+` *means a space*. And almost every web framework decodes query strings with form rules: Rails, Django, Express's `qs`, PHP's `$_GET`, Go's `url.ParseQuery`, Spring. They see `+` and give you a space.
+
+So the client sends a legal URI, and the server decodes it with a rule from a different spec. It's like writing "1/2/2027" on a form and mailing it across the Atlantic. Everyone read it correctly, by their own rules, and the date is still wrong.
+
+---
+
+## Where this actually bites
+
+Email aliases are the classic one, and they're more common than you'd think. Plenty of people use `+` tags to sort their inbox or catch which service leaked their address. Those users are also more likely to email you an angry support ticket, because they know exactly what they typed.
+
+Then there's everything else with a `+` in it:
+
+- **Phone numbers.** `+385 91 ...` turns into ` 385 91 ...`, and depending on the backend's trimming, either fails validation or silently becomes a local number.
+- **Search queries.** Someone searches for `C++` and gets results for `C`. The two trailing spaces get trimmed away and nobody notices.
+- **Timestamps with offsets.** `2026-10-23T09:00:00+02:00` arrives as `2026-10-23T09:00:00 02:00`, and your date parser on the server throws a fit.
+- **Base64.** Standard base64 uses `+`. Pass a token or a signature as a query parameter and one bad character later, the HMAC no longer matches.
+
+That last one is the nastiest. A signature check doesn't say "you have a space where a plus should be." It just says "invalid signature," and it only fails for some tokens, because only some of them contain a `+`. That's the bug that eats an afternoon.
+
+---
+
+## The fix
+
+Let `URLComponents` do its job, then patch the one character it leaves alone:
+
+```swift
+var components = URLComponents(string: "https://api.example.com/users/lookup")!
+components.queryItems = [
+    URLQueryItem(name: "email", value: "mario+receipts@gmail.com")
+]
+components.percentEncodedQuery = components.percentEncodedQuery?
+    .replacingOccurrences(of: "+", with: "%2B")
+
+print(components.url!)
+// https://api.example.com/users/lookup?email=mario%2Breceipts@gmail.com
+```
+
+**This replacement is safe, and it's worth understanding why.** After `queryItems` runs, every space is already `%20`. So any literal `+` left in `percentEncodedQuery` came from a literal `+` in your data. There's nothing to confuse it with. Turning it into `%2B` is unambiguous under both specs: RFC 3986 decoders and form decoders both read `%2B` as a plus.
+
+I'd put it somewhere you can't forget it, not at every call site:
+
+```swift
+extension URLComponents {
+    /// Sets query items and encodes `+` so form-style decoders
+    /// on the server don't turn it into a space.
+    mutating func setQueryItemsEncodingPlus(_ items: [URLQueryItem]) {
+        queryItems = items
+        percentEncodedQuery = percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+    }
+}
+```
+
+Then, in your request builder, replace `components.queryItems = endpoint.queryItems` with `components.setQueryItemsEncodingPlus(endpoint.queryItems)`. One line in one place, and every endpoint is covered.
+
+---
+
+## What *not* to do
+
+Two tempting fixes that make things worse:
+
+**Don't pre-encode the value yourself.** If you pass `"mario%2Breceipts@gmail.com"` into `URLQueryItem`, `URLComponents` encodes the `%` too, and the server receives `mario%252Breceipts@gmail.com`. Now you have a different bug, plus a double encoding that looks fine in some logs and not others.
+
+**Don't reach for `addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)`.** It's the first thing Stack Overflow suggests, and `.urlQueryAllowed` *also* allows `+`, for the same RFC 3986 reason. It also allows `&` and `=`, so it's strictly worse than `URLComponents` for values. If you build your own character set by removing `+&=` from `.urlQueryAllowed`, it works, but at that point you're just rebuilding the fix above with extra steps.
+
+And yes, you could argue the server should decode with RFC 3986 instead of form rules. You'd be technically right. You'll also be technically right in the support queue for six months while the backend team adds it to a backlog. Fix it on the side you control.
+
+---
+
+## The cousin bug: `appendingPathComponent`
+
+While you're in this code, check the path side too. This one goes the other way: it encodes something you didn't want encoded.
+
+```swift
+let base = URL(string: "https://api.example.com")!
+let url = base.appendingPathComponent("search?q=swift")
+print(url)
+// https://api.example.com/search%3Fq=swift
+```
+
+`appendingPathComponent` treats its whole argument as a path segment, so the `?` becomes `%3F` and your query becomes part of the path. The server gets a 404 for a route called `search?q=swift`. Paths go in the path, queries go in `queryItems`, and the two don't mix, which is the same lesson as the [uppercase UUID mismatch](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift): the string you built isn't the string the server compares.
+
+---
+
+## Lock it in with a test
+
+This is exactly the kind of fix that someone "cleans up" six months later. Pin it:
+
+```swift
+import Testing
+import Foundation
+
+@Suite struct QueryEncodingTests {
+    @Test func plusIsEncodedInQueryValues() throws {
+        var components = URLComponents(string: "https://api.example.com/lookup")!
+        components.setQueryItemsEncodingPlus([
+            URLQueryItem(name: "email", value: "mario+receipts@gmail.com"),
+            URLQueryItem(name: "q", value: "C++ & Swift")
+        ])
+
+        let query = try #require(components.percentEncodedQuery)
+        #expect(query == "email=mario%2Breceipts@gmail.com&q=C%2B%2B%20%26%20Swift")
+
+        // Round-trip: URLComponents still decodes it back to the original values.
+        let decoded = URLComponents(string: components.url!.absoluteString)?.queryItems
+        #expect(decoded?.first { $0.name == "email" }?.value == "mario+receipts@gmail.com")
+    }
+}
+```
+
+The round-trip check matters. It proves you didn't break your own decoding while fixing the server's. And if you have any test fixtures with user data, add one email with a `+` tag and one phone number in international format. Those two strings will catch this bug, and the [locale decimal separator bug](/blog/decimal-separator-locale-string-format-swift-bug), and a surprising number of others.
+
+---
+
+## The takeaway
+
+`URLComponents` is correct. Your server is correct. Your user is correct. The bug sits in the gap between two specs, and none of them will ever tell you it's there.
+
+That's the pattern behind a lot of the Foundation gotchas I keep writing about, from [`convertFromSnakeCase` and acronyms](/blog/codable-convert-snake-case-acronym-bug) to UUID casing: an API that's right by its own spec, meeting a system that follows a different one. If you're building a network layer from scratch, the [protocol-based networking lesson](/learn/swiftui-in-practice-05-protocol-network-layer) is a good place to put the fix: one request builder, encoded properly once.
+
+Go search your codebase for `queryItems =`. I'll wait. Then go find the user with the `+` in their email. They've been waiting longer.
