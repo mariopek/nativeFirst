@@ -1,0 +1,228 @@
+---
+title: "Your @Mention Highlight Drifts After Every Emoji. NSRange Doesn't Count What String.count Counts."
+description: "String.count counts characters, NSRange counts UTF-16 code units, and mixing them shifts every highlight, regex match, and text field limit after the first emoji. Here's why, and the two initializers that fix it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "UIKit", "Strings"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1508188317434-1fd219bb636f?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A yellow tape measure pulled out across a surface, its markings counting off units"
+---
+
+{/*
+SEO keywords: Swift NSRange String.count mismatch, NSRange UTF-16 emoji offset,
+NSRange(range, in:) Swift, Range(nsRange, in:) Swift, NSRegularExpression emoji wrong range,
+UITextField shouldChangeCharactersIn max length emoji, NSAttributedString addAttribute out of bounds,
+Swift string utf16 count vs count, mention highlighting emoji bug iOS
+Internal linking plan: swift-string-count-grapheme-cluster-performance (what count actually does),
+attributedstring-markdown-user-content-swiftui (attributed text from user input),
+uuid-uuidstring-uppercase-backend-lowercase-swift (another app/backend string mismatch),
+decimal-separator-locale-string-format-swift-bug (a string assumption that's only true locally),
+course /learn/debugging-with-ai
+*/}
+
+The bug report said: "When I mention someone after a wave emoji, the blue highlight eats half the emoji and misses the end of the name."
+
+I typed `Hey 👋🏽 @maria` into the simulator. The highlight started in the middle of the skin-tone modifier and stopped at `@ma`. The wave itself looked a bit broken, like someone had colored half a sticker. Without the emoji, it was pixel perfect. Every test I had used plain ASCII, so of course every test passed.
+
+The mention parser was fine. The highlighting code was fine. The problem was in the gap between them, where one number was handed from a world that counts one thing to an API that counts something else.
+
+---
+
+## Three answers to "how long is this string?"
+
+Swift gives you several honest answers to the same question, and they disagree:
+
+```swift
+let text = "Hey 👋🏽 @maria"
+
+text.count                 // 12  (Characters, a.k.a. grapheme clusters)
+text.unicodeScalars.count  // 13  (Unicode code points)
+text.utf16.count           // 15  (UTF-16 code units)
+(text as NSString).length  // 15  (same thing; NSString is UTF-16 inside)
+```
+
+The waving hand with a skin tone is **one Character** (what a human sees), built from **two Unicode scalars** (the hand, U+1F44B, plus the modifier, U+1F3FD). Each of those is outside the Basic Multilingual Plane, so each takes **two UTF-16 code units**. One emoji, four units.
+
+Swift's `String.count` does the human thing and counts graphemes. That's why [it's not O(1)](/blog/swift-string-count-grapheme-cluster-performance): it has to walk the string to find out where each visible character ends.
+
+`NSRange` doesn't count graphemes. It comes from Foundation, where `NSString` is a buffer of UTF-16 code units, so every `location` and `length` in an `NSRange` is measured in **UTF-16 units**. Always. No exceptions, no flag to change it.
+
+So when you take a number from the Swift side and put it into an `NSRange`, you're giving centimeters to someone who expects inches. On ASCII text the two happen to match, which is exactly why the bug survives code review.
+
+---
+
+## The code that looked obviously correct
+
+Here's roughly what I had:
+
+```swift
+func highlightMention(in text: String) -> NSAttributedString {
+    let attributed = NSMutableAttributedString(string: text)
+    guard let at = text.firstIndex(of: "@") else { return attributed }
+
+    let start = text.distance(from: text.startIndex, to: at)   // 6 Characters
+    let length = text[at...].prefix { !$0.isWhitespace }.count // 6 Characters
+
+    attributed.addAttribute(
+        .foregroundColor,
+        value: UIColor.systemBlue,
+        range: NSRange(location: start, length: length)        // {6, 6}, wrong units
+    )
+    return attributed
+}
+```
+
+`distance(from:to:)` on a `String` counts Characters. The `@` is Character number 6. In UTF-16 it's at offset 9, because the emoji in front of it takes four units, not one.
+
+So `NSRange(location: 6, length: 6)` covers UTF-16 units 6 through 11: the second half of the emoji (the skin-tone modifier), the space, and `@ma`. That's exactly what the bug report described. The user was right, and my tests were testing a language nobody types in anymore.
+
+It gets worse with longer strings. Every emoji before the mention pushes the highlight further left. A family emoji like 👨‍👩‍👧 is one Character but **eight** UTF-16 units (three people plus two zero-width joiners). Put a couple of those in a message and the highlight lands on a different word entirely.
+
+And when the error goes the other way, with your Character-based range ending past the real UTF-16 length, `NSMutableAttributedString` doesn't quietly clip it. It throws an `NSRangeException` and your app crashes. Same bug: a cosmetic glitch on some inputs, a crash on others.
+
+---
+
+## The fix is two initializers you already have
+
+Foundation has had the bridge since Swift 4. Stop computing integers. Get a real `Range<String.Index>` and convert it:
+
+```swift
+func highlightMention(in text: String) -> NSAttributedString {
+    let attributed = NSMutableAttributedString(string: text)
+    guard let at = text.firstIndex(of: "@") else { return attributed }
+
+    let end = text[at...].firstIndex(where: \.isWhitespace) ?? text.endIndex
+    let nsRange = NSRange(at..<end, in: text)   // {9, 6}, UTF-16, correct
+
+    attributed.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: nsRange)
+    return attributed
+}
+```
+
+Going the other way, from an `NSRange` some API gave you back into Swift indices:
+
+```swift
+if let range = Range(nsRange, in: text) {
+    let mention = text[range]   // "@maria"
+}
+```
+
+`Range(_:in:)` returns an optional because an `NSRange` can point outside the string. Treat a `nil` as "this range came from a different string than I think," because that's usually what it means.
+
+**The rule:** an `Int` offset should never cross the boundary between `String` and `NSString` APIs. `String.Index` crosses. Integers don't.
+
+---
+
+## Where else this bites
+
+Mentions are just where I found it. The same mismatch is hiding in a few other places.
+
+**NSRegularExpression full-string ranges.** This one is everywhere in older code:
+
+```swift
+// Wrong: misses the end of any string that contains emoji
+let range = NSRange(location: 0, length: text.count)
+
+// Right
+let range = NSRange(text.startIndex..., in: text)
+
+let regex = try NSRegularExpression(pattern: "@\\w+")
+for match in regex.matches(in: text, range: range) {
+    guard let r = Range(match.range, in: text) else { continue }
+    print(text[r])
+}
+```
+
+With `text.count` as the length, the search window is shorter than the string by however many extra UTF-16 units your emoji take. A mention at the very end of an emoji-heavy message just isn't found. No crash, no warning, just a missing match.
+
+If you can target iOS 16, Swift Regex removes the problem entirely, because it works in `String.Index` from start to finish:
+
+```swift
+for match in text.matches(of: /@\w+/) {
+    print(text[match.range])   // no NSRange anywhere
+}
+```
+
+**Text field length limits.** The classic `UITextFieldDelegate` limit mixes units in a single line:
+
+```swift
+// Wrong: range.length is UTF-16, the other two are Characters
+let newLength = (textField.text?.count ?? 0) + string.count - range.length
+return newLength <= 30
+```
+
+Delete an emoji and `range.length` is 2 (or 4, or 8) while the text only got one Character shorter. The math drifts and users either get blocked early or slip past the limit. Build the new string and count that:
+
+```swift
+func textField(_ textField: UITextField,
+               shouldChangeCharactersIn range: NSRange,
+               replacementString string: String) -> Bool {
+    let current = textField.text ?? ""
+    guard let r = Range(range, in: current) else { return false }
+    let updated = current.replacingCharacters(in: r, with: string)
+    return updated.count <= 30
+}
+```
+
+Same for `UITextView`'s `shouldChangeTextIn`. If the limit is really a backend column size, count in whatever the backend counts, which brings us to the next one.
+
+**Offsets from your server.** If your API sends mention or link positions as integers, find out what unit they're in before you use them. JavaScript's `string.length` is UTF-16, so a Node backend usually means UTF-16 offsets, which line up with `NSRange` by luck. Python 3's `len()` counts code points, which matches `unicodeScalars`, not `count` or `utf16`. A Rust or Go backend working with raw bytes may hand you UTF-8 byte offsets. All three agree on `"hello"`, and none of them agree on `"👋🏽"`.
+
+It's the same kind of problem as [the UUID casing mismatch](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift): both sides are correct by their own rules, and the bug is in the handoff. Put the unit in the API contract, in writing, and convert once at the boundary:
+
+```swift
+extension String {
+    /// Converts a code-point offset (e.g. from a Python backend) into an index.
+    func index(atScalarOffset offset: Int) -> String.Index? {
+        let scalars = unicodeScalars
+        guard offset >= 0, offset <= scalars.count else { return nil }
+        return scalars.index(scalars.startIndex, offsetBy: offset)
+    }
+}
+```
+
+---
+
+## The test that would have caught it
+
+My test suite only had ASCII in it, and ASCII is the one input where Character, scalar, and UTF-16 counts are all equal. If you only test that case, you never test the bug.
+
+So make your string fixtures hostile on purpose:
+
+```swift
+import Testing
+import Foundation
+
+func mentionRange(in text: String) -> NSRange? {
+    guard let at = text.firstIndex(of: "@") else { return nil }
+    let end = text[at...].firstIndex(where: \.isWhitespace) ?? text.endIndex
+    return NSRange(at..<end, in: text)
+}
+
+@Test(arguments: [
+    "@maria",
+    "Hey 👋🏽 @maria",
+    "👨‍👩‍👧👨‍👩‍👧 dinner? @maria",
+    "Cafe\u{301} at 8 @maria",   // decomposed é: 1 Character, 2 UTF-16 units
+    "🇭🇷 @maria"                  // flag: 1 Character, 4 UTF-16 units
+])
+func mentionRangeSurvivesWideCharacters(_ text: String) throws {
+    let ns = try #require(mentionRange(in: text))
+    let range = try #require(Range(ns, in: text))
+    #expect(text[range] == "@maria")
+}
+```
+
+Five strings, and every one has a different gap between `count` and `utf16.count`. Any function that touches `NSRange` should get them. Keep them in one shared fixtures file so the next person writing a string helper finds them before they find the bug.
+
+And if you're asking an AI assistant to write the delegate method for you, check its output for `.count` next to `NSRange`. Models write `NSRange(location: 0, length: text.count)` constantly, because years of Stack Overflow answers taught them to. The [debugging with AI lesson](/learn/debugging-with-ai) covers getting a model to write the failing test first, and a test with an emoji in it is a good one to ask for.
+
+---
+
+## What I actually changed
+
+I grepped the project for `NSRange(location:` and found eleven of them. Nine used `.count`. Two were correct by accident because the strings were hardcoded ASCII labels. All eleven now go through `NSRange(_:in:)`. The mention code became four lines shorter, and the skin-tone wave is all one color again.
+
+The general lesson is the one from [the decimal separator post](/blog/decimal-separator-locale-string-format-swift-bug): code that's only correct for the input you typed while writing it isn't correct yet. Your users don't type in ASCII. They type in emoji, accented names, and flags, and if you're working with [attributed text built from user content](/blog/attributedstring-markdown-user-content-swiftui), that's the input your ranges have to handle.
+
+`String.count` tells you how many characters a person sees. `NSRange` tells you how many UTF-16 units Foundation stores. Both numbers are correct. They just shouldn't be mixed.
