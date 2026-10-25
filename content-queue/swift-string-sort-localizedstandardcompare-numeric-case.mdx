@@ -1,0 +1,195 @@
+---
+title: "Your List Sorts \"Track 10\" Before \"Track 2\" and \"Zebra\" Before \"apple\". Swift's < Isn't Alphabetical."
+description: "Sorting user-facing strings with < in Swift compares Unicode scalar values: uppercase before lowercase, accented letters at the end, and numbers digit by digit. Here's how localizedStandardCompare, compare(options:locale:) and KeyPathComparator fix it, and when you should keep using <."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Strings", "Localization", "SwiftUI"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1463717738788-85fcacb6ac3d?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of small wooden library card catalog drawers, each labeled for a range of the alphabet"
+---
+
+{/*
+SEO keywords: Swift sort strings alphabetically, localizedStandardCompare Swift,
+Swift natural sort numbers, Swift sort case insensitive, Swift string comparison uppercase lowercase,
+KeyPathComparator localizedStandard, SwiftUI list sort alphabetical, Finder-like sorting iOS,
+Swift sort accented characters, SortDescriptor localizedStandard SwiftData
+Internal linking plan: swift-sorted-is-not-a-stable-sort (the other sorting surprise),
+swift-string-count-grapheme-cluster-performance (how Swift strings really work),
+decimal-separator-locale-string-format-swift-bug (locale bites again),
+uuid-uuidstring-uppercase-backend-lowercase-swift (case in string comparisons),
+course /learn/swiftui-foundations-11-lists-and-empty-states
+*/}
+
+The one-star review just said: "Can't even put my tracks in order. Track 10 comes after Track 1. Is this app written by a toaster?"
+
+I opened the app, imported ten audio files, and there it was: Track 1, Track 10, Track 2, Track 3. The code was one line, `files.sorted { $0.name < $1.name }`, and it was doing exactly what I'd asked. The problem is that what I'd asked for is not what any human being means by "sort these."
+
+---
+
+## What < actually compares
+
+Swift's `<` on `String` is not alphabetical order. It's a **lexicographic comparison of Unicode scalar values**, after canonical normalization so that a precomposed "é" and an "e" plus combining accent count as equal. That's a fine, deterministic, locale-independent definition. It's also a terrible one for anything a person will read.
+
+Three consequences fall out immediately:
+
+```swift
+let names = ["apple", "Zebra", "banana", "Émile", "zoe", "Track 2", "Track 10"]
+print(names.sorted())
+// ["Track 10", "Track 2", "Zebra", "apple", "banana", "zoe", "Émile"]
+```
+
+- **Uppercase beats lowercase.** "Z" is U+005A, "a" is U+0061. Every capitalized name lands above every lowercase one, so "Zebra" sits above "apple".
+- **Numbers compare digit by digit.** "1" comes before "2", so "Track 10" beats "Track 2" before the second digit is ever looked at.
+- **Accented letters get exiled.** "É" is U+00C9, which is bigger than every plain ASCII letter. Émile ends up after zoe, at the bottom of a contact list, wondering what they did wrong.
+
+None of this is a bug. `<` is built for machines, and it's very good at that job. You just shouldn't hand its output to a person.
+
+---
+
+## The one-word fix: localizedStandardCompare
+
+Foundation has had the answer for years, and it's the same thing Finder uses:
+
+```swift
+let sorted = names.sorted {
+    $0.localizedStandardCompare($1) == .orderedAscending
+}
+// ["apple", "banana", "Émile", "Track 2", "Track 10", "Zebra", "zoe"]
+```
+
+`localizedStandardCompare(_:)` gives you three things at once: it **ignores case**, it **compares runs of digits as numbers**, and it **follows the user's locale** for accents and letter order. Apple's docs say to use it whenever file names or other strings show up in lists and tables where Finder-like sorting makes sense. That covers nearly every list in nearly every app.
+
+The docs also say the exact ordering may change between OS releases. That's fine for a list on screen. It's a problem for some other uses, which I'll come back to.
+
+If you're on iOS 15 or later, the nicer way to write this is a comparator instead of a closure:
+
+```swift
+struct AudioFile: Identifiable {
+    let id = UUID()
+    var name: String
+}
+
+let sortedFiles = files.sorted(
+    using: KeyPathComparator(\AudioFile.name, comparator: .localizedStandard)
+)
+```
+
+`String.StandardComparator` comes in three versions: `.lexical` (which behaves like `<`), `.localized`, and `.localizedStandard`. The last one is what you want almost every time. The `KeyPathComparator` version also works with SwiftUI's `Table` sorting, and it reads like a sentence instead of a puzzle.
+
+---
+
+## When you need more control: compare(_:options:range:locale:)
+
+`localizedStandardCompare` is a preset. Sometimes you want to choose the options yourself, for example to also ignore accents in a search-ranked list:
+
+```swift
+extension String {
+    func naturalOrder(_ other: String, locale: Locale = .current) -> ComparisonResult {
+        compare(
+            other,
+            options: [.caseInsensitive, .numeric, .diacriticInsensitive],
+            range: nil,
+            locale: locale
+        )
+    }
+}
+
+let byName = names.sorted { $0.naturalOrder($1) == .orderedAscending }
+```
+
+**The locale parameter matters more than people think.** In Swedish, "ö" is its own letter and comes after "z". In German it sorts right next to "o". Same string, two correct answers, depending on who's holding the phone. If you pass `locale: nil`, which is the default when you leave the argument out, you get a non-localized comparison and quietly lose that behavior. I've seen this in code that looked careful, because it set `.caseInsensitive` and `.numeric` and stopped there.
+
+My rule: **use `localizedStandardCompare` for display, and only switch to `compare(_:options:range:locale:)` when you have a specific reason**, such as needing a fixed locale or a different set of options.
+
+---
+
+## The places this hides
+
+The obvious one is `sorted()` on an array of names. These are less obvious:
+
+**SwiftData and Core Data.** `@Query(sort: \Song.title)` hands the sort to the store, which by default compares strings the way a database does: by bytes, uppercase first. `SortDescriptor` takes a comparator for string key paths, so here's how you'd ask for natural order:
+
+```swift
+@Query(sort: [SortDescriptor(\Song.title, comparator: .localizedStandard)])
+private var songs: [Song]
+```
+
+Core Data's SQLite store has supported `localizedStandardCompare:` as an `NSSortDescriptor` selector for a long time. With SwiftData, check the result on device with mixed-case and numbered data before you trust it. If the order is wrong, fetch first and sort in memory. That's fine for a few thousand rows.
+
+**Section indexes.** If you group a contact-style list by first letter, `String(name.prefix(1)).uppercased()` puts "Émile" in its own "É" section at the bottom. Fold the key first:
+
+```swift
+func sectionKey(for name: String, locale: Locale = .current) -> String {
+    let folded = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+    return String(folded.prefix(1)).uppercased()
+}
+```
+
+Note that this folds Swedish "Ö" into "O", which a Swedish user may not want. If you ship in those markets, test with real names from those markets.
+
+**Server-sorted data that you sort again.** If the backend returns results in its own collation and you then insert new items client-side using `<`, the list ends up in two different orders at once. Choose one place to sort.
+
+Case-sensitivity bit me the same way when [uuidString came back uppercase](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift) and the backend's UUIDs didn't. The pattern is the same: the computer's idea of "the same text" and a human's idea are two different functions.
+
+---
+
+## When < is still the right answer
+
+Localized comparison is for **people**. For **programs**, keep `<`, because it's deterministic. Use it when:
+
+- **You binary search the array.** If you sorted with one comparison and search with another, the search will confidently return nothing. Use the same comparison for both, and make it `<` if the array is a lookup structure.
+- **You compare against stored state.** A sorted cache key, a diff against yesterday's snapshot, a sort order persisted to disk. The user can change their language in Settings and the ordering changes under you, and Apple doesn't promise `localizedStandardCompare` stays the same across OS versions.
+- **You sort identifiers.** Nobody cares where a UUID or a SKU falls in alphabetical order. They care that it's the same every time.
+
+Sorting has more than one surprise. [sorted() isn't stable either](/blog/swift-sorted-is-not-a-stable-sort), so equal elements can swap places when you sort again. Combine that with case-insensitive comparison, where "apple" and "Apple" are now equal, and a list can reshuffle those two rows on every refresh. If that matters, add a tiebreaker:
+
+```swift
+let stable = files.sorted {
+    switch $0.name.localizedStandardCompare($1.name) {
+    case .orderedAscending: return true
+    case .orderedDescending: return false
+    case .orderedSame: return $0.id.uuidString < $1.id.uuidString
+    }
+}
+```
+
+---
+
+## A test that pins it down
+
+`localizedStandardCompare` reads the current locale, so tests that use it can pass on your Mac and fail on a CI runner set to a different region. Test against the explicit-locale version and pin the locale:
+
+```swift
+import Testing
+import Foundation
+
+@Test func naturalOrderMatchesWhatHumansExpect() {
+    let input = ["Track 10", "track 2", "Zebra", "apple", "Émile", "Track 1"]
+    let sorted = input.sorted {
+        $0.naturalOrder($1, locale: Locale(identifier: "en_US")) == .orderedAscending
+    }
+    #expect(sorted == ["apple", "Émile", "Track 1", "track 2", "Track 10", "Zebra"])
+}
+
+@Test func swedishPutsOAfterZ() {
+    let input = ["Öland", "Zürich", "Oslo"]
+    let sorted = input.sorted {
+        $0.naturalOrder($1, locale: Locale(identifier: "sv_SE")) == .orderedAscending
+    }
+    #expect(sorted.last == "Öland")
+}
+```
+
+The Swedish test is there to check that the locale really gets through. Its exact expected order is the kind of thing to confirm once on your own machine before you commit it. That's exactly why it's worth having.
+
+Locale has burned me before, with [a String(format:) price that broke in Germany](/blog/decimal-separator-locale-string-format-swift-bug). Every time, the code was correct for exactly one region: mine.
+
+---
+
+## The takeaway
+
+`<` on `String` answers the question "which of these has the smaller Unicode scalars?" That's almost never what your user is asking. For anything a person reads, use `localizedStandardCompare` or a `KeyPathComparator` with `.localizedStandard`. For anything a program looks up, keep `<`, and never mix the two on the same array.
+
+If you're building your first lists in SwiftUI, the [lists and empty states lesson](/learn/swiftui-foundations-11-lists-and-empty-states) is a good place to put this in from the start. And if you want to know why Swift strings behave this way in the first place, [String.count walks the whole string](/blog/swift-string-count-grapheme-cluster-performance) for the same reason `<` normalizes before it compares: Swift takes Unicode seriously. It just doesn't take *your alphabet* into account until you ask.
+
+The toaster review is still up, by the way. I replied that Track 10 now comes after Track 9. They gave it two stars.
