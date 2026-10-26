@@ -1,0 +1,223 @@
+---
+title: "One Invisible Character Makes Your App's Text Run Backwards. SE-0559 Finally Lets Swift See It."
+description: "U+202E RIGHT-TO-LEFT OVERRIDE can flip usernames, notification text, and file names like invoice_exe.pdf in any iOS app. Here's how bidi spoofing works, how to strip and isolate user text in Swift today, and what SE-0559's new Unicode.BidiClass adds."
+pubDate: 2026-10-26
+tags: ["Swift", "iOS Development", "Swift Evolution", "Strings", "Security"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1552516267-8828028f1273?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A green car side mirror printed with the warning 'Objects in mirror are closer than they appear'"
+---
+
+{/*
+SEO keywords: SE-0559 bidiClass, Unicode.BidiClass Swift, Unicode.Scalar.Properties bidiClass,
+U+202E right-to-left override iOS, RTLO filename spoofing, bidi spoofing username Swift,
+first strong isolate U+2068 Swift, Trojan Source Swift, strip bidi control characters Swift,
+right-to-left text SwiftUI user content, Swift Evolution October 2026
+Internal linking plan: nsrange-string-count-utf16-emoji-offset-swift (another "String lies about itself" bug),
+swift-string-count-grapheme-cluster-performance (what a Character really is),
+attributedstring-markdown-user-content-swiftui (treating user text as hostile),
+string-catalogs-localization-swiftui-what-breaks (interpolation in localized strings),
+course /learn/vibe-code-native, app mention: /apps/invoize (PDF attachments)
+*/}
+
+In *Tenet*, a bullet flies backwards out of a wall and back into the gun. The characters spend two and a half hours trying to understand it. If you've ever stared at a chat screen where one user's name made everything after it read backwards, you know exactly how they feel.
+
+The culprit was one character. You can't see it. It has no width. It's called **U+202E RIGHT-TO-LEFT OVERRIDE**, and every text renderer on every Apple platform obeys it exactly as the Unicode Standard says it should.
+
+The timing is good, because Swift is about to get a proper tool for this. **SE-0559** adds `bidiClass` to `Unicode.Scalar.Properties`, and its review runs until November 4, 2026. Let's look at the bug first, then the fix you can ship today, and then what the new API changes.
+
+---
+
+## The character that reverses everything after it
+
+Text with mixed directions, like English with Hebrew or Arabic in it, is laid out by the **Unicode Bidirectional Algorithm** (UAX #9). Most of the time it just works. Every scalar has a *bidi class*: Latin letters are strong left-to-right, Hebrew letters are strong right-to-left, digits and punctuation are weaker and take their cue from their neighbors.
+
+Then there are the **explicit formatting characters**, which say "ignore the usual rules from here on." There are nine of them:
+
+| Scalar | Name | What it does |
+|---|---|---|
+| U+202A / U+202B | LRE / RLE | Start a left-to-right / right-to-left embedding |
+| U+202D / U+202E | LRO / RLO | **Force** everything after it into one direction |
+| U+202C | PDF | End the last embedding or override |
+| U+2066 / U+2067 / U+2068 | LRI / RLI / FSI | Start an isolate (LTR / RTL / "whatever the first strong letter says") |
+| U+2069 | PDI | End the isolate |
+
+The override is the dangerous one. Anything after an RLO, up to a PDF or the end of the paragraph, gets drawn **in reverse order**. And if the user never types the closing PDF, it runs to the end of the paragraph. It doesn't care whose text that is.
+
+So when a user sets their display name to `"Mallory\u{202E}"` and your app shows this:
+
+```swift
+Text("\(user.displayName) liked your photo")
+```
+
+everything after the name comes out mirrored. That's the harmless version. The nasty version is a file name.
+
+---
+
+## invoice_exe.pdf
+
+Here's the classic trick. The real file name is:
+
+```swift
+let name = "invoice_\u{202E}fdp.exe"
+```
+
+The bytes say the file ends in `.exe`. But everything after the override is drawn reversed, so `fdp.exe` shows up as `exe.pdf`, and the user sees **`invoice_exe.pdf`**. It looks like a PDF with a weird name. It's not a PDF.
+
+This has been a malware trick for over a decade. In 2021 the "Trojan Source" research (CVE-2021-42574) used the same idea on source code: comments and string literals that look harmless in a code review but compile into something else. Compilers and GitHub added warnings. Your chat app's attachment list did not.
+
+On iOS it shows up anywhere you show text someone else picked:
+
+- **Display names and usernames**, in lists, mentions, and notifications.
+- **File names** from attachments, share extensions, or a backend.
+- **Push notification bodies** built by putting a name into a template.
+- **Product or listing titles** in marketplace apps.
+
+I care about the file name case more than most, because Invoize is basically an app that turns things into PDFs called "invoice-something." A PDF that only *looks* like a PDF is exactly the kind of thing I don't want showing up in a list I drew.
+
+The takeaway: **any string you didn't write yourself can change the direction of the text around it.**
+
+---
+
+## Fix one: strip the controls from identifiers
+
+Usernames, handles, and file names don't need explicit bidi controls. Real right-to-left users type Hebrew or Arabic letters, and the algorithm handles those fine on its own. Overrides in a username are almost never legitimate.
+
+You don't need any new API for this. There are only nine scalars:
+
+```swift
+extension Unicode.Scalar {
+    /// The explicit bidi formatting controls: embeddings, overrides,
+    /// isolates, and the two characters that terminate them.
+    static let bidiControls: Set<Unicode.Scalar> = [
+        "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+        "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
+    ]
+}
+
+extension String {
+    var containsBidiControls: Bool {
+        unicodeScalars.contains { Unicode.Scalar.bidiControls.contains($0) }
+    }
+
+    var strippingBidiControls: String {
+        String(String.UnicodeScalarView(
+            unicodeScalars.filter { !Unicode.Scalar.bidiControls.contains($0) }
+        ))
+    }
+}
+```
+
+Notice this works on `unicodeScalars`, not `Character`. These controls have no width and can attach to clusters in surprising ways, so scalar level is the only level where you can count on finding them. (If you've read my [NSRange and emoji post](/blog/nsrange-string-count-utf16-emoji-offset-swift) or the one on [what String.count really counts](/blog/swift-string-count-grapheme-cluster-performance), this is the same lesson again: String has several views, and you have to pick the right one.)
+
+I deliberately left out U+200E and U+200F, the left-to-right and right-to-left *marks*. They're invisible strong letters with no override power, and people writing in RTL languages do use them on purpose. Keep them.
+
+**Where to run it:** on the server when a username or file name is saved, and on the client when you display it. Do both. The client is the last thing between that string and the user's eyes, and you don't control every backend that will ever send you a name.
+
+---
+
+## Fix two: isolate everything you put into a sentence
+
+Stripping is right for identifiers. It's wrong for free text, like a chat message from someone writing Arabic who used an embedding on purpose. For that, there's a better tool: **isolate the user's text** so whatever direction it has stays inside it.
+
+```swift
+extension String {
+    /// Wraps text in FIRST STRONG ISOLATE … POP DIRECTIONAL ISOLATE so its
+    /// direction can't leak into the surrounding string.
+    var bidiIsolated: String { "\u{2068}" + self + "\u{2069}" }
+}
+
+Text("\(user.displayName.bidiIsolated) liked your photo")
+```
+
+An isolate is a sealed box. The surrounding text treats the whole thing as one neutral unit, and per UAX #9 the closing PDI also ends any embedding or override that was opened inside it. Mallory's override stops at the edge of her own name.
+
+Isolates also fix a less dramatic bug you may already have. A Hebrew name followed by `(3)` in an English UI often comes out as `(3)` jumping to the wrong side, because the parentheses are neutral and attach to the RTL text next to them. Wrap the name and the problem goes away.
+
+This works fine with String Catalogs too. The interpolation becomes a `%@` argument, and you're just passing an argument that's already wrapped. (More on what does and doesn't survive that conversion in my [String Catalogs post](/blog/string-catalogs-localization-swiftui-what-breaks).)
+
+The rule I follow now: **every user-supplied string that goes into a template gets isolated. Every one.** Treat it like escaping HTML, the same instinct as [rendering user Markdown safely](/blog/attributedstring-markdown-user-content-swiftui).
+
+---
+
+## So what does SE-0559 add?
+
+If nine hardcoded scalars do the job, why does Swift need a new API?
+
+Because stripping and isolating are the easy part. The harder questions are about **what kind of text you're looking at**: does this string contain any right-to-left letters? What's the direction of its first strong character? Does it need isolating at all, or is it plain ASCII that can be left alone? Those questions need each scalar's `Bidi_Class`, and Swift has never exposed it.
+
+The existing `generalCategory` doesn't help. It tells you something is a letter. It doesn't tell you whether it's a left-to-right letter or a right-to-left one. Today people solve this with hardcoded Hebrew and Arabic code point ranges, which quietly miss Syriac, Thaana, N'Ko, Adlam, and others. Or they go down to ICU, which is exactly the pain SE-0211 was written to get rid of back in 2018.
+
+The proposal says Foundation ran into this itself while adding isolate wrapping to `ListFormatStyle`. When the people writing Foundation need a property, you can bet the rest of us need it too.
+
+As of the review draft, it looks like this:
+
+```swift
+let alef: Unicode.Scalar = "\u{05D0}"   // HEBREW LETTER ALEF
+alef.properties.bidiClass               // .rightToLeft
+```
+
+`Unicode.BidiClass` is a `@frozen` struct with a `UInt8` raw value and one static member for each Unicode value: `.leftToRight`, `.rightToLeft`, `.arabicLetter`, `.europeanNumber`, `.nonspacingMark`, `.whitespace`, `.otherNeutral`, and so on, plus the formatting classes. Every scalar has one, including unassigned code points, which get a default based on where they fall.
+
+That turns my hardcoded set into something with real names:
+
+```swift
+extension Unicode.BidiClass {
+    static let explicitFormatting: Set<Unicode.BidiClass> = [
+        .leftToRightEmbedding, .rightToLeftEmbedding,
+        .leftToRightOverride, .rightToLeftOverride, .popDirectionalFormat,
+        .leftToRightIsolate, .rightToLeftIsolate,
+        .firstStrongIsolate, .popDirectionalIsolate,
+    ]
+}
+
+extension String {
+    var hasStrongRightToLeft: Bool {
+        unicodeScalars.contains {
+            let bidi = $0.properties.bidiClass
+            return bidi == .rightToLeft || bidi == .arabicLetter
+        }
+    }
+}
+```
+
+And `hasStrongRightToLeft` is the one you couldn't write correctly before without shipping your own Unicode tables. Use it to pick text alignment for a chat bubble, or to skip isolating names that are plain ASCII.
+
+A few honest caveats. It's **in review**, so names could still change; someone has already suggested `bidirectionalCharacterClass` in the thread, since "bidi" is jargon to most people. It's marked `@available(SwiftStdlib 6.5, *)`, which on Apple platforms means an OS availability check. Keep the hardcoded scalar set around as your fallback for a long time. And because it's a struct, not an enum, a `switch` over it always needs a `default`. The proposal chose that on purpose, so Unicode can add new classes later without breaking you. Unicode 6.3 already did that once when it added the isolates.
+
+---
+
+## Test it like you mean it
+
+This is a five-line test, and it's worth more than any code review.
+
+```swift
+import Testing
+
+@Suite struct BidiSafetyTests {
+    @Test func overrideIsStrippedFromIdentifiers() {
+        let name = "invoice_\u{202E}fdp.exe"
+        #expect(name.containsBidiControls)
+        #expect(name.strippingBidiControls == "invoice_fdp.exe")
+    }
+
+    @Test func marksSurviveStripping() {
+        let name = "\u{200F}שלום"
+        #expect(name.strippingBidiControls == name)
+    }
+
+    @Test func isolatedTextIsBalanced() {
+        let wrapped = "Mallory\u{202E}".bidiIsolated
+        #expect(wrapped.unicodeScalars.first == "\u{2068}")
+        #expect(wrapped.unicodeScalars.last == "\u{2069}")
+    }
+}
+```
+
+Then do the real check: change your own test account's display name to something with `\u{202E}` in it and scroll through the app. Notifications, mention lists, the share sheet, the widget. Every screen that looks wrong is one you forgot. If you're [vibe coding the UI layer](/learn/vibe-code-native), this is a great thing to hand an agent: "find every place we interpolate a user string into a sentence." It's tedious, mechanical, and easy to check, which is exactly what agents are good at.
+
+---
+
+The bullet in *Tenet* was always going to go back into the gun. That's just how that world works. The override character is the same: it's not a bug in UIKit, it's the Unicode Standard doing exactly what it says.
+
+The bug is yours, and it's the assumption that text you didn't write will stay where you put it.
