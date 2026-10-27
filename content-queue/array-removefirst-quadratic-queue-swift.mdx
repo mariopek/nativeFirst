@@ -1,0 +1,225 @@
+---
+title: "Your Queue Is Quadratic. Array.removeFirst() Moves Every Element, Every Single Time."
+description: "Swift's Array.removeFirst() is O(n), so using an Array as a FIFO queue turns BFS, flood fill, and job queues quadratic. Here's the math, the head-index fix, Deque from swift-collections, and when removeFirst is actually fine."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Performance", "Data Structures"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1519248200454-8f2590ed22b7?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A long line of people waiting in a queue, stretching back into the distance"
+---
+
+{/*
+SEO keywords: Swift Array removeFirst O(n), Swift queue performance, Swift FIFO queue,
+Deque swift-collections, BFS Swift slow, flood fill Swift performance, Swift popFirst Array,
+Swift ring buffer, Array insert at 0 performance, Swift quadratic algorithm
+Internal linking plan: arrayslice-holds-entire-array-memory-swift (the popFirst/slice
+alternative and its memory catch), enumerated-offset-is-not-an-index-swift (Array index
+assumptions), swift-struct-field-order-padding-stride (element size makes every move costlier),
+set-dictionary-iteration-order-hash-seed-swift (other stdlib behavior people assume),
+course /learn/performance-optimization
+*/}
+
+The paint bucket tool worked perfectly on the test image. Then someone tapped it on a 12-megapixel photo and the app just... stopped. No crash. No log. The spinner spun, the watchdog got bored, and the OS put the whole thing out of its misery.
+
+The algorithm was a textbook flood fill. The data structure was a textbook mistake. One line, `queue.removeFirst()`, was quietly moving millions of elements around for every single pixel it visited.
+
+---
+
+## The line that looks free
+
+Here's the code. You've written something like it. I've written something like it more times than I'd like to admit.
+
+```swift
+struct Point: Hashable { var x: Int; var y: Int }
+
+func floodFill(from start: Point, in grid: inout [[Bool]]) {
+    var queue: [Point] = [start]
+    grid[start.y][start.x] = true
+
+    while !queue.isEmpty {
+        let p = queue.removeFirst()   // ← here's the bill
+
+        for n in [Point(x: p.x + 1, y: p.y), Point(x: p.x - 1, y: p.y),
+                  Point(x: p.x, y: p.y + 1), Point(x: p.x, y: p.y - 1)] {
+            guard n.y >= 0, n.y < grid.count,
+                  n.x >= 0, n.x < grid[n.y].count,
+                  !grid[n.y][n.x] else { continue }
+            grid[n.y][n.x] = true
+            queue.append(n)
+        }
+    }
+}
+```
+
+It reads beautifully. Take from the front, add to the back. It's a queue. Except Swift's `Array` isn't a queue, and **the documentation says so out loud**: `removeFirst()` is O(*n*), where *n* is the length of the array.
+
+An `Array` is one contiguous block of memory with element zero at the start. Remove element zero, and every remaining element shifts down one slot so that the new first element sits at the start again. That's not a bug. That's what "contiguous" means.
+
+Think of a line at the bakery where, every time the person at the front gets served, everyone else physically takes one step forward. Fine with four people. With four thousand, the shuffling takes longer than the baking.
+
+---
+
+## The math, without the hand-waving
+
+A single `removeFirst()` on a 10-element array is nothing. The problem is doing it in a loop while the array stays big.
+
+In a breadth-first search, the queue holds the "frontier": every node you've discovered but not processed yet. On a grid, that frontier can easily hold thousands of points at once. Each dequeue moves the whole frontier.
+
+Rough numbers for a loop that dequeues *n* items while the queue averages *n*/2 elements:
+
+| Items processed | Element moves (≈ n²/2) |
+|---|---|
+| 1,000 | 500,000 |
+| 100,000 | 5,000,000,000 |
+| 12,000,000 (a 12 MP photo) | don't |
+
+Real frontiers are usually smaller than *n*/2, so the true count is lower. But "lower than five billion" is not a performance strategy. And the table assumes cheap elements: if each element is a fat struct, every one of those moves copies more bytes. (Element size matters more than you'd think; I dug into that in [the post on struct field order and stride](/blog/swift-struct-field-order-padding-stride).)
+
+**The tell is that it works fine in development.** Your test grid is 20×20. Your test graph has 30 nodes. Quadratic code hides beautifully at small *n* and then ambushes you the first time a real user shows up with real data.
+
+---
+
+## Fix one: stop moving, start pointing
+
+The cheapest fix needs no dependencies at all. Don't remove anything. Keep an index pointing at the front of the line and walk it forward.
+
+```swift
+struct IndexQueue<Element> {
+    private var storage: [Element] = []
+    private var head = 0
+
+    var isEmpty: Bool { head == storage.count }
+    var count: Int { storage.count - head }
+
+    mutating func enqueue(_ element: Element) {
+        storage.append(element)
+    }
+
+    mutating func dequeue() -> Element? {
+        guard head < storage.count else { return nil }
+        let element = storage[head]
+        head += 1
+
+        // Reclaim the dead prefix once it's more than half the buffer,
+        // so a long-running queue doesn't grow forever.
+        if head > 64 && head * 2 > storage.count {
+            storage.removeFirst(head)
+            head = 0
+        }
+        return element
+    }
+}
+```
+
+Dequeue is now O(1) for almost every call. The occasional compaction is O(*n*), but it only happens after you've dequeued at least half the buffer, so the cost **amortizes** to constant time per element. Same trick `Array.append` uses when it doubles its capacity.
+
+For a one-shot BFS you can skip compaction entirely. The queue dies when the function returns. Just make sure you understand that the processed elements stay in memory until then.
+
+And the flood fill becomes:
+
+```swift
+var queue = IndexQueue<Point>()
+queue.enqueue(start)
+while let p = queue.dequeue() {
+    // ...same neighbor logic, using queue.enqueue(n)
+}
+```
+
+---
+
+## Fix two: use the actual data structure
+
+If you're fine with a package dependency, Apple's [swift-collections](https://github.com/apple/swift-collections) ships `Deque`, a double-ended queue backed by a ring buffer. Adding and removing at **either** end is O(1) amortized.
+
+```swift
+import DequeModule  // or `import Collections`
+
+var queue: Deque<Point> = [start]
+while let p = queue.popFirst() {
+    // neighbors...
+    queue.append(n)
+}
+```
+
+It conforms to `RandomAccessCollection` and `RangeReplaceableCollection`, so most code that worked on `[Point]` keeps compiling. It also has `prepend(_:)`, which matters for the next section.
+
+A ring buffer is a circular track. The front and back are just two markers that chase each other around it. Nothing ever slides. When the track fills up, it gets reallocated bigger, the same way `Array` grows.
+
+My rule: **writing a one-off algorithm, use the index trick. Building a queue that lives as long as the app (an upload queue, a job scheduler, an undo stack with a cap), use `Deque`.**
+
+---
+
+## What about popFirst()?
+
+You might reach for `popFirst()` and discover `Array` doesn't have it. That's deliberate. `popFirst()` exists on collections that are their own subsequence, like `ArraySlice`, where removing from the front just bumps a start index.
+
+```swift
+var pending = items[...]          // ArraySlice<Item>
+while let item = pending.popFirst() {
+    process(item)                 // O(1) per pop
+}
+```
+
+That's genuinely O(1), and for "drain this list I already have" it's perfect. The catch: the slice keeps the entire original buffer alive, consumed elements included. If you hang on to it, you're paying memory for elements you already processed. I wrote up [how ArraySlice holds the whole array in memory](/blog/arrayslice-holds-entire-array-memory-swift); it applies here too.
+
+Also: slice indices don't restart at zero after you pop. If you write `pending[0]` after a few pops, you'll trap. That's the same family of surprise as [enumerated() offsets that aren't indices](/blog/enumerated-offset-is-not-an-index-swift).
+
+---
+
+## The cousins hiding in your codebase
+
+`removeFirst()` isn't the only front-of-array operation that moves everything. Grep for these:
+
+- **`insert(x, at: 0)`** is O(*n*). The classic case is a chat screen that prepends new messages to the top of a 10,000-message array. Use `Deque.prepend`, or store in chronological order and reverse at display time.
+- **`removeFirst(k)`** is O(*n*), not O(*k*). It's one shift instead of *k* shifts, so it's much better than looping `removeFirst()`, but it's still not free.
+- **`Array(queue.dropFirst())`** looks innocent and allocates a brand-new array. Doing that in a loop is the same quadratic, with extra allocation on top.
+- **The capped log buffer.** `logs.append(line); if logs.count > 5_000 { logs.removeFirst() }` costs a 5,000-element shift on **every append** once the buffer is full. If that sits on a hot path, it's a ring buffer's whole reason for existing.
+
+---
+
+## When removeFirst() is completely fine
+
+I'm not telling you to rip out every `removeFirst()` in your app. That would be its own kind of silly.
+
+It's fine when the array is small and stays small. A queue of three pending alerts, a navigation history capped at 20 entries, a retry list that never holds more than a handful of requests. Shifting 20 elements costs less than the function call around it.
+
+It's fine when you call it once, not in a loop. Popping the header row off a parsed CSV is one shift. Nobody cares.
+
+And there's an old trick for the "build it once, drain it once" case: reverse the array and use `popLast()`, which is O(1).
+
+```swift
+var stack = Array(jobs.reversed())
+while let job = stack.popLast() {
+    run(job)   // jobs run in original order
+}
+```
+
+**The question isn't "is this O(n)?" It's "is this O(n) inside a loop over something that can get big?"** That second part is what turns a cheap call into a frozen app.
+
+---
+
+## How to catch it before a user does
+
+The easiest catch is a test with a deliberately large input and a time budget. It doesn't need to be a precise benchmark. It needs to fail loudly when someone reintroduces the quadratic version.
+
+```swift
+import Testing
+
+@Test func floodFillOnLargeGridFinishesQuickly() {
+    var grid = Array(repeating: Array(repeating: false, count: 1_000), count: 1_000)
+    let clock = ContinuousClock()
+
+    let elapsed = clock.measure {
+        floodFill(from: Point(x: 0, y: 0), in: &grid)
+    }
+
+    #expect(grid.allSatisfy { $0.allSatisfy { $0 } })
+    #expect(elapsed < .seconds(2))
+}
+```
+
+A million cells. The index-queue version should finish comfortably inside the budget on a simulator. The `removeFirst()` version will blow past it and keep going. The budget is loose on purpose so CI noise doesn't make the test flaky; you're not measuring milliseconds, you're catching an O(*n*²) that slipped back in.
+
+In Instruments, the Time Profiler signature is distinctive once you've seen it: a huge chunk of time inside `memmove` (or an Array `replaceSubrange` frame) underneath a call that's supposed to be trivial. If you want the full workflow for reading traces like that, the [performance optimization lesson](/learn/performance-optimization) walks through it.
+
+The paint bucket now fills a 12-megapixel photo before the finger leaves the screen. The fix was a twenty-line struct. The bug was one method call, and it had been sitting in plain sight because `removeFirst()` sounds like it costs nothing. Most of Swift's sharp edges are like that. They're not hidden. They're just [documented](/blog/set-dictionary-iteration-order-hash-seed-swift) somewhere nobody looks.
