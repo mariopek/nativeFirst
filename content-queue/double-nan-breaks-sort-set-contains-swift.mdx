@@ -1,0 +1,225 @@
+---
+title: "One NaN Got Into Your Array. Now sorted(), contains(), and Set Are All Quietly Lying."
+description: "Double.nan isn't equal to itself, so one NaN silently breaks Swift's sorted(), contains(), firstIndex(of:), max(), Set and Dictionary, and even your clamp function. Where NaN comes from in iOS apps, why it spreads, and how to stop it at the boundary."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Floating Point", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1564939558297-fc396f18e5c7?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a calculator with its display showing an error instead of a number"
+---
+
+{/*
+SEO keywords: Swift Double NaN, NaN not equal to itself Swift, Swift sorted NaN, Swift Set NaN,
+Array contains NaN Swift, Double.nan comparison, isNaN isFinite Swift, divide by zero Double Swift,
+Invalid frame dimension SwiftUI, JSONEncoder NaN invalidValue, nonConformingFloatEncodingStrategy,
+isTotallyOrdered Swift, Int(Double.nan) crash
+Internal linking plan: decimal-from-double-literal-imprecision-swift (the other Double gotcha),
+swift-sorted-is-not-a-stable-sort (sort contract assumptions), set-dictionary-iteration-order-hash-seed-swift
+(Set/Dictionary behavior people assume), swift-remainder-operator-negative-numbers-not-modulo
+(arithmetic that looks obvious and isn't), course /learn/error-handling-loading-states
+*/}
+
+The leaderboard had one job: show the top ten scores, highest first. It did that for months. Then a user with zero completed rounds got an "average score" computed as `0.0 / 0.0`, and the leaderboard started sorting like it had been shuffled by a raccoon.
+
+No crash. No warning. Just a list that was mostly in order, with a few entries sitting in places that made no sense. One value was poisoning the whole sort, and that value wasn't even on screen. It was **NaN**.
+
+---
+
+## The value that isn't equal to itself
+
+Here's the fact everything else follows from:
+
+```swift
+let x = Double.nan
+print(x == x)   // false
+print(x < 1)    // false
+print(x > 1)    // false
+print(x != x)   // true
+```
+
+This isn't a Swift quirk. It's IEEE 754, the floating point standard every CPU you'll ever ship on implements. NaN means "not a number," and the standard says every ordered comparison against it is false, and it's not equal to anything, including itself.
+
+That sounds like trivia until you realize how much of the standard library is built on `==` and `<`. Every algorithm that assumes "if `a < b` is false and `b < a` is false, then they're equal" is now standing on a trapdoor.
+
+Think of NaN as a guest who answers "no" to every question. "Are you taller than Bob?" No. "Shorter?" No. "Same height?" Also no. Now try lining people up by height with that guest in the room.
+
+---
+
+## Where it actually comes from
+
+Nobody types `Double.nan` on purpose. It shows up through perfectly reasonable arithmetic:
+
+```swift
+let average = Double(totalScore) / Double(roundsPlayed)   // 0 / 0 → NaN
+let progress = Double(completed) / Double(total)          // empty list → NaN
+let speed = distance / elapsed                            // elapsed == 0 → inf, then inf - inf → NaN
+let side = sqrt(area)                                     // negative area from bad data → NaN
+```
+
+Notice the asymmetry. `Int` division by zero **traps** immediately, so you find it in five minutes. `Double` division by zero just hands you a weird value and keeps going. The `Int` version is rude. The `Double` version is polite, and that's what makes it dangerous.
+
+And NaN is contagious. Any arithmetic involving NaN produces NaN. One bad average flows into a weighted score, which flows into a chart's y-axis range, which flows into a frame. By the time it's visible, it's four hops away from the line that caused it.
+
+---
+
+## Everything it quietly breaks
+
+### contains() and firstIndex(of:)
+
+```swift
+let values = [1.0, .nan, 3.0]
+values.contains(.nan)       // false
+values.firstIndex(of: .nan) // nil
+```
+
+They use `==`, and NaN is never `==` to anything. If you're checking for bad data this way, the check always says the data is fine.
+
+### sorted()
+
+Swift's `sorted()` requires that `<` be a **strict weak ordering**. NaN breaks that contract, because it's "incomparable" with every value, and incomparability is supposed to be transitive. With NaN in the array, the sort doesn't crash. It just gives you no guarantee about the order of anything. The result depends on where the NaN started and how the algorithm happened to partition around it.
+
+That's my raccoon leaderboard. I've already written about [the stability guarantee people assume `sorted()` has](/blog/swift-sorted-is-not-a-stable-sort). This one is worse: you don't even get a correct sort.
+
+### max() and min()
+
+```swift
+[1.0, .nan, 3.0].max()   // 3.0
+[.nan, 1.0, 3.0].max()   // nan
+```
+
+Same values, different order, different answer. With the current stdlib implementation, `max()` keeps its running result unless `result < element` is true. If NaN shows up first, nothing is ever "greater" than it, so it wins. Your chart's y-axis is now `0...nan`.
+
+### Set and Dictionary
+
+```swift
+var seen: Set<Double> = []
+seen.insert(.nan)
+seen.insert(.nan)
+seen.count            // 2
+seen.contains(.nan)   // false
+
+var cache: [Double: String] = [:]
+cache[.nan] = "a"
+cache[.nan] = "b"
+cache.count           // 2
+cache[.nan]           // nil
+```
+
+Hashing finds the bucket, then `==` confirms the match. The confirm step always fails, so every NaN insert adds a new entry you can never look up again. A memoization cache keyed on a computed `Double` becomes a memory leak with extra steps. (If you've been bitten by [Set and Dictionary iteration order](/blog/set-dictionary-iteration-order-hash-seed-swift) before, add this to the list of things those types never promised you.)
+
+### Your clamp function
+
+This is the one I find most annoying:
+
+```swift
+func clamp(_ x: Double) -> Double { min(max(x, 0), 1) }
+clamp(.nan)   // nan
+```
+
+You wrote a clamp specifically so the value would always land in `0...1`. Swift's free `max(x, y)` returns `y >= x ? y : x`. `0 >= nan` is false, so you get NaN back. Then `min` does the same thing. The guard rail you built lets the one value through that it most needed to stop.
+
+---
+
+## Where it finally surfaces
+
+NaN usually gets noticed at a boundary that refuses to play along:
+
+- **`Int(x)` traps.** `Int(Double.nan)` crashes with "Double value cannot be converted to Int because it is either infinite or NaN." That's often the first loud failure, far away from the cause.
+- **SwiftUI logs `Invalid frame dimension (negative or non-finite)`** when a NaN reaches `.frame(width:)`, and the view lays out strangely instead of crashing.
+- **CoreGraphics prints a warning** about an invalid numeric value (NaN) passed to its API. Setting the `CG_NUMERICS_SHOW_BACKTRACE` environment variable in your scheme shows you where it came from.
+- **`JSONEncoder` throws `EncodingError.invalidValue`**, because JSON has no NaN. The default `nonConformingFloatEncodingStrategy` is `.throw`, so one NaN in a model fails the whole upload.
+
+That last one connects to [the null-vs-missing-key problem with Codable](/blog/codable-null-vs-missing-key-decodeifpresent-swift). Your backend contract has no representation for "this number isn't a number," and you have to decide what it should be before you encode.
+
+---
+
+## The fix: stop it at the door
+
+Once NaN is inside your data, every algorithm downstream is suspect. So don't try to make every algorithm NaN-safe. Stop it where it's created.
+
+```swift
+extension Double {
+    /// Returns nil for NaN and ±infinity, so bad math becomes an explicit Optional.
+    var finiteOrNil: Double? { isFinite ? self : nil }
+}
+
+func average(_ total: Int, over count: Int) -> Double? {
+    guard count > 0 else { return nil }
+    return Double(total) / Double(count)
+}
+```
+
+`isFinite` rejects NaN and both infinities in one check, which is almost always what you want. `isNaN` alone lets infinity through, and infinity minus infinity is just NaN waiting for its turn.
+
+Returning `nil` instead of `0` matters too. A user with zero rounds doesn't have an average of zero. They have **no average**, and the UI should say "No games yet" instead of ranking them last. Optional forces that decision to happen in the open, which is the same reason it's the right default for loading and empty states in [the error-handling lesson](/learn/error-handling-loading-states).
+
+For the checks that did fail, use predicates instead of `==`:
+
+```swift
+values.contains { $0.isNaN }
+values.firstIndex { !$0.isFinite }
+```
+
+When you need min and max that ignore NaN, IEEE has you covered:
+
+```swift
+Double.maximum(.nan, 1.0)   // 1.0
+Double.minimum(.nan, 1.0)   // 1.0
+```
+
+`Double.maximum` and `Double.minimum` return the number when exactly one argument is NaN. Your clamp becomes `Double.minimum(Double.maximum(x, 0), 1)`, which returns `0` for NaN. Whether 0 is the right answer is up to you, but at least you chose it.
+
+And if you genuinely need to sort data that may contain NaN, say in a debug tool that shows raw sensor readings, use IEEE's total order, which gives NaN a defined place after positive infinity:
+
+```swift
+let sorted = readings.sorted { !$1.isTotallyOrdered(belowOrEqualTo: $0) }
+```
+
+`isTotallyOrdered(belowOrEqualTo:)` is a `<=`, so negating the flipped call gives a strict `<` that's a valid ordering for every value, NaN included. It also puts `-0.0` before `+0.0`, which ordinary `<` treats as equal.
+
+---
+
+## Test the poison, not just the happy path
+
+One more fun fact before you write the test. With the current stdlib, comparing an array to *itself* can short-circuit on shared storage:
+
+```swift
+let a = [Double.nan]
+a == a        // true, same buffer
+a == [.nan]   // false, element comparison
+```
+
+So "it equals itself in my test" proves nothing. Assert on the property you care about:
+
+```swift
+import Testing
+
+@Suite struct ScoreMathTests {
+    @Test func averageOfNoRoundsIsNil() {
+        #expect(average(0, over: 0) == nil)
+    }
+
+    @Test func leaderboardIgnoresNonFiniteScores() {
+        let scores: [Double] = [3, .nan, 1, .infinity, 2]
+        let board = scores.compactMap(\.finiteOrNil).sorted(by: >)
+        #expect(board == [3, 2, 1])
+    }
+
+    @Test func clampHandlesNaN() {
+        let x = Double.minimum(Double.maximum(.nan, 0), 1)
+        #expect(x.isFinite)
+    }
+}
+```
+
+Throw a NaN and an infinity into every fixture that touches computed `Double`s. It costs two array elements, and it's the cheapest bug hunt you'll ever run.
+
+---
+
+## The takeaway
+
+`Double` isn't broken, and NaN isn't a bug. It's the standard doing its job: refusing to pretend that `0 / 0` has an answer. The bug is letting that honest "I don't know" into code that only knows how to handle numbers.
+
+It's the same lesson as [`Decimal(0.1)` still going through a Double](/blog/decimal-from-double-literal-imprecision-swift) and [`%` not being modulo](/blog/swift-remainder-operator-negative-numbers-not-modulo): arithmetic that looks obvious usually has a footnote. Guard every division whose denominator can be zero, turn non-finite results into `nil`, and let the type system carry the "no answer" the rest of the way.
+
+The raccoon leaderboard took me an afternoon to trace. The fix was one `guard` statement. That ratio is pretty much the whole story of floating point.
