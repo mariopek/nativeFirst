@@ -1,0 +1,248 @@
+---
+title: "Swift's split() Throws Away Your Empty Fields. Your CSV Import Just Shifted Every Column Left."
+description: "Swift's split(separator:) omits empty subsequences by default, so a,,c becomes two fields, not three. Here's how that shifts CSV and TSV columns, why Windows CRLF line endings never split on a newline, how components(separatedBy:) differs, and the safe way to parse delimited lines."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Strings", "Parsing"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1564506761272-8a2bb17bea83?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A spreadsheet with rows and columns of numbers on a screen"
+---
+
+{/*
+SEO keywords: Swift split empty fields, omittingEmptySubsequences, Swift split vs components(separatedBy:),
+Swift CSV parsing, Swift TSV parse, Swift split CRLF, Swift split newline Windows line endings,
+Character \r\n grapheme, Swift split maxSplits, Swift Substring memory
+Internal linking plan: nsrange-string-count-utf16-emoji-offset-swift (Character vs UTF-16 units),
+arrayslice-holds-entire-array-memory-swift (Substring keeps the whole String alive),
+codable-null-vs-missing-key-decodeifpresent-swift (empty vs missing data),
+urlcomponents-plus-sign-query-not-encoded-swift (another "parsing is the bug" story),
+course /learn/unit-testing-with-ai
+*/}
+
+The bank statement import worked for three weeks. Then a user in Lyon emailed a screenshot: every transaction in March showed the **amount** where the **description** should be, and the date column said "EUR".
+
+Nobody had touched the parser. The file was fine. The bug was one optional parameter with a default value that nobody on the team had ever read, including me, because I wrote that parser.
+
+---
+
+## The line that looks completely innocent
+
+Here's the shape of it. A CSV export where the "memo" column is optional:
+
+```swift
+let line = "2026-03-04,,42.50,EUR"
+let fields = line.split(separator: ",")
+print(fields.count)   // 3
+print(fields)         // ["2026-03-04", "42.50", "EUR"]
+```
+
+Four columns went in. Three came out. `fields[1]` is now the amount, `fields[2]` is the currency, and `fields[3]` is a crash waiting for the first row where you forget a bounds check.
+
+The culprit is the full signature:
+
+```swift
+func split(
+    separator: Character,
+    maxSplits: Int = Int.max,
+    omittingEmptySubsequences: Bool = true
+) -> [Substring]
+```
+
+**`omittingEmptySubsequences` defaults to `true`.** Swift decided that, by default, an empty field between two commas is noise to throw away. For splitting a sentence on spaces, that's a nice touch. For any format where position means something, it's a column-shifting machine.
+
+It worked for three weeks because for three weeks every row had a memo. Then March had one card payment with no description, and that's all it takes.
+
+---
+
+## The three places empty fields hide
+
+Empty fields don't only appear in the middle. Watch the edges too:
+
+```swift
+"a,,c".split(separator: ",")    // ["a", "c"]          middle gone
+",b,c".split(separator: ",")    // ["b", "c"]          leading gone
+"a,b,".split(separator: ",")    // ["a", "b"]          trailing gone
+"".split(separator: ",")        // []                  no fields at all
+",,,".split(separator: ",")     // []                  four empty fields, zero results
+```
+
+That trailing case is the sneaky one. Plenty of exporters write a trailing delimiter, or leave the last column empty for most rows. Your code reads `fields.last` expecting the "notes" column and gets the "category" column instead, with no error anywhere.
+
+The fix is one argument:
+
+```swift
+"a,,c".split(separator: ",", omittingEmptySubsequences: false)
+// ["a", "", "c"]
+
+"a,b,".split(separator: ",", omittingEmptySubsequences: false)
+// ["a", "b", ""]
+
+"".split(separator: ",", omittingEmptySubsequences: false)
+// [""]
+```
+
+Now `n` delimiters always produce `n + 1` fields. That's the invariant every positional parser actually depends on, and it's the opposite of the default.
+
+---
+
+## components(separatedBy:) has the opposite default
+
+Here's what makes this extra fun: Foundation's older API does the other thing.
+
+```swift
+import Foundation
+
+"a,,c".components(separatedBy: ",")   // ["a", "", "c"]
+"a,b,".components(separatedBy: ",")   // ["a", "b", ""]
+"".components(separatedBy: ",")       // [""]
+```
+
+`components(separatedBy:)` keeps empty fields, always, with no option to turn that off. So if you're migrating old code from `components` to `split` because someone said "split is more Swifty and returns Substrings," you just changed behavior in a way no compiler and no code review diff will flag. The two lines look like synonyms. They aren't.
+
+My rule now: **if position matters, the call site says `omittingEmptySubsequences: false` out loud**, even when I'm using `components` elsewhere. Explicit beats remembering which API has which default.
+
+---
+
+## The Windows line ending that never splits
+
+Okay, so you fixed the commas. Now you split the file into lines:
+
+```swift
+let file = "date,memo,amount\r\n2026-03-04,,42.50\r\n"
+let lines = file.split(separator: "\n")
+print(lines.count)   // 1
+```
+
+One. The entire file, as a single "line."
+
+This isn't a bug in `split`. It's Swift being honest about text. **`"\r\n"` is a single `Character`** in Swift, one extended grapheme cluster, per Unicode's rules. And `Character("\r\n") == "\n"` is `false`. So splitting on `"\n"` walks the string Character by Character, never finds a lone `"\n"`, and hands you back everything.
+
+If you've read [why NSRange and String.count disagree](/blog/nsrange-string-count-utf16-emoji-offset-swift), this is the same family of surprise: Swift counts what humans see, not the bytes underneath.
+
+Now try Foundation's version:
+
+```swift
+let lines = file.components(separatedBy: "\n")
+// ["date,memo,amount\r", "2026-03-04,,42.50\r", ""]
+```
+
+It splits, because it works on UTF-16 code units. But every line now ends with a stray `\r`, which means your last column is `"42.50\r"`, and `Decimal(string:)` or `Double(_:)` on that returns `nil`. Different API, different bug, same Tuesday ruined.
+
+The fix that handles `\n`, `\r\n`, and even old-Mac `\r`:
+
+```swift
+let lines = file.split(whereSeparator: \.isNewline)
+// ["date,memo,amount", "2026-03-04,,42.50"]
+```
+
+`Character.isNewline` is `true` for the `"\r\n"` cluster as well as `"\n"` and `"\r"`, so this does what you meant. Note that I'm happily letting it drop empty subsequences here: blank lines in a data file are usually junk, and that trailing `""` from the final newline disappears too. Same parameter, opposite correct answer, depending on whether you're splitting *records* or *fields*.
+
+---
+
+## A delimited-line parser that doesn't lie
+
+Putting it together, here's how I'd write the simple case, for files where fields never contain the delimiter or quotes:
+
+```swift
+struct DelimitedTable {
+    let header: [String]
+    let rows: [[String]]
+
+    enum ParseError: Error, Equatable {
+        case empty
+        case wrongFieldCount(line: Int, expected: Int, got: Int)
+    }
+
+    init(_ text: String, separator: Character = ",") throws {
+        let lines = text.split(whereSeparator: \.isNewline)
+        guard let first = lines.first else { throw ParseError.empty }
+
+        func fields(_ line: Substring) -> [String] {
+            line.split(separator: separator, omittingEmptySubsequences: false)
+                .map(String.init)
+        }
+
+        header = fields(first)
+        rows = try lines.dropFirst().enumerated().map { offset, line in
+            let row = fields(line)
+            guard row.count == header.count else {
+                throw ParseError.wrongFieldCount(
+                    line: offset + 2, expected: header.count, got: row.count
+                )
+            }
+            return row
+        }
+    }
+}
+```
+
+Three things worth pointing out:
+
+- **Fields keep their position**, because empty subsequences are kept.
+- **Lines split on `isNewline`**, so CRLF files from Excel on Windows behave.
+- **The field count is validated per row.** This is the real safety net. If something ever shifts again, you get an error naming line 47, not a silently wrong amount in someone's budget.
+
+The `.map(String.init)` matters too. `split` returns `Substring`s that share storage with the original string, and like [ArraySlice holding the whole array](/blog/arrayslice-holds-entire-array-memory-swift), keeping a few of them around keeps the entire 40 MB file in memory. Convert to `String` once you're storing them.
+
+And the honest caveat: **this is not a CSV parser.** The moment a field can contain `"Smith, John"` in quotes, splitting on commas is wrong no matter which parameter you pass. Real CSV needs a small state machine that tracks whether you're inside quotes, handles doubled `""` escapes, and allows newlines inside quoted fields. If you don't control the file, use a proper parser. If you do control it, TSV with no tabs allowed in values is the boring, correct choice.
+
+---
+
+## The maxSplits trap, briefly
+
+While we're here: `maxSplits` is great for `key=value` lines where the value might contain `=`.
+
+```swift
+"token=abc=def".split(separator: "=", maxSplits: 1)
+// ["token", "abc=def"]
+```
+
+But combine it with the default and you get this:
+
+```swift
+"token=".split(separator: "=", maxSplits: 1)
+// ["token"]
+```
+
+An empty value doesn't come back as `""`. It doesn't come back at all, so code that does `parts[1]` traps. That's the same "empty versus missing" distinction that [bites Codable on null vs absent keys](/blog/codable-null-vs-missing-key-decodeifpresent-swift). Pass `omittingEmptySubsequences: false` and `"token="` gives you `["token", ""]`, which is the truth.
+
+---
+
+## Pin it with a test
+
+This is precisely the kind of bug that a five-line test catches forever:
+
+```swift
+import Testing
+
+@Suite struct DelimitedTableTests {
+    @Test func emptyMiddleFieldKeepsColumns() throws {
+        let table = try DelimitedTable("date,memo,amount\n2026-03-04,,42.50")
+        #expect(table.rows[0] == ["2026-03-04", "", "42.50"])
+    }
+
+    @Test func trailingEmptyFieldIsKept() throws {
+        let table = try DelimitedTable("a,b,c\n1,2,")
+        #expect(table.rows[0] == ["1", "2", ""])
+    }
+
+    @Test func windowsLineEndings() throws {
+        let table = try DelimitedTable("a,b\r\n1,2\r\n3,4\r\n")
+        #expect(table.rows == [["1", "2"], ["3", "4"]])
+    }
+
+    @Test func shortRowIsRejected() {
+        #expect(throws: DelimitedTable.ParseError.wrongFieldCount(line: 2, expected: 3, got: 2)) {
+            try DelimitedTable("a,b,c\n1,2")
+        }
+    }
+}
+```
+
+Fixtures like these are also a great job to hand an AI assistant: "give me 15 nasty CSV edge cases" produces a better list than I'd write at 6 PM. The [unit testing with AI lesson](/learn/unit-testing-with-ai) covers how to make it generate tests that actually fail on the bug, rather than tests that politely agree with your code.
+
+---
+
+The Lyon user got a fix the same afternoon, and I got a new habit. Whenever I see `split(separator:)` in a code review now, I ask exactly one question: **does position matter here?** If yes, the default is wrong, and the line should say so.
+
+Swift's defaults are usually kind. This one is kind to sentences and cruel to spreadsheets. Know which one you're parsing.
