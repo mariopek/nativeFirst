@@ -1,0 +1,204 @@
+---
+title: "Your Receipt Says $0.13. Your Label Says $0.12. Swift Has Two Rounding Rules and You're Using Both."
+description: "Swift's Double.rounded() rounds half away from zero, but NumberFormatter, FormatStyle, and String(format:) round half to even. Here's why the same number displays two ways, the 1.005 trap, and how to pick one rounding rule and enforce it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Foundation", "Floating Point"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1554224154-26032ffc0d07?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A calculator resting on printed receipts and financial paperwork on a desk"
+---
+
+{/*
+SEO keywords: Swift rounded() half away from zero, Swift round to 2 decimal places,
+NumberFormatter rounding mode halfEven, FormatStyle rounding rule, bankers rounding Swift,
+String(format: "%.2f") rounding, Swift 1.005 rounding bug, FloatingPointRoundingRule,
+Swift Int(Double) truncates, consistent rounding iOS money
+Internal linking plan: decimal-from-double-literal-imprecision-swift (Decimal and NSDecimalRound),
+double-nan-breaks-sort-set-contains-swift (other Double surprises),
+swift-remainder-operator-negative-numbers-not-modulo (another "math operator isn't what you think"),
+dateformatter-yyyy-week-based-year-bug-swift (another formatter default that bites),
+course /learn/debugging-with-ai
+*/}
+
+The bug report had two screenshots side by side. On the left, the tip screen: **$0.13**. On the right, the emailed receipt for the exact same order: **$0.12**. The customer wasn't angry about the penny. They were angry that the app couldn't agree with itself.
+
+I assumed a stale value, or a race, or the backend doing its own math. Nope. Both numbers came from the same `Double` on the same device in the same second. One code path rounded it with `rounded()`. The other formatted it with a `NumberFormatter`. And those two **disagree about what to do with a 5.**
+
+---
+
+## The penny that rounds both ways
+
+Here's the whole bug, boiled down:
+
+```swift
+import Foundation
+
+let tip = 0.125   // exactly representable in binary, no float fuzz here
+
+// Path 1: "round to two decimals" the way everyone writes it
+let stored = (tip * 100).rounded() / 100
+print(stored)                         // 0.13
+
+// Path 2: let the formatter do it
+let formatter = NumberFormatter()
+formatter.numberStyle = .decimal
+formatter.maximumFractionDigits = 2
+print(formatter.string(from: tip as NSNumber)!)   // 0.12
+```
+
+No floating-point weirdness here. `0.125` is exact in binary, `12.5` is exact, everything is clean. The two lines just follow **different rules for ties.**
+
+`Double.rounded()` with no arguments uses `.toNearestOrAwayFromZero`. That's the schoolbook rule: 2.5 becomes 3, -2.5 becomes -3. It's what you learned at age nine and what your product manager expects.
+
+`NumberFormatter` defaults to `roundingMode = .halfEven`. That's banker's rounding: ties go to the nearest *even* digit. So 12.5 becomes 12, 13.5 becomes 14, and 0.125 shows as "0.12". This default is documented. It's also the last thing anyone checks.
+
+---
+
+## It's not just NumberFormatter
+
+You'd hope the modern API picked a side. It did. The other side.
+
+```swift
+let x = 2.5
+
+x.rounded()                                              // 3.0
+x.formatted(.number.precision(.fractionLength(0)))       // "2"
+String(format: "%.0f", x)                                // "2"
+Int(x)                                                   // 2  (that's not even rounding)
+lround(x)                                                // 3
+```
+
+Five ways to turn 2.5 into a whole number, and they split 3 to 2. Here's the scorecard:
+
+- **`rounded()`** and C's **`lround`**: half away from zero.
+- **`FormatStyle`** (`.formatted(...)`): backed by ICU, whose default is half-even. Its `rounded(rule:)` modifier defaults to `.toNearestOrEven` too.
+- **`String(format:)`**: printf-style. It rounds the *exact binary value* using the current rounding mode, which is round-to-nearest-even.
+- **`Int(_:)`**: doesn't round at all. It **truncates toward zero.** `Int(2.9)` is 2, and `Int(-2.9)` is -2.
+
+That last one deserves its own warning label. I've seen `Int(price * 100)` used to compute cents more times than I can count, and it's wrong for roughly half of all prices. More on that in a second.
+
+Half-even isn't a bad rule, by the way. It exists because always rounding ties up skews sums upward. Over a million transactions, half-even's ties cancel out. That's why accountants and IEEE 754 like it. The problem isn't either rule. **The problem is mixing them.**
+
+---
+
+## The 1.005 trap (now with float fuzz)
+
+So you standardize on `rounded()` everywhere. Victory? Not yet.
+
+```swift
+let price = 1.005
+print((price * 100).rounded() / 100)   // 1.0  — you expected 1.01
+```
+
+This one *is* floating point. `1.005` can't be stored exactly. The nearest `Double` is `1.00499999999999989...`, a hair below the tie. Multiply by 100 and you get `100.49999999999999`, which rounds down to 100. There never was a 5 to round.
+
+And now the truncation bug I promised:
+
+```swift
+let price = 0.29
+let cents = Int(price * 100)   // 28. Not 29.
+```
+
+`0.29 * 100` comes out as `28.999999999999996`. `Int` chops off the fraction and hands you 28 cents. Your Stripe charge and your UI are now off by one cent, and you'll find out during reconciliation, which is the worst possible time to find anything out.
+
+If you're doing money, the real fix is to stop doing it in `Double` at all. I wrote a whole post on [why Decimal(0.1) still goes through a Double first](/blog/decimal-from-double-literal-imprecision-swift), and it covers `NSDecimalRound` with explicit `.plain` and `.bankers` modes. For integer cents from a `Double` you already have, at least round before converting: `Int((price * 100).rounded())`. That gives you 29.
+
+---
+
+## Pick one rule, write it down, enforce it
+
+The receipt bug wasn't really a math bug. It was a **policy** bug: nobody had decided what the rounding rule was, so every code path picked its own default. Here's the fix I landed on.
+
+**1. Round once, at the boundary, and store the result.** Display should never re-round raw values. If the tip is 13 cents, store 13 cents as an integer, or as a `Decimal` that's already rounded, and every screen formats *that*.
+
+**2. When you do format a raw value, set the rule explicitly.** FormatStyle makes this one modifier:
+
+```swift
+extension FloatingPointRoundingRule {
+    /// The one rule this app uses for anything a human will see.
+    static let app: FloatingPointRoundingRule = .toNearestOrAwayFromZero
+}
+
+extension Double {
+    func rounded(toPlaces places: Int, rule: FloatingPointRoundingRule = .app) -> Double {
+        let scale = pow(10, Double(places))
+        return (self * scale).rounded(rule) / scale
+    }
+
+    func displayString(places: Int = 2) -> String {
+        formatted(
+            .number
+                .precision(.fractionLength(places))
+                .rounded(rule: .app)
+        )
+    }
+}
+
+0.125.rounded(toPlaces: 2)   // 0.13
+0.125.displayString()        // "0.13" — finally, they agree
+```
+
+Now both paths share one named rule. If finance decides tomorrow that the app uses banker's rounding, you change one line instead of grepping for every `.rounded()` and `NumberFormatter` in the project.
+
+Note that `rounded(toPlaces:)` still has the 1.005 problem, since the multiplication happens in binary. It's fine for display-adjacent math like percentages and progress. It is **not** fine for money. For money, see rule 1.
+
+**3. Decide line-level vs total-level rounding for sums.** Three items at $0.125 each: round each one and you get $0.39. Sum first and round once and you get $0.38 (half away from zero gives 0.375 → 0.38). Both answers are defensible. Having one screen do it each way is not. Write the decision in a comment at the top of whatever type computes totals.
+
+---
+
+## The negative-number footnote
+
+One more, because it bites refund flows. The rounding rules are symmetric around zero in ways that feel wrong if you think of "rounding" as "going up":
+
+```swift
+(-2.5).rounded()           // -3.0  (away from zero)
+(-2.5).rounded(.up)        // -2.0  (toward +infinity)
+(-2.5).rounded(.down)      // -3.0  (toward -infinity)
+(-2.5).rounded(.towardZero)// -2.0
+```
+
+If your refund code uses `.up` because "we always round in the customer's favor," you're rounding a negative refund *toward the merchant*. Same flavor of surprise as [Swift's `%` returning negative numbers](/blog/swift-remainder-operator-negative-numbers-not-modulo): an operator that's correct by its own definition and wrong by yours.
+
+---
+
+## Lock it in with a test
+
+The best part of naming the rule is that you can test that display and storage agree. Pick the ties on purpose. A random number almost never lands on one, which is exactly why this bug survives QA.
+
+```swift
+import Testing
+
+@Suite("Rounding policy")
+struct RoundingPolicyTests {
+    // Exact binary ties: these are where half-even and half-away disagree.
+    static let ties: [(Double, String)] = [
+        (0.125, "0.13"),
+        (0.375, "0.38"),
+        (2.5,   "2.50"),
+        (-0.125, "-0.13"),
+    ]
+
+    @Test("Stored value and displayed string agree", arguments: ties)
+    func storedMatchesDisplay(value: Double, expected: String) {
+        let stored = value.rounded(toPlaces: 2)
+        #expect(stored.displayString() == expected)
+        #expect(value.displayString() == expected)
+    }
+
+    @Test func intConversionRoundsInsteadOfTruncating() {
+        #expect(Int((0.29 * 100).rounded()) == 29)
+    }
+}
+```
+
+The display strings in that test are locale-sensitive, so either pin the locale in the format style (`.locale(Locale(identifier: "en_US_POSIX"))`) or run the test plan in a fixed region. Ask the [DateFormatter `YYYY` bug](/blog/dateformatter-yyyy-week-based-year-bug-swift) how much fun it is when a formatter's default quietly depends on where the device is.
+
+If you hand this kind of bug to an AI assistant, give it both code paths and the exact input. "Why does 0.125 show as 0.12 here and 0.13 there" gets you the answer in one shot. "My rounding is off sometimes" gets you a lecture on IEEE 754 and a suggestion to add `+ 0.0001`. The [debugging with AI](/learn/debugging-with-ai) lesson has more on writing prompts that point at the actual difference.
+
+---
+
+## The takeaway
+
+The receipt fix was eleven lines. Finding it took two days, because I kept looking for a bug in the *numbers* when the bug was in the *defaults*. `Double` has its share of landmines, from [NaN breaking `sorted()`](/blog/double-nan-breaks-sort-set-contains-swift) to literals that aren't what you typed. This one is quieter. Every API involved does exactly what its docs say.
+
+They just don't say the same thing. So pick a rule, give it a name, and make every penny go through it.
