@@ -1,0 +1,260 @@
+---
+title: "Dictionary(uniqueKeysWithValues:) Is a Promise. One Duplicate ID From Your Backend and Your App Crashes."
+description: "Swift's Dictionary(uniqueKeysWithValues:) traps on a duplicate key, in release builds too. Here's how one repeated ID from an API crashes your iOS app, the uniquingKeysWith and grouping fixes, Unicode keys that collide, and SwiftUI ForEach's duplicate-ID cousin."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Collections"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1553386323-60698d6f7325?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A heap of ornate antique brass keys piled on top of each other, many of them nearly identical"
+---
+
+{/*
+SEO keywords: Dictionary uniqueKeysWithValues crash, Fatal error Duplicate values for key,
+Swift dictionary duplicate keys, uniquingKeysWith, Dictionary grouping by Swift,
+SwiftUI ForEach ID occurs multiple times, Swift precondition release build,
+Swift String canonical equivalence dictionary key, iOS crash duplicate id API
+Internal linking plan: codable-null-vs-missing-key-decodeifpresent-swift (other ways backend
+data surprises the decoder), uuid-uuidstring-uppercase-backend-lowercase-swift (normalizing IDs
+can create collisions), set-dictionary-iteration-order-hash-seed-swift (more Dictionary
+assumptions), swift-split-drops-empty-fields-csv-crlf (CSV imports, a classic source of
+duplicate rows), course /learn/debugging-with-ai
+*/}
+
+There's a scene in every heist movie where the crew opens the vault and finds two identical briefcases. Somebody says "which one?" and the whole plan falls apart in a single line of dialogue.
+
+Swift has a version of that scene. It's called `Dictionary(uniqueKeysWithValues:)`, and unlike the movies, nobody improvises. **The app just dies.**
+
+I hit this one on a Monday morning. A crash report, nothing in the changelog that could explain it, and a stack trace pointing at a line I'd written eight months earlier and never thought about again:
+
+```swift
+let productsByID = Dictionary(uniqueKeysWithValues: products.map { ($0.id, $0) })
+```
+
+Totally reasonable code. It worked for eight months. Then the backend shipped a bug that returned the same product twice in one page, and every user who opened that screen got this:
+
+```
+Fatal error: Duplicate values for key: 'sku_4412'
+```
+
+---
+
+## The name is the contract
+
+Here's the thing I hadn't really absorbed: **`uniqueKeysWithValues` isn't describing what the initializer does. It's describing what you promise.**
+
+You're telling Swift "I guarantee these keys are unique." Swift takes you at your word, and when you break the promise, it doesn't pick a winner, doesn't log a warning, doesn't return nil. It hits a precondition and traps.
+
+And no, this isn't a debug-only thing. Preconditions stay on in `-O` release builds. They only disappear under `-Ounchecked`, which you're almost certainly not using. So the crash you never see in the simulator is the exact crash your users get from the App Store build.
+
+The dictionary literal has the same rule, by the way:
+
+```swift
+let flags = ["darkMode": true, "darkMode": false]
+// Fatal error: Dictionary literal contains duplicate keys
+```
+
+That one at least tends to blow up the first time you run the code. The initializer is sneakier, because the duplicates come from data, and data is fine right up until it isn't.
+
+**The lesson: if the keys come from outside your process, you can't promise they're unique. So don't sign the contract.**
+
+---
+
+## Where duplicates actually come from
+
+"Our IDs are unique, it's a primary key" is what I said too. Here's what broke that assumption for me and for people I've talked to:
+
+- **Paginated APIs with offset paging.** A new item gets inserted while you're scrolling, everything shifts by one, and the last item of page 1 shows up again as the first item of page 2. You append the pages, build a dictionary, crash.
+- **Merging local and remote data.** You combine the SwiftData cache with a fresh fetch and map the result into a dictionary. Every item that exists in both places is now a duplicate.
+- **CSV and spreadsheet imports.** Users paste the same row twice. Of course they do. (If you're parsing CSV by hand, I wrote about [how `split()` silently drops empty fields](/blog/swift-split-drops-empty-fields-csv-crlf) too. Imports are a minefield.)
+- **Normalized keys.** The raw IDs really are unique, but you lowercased them first. `"ABC-1"` and `"abc-1"` are two rows in Postgres and one key in your dictionary. That's exactly the kind of fix people reach for after reading about [UUID casing mismatches](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift), and it can turn two keys into one.
+
+That last bucket has an even weirder member.
+
+---
+
+## Two strings your server thinks are different
+
+Swift's `String` equality uses **Unicode canonical equivalence.** `"é"` written as one precomposed scalar (U+00E9) and `"é"` written as `e` plus a combining acute accent (U+0065 U+0301) are equal in Swift, and they hash the same.
+
+```swift
+let precomposed = "caf\u{00E9}"
+let decomposed = "cafe\u{0301}"
+
+print(precomposed == decomposed)           // true
+print(precomposed.utf8.count, decomposed.utf8.count)  // 5 6
+
+let tags = [(precomposed, 1), (decomposed, 2)]
+let byName = Dictionary(uniqueKeysWithValues: tags)  // crash
+```
+
+Your backend compares bytes. Those are two different strings with two different rows. Swift compares meaning, so it sees one key used twice. Nobody did anything wrong, and the app still crashes.
+
+This is honestly correct behavior from Swift. It's just correct in a way your database doesn't share. If you key anything on user-entered text (tag names, usernames, file names from macOS, which loves decomposed forms), keep this in the back of your head.
+
+---
+
+## The fix: say what should happen on a collision
+
+The replacement is one initializer away, and it forces you to answer the question you skipped:
+
+```swift
+// Keep the first occurrence
+let productsByID = Dictionary(
+    products.map { ($0.id, $0) },
+    uniquingKeysWith: { first, _ in first }
+)
+
+// Keep the last occurrence (newest page wins)
+let latestByID = Dictionary(
+    products.map { ($0.id, $0) },
+    uniquingKeysWith: { _, last in last }
+)
+```
+
+Which one is right depends on your data, and that's the point. **"Which one?" is a product decision, not a crash.** For a paginated feed, last-wins usually makes sense because the newer copy is fresher. For merging cache and network, you might want to compare `updatedAt`:
+
+```swift
+let merged = Dictionary(
+    (cached + fetched).map { ($0.id, $0) },
+    uniquingKeysWith: { a, b in a.updatedAt >= b.updatedAt ? a : b }
+)
+```
+
+If you need to keep every value, use `grouping`:
+
+```swift
+let ordersByCustomer = Dictionary(grouping: orders, by: \.customerID)
+// [CustomerID: [Order]]
+```
+
+And if you're adding to an existing dictionary, `merge(_:uniquingKeysWith:)` takes the same closure. Plain subscript assignment in a loop (`dict[item.id] = item`) is last-wins too, and it never crashes. It just never tells you it happened, either.
+
+---
+
+## Don't just silence it. Notice it.
+
+Swapping in `uniquingKeysWith` stops the crash. It also hides the backend bug that caused it. I'd rather know.
+
+So in my own code the collision closure logs:
+
+```swift
+import os
+
+private let log = Logger(subsystem: "com.example.app", category: "data")
+
+extension Dictionary {
+    /// Builds a dictionary from possibly-duplicated keys. Last value wins,
+    /// and every collision is logged instead of trapping.
+    init<S: Sequence>(
+        lenient pairs: S,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) where S.Element == (Key, Value) {
+        self.init()
+        for (key, value) in pairs {
+            if self.updateValue(value, forKey: key) != nil {
+                log.error("Duplicate key \(String(describing: key), privacy: .public) at \(String(describing: file), privacy: .public):\(line)")
+            }
+        }
+    }
+}
+
+let productsByID = Dictionary(lenient: products.map { ($0.id, $0) })
+```
+
+`updateValue(_:forKey:)` returns the old value if there was one, which makes it a free collision detector. Now the bug shows up in Console and your logging pipeline instead of in crash reports, and the screen still loads.
+
+This is the kind of thing an AI assistant is good at spotting if you ask the right question. "Find every place this codebase traps on data from the network" is a much better prompt than "why did this crash." I go deeper on that approach in [Debugging with AI](/learn/debugging-with-ai).
+
+---
+
+## The SwiftUI cousin: ForEach with duplicate IDs
+
+Same data, different symptom. Feed those duplicated products to a `ForEach`:
+
+```swift
+ForEach(products) { product in
+    ProductRow(product: product)
+}
+```
+
+This one doesn't crash. You get a runtime warning in the console, something like *"the ID sku_4412 occurs multiple times within the collection, this will give undefined results!"*, and SwiftUI means it about the undefined part. I've seen rows show the wrong content, swipe actions delete the wrong item, and animations jump around because the diffing can't tell the two rows apart.
+
+Honestly, I think this is worse than the crash. A crash shows up in your reports. A row that deletes the wrong order shows up as a one-star review.
+
+The fix is the same idea: deduplicate once, at the boundary, before anything reaches the UI.
+
+```swift
+extension Sequence {
+    /// Removes later elements whose key was already seen. Keeps the original order.
+    func uniqued<Key: Hashable>(by key: (Element) -> Key) -> [Element] {
+        var seen = Set<Key>()
+        return filter { seen.insert(key($0)).inserted }
+    }
+}
+
+products = (products + nextPage).uniqued(by: \.id)
+```
+
+`Set.insert` returns whether the element was new, so this is one pass with order preserved. Unlike `Set(products)`, which would also wreck your sort order. Speaking of which, [Dictionary and Set iteration order changes on every launch](/blog/set-dictionary-iteration-order-hash-seed-swift), so never build a list by iterating a dictionary and expect the order to hold still.
+
+---
+
+## Test the ugly payload, not the happy one
+
+The reason this lived for eight months is that every fixture I had was clean. Real APIs aren't. Add the bad case on purpose:
+
+```swift
+import Testing
+
+struct Product: Identifiable, Equatable {
+    let id: String
+    let name: String
+}
+
+@Test func duplicateIDsDoNotCrashAndLastWins() {
+    let page = [
+        Product(id: "sku_1", name: "Old"),
+        Product(id: "sku_2", name: "Mug"),
+        Product(id: "sku_1", name: "New"),
+    ]
+
+    let byID = Dictionary(lenient: page.map { ($0.id, $0) })
+
+    #expect(byID.count == 2)
+    #expect(byID["sku_1"]?.name == "New")
+}
+
+@Test func uniquedKeepsFirstAndPreservesOrder() {
+    let page = [
+        Product(id: "a", name: "1"),
+        Product(id: "b", name: "2"),
+        Product(id: "a", name: "3"),
+    ]
+
+    #expect(page.uniqued(by: \.id).map(\.name) == ["1", "2"])
+}
+
+@Test func canonicallyEquivalentKeysCollide() {
+    let pairs = [("caf\u{00E9}", 1), ("cafe\u{0301}", 2)]
+    #expect(Dictionary(lenient: pairs).count == 1)
+}
+```
+
+That third test is mostly documentation. It's there so the next person who wonders why two "different" tags merged has an answer in the test suite instead of a three-hour mystery.
+
+Same energy as [handling null versus a missing key in Codable](/blog/codable-null-vs-missing-key-decodeifpresent-swift): the decoder and the dictionary both assume the backend behaves. Your tests shouldn't.
+
+---
+
+## The grep that finds them all
+
+Before you close the tab, run this in your project:
+
+```bash
+grep -rn "uniqueKeysWithValues" --include="*.swift" .
+```
+
+For each hit, ask one question: **where do these keys come from?** If it's an enum's cases or a constant table you wrote yourself, fine, the promise holds. If it's anything that came over a network, out of a file, or from a user's keyboard, you've got a crash on a timer. You just don't know when the backend will set it off.
+
+Swift was clear about it. The initializer's name told you what you were promising. I just didn't read it as a promise until it broke.
