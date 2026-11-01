@@ -1,0 +1,225 @@
+---
+title: "guard let try? Is a Neuralyzer for Your Errors. Swift's New guard do/catch Pitch Wants to Fix It."
+description: "guard let x = try? throws away the error, so a renamed JSON key becomes a silent empty screen. Here's what try? really hides in iOS apps (decoding failures, nil vs thrown, Task.sleep cancellation loops), the do/catch pattern that keeps the error without nesting today, and what the guard do ... catch Swift Evolution pitch proposes."
+pubDate: 2026-11-01
+tags: ["Swift", "iOS Development", "Swift Evolution", "Error Handling", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1571510228522-bcd6099cea0b?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Discarded paper thrown away in a waste bin, like an error swallowed by try?"
+---
+
+{/*
+SEO keywords: guard let try?, try? swallows error Swift, guard do catch Swift pitch,
+Swift Evolution guard catch, Swift error handling early exit, do catch without nesting,
+definite initialization let do catch, try? optional flattening SE-0230,
+Task.sleep try? cancellation busy loop, JSONDecoder silent failure iOS, Swift 2026
+
+Internal linking plan:
+- /blog/swift-typed-throws-protocol-boundary-gotcha (typed throws, catch error type inference)
+- /blog/codable-null-vs-missing-key-decodeifpresent-swift (decoding failures you want to see)
+- /blog/swiftui-task-cancellation-isnt-automatic (cancellation and Task.sleep)
+- /blog/unkeyeddecodingcontainer-skip-infinite-loop-swift (another decoding-error horror story)
+- /learn/debugging-with-ai (course lesson: debugging when the evidence is gone)
+*/}
+
+In *Men in Black*, Agent K points a little silver stick at a witness, there's a flash, and the witness forgets everything. They walk away calm and none the wiser. The alien is still out there.
+
+**`try?` is a neuralyzer.** You point it at an error, there's a tiny flash of a question mark, and your code forgets anything went wrong. It walks off calmly down the `else` branch. The bug is still out there.
+
+I've been thinking about this all weekend because of a fresh Swift Evolution pitch, [`guard do ... catch`](https://forums.swift.org/t/pitch-guard-do-catch-local-error-handling-with-early-exit-and-bound-variables/90330), posted on October 29. It's the latest attempt at something Swift developers have asked for since 2016: **bind a value from a throwing call, exit early on failure, and keep the error.** Before we get to the new syntax, though, let's look at the damage the current habit does.
+
+---
+
+## The line that ate my afternoon
+
+Here's a function that's probably in your app in some form:
+
+```swift
+func loadProfile() async {
+    guard let data = try? await URLSession.shared.data(from: profileURL).0,
+          let profile = try? JSONDecoder().decode(Profile.self, from: data)
+    else {
+        state = .empty
+        return
+    }
+    state = .loaded(profile)
+}
+```
+
+It's tidy, it reads top to bottom, and the happy path isn't nested. It's also a trap.
+
+One Tuesday the backend renamed `display_name` to `displayName`. Decoding started throwing `DecodingError.keyNotFound`, a beautifully specific error that names the exact missing key and the coding path to it. `try?` turned it into `nil`. The screen showed the empty state. No log, no crash, no analytics event. Just a user staring at "Nothing here yet" while their profile sat on the server, perfectly fine.
+
+**The worst bugs aren't crashes. They're errors your code was told to forget.** A crash at least gives you a stack trace. This gave me an afternoon of diffing JSON by hand.
+
+I've written before about how much information [Codable throws at you when you let it](/blog/codable-null-vs-missing-key-decodeifpresent-swift). `try?` throws all of it in the bin.
+
+---
+
+## Three more things try? hides
+
+The decoding case is the famous one. These are sneakier.
+
+**1. nil and "it threw" become the same thing.** Since Swift 5 (SE-0230), `try?` on a function that already returns an optional flattens the result. If `cachedUser()` returns `User?` and can also throw, then `try? cachedUser()` is just `User?`:
+
+```swift
+func cachedUser() throws -> User?   // nil = "no cache yet", throw = "cache is corrupt"
+
+guard let user = try? cachedUser() else {
+    // Was the cache empty? Or is the database file corrupt?
+    // You can't know. Both land here.
+    return showOnboarding()
+}
+```
+
+"Not logged in yet" and "your SQLite file is damaged" now show the same screen. One is normal and the other is a support ticket waiting to happen.
+
+**2. Cancellation turns a polling loop into a hot loop.** This one is genuinely nasty:
+
+```swift
+func pollStatus() async {
+    while true {
+        try? await Task.sleep(for: .seconds(5))
+        await refreshStatus()
+    }
+}
+```
+
+Once the task is cancelled (the view disappears and SwiftUI cancels its `.task`), `Task.sleep` throws `CancellationError` **immediately, every time**. `try?` swallows it. The loop doesn't sleep anymore. It calls `refreshStatus()` as fast as the CPU allows, forever. I covered why [SwiftUI's cancellation isn't the off switch you think it is](/blog/swiftui-task-cancellation-isnt-automatic), and this is the extreme version: cancellation actively makes the code worse. The fix is to let the sleep throw:
+
+```swift
+func pollStatus() async {
+    do {
+        while true {
+            try await Task.sleep(for: .seconds(5))
+            await refreshStatus()
+        }
+    } catch {
+        // CancellationError: we're done, which is exactly what we wanted.
+    }
+}
+```
+
+**3. Typed errors lose their types.** If you've gone to the trouble of [adopting typed throws](/blog/swift-typed-throws-protocol-boundary-gotcha), `try?` throws that work away too. `PaymentError.cardDeclined` and `PaymentError.networkUnavailable` deserve very different UI. Through `try?` they're both `nil`.
+
+---
+
+## Why everyone reaches for try? anyway
+
+Because the honest alternative is ugly. This is what "handle the error" looks like with plain `do/catch`:
+
+```swift
+do {
+    let profile = try JSONDecoder().decode(Profile.self, from: data)
+    state = .loaded(profile)
+    // ...forty more lines of happy path, all indented
+} catch {
+    logger.error("Profile decode failed: \(String(describing: error), privacy: .public)")
+    state = .failed
+}
+```
+
+The happy path is nested, and worse, **the `catch` now catches everything in that block**, not just the decode. If something forty lines down throws, it gets logged as "Profile decode failed." That's how you end up debugging the wrong function.
+
+So people pick `try?`, because `guard let` is the shape Swift trained us to love. The pitch author lays this tradeoff out well: `do/catch` nests, `try?` forgets, and `Result` needs a wrapper plus a second pattern match just to get at the error.
+
+---
+
+## The pattern you can use today
+
+There's a fourth option that's been in the language all along, and almost nobody uses it. **Declare the constant first, assign it inside `do`, and exit from `catch`:**
+
+```swift
+let profile: Profile
+do {
+    profile = try JSONDecoder().decode(Profile.self, from: data)
+} catch {
+    logger.error("Profile decode failed: \(String(describing: error), privacy: .public)")
+    state = .failed
+    return
+}
+
+state = .loaded(profile)
+```
+
+This works because of Swift's **definite initialization** check. `profile` is a `let` without a value. The compiler proves that every path reaching `state = .loaded(profile)` has assigned it. If you forget the `return` in the `catch`, you get a compile error ("constant 'profile' used before being initialized"). So the early exit is enforced, just like `guard`.
+
+You get:
+
+- the happy path un-nested,
+- a `catch` scoped to **exactly one call**,
+- the full error, with pattern matching (`catch DecodingError.keyNotFound(let key, _)` works fine here).
+
+The costs: you need the type annotation, and the "this exits early" promise is hidden in a `do` block instead of shouted by a `guard`. The pitch calls both out, and they're fair complaints. I still think it beats `try?` in any code where you'd want to know why something failed.
+
+---
+
+## What guard do ... catch proposes
+
+The pitch adds a `do` marker inside `guard` conditions. Errors thrown by a `do`-marked condition go to `catch` blocks on the guard:
+
+```swift
+// Proposed syntax, not valid Swift today
+guard do let profile = JSONDecoder().decode(Profile.self, from: data) catch {
+    logger.error("Profile decode failed: \(String(describing: error), privacy: .public)")
+    state = .failed
+    return
+}
+
+state = .loaded(profile)
+```
+
+Notice there's no `try`. Since `do` can only mark throwing expressions, the pitch makes `try` redundant there. The rules are tight in a way I like:
+
+- **`catch` must exit the scope**, just like `else`. The compiler guarantees `profile` exists below the guard.
+- **`do let` doesn't unwrap.** If the function returns `Profile?`, you get a `Profile?`. That deliberately avoids the old objection (from the 2017 Guard/Catch proposal) that `guard let` shouldn't mean two different things depending on what follows it.
+- **`catch` and `else` can coexist**, so you can mix error handling and optional unwrapping in one guard. `catch` handles errors from `do` conditions; `else` handles failed boolean or optional conditions.
+- **`catch` blocks needn't be exhaustive.** Unmatched errors propagate, which still exits the scope.
+- **The error's type is inferred like a normal `catch`**, so it's typed when typed throws applies.
+
+The mixed form is where it gets interesting. Here's my cache example, split properly:
+
+```swift
+// Proposed syntax, not valid Swift today
+guard do let cached = cachedUser(),   // throws: corrupt cache
+      let user = cached               // nil: no cache yet
+catch {
+    logger.fault("User cache corrupt: \(String(describing: error), privacy: .public)")
+    return resetCacheAndShowOnboarding()
+} else {
+    return showOnboarding()
+}
+```
+
+Two different failures, two different branches, one flat happy path. That's the thing `try?` makes impossible.
+
+---
+
+## Will it ship?
+
+**Honestly, I don't know, and neither does anyone else yet.** It's a pitch, which means it isn't even a formal proposal. The thread is a couple of days old. Its history section lists eight earlier attempts going back to 2016. The core team liked the problem in 2017 and rejected the spelling. In the replies, Xiaodi Wu pointed at multi-statement `do` expressions as another route. The author answered that under SE-0380, expression branches can't `return`, so a `do` expression can't give you the early exit.
+
+My guess: some form of this lands eventually, because the demand is that old and that persistent. The exact spelling will probably change. **Don't wait for it.** The definite-initialization pattern does the same job today with one extra line.
+
+---
+
+## The 10-minute audit
+
+Run this in your project:
+
+```bash
+grep -rn --include='*.swift' 'try?' . | grep -v '/Tests/' | wc -l
+```
+
+Then go through the results with one question: **"If this fails in production, will I ever find out?"**
+
+Some `try?` calls are completely fine. `try? FileManager.default.removeItem(at: tempURL)` on a best-effort cleanup is fine. Ignoring the result of a cache write you'll redo next launch is fine. The ones to fix:
+
+- anything that decodes data from a server,
+- anything inside a loop with `Task.sleep`,
+- anything where `nil` already means something (`try?` on an optional-returning function),
+- anything whose failure leads to a user-visible state like "empty," "logged out," or "no results."
+
+For those, use `let` + `do/catch` + `return`, and log the error with enough detail to act on. When something does go silent in production, the [debugging-with-AI lesson](/learn/debugging-with-ai) walks through rebuilding the evidence, but it's a lot easier when your code didn't neuralyze it in the first place.
+
+The alien is still out there. At least let your logs remember seeing it.
