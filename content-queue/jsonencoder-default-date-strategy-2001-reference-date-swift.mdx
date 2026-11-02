@@ -1,0 +1,203 @@
+---
+title: "JSONEncoder Sends Your Dates as Seconds Since 2001. Your Backend Thinks It's 1995."
+description: "Swift's JSONEncoder defaults to .deferredToDate, which encodes Date as a Double counting seconds from January 1, 2001, not 1970. Here's why round-trip tests never catch it, what it does to Node, Python and Go backends, and how to pin one date strategy for your whole app."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Codable", "Networking", "Dates"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1591259209967-57fb10170b69?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of paper calendar pages with printed dates"
+---
+
+{/*
+SEO keywords: JSONEncoder date encoding strategy, Swift deferredToDate, timeIntervalSinceReferenceDate,
+Swift Date JSON 2001, JSONEncoder Date wrong year, dateEncodingStrategy iso8601 fractional seconds,
+Swift Codable Date backend, secondsSince1970 vs millisecondsSince1970, Swift JSON date contract test
+Internal linking plan: jsondecoder-iso8601-fractional-seconds-failure (the decoding side of the same
+boundary), codable-convert-snake-case-acronym-bug (another "free" Codable default that bites),
+codable-null-vs-missing-key-decodeifpresent-swift (encoder/backend contract mismatches),
+continuousclock-date-elapsed-time-swift (what Date actually is), course
+/learn/swiftui-in-practice-05-protocol-network-layer (where the shared encoder should live)
+*/}
+
+The support ticket said: "I booked a haircut for next Tuesday and your app says my appointment was in 1995."
+
+I laughed, because obviously the user had done something weird. Then I opened the admin dashboard, and there it was. Forty-one appointments that afternoon, all created by the iOS app, all neatly scheduled for a Thursday in November 1995. The web client's bookings were fine. Android was fine. Only iOS had invented time travel.
+
+The fix was one line. Finding it took the whole afternoon, because **every test I had said the dates were perfect.**
+
+---
+
+## What JSONEncoder actually writes
+
+Here's a struct you've written a hundred times:
+
+```swift
+struct Appointment: Codable {
+    let id: UUID
+    let startsAt: Date
+}
+
+let appointment = Appointment(id: UUID(), startsAt: .now)
+let data = try JSONEncoder().encode(appointment)
+print(String(decoding: data, as: UTF8.self))
+```
+
+You'd expect an ISO 8601 string, or at least a Unix timestamp. What you get is this:
+
+```json
+{"id":"3F2C...","startsAt":815270400.123}
+```
+
+That number isn't seconds since 1970. It's **seconds since January 1, 2001, 00:00:00 UTC**, which is Apple's reference date. `JSONEncoder` defaults to `dateEncodingStrategy = .deferredToDate`, which means "let `Date` encode itself", and `Date`'s own `Codable` conformance writes `timeIntervalSinceReferenceDate`. That's the value Foundation stores internally, inherited from Core Foundation's `CFAbsoluteTime`. It's perfectly reasonable inside Apple's world, and nobody outside Apple's world has ever heard of it.
+
+The gap between the two epochs is exactly 978,307,200 seconds. Foundation even ships it as a constant, `Date.timeIntervalBetween1970AndReferenceDate`, which feels a bit like a store keeping a framed photo of the bug on the wall.
+
+---
+
+## Why your backend lands in 1995
+
+Every backend language treats a bare number as Unix time. So when that `815270400.123` arrives, here's what happens:
+
+- **Python / Go / Postgres `to_timestamp`:** reads it as seconds since 1970 and gets **November 2, 1995**. Same calendar day, 31 years earlier. That's not a coincidence. The two epochs are 11,323 days apart, and the extra leap days line up neatly with the date's own shift.
+- **Node / JavaScript `new Date(n)`:** reads it as *milliseconds* since 1970 and gets **January 10, 1970**. That's even funnier, and it's less likely to be noticed, because a lot of dashboards hide dates before 2000 as "invalid."
+- **Anything that validates:** rejects it, and at least then you find out right away.
+
+It also goes the other way. If your server sends `1793577600` (a real Unix timestamp for today) and you decode it with a default `JSONDecoder`, Swift adds it to 2001 and you get a date in **2057**. Your "posted 3 minutes ago" label turns into "in 31 years," and that's the good outcome. The bad one is a cache-expiry check that now thinks nothing ever expires.
+
+---
+
+## Why your tests said everything was fine
+
+This is the part that cost me the afternoon. My tests looked like this:
+
+```swift
+@Test func appointmentRoundTrips() throws {
+    let original = Appointment(id: UUID(), startsAt: .now)
+    let data = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(Appointment.self, from: data)
+    #expect(decoded.startsAt == original.startsAt)
+}
+```
+
+Green. Always green. A default encoder and a default decoder agree on the 2001 epoch perfectly, so **a round-trip test only proves your app agrees with itself.** It's like checking your watch against your watch.
+
+Same deal with anything you persist locally. Caching `Appointment` to disk with `JSONEncoder` and reading it back is completely fine. The bug only exists at the boundary, where something that isn't Swift reads the number. So it hides until the first real request, and in my case until the first real customer.
+
+---
+
+## Pick a strategy, and pick it once
+
+The fix itself is short:
+
+```swift
+let encoder = JSONEncoder()
+encoder.dateEncodingStrategy = .iso8601
+
+let decoder = JSONDecoder()
+decoder.dateDecodingStrategy = .iso8601
+```
+
+The real lesson, though, is that **a date strategy is part of your API contract**, and contracts shouldn't be redeclared at every call site. The 1995 appointments came from one request built with a fresh `JSONEncoder()` in a file that predated our networking layer. Every other request was fine.
+
+So make a single source of truth and ban the bare initializer:
+
+```swift
+extension JSONEncoder {
+    static let api: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(date))
+        }
+        return encoder
+    }()
+}
+
+extension JSONDecoder {
+    static let api: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let string = try container.decode(String.self)
+            if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(string) {
+                return date
+            }
+            if let date = try? Date.ISO8601FormatStyle().parse(string) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Expected an ISO 8601 date, got \(string)"
+            )
+        }
+        return decoder
+    }()
+}
+```
+
+Why `.custom` instead of plain `.iso8601`? Because the built-in `.iso8601` **drops fractional seconds** when it encodes. Send `10:30:00.734`, store `10:30:00`, fetch it back, and suddenly your local copy and the server's copy aren't `==`. Your "has this changed?" sync check now thinks every record changed. The decoder accepts both with and without fractions, because backends are inconsistent about it and I already wrote a [whole post about that particular pain](/blog/jsondecoder-iso8601-fractional-seconds-failure).
+
+`JSONEncoder` isn't documented as safe to share across threads while you're mutating it, but you're configuring it once inside the closure and never touching its properties again. If you'd rather not think about that at all, make it a `static func make()` and pay for a few allocations.
+
+---
+
+## If your backend wants numbers
+
+Sometimes the API really does want a timestamp. Fine, just say which one:
+
+```swift
+encoder.dateEncodingStrategy = .secondsSince1970        // 1793577600.123
+encoder.dateEncodingStrategy = .millisecondsSince1970   // 1793577600123.0
+```
+
+Two things to watch for here. First, both of these encode as a `Double`, so a strict backend expecting an integer may choke on `.0` or on the fraction. If it wants integers, use `.custom` and encode `Int64((date.timeIntervalSince1970 * 1000).rounded())`. Second, **seconds vs milliseconds is the same bug one level up.** If the backend team says "Unix timestamp", ask "seconds or millis?" out loud and write the answer in the API docs. That's a three-minute conversation, and it would have saved me an afternoon.
+
+---
+
+## A test that actually tests the contract
+
+Round trips are useless here. What you want is a test that **looks at the raw JSON**, the same way the server will:
+
+```swift
+import Foundation
+import Testing
+
+@Test func appointmentDatesAreISO8601OnTheWire() throws {
+    let fixed = Date(timeIntervalSince1970: 1_793_577_600.5) // 2026-11-02T00:00:00.500Z
+    let data = try JSONEncoder.api.encode(Appointment(id: UUID(), startsAt: fixed))
+
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let wire = try #require(object["startsAt"] as? String, "Date was encoded as a number, not a string")
+
+    #expect(wire == "2026-11-02T00:00:00.500Z")
+}
+
+@Test func decoderAcceptsServerDatesWithAndWithoutFractions() throws {
+    let withFraction = Data(#"{"id":"3F2C2B0E-1D4A-4B7A-9C3E-2A1B0C9D8E7F","startsAt":"2026-11-02T00:00:00.500Z"}"#.utf8)
+    let without = Data(#"{"id":"3F2C2B0E-1D4A-4B7A-9C3E-2A1B0C9D8E7F","startsAt":"2026-11-02T00:00:00Z"}"#.utf8)
+
+    let a = try JSONDecoder.api.decode(Appointment.self, from: withFraction)
+    let b = try JSONDecoder.api.decode(Appointment.self, from: without)
+
+    #expect(a.startsAt.timeIntervalSince1970 == 1_793_577_600.5)
+    #expect(b.startsAt.timeIntervalSince1970 == 1_793_577_600)
+}
+```
+
+The first test fails loudly the moment anyone switches back to the default strategy, and it fails with a message that tells them *why*. The literal `"2026-11-02T00:00:00.500Z"` is the kind of thing you can paste into a Slack thread with the backend team and settle an argument with.
+
+---
+
+## Hunt down the stragglers
+
+My bug came from one forgotten `JSONEncoder()`. Yours will too. Before you call this done, grep for them:
+
+```bash
+grep -rn --include='*.swift' -E 'JSON(En|De)coder\(\)' . | grep -v 'static let api'
+```
+
+Every hit is either local persistence, which is fine (leave a comment saying so), or a network call that's quietly speaking the 2001 dialect. While you're at it, look for `timeIntervalSinceReferenceDate` anywhere near a request body. That one's the same bug done by hand.
+
+`Codable` hands you a lot of defaults that feel free. [Snake-case conversion](/blog/codable-convert-snake-case-acronym-bug) is free until it meets an acronym. [`decodeIfPresent`](/blog/codable-null-vs-missing-key-decodeifpresent-swift) is free until your PATCH endpoint needs to tell null apart from a missing key. Date encoding is free until a customer books a haircut in 1995. And if you're wondering what a `Date` even is under the hood, it's [just a Double with opinions](/blog/continuousclock-date-elapsed-time-swift).
+
+Put your encoder and decoder in the networking layer, [behind one protocol](/learn/swiftui-in-practice-05-protocol-network-layer), configured exactly once. **Every place that reaches for a bare `JSONEncoder()` is a place where your app gets to pick its own epoch.**
