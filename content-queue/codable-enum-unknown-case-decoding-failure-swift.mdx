@@ -1,0 +1,244 @@
+---
+title: "Your Backend Added One Enum Case. Every User on the Old App Build Got an Empty Screen."
+description: "A Swift enum with a String raw value and synthesized Codable throws on any value it doesn't know, and that one throw takes down the whole object and the whole array around it. Here's how a harmless server-side addition empties your iOS app, the unknown-case and other(String) fixes, the encode-back trap, and the test that catches it before the App Store does."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Codable", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1556227996-370b60576b84?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A plain cardboard box with no label sitting alone on a wooden floor"
+---
+
+{/*
+SEO keywords: Swift enum Codable unknown case, Cannot initialize from invalid String value,
+DecodingError dataCorrupted enum, Swift enum decoding fails new case, Codable enum default case,
+unknown case enum Swift, RawRepresentable Decodable fallback, iOS app empty screen after backend change
+Internal linking plan: unkeyeddecodingcontainer-skip-infinite-loop-swift (one bad element kills
+the array), codable-null-vs-missing-key-decodeifpresent-swift (other decoder assumptions),
+codable-convert-snake-case-acronym-bug (keys that don't match), jsondecoder-iso8601-fractional-
+seconds-failure (another "the server changed something tiny" decode failure),
+course /learn/networking-with-ai
+*/}
+
+The backend team shipped a two-line change on a Wednesday afternoon. Orders could now be `"archived"`. Nobody told mobile, because why would they? It's a new status, not a new endpoint.
+
+By Thursday morning, every user on the current App Store build who had ever archived an order opened the app and saw... nothing. An empty orders list. No error. No retry button. **Just a very polite, very blank screen.**
+
+I've been on the mobile side of this exact story three times at three different companies. It's always the same enum.
+
+---
+
+## The enum that only knows what it knew
+
+Here's the kind of model that causes it. You've written this a hundred times:
+
+```swift
+struct Order: Codable {
+    let id: String
+    let status: Status
+
+    enum Status: String, Codable {
+        case pending
+        case paid
+        case shipped
+        case cancelled
+    }
+}
+```
+
+Clean. Type-safe. Exhaustive `switch` statements everywhere, which is the whole reason you reached for an enum instead of a `String`.
+
+Then the server sends `"status": "archived"`, and the synthesized `Decodable` conformance does the only thing it knows how to do:
+
+```
+dataCorrupted(Swift.DecodingError.Context(
+  codingPath: [_JSONKey(index: 7), CodingKeys(stringValue: "status")],
+  debugDescription: "Cannot initialize Status from invalid String value archived"
+))
+```
+
+**That's not a warning. That's a throw.** And a throw inside `init(from:)` doesn't just fail the `status` field. It fails the `Order`. And because the `Order` is one element of an array, the array's `decode` throws too, and now the entire response is gone. One archived order in a page of fifty, and you get zero orders back.
+
+If you want the gory details of why one element poisons the whole array, I wrote about [the UnkeyedDecodingContainer problem](/blog/unkeyeddecodingcontainer-skip-infinite-loop-swift) separately. The short version: Swift's array decoding is all-or-nothing, and there's no built-in way to skip a bad element.
+
+---
+
+## Why this one is so sneaky
+
+Most decode failures show up fast. A renamed key, a date in a new format, a `null` where you expected a number: those break on the first request against the new backend, usually in staging, usually while someone's watching.
+
+The unknown enum case is different for two reasons.
+
+**First, it's not a breaking change on the server's terms.** Adding a value to a set is additive. No existing field changed shape. The API contract, as the backend team understands it, is intact. Their tests pass. Their OpenAPI spec updated itself. From where they sit, nothing broke.
+
+**Second, it's data-dependent.** The new case only appears for users who have data in the new state. So your QA account with three test orders is fine. Your own account is fine. The 4% of real users who archived something last month are the ones staring at the blank screen, and they're the ones filing one-star reviews about "the update that deleted my orders."
+
+Nothing was deleted. The app just refused to look at it.
+
+---
+
+## Fix one: give the enum somewhere to put the unknown
+
+The smallest fix that works is a fallback case and a hand-written initializer:
+
+```swift
+enum Status: String, Codable {
+    case pending
+    case paid
+    case shipped
+    case cancelled
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = Status(rawValue: raw) ?? .unknown
+    }
+}
+```
+
+Now `"archived"` decodes as `.unknown`, the `Order` decodes, the array decodes, and the user sees forty-nine orders they recognize plus one with a status they don't. **Infinitely better than zero.**
+
+The `switch` statements in your UI now have a new case to handle, and that's good. It forces the question nobody asked at design time: what *should* the app show for a state it doesn't understand? Usually a neutral label and no action buttons. Sometimes the row should be hidden. Occasionally the right answer is "show it, and log it, so we find out the backend grew a case we don't know about."
+
+That last part matters. Put an analytics event or an `os_log` in the `?? .unknown` branch. **An unknown case that gets silently absorbed forever is nearly as bad as one that crashes.** You want to know.
+
+If you've got a dozen enums like this, don't write a dozen initializers. One protocol does it:
+
+```swift
+protocol UnknownCaseDecodable: RawRepresentable, Decodable
+    where RawValue: Decodable {
+    static var unknownCase: Self { get }
+}
+
+extension UnknownCaseDecodable {
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(RawValue.self)
+        self = Self(rawValue: raw) ?? Self.unknownCase
+    }
+}
+
+enum Status: String, UnknownCaseDecodable {
+    case pending, paid, shipped, cancelled, unknown
+    static let unknownCase = Status.unknown
+}
+```
+
+Works for `Int`-backed enums too, which matters, because `"priority": 4` from a server that used to only send 1 through 3 blows up in exactly the same way.
+
+---
+
+## Fix two: keep the value you didn't recognize
+
+The `.unknown` approach has a flaw. You've thrown away the string. If a user in `.unknown` state contacts support, you can't tell them it was `"archived"` versus `"disputed"` versus a typo on the backend. And if the app ever writes that model back to the server, you've got a real problem, which I'll get to.
+
+The alternative is to carry the raw value along:
+
+```swift
+enum Status: Codable, Equatable {
+    case pending
+    case paid
+    case shipped
+    case cancelled
+    case other(String)
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "pending":   self = .pending
+        case "paid":      self = .paid
+        case "shipped":   self = .shipped
+        case "cancelled": self = .cancelled
+        default:          self = .other(raw)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .pending:        try container.encode("pending")
+        case .paid:           try container.encode("paid")
+        case .shipped:        try container.encode("shipped")
+        case .cancelled:      try container.encode("cancelled")
+        case .other(let raw): try container.encode(raw)
+        }
+    }
+}
+```
+
+More typing. You lose the `String` raw value and the free `rawValue` property. In exchange, `.other("archived")` tells you exactly what the server said, and it round-trips without corruption.
+
+Which one should you use? **If the model is read-only in your app, `.unknown` is fine.** If the app ever encodes the model and sends it back, use `.other(String)`. Here's why.
+
+---
+
+## The encode-back trap
+
+Say you went with `.unknown`, and your app has an "edit order note" feature that sends the whole `Order` back as a `PUT`. The user opens an archived order, edits the note, taps save. Your app encodes `.unknown`, and the synthesized `Encodable` writes:
+
+```json
+{ "id": "ord_8812", "status": "unknown", "note": "call before delivery" }
+```
+
+The server now has an order whose status is the literal string `"unknown"`, which it also doesn't recognize, and depending on how forgiving its validation is, you've either got a 400 error or a corrupted record. **You turned a display problem into a data problem.**
+
+Three ways out, in order of preference:
+
+1. Don't send full models back. Send a patch with only the fields the user changed. This is better for about nine other reasons too.
+2. Use `.other(String)`, which encodes the original string and leaves the server's data exactly as it was.
+3. If you must keep `.unknown`, make `encode(to:)` throw for it. A thrown error on save is loud and honest. A silently written `"unknown"` is neither.
+
+---
+
+## The contract test that would have caught it
+
+I now add this test to every project with a server-driven enum. It takes about a minute to write:
+
+```swift
+import Testing
+import Foundation
+
+@Test func unknownStatusDoesNotKillTheOrder() throws {
+    let json = Data("""
+    [
+      { "id": "a", "status": "paid" },
+      { "id": "b", "status": "archived" }
+    ]
+    """.utf8)
+
+    let orders = try JSONDecoder().decode([Order].self, from: json)
+
+    #expect(orders.count == 2)
+    #expect(orders[0].status == .paid)
+    #expect(orders[1].status == .unknown)
+}
+
+@Test func knownStatusesStillDecodeExactly() throws {
+    for (raw, expected) in [("pending", Order.Status.pending),
+                            ("shipped", .shipped)] {
+        let json = Data(#"{ "id": "x", "status": "\#(raw)" }"#.utf8)
+        let order = try JSONDecoder().decode(Order.self, from: json)
+        #expect(order.status == expected)
+    }
+}
+```
+
+The first test is the one that matters. It encodes the rule in plain sight: **a value this app has never seen must not make the array disappear.** The second test is there so nobody "fixes" the first one by making everything `.unknown`.
+
+Same philosophy as [treating a missing key differently from `null`](/blog/codable-null-vs-missing-key-decodeifpresent-swift): your decoder's defaults encode assumptions about the server, and the server didn't agree to any of them.
+
+---
+
+## The audit
+
+Run this in your project:
+
+```bash
+grep -rn "enum .*: String, Codable\|enum .*: String, Decodable\|enum .*: Int, Codable\|enum .*: Int, Decodable" --include="*.swift" .
+```
+
+For every hit, ask: **who controls the set of values?** If it's you, in your own code, a closed enum is perfect. If the values come over the network, every one of those enums is a blank screen waiting for a server deploy you won't be told about.
+
+Protocol Buffers got this right years ago. In proto3, an enum value the client doesn't recognize is preserved as its integer and passed through. The message still parses. Swift's synthesized `Codable` makes the opposite bet: it assumes the enum is closed, and when the world proves otherwise, it takes the whole response with it.
+
+The world is not closed. Give your enums a door.
+
+If you want a broader walkthrough of defensive decoding at the network boundary, the [networking lesson](/learn/networking-with-ai) in our course covers how to structure the models and the error handling so a server surprise shows up as a logged event instead of an empty list.

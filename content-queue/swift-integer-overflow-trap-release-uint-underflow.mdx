@@ -1,0 +1,238 @@
+---
+title: "Swift Integers Don't Wrap. They Crash. And UInt Crashes the Moment You Subtract One From Zero."
+description: "Unlike C, Swift traps on integer overflow in release builds too. Here's the arithmetic-overflow crash in a progress bar, the UInt subtraction that can't go below zero, the UInt8(doubleValue) conversion that dies at 256.0, the Y2038 bug compiled into Int32(timeIntervalSince1970), the wrapping operators that hashes and PRNGs actually need, and the reporting and clamping APIs that replace the guesswork."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "iOS Development", "Debugging", "Performance"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1498887960847-2a5e46312788?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of a mechanical odometer with its digits mid-roll"
+---
+
+{/*
+SEO keywords: Swift arithmetic overflow crash, Swift runtime failure arithmetic overflow, Swift UInt
+subtraction crash, Swift integer overflow release build, &+ &- &* wrapping operators Swift,
+addingReportingOverflow, UInt8 clamping Swift, Double value cannot be converted to UInt8,
+Int32 timeIntervalSince1970 2038, Swift Int vs UInt
+Internal linking plan: double-nan-breaks-sort-set-contains-swift (Int(Double) traps on NaN),
+swift-remainder-operator-negative-numbers-not-modulo (other integer surprises),
+dictionary-uniquekeyswithvalues-duplicate-key-crash-swift (preconditions stay on in release),
+mutating-hashable-class-corrupts-set-swift (hashing), course /learn/debugging-with-ai
+*/}
+
+The crash report said `Swift runtime failure: arithmetic overflow`. The line it pointed at was a progress bar.
+
+```swift
+let percent = UInt(completed * 100 / total)
+```
+
+Not a bug, I thought. `completed` can't exceed `total`. Except it could, for about four hundred milliseconds, when a download finished and the byte counter ticked one past the `Content-Length` header because the server lied about the size. That line survived it, actually. 101 percent fits in a `UInt` just fine.
+
+The *next* line was the problem:
+
+```swift
+let remaining = total - completed   // UInt - UInt, and completed > total
+```
+
+In C, that's a very large number. In Swift, **that's a crash.** On a release build. For every user who hit a server that rounded its headers.
+
+---
+
+## Swift made a decision C never did
+
+Here's the one-sentence version of this whole post: **in Swift, integer arithmetic that overflows is a programming error, and programming errors trap.**
+
+C says `UINT_MAX + 1` is `0` and `INT_MAX + 1` is undefined behavior, which in practice means "whatever the optimizer felt like." Java and Kotlin wrap silently. JavaScript turns into a float and starts losing precision. Swift looked at all of that and said: no. If you add two numbers and the result doesn't fit, you did something wrong, and we're going to stop right here.
+
+```swift
+let a: UInt8 = 250
+let b = a + 10          // Fatal error: arithmetic overflow
+
+let c: Int = .max
+let d = c + 1           // Fatal error: arithmetic overflow
+
+let e: UInt = 0
+let f = e - 1           // Fatal error: arithmetic overflow
+```
+
+And yes, this stays on in `-O`. The checks compile out only under `-Ounchecked`, which you are almost certainly not using, and shouldn't be. Same deal as [`Dictionary(uniqueKeysWithValues:)` trapping on a duplicate](/blog/dictionary-uniquekeyswithvalues-duplicate-key-crash-swift): the crash you've never seen in the simulator is exactly the one your App Store build ships with.
+
+I think Swift made the right call. A number that silently wraps to garbage is worse than a crash, because the garbage keeps going. It gets stored. It gets sent to a server. It becomes a refund for negative four billion dollars. But "right call" and "won't bite you" are different things, and this one bites in some very specific, very repeatable places.
+
+---
+
+## Place one: UInt subtraction
+
+The `remaining = total - completed` crash above is the single most common version. `UInt` can't represent a negative number, so any subtraction where the right side is bigger traps. Not sometimes. Every time.
+
+The fix is almost always to stop using `UInt`. Apple's own API design guidance says to use `Int` for everything that's a count, a size, or an index, even values that can never be negative. `UInt` is for bit patterns, hardware registers, and talking to C APIs that insist on it. **The moment you subtract two `UInt`s, you've bet your app that the left one is bigger.**
+
+If you really do need to subtract and clamp at zero:
+
+```swift
+let remaining = total >= completed ? total - completed : 0
+// or, if you've moved to Int:
+let remaining = max(0, total - completed)
+```
+
+Watch out for the sneaky versions. `array.count - 1` is fine, because `count` is an `Int` and `-1` is a legal `Int`. But `someUInt32FromAnSDK - 1` when the SDK returned zero is not fine. And neither is a loop like `for i in 0..<count - 1` when `count` is a `UInt` and zero.
+
+---
+
+## Place two: converting from Double
+
+This one hides in color math, audio, and anything with a normalized 0...1 float:
+
+```swift
+let r: Double = 1.0000001            // a hair over, from a gradient interpolation
+let byte = UInt8(r * 255)            // UInt8(255.0000255) → 255, fine
+```
+
+That's fine, because the integer initializer from a floating-point value *truncates*. `255.00003` becomes `255`. But:
+
+```swift
+let r: Double = 1.004
+let byte = UInt8(r * 255)            // UInt8(256.02)
+// Fatal error: Double value cannot be converted to UInt8
+// because the result would be greater than UInt8.max
+```
+
+One frame of a spring animation overshoots to 1.004, your color conversion runs, the app dies. Spring animations overshoot *by design*. **Any `UInt8(someDouble * 255)` in a view that animates is a crash with a timer on it.**
+
+The same initializer also traps on `NaN` and infinity, which is its own adventure. I wrote about [where NaN comes from and what it breaks](/blog/double-nan-breaks-sort-set-contains-swift) separately. `Int(0.0 / 0.0)` is in that list.
+
+The fix is one of two words:
+
+```swift
+let byte = UInt8(clamping: Int(r * 255))     // 256 → 255, -3 → 0
+let byte = UInt8(exactly: r * 255)           // UInt8? — nil if it doesn't fit
+```
+
+For display math, `clamping` is almost always what you meant. For parsing or validation, `exactly` gives you a `nil` to make a decision about.
+
+---
+
+## Place three: the Y2038 bug you compiled last week
+
+```swift
+let timestamp = Int32(Date().timeIntervalSince1970)
+```
+
+Some SDK wanted a 32-bit timestamp. Some protobuf field was `int32`. Some legacy backend stores epoch seconds in a four-byte column and the Swift client dutifully matched it.
+
+`Int32.max` is 2,147,483,647 seconds after 1970, which is 03:14:07 UTC on January 19, 2038. On that morning, every build of your app with that line in it will trap the first time it checks the time. Not "return a wrong date." Trap.
+
+Eleven years sounds like forever. The App Store is already seventeen years old. **Apps outlive their assumptions.** And a `UInt32` version of the same line buys you until 2106, which sounds safer, except any date math that goes *before* 1970, like a user's birthday, traps today.
+
+If something genuinely needs a 32-bit timestamp, convert at the boundary with `Int32(exactly:)` and handle the `nil`. If nothing does, and it's just there because someone copied a type from a backend schema, make it an `Int`.
+
+---
+
+## Place four: hashes, checksums, and random numbers
+
+Here's the one case where you *want* wrapping, and Swift's default actively fights you:
+
+```swift
+var hash = 5381
+for byte in data {
+    hash = hash * 33 + Int(byte)     // traps about 13 bytes in
+}
+```
+
+That's the djb2 hash, and in C it relies on unsigned overflow to wrap. In Swift, 33 to the 13th power is already past `Int.max`, so it crashes before it finishes hashing a short email address. Same for CRC32, FNV, xorshift PRNGs, anything that's defined in terms of modular arithmetic.
+
+Swift gives you the wrapping operators for exactly this:
+
+```swift
+var hash: UInt32 = 5381
+for byte in data {
+    hash = hash &* 33 &+ UInt32(byte)   // wraps, never traps
+}
+```
+
+`&+`, `&-`, `&*` are the "I know this can overflow, and that's the point" operators. There's also `&<<` and `&>>` for shifts that mask the shift amount instead of trapping on an out-of-range one. If you're porting a hash or a PRNG from C and you see `+`, `-`, `*` on unsigned types, every one of them should become the `&` version.
+
+Two things to keep straight. First, do *not* use these for business logic. `&+` on a cart total is a silent-wrap bug you imported from C on purpose. Second, if you're implementing `Hashable` by hand, you shouldn't be doing any of this. `hasher.combine(_:)` is what you want, and [mixing up `==` and `hash(into:)` has its own failure mode](/blog/mutating-hashable-class-corrupts-set-swift) that has nothing to do with overflow.
+
+---
+
+## Place five: the two unary traps nobody expects
+
+```swift
+let x = Int.min
+let y = -x              // Fatal error: arithmetic overflow
+let z = abs(x)          // Fatal error: arithmetic overflow
+```
+
+`Int.min` is `-9223372036854775808`. Its positive counterpart is one more than `Int.max`, which doesn't exist. So negating it, or taking its absolute value, is an overflow. You'll hit this in exactly one situation: when `Int.min` is being used as a sentinel for "no value yet" and then some generic distance or difference code runs over it. Use an `Optional` for "no value." That's what it's for.
+
+And since we're on surprises: `Int.min / -1` traps for the same reason, and `x % 0` traps like division by zero does. The remainder operator has other opinions too, on negative numbers, that [I've written about before](/blog/swift-remainder-operator-negative-numbers-not-modulo).
+
+---
+
+## The toolbox
+
+When you don't know whether an operation fits, Swift has three families of answers, and picking the right one is the whole job:
+
+| You want | Use |
+|---|---|
+| wrap around like C | `&+`, `&-`, `&*`, `&<<`, `&>>` |
+| know whether it overflowed | `addingReportingOverflow`, `subtractingReportingOverflow`, `multipliedReportingOverflow` |
+| pin to the valid range | `T(clamping:)` |
+| nil instead of a crash on conversion | `T(exactly:)` |
+| drop the high bits on purpose | `T(truncatingIfNeeded:)` |
+
+The reporting variants are underused and great for anything money-shaped:
+
+```swift
+let (total, overflowed) = subtotal.multipliedReportingOverflow(by: quantity)
+guard !overflowed else { throw PricingError.unreasonableQuantity }
+```
+
+A thrown error you can show a message for. A trap you can only read about in Xcode Organizer.
+
+---
+
+## Tests that pin the behavior
+
+```swift
+import Testing
+
+@Test func remainingNeverGoesNegative() {
+    #expect(Progress.remaining(total: 100, completed: 101) == 0)
+}
+
+@Test func colorByteClampsOvershoot() {
+    #expect(ColorMath.byte(from: 1.004) == 255)
+    #expect(ColorMath.byte(from: -0.01) == 0)
+}
+
+@Test func djb2WrapsInsteadOfTrapping() {
+    let long = Data(repeating: 0xFF, count: 10_000)
+    _ = Checksum.djb2(long)             // the test is that this line returns
+}
+
+@Test func thirtyTwoBitTimestampRefusesTheFuture() {
+    let far = Date(timeIntervalSince1970: 3_000_000_000)   // the year 2065
+    #expect(LegacyAPI.timestamp(for: far) == nil)
+}
+```
+
+The third one is my favorite kind of test: no assertion, just a function call that would have crashed. Swift Testing reports a trap as a failed test with the location, which is a far better place to meet it than a one-star review.
+
+---
+
+## The grep
+
+Three searches, in order of how likely they are to find a real crash:
+
+```bash
+grep -rn "UInt" --include="*.swift" . | grep -v "UInt8\]\|UInt8>" 
+grep -rn "UInt8(\|Int32(\|UInt32(\|Int16(" --include="*.swift" . | grep -v "exactly\|clamping\|truncating"
+grep -rn "timeIntervalSince1970" --include="*.swift" . | grep "Int32\|UInt32"
+```
+
+For every `UInt` that isn't a bit pattern, ask why it isn't an `Int`. For every narrowing conversion without `exactly`, `clamping`, or `truncatingIfNeeded`, ask what happens when the value is one too big. And for every 32-bit timestamp, pick a year you'd like your app to stop working in.
+
+Swift chose to crash instead of lie. It's a good choice. It just means the numbers you *thought* couldn't go out of range are now your problem, not the optimizer's.
+
+For a systematic approach to hunting these down in a crash log, including how to get the AI tooling to find the narrowing conversion for you, the [debugging lesson](/learn/debugging-with-ai) in our course goes through a real one from the Organizer trace back to the line.

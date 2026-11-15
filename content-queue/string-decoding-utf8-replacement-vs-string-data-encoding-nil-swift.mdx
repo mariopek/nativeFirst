@@ -1,0 +1,234 @@
+---
+title: "String(decoding:as:) Never Fails. It Just Quietly Swaps Your Bytes for �."
+description: "Swift has two ways to turn bytes into a String and they disagree about failure: String(data:encoding:) returns nil on invalid UTF-8, String(decoding:as:) repairs it with U+FFFD and never tells you. Here's where broken bytes actually come from on iOS (chunked streams, Latin-1 files, BLE packets), how the repair corrupts hashes and signatures, Swift 6's String(validating:as:), and a chunk-safe decoder."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Strings", "Unicode", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1510935813936-763eb6fbc613?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A printed document with several lines blacked out by a heavy marker"
+---
+
+{/*
+SEO keywords: String(decoding:as:) replacement character, String(data:encoding:) returns nil,
+U+FFFD Swift, invalid UTF-8 Swift, String(validating:as:) Swift 6, SE-0405, chunked UTF-8 decoding
+Swift, URLSession bytes split multibyte character, Latin-1 to UTF-8 Swift, lossy string decoding iOS
+Internal linking plan: nsrange-string-count-utf16-emoji-offset-swift (string counting units),
+swift-string-count-grapheme-cluster-performance (what a Character is), swift-bidiclass-se-0559-rtl-
+override-spoofing-ios (other invisible string corruption), codable-null-vs-missing-key-
+decodeifpresent-swift (silent defaults at the boundary), course /learn/networking-with-ai
+*/}
+
+A customer sent us a screenshot of their own name. It said `Fran�ois`. Two support tickets later, we had one from `M�ller` and one from somebody whose street was `Stra�e`.
+
+The names were fine in the database. They were fine in the API response. They were fine in the Android app. **Only our iOS build had the diamond with the question mark in it**, and only for a feature we'd shipped a week earlier.
+
+The diff for that feature was eleven lines. One of them was a `String(decoding:as:)` where a `String(data:encoding:)` used to be. Somebody got tired of unwrapping an optional. Fair enough. The optional was the whole point.
+
+---
+
+## Two initializers, two philosophies
+
+Swift gives you two mainstream ways to turn bytes into text, and they have opposite opinions about what to do when the bytes are wrong.
+
+**Foundation's version returns nil:**
+
+```swift
+let text = String(data: data, encoding: .utf8)   // String?
+```
+
+If `data` contains a byte sequence that isn't valid UTF-8, you get `nil`. You have to deal with that, which is annoying, which is why people replace it with the next one.
+
+**The standard library's version always succeeds:**
+
+```swift
+let text = String(decoding: data, as: UTF8.self)   // String, never nil
+```
+
+It never fails because it *repairs*. Every ill-formed sequence gets replaced with U+FFFD, the Unicode replacement character, which renders as `�`. The docs say so right there in the discussion section, and almost nobody reads it, because the function signature says "I return a String" and that's all you wanted to hear.
+
+Here's the thing: **both behaviors are correct.** They're correct for different situations. The bug is picking one without deciding which situation you're in.
+
+---
+
+## Where invalid UTF-8 actually comes from
+
+The common objection is "my server sends UTF-8, this can't happen to me." I believed that too. Here's where it bit, in rough order of how often I've seen it.
+
+**Chunk boundaries in streaming.** A multi-byte character is two to four bytes. If you're reading a stream in chunks, the boundary between two chunks lands in the middle of a character roughly one time in every few hundred, depending on the text. Decode each chunk separately and you get `�` at every unlucky seam. Twice, actually: the tail of one chunk is an incomplete sequence, and the head of the next is a stray continuation byte.
+
+```swift
+let bytes = Array("Café au lait".utf8)   // é is 0xC3 0xA9
+let chunk1 = bytes[0..<4]                // "Caf" + 0xC3
+let chunk2 = bytes[4...]                 // 0xA9 + " au lait"
+
+String(decoding: chunk1, as: UTF8.self)  // "Caf�"
+String(decoding: chunk2, as: UTF8.self)  // "� au lait"
+```
+
+This is exactly what `URLSession.bytes` hands you if you reassemble lines yourself instead of using `.lines`, what a `FileHandle` read loop hands you, and what a Bluetooth characteristic hands you when a message is longer than the MTU.
+
+**Files that were never UTF-8.** A CSV exported from a 2009 Windows accounting package is Windows-1252. The `é` in it is a single byte, `0xE9`, which on its own is invalid UTF-8. Decode that lossy and every accented character in the file becomes `�`, and because the file "decoded fine," you import it, and now the garbage is in *your* database too.
+
+**Truncation by someone else.** A backend that caps a field at 255 *bytes* instead of 255 characters will cut a four-byte emoji in half. Perfectly common. The database stores the broken tail. Every client that decodes lossy sees `�` at the end of the bio and shrugs.
+
+**Binary that was never text.** A QR code payload, a push notification's raw data, a `Data` blob someone stored as a string because the schema only had a string column. Decoding these lossy produces something that *looks* like text and is actually noise.
+
+---
+
+## The repair isn't just cosmetic
+
+If this were purely about an ugly glyph in a label, I'd call it a papercut. It isn't.
+
+**Hashes and signatures change.** If you decode bytes to a String, then hash the String's `.utf8` to compare against a server-provided digest, a single repaired byte changes the digest. The comparison fails, you report "tampered content," and the content was fine. The bytes you received were right. The String you built wasn't.
+
+**Round trips lose data.** Decode lossy, store the String, encode it back to bytes. The original `0xE9` is now `0xEF 0xBF 0xBD`. Three bytes, and no way to get the original back. If that String was a filename, a key, or an identifier, you now have a thing that doesn't match the thing it came from.
+
+**Equality lies.** Two different invalid inputs can repair to the identical String. `Set` and `Dictionary` will happily merge them. Same shape of problem as [NSRange and `String.count` disagreeing about what they're counting](/blog/nsrange-string-count-utf16-emoji-offset-swift): the text looks right, the math underneath is wrong.
+
+**The replacement character is a legal character.** You can't reliably detect a repair after the fact by searching for `"\u{FFFD}"`, because legitimate text can contain it. By the time you have a String, the evidence is gone. **Validation has to happen on the bytes, before the String exists.**
+
+---
+
+## Swift 6 finally gives you a validating initializer without Foundation
+
+For years, "I want nil on bad bytes" meant importing Foundation and using `String(data:encoding:)`. SE-0405 fixed that in Swift 6.0:
+
+```swift
+let text = String(validating: data, as: UTF8.self)   // String?
+```
+
+Same `nil`-on-failure contract as the Foundation one, but it's in the standard library, it works on any `Sequence<UInt8>`, and it doesn't drag Foundation into a server-side or Embedded Swift target. There's also `String(validatingCString:)`, which replaced the awkwardly named `String(validatingUTF8:)`.
+
+So as of Swift 6 the menu is:
+
+| You want... | Use |
+|---|---|
+| nil on invalid bytes, stdlib only | `String(validating:as:)` |
+| nil on invalid bytes, Foundation, other encodings | `String(data:encoding:)` |
+| best-effort text for display, never nil | `String(decoding:as:)` |
+| a C string up to the first NUL, repaired | `String(cString:)` |
+
+That last one surprises people: `String(cString:)` also repairs, and it also stops at the first zero byte, so a buffer with an embedded NUL silently loses its tail.
+
+---
+
+## The rule I use now
+
+**Validate at trust boundaries. Repair for display only.**
+
+If bytes come from the network, a file, a peripheral, or anything that isn't your own process, validate them. A `nil` there is information: the input is not what the contract said it would be, and you want to know, the same way you want to know when the server [sends a `null` where you expected a value](/blog/codable-null-vs-missing-key-decodeifpresent-swift).
+
+```swift
+guard let name = String(validating: nameBytes, as: UTF8.self) else {
+    throw ImportError.invalidEncoding(field: "name", bytes: nameBytes.count)
+}
+```
+
+If you're rendering a log line, a debug description, or a "we couldn't parse this, here's roughly what it said" message, repair away. Nobody cares that a crash log has a `�` in it. They care that it rendered at all.
+
+And for the one case that's neither, the legacy Windows-1252 import, try the strict decode first and fall back deliberately:
+
+```swift
+func decodeLegacyCSV(_ data: Data) -> String? {
+    String(validating: data, as: UTF8.self)
+        ?? String(data: data, encoding: .windowsCP1252)
+}
+```
+
+That's a *choice* to interpret the bytes a second way. It's not a repair. Every byte in Windows-1252 maps to a real character, so nothing becomes `�`, and the `é` comes out as `é`.
+
+---
+
+## Streams: don't decode what you haven't finished receiving
+
+For the chunk-boundary problem, the fix is to never decode a partial character. The cheap way is to let Apple do it:
+
+```swift
+let (bytes, _) = try await URLSession.shared.bytes(from: url)
+for try await line in bytes.lines {
+    handle(line)   // lines are decoded correctly across chunk boundaries
+}
+```
+
+`AsyncBytes.lines` and `.characters` buffer across chunks for you. If you're working with raw `Data` chunks from a peripheral or a socket, you need a tiny stateful decoder that holds back an incomplete trailing sequence:
+
+```swift
+struct UTF8ChunkDecoder {
+    private var pending: [UInt8] = []
+
+    mutating func decode(_ chunk: some Sequence<UInt8>) -> String {
+        pending.append(contentsOf: chunk)
+
+        // Walk back from the end to find the start of the last sequence.
+        var cut = pending.count
+        var i = pending.count - 1
+        var seen = 0
+        while i >= 0 && seen < 4 {
+            let b = pending[i]
+            if b & 0xC0 == 0x80 {            // continuation byte, keep looking
+                seen += 1; i -= 1; continue
+            }
+            let need = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4
+            if seen + 1 < need { cut = i }   // sequence is incomplete, hold it back
+            break
+        }
+
+        let ready = pending[..<cut]
+        pending = Array(pending[cut...])
+        return String(decoding: ready, as: UTF8.self)
+    }
+
+    mutating func finish() -> String {
+        defer { pending.removeAll() }
+        return String(decoding: pending, as: UTF8.self)
+    }
+}
+```
+
+Lossy decoding is fine *inside* this type, because by the time bytes reach `String(decoding:)` they're either complete sequences or genuinely broken ones, and genuinely broken bytes in a live stream are something you want to render rather than crash on. The incomplete tail waits for the next chunk. `finish()` flushes whatever's left at end of stream, repaired if it has to be.
+
+---
+
+## Tests for the boundary
+
+```swift
+import Testing
+
+@Test func validatingRejectsSplitCharacter() {
+    let e = Array("é".utf8)                     // [0xC3, 0xA9]
+    #expect(String(validating: e[0..<1], as: UTF8.self) == nil)
+    #expect(String(validating: e, as: UTF8.self) == "é")
+}
+
+@Test func latin1ByteIsNotUTF8() {
+    let bytes: [UInt8] = [0x43, 0x61, 0x66, 0xE9]   // "Café" in Windows-1252
+    #expect(String(validating: bytes, as: UTF8.self) == nil)
+    #expect(String(decoding: bytes, as: UTF8.self) == "Caf\u{FFFD}")
+}
+
+@Test func chunkDecoderSurvivesSplitCharacter() {
+    let bytes = Array("Café au lait".utf8)
+    var decoder = UTF8ChunkDecoder()
+    var out = decoder.decode(bytes[0..<4])
+    out += decoder.decode(bytes[4...])
+    out += decoder.finish()
+    #expect(out == "Café au lait")
+    #expect(!out.contains("\u{FFFD}"))
+}
+```
+
+The second test is the one to show the person who says "we only ever get UTF-8." Four bytes, perfectly reasonable-looking, and the two initializers give you `nil` and a `�` respectively. Neither is wrong. Only one of them is honest.
+
+---
+
+## The grep
+
+```bash
+grep -rn "String(decoding:" --include="*.swift" .
+```
+
+For each hit, ask one question: **do these bytes come from outside my process?** If yes, and the result is used for anything other than putting pixels on a screen, you've got a silent data repair in your pipeline. Swap it for `String(validating:as:)` and let the `nil` tell you something.
+
+That customer's name was `François`. The bytes had it right the whole time. We just told Swift we didn't want to hear about it if they didn't.
+
+For the full picture of handling untrusted input at the network edge, from decoding to error surfaces, the [networking lesson](/learn/networking-with-ai) in our course walks through where these checks belong in a real app.
