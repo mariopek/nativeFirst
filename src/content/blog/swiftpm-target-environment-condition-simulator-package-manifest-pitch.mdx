@@ -1,0 +1,196 @@
+---
+title: "Package.swift Can't Tell the Simulator From a Real iPhone. A New SwiftPM Pitch Finally Fixes That."
+description: "SwiftPM's .when(platforms:) condition matches the OS, so a package manifest can't link one library for the iOS simulator and another for the device. A new Swift Evolution pitch adds target environment conditions to Package.swift. Here's what it fixes, the workarounds it replaces, and the one naming fight the thread is already having."
+pubDate: 2026-11-15
+tags: ["Swift", "SwiftPM", "Swift Evolution", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1700116576530-e1abc3eb1c8d?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A railway junction where one track splits into two, seen from above the switch"
+---
+
+{/*
+SEO keywords: SwiftPM targetEnvironment condition, Package.swift simulator condition,
+.when(platforms:) simulator, SwiftPM musl glibc dependency, target triple environment Swift,
+#if targetEnvironment(simulator) Package.swift, Swift Evolution pitch SwiftPM 2026,
+link library only on device Swift package, Package@swift-6.5.swift
+Internal linking plan: swiftpm-traits-test-target-configurations-pitch (traits are the
+workaround this pitch replaces), spm-modular-architecture-swift-when-to-split (why packages
+have many targets in the first place), swiftpm-embedincode-object-file-span-fix (same
+tools-version dance), se-0547-accepted-remote-caching-cut-swiftpm (recent SwiftPM proposals),
+course /learn/working-with-system-frameworks (hardware the simulator doesn't have)
+*/}
+
+There's one `#if` I have typed more than any other in a decade of iOS work, and it isn't `#if DEBUG`. It's `#if targetEnvironment(simulator)`.
+
+The camera doesn't exist on the simulator. Neither does ARKit, the Secure Enclave, half of CoreMotion, or that vendor SDK whose static library ships device-only slices and makes the linker scream the moment you hit Run on an iPhone 17 Pro that isn't real. **So you branch.** In Swift source, that's a one-liner. In `Package.swift`, it's impossible.
+
+As of Thursday, there's a pitch on the Swift Forums that wants to make it possible. It's short, it's overdue, and the thread has already found the one naming question that will eat most of the review. Let me walk through it.
+
+---
+
+## The gap: a manifest knows the OS, not the environment
+
+A target triple has four parts: architecture, vendor, OS, and an optional environment. The environment is the one that picks a *variant* of the OS with a different ABI or different libraries:
+
+| Triple | Environment |
+|---|---|
+| `arm64-apple-ios17.0-simulator` | iOS simulator |
+| `arm64-apple-ios17.0-macabi` | Mac Catalyst |
+| `x86_64-unknown-linux-gnu` | Linux with glibc |
+| `x86_64-swift-linux-musl` | Linux with musl (the Static Linux SDK) |
+| `aarch64-unknown-linux-android` | Android |
+
+Swift source can see that last segment. `#if targetEnvironment(simulator)` and `#if targetEnvironment(macCatalyst)` work today. But a package manifest only has `.when(platforms:)`, and `.iOS` means *every* iOS variation. Device and simulator. No way to split them.
+
+So these two very normal things can't be expressed in `Package.swift`:
+
+- Link a different library, or set a different define, for the simulator and for the device.
+- Pick a different implementation of a dependency for Linux with musl versus Linux with glibc.
+
+**The manifest can see the OS. It just can't see which flavor of the OS.** Which is exactly the information you need most of the time.
+
+---
+
+## What people do instead (and why it's all a bit gross)
+
+I've shipped all three of these workarounds. None of them feel good.
+
+**Option one: `#if` in every source file.** You can't exclude a target on the simulator, so you compile it everywhere and stub the guts out. Every file that touches the real hardware grows a `#if targetEnvironment(simulator)` block with a fake implementation. It works. It also means your simulator build still compiles, type-checks, and links a module that does nothing, and your "mock" lives in the same file as the real thing, where it rots quietly.
+
+**Option two: traits.** Declare a `Simulator` trait, make the dependency conditional on it, and have the app enable it for simulator builds. Except traits have to be wired through every transitive dependency by the root package, and the root package doesn't know whether you're building for a simulator either. I wrote about [how traits already confuse your test targets](/blog/swiftpm-traits-test-target-configurations-pitch). Using them as a stand-in for the target triple is asking a configuration knob to do a build-system job.
+
+**Option three: `unsafeFlags` and a prayer.** Pass `-D SIMULATOR` from an Xcode scheme or a CI script, read it in the manifest. Your package now has an undocumented contract with whoever builds it, and it can't be consumed as a versioned dependency because `unsafeFlags` poisons that.
+
+Every one of these is a workaround for a missing sentence in the manifest language. **The pitch adds the sentence.**
+
+---
+
+## The pitch: `.when(targetEnvironments:)`
+
+Franz Busch posted the pitch on November 13. The core change is a new `targetEnvironments` parameter on the `.when(...)` conditions for both build settings and target dependencies:
+
+```swift
+// swift-tools-version: 6.5
+import PackageDescription
+
+let package = Package(
+    name: "Example",
+    targets: [
+        // An implementation of `fts` for C libraries that don't have it, such as musl.
+        .target(name: "CFTS"),
+        .target(
+            name: "FileWalker",
+            dependencies: [
+                .target(
+                    name: "CFTS",
+                    condition: .when(platforms: [.linux], targetEnvironments: [.musl])
+                ),
+            ]
+        ),
+    ]
+)
+```
+
+On glibc, `fts_open()` is in the C library and `CFTS` never gets built. On musl, `FileWalker` picks up `CFTS` and the Swift side checks `#if canImport(CFTS)`. The dependency graph itself changes with the triple, instead of the source pretending it did.
+
+For the iOS version of this story, the shape I'd actually write looks like this:
+
+```swift
+.target(
+    name: "CameraKit",
+    dependencies: [
+        .target(
+            name: "RealCamera",
+            condition: .when(platforms: [.iOS])
+        ),
+        .target(
+            name: "SimulatorCamera",
+            condition: .when(platforms: [.iOS], targetEnvironments: [.simulator])
+        ),
+    ],
+    swiftSettings: [
+        .define("CAMERA_IS_FAKE", .when(platforms: [.iOS], targetEnvironments: [.simulator]))
+    ]
+)
+```
+
+Keep that one in your head for a second, because it has a hole in it, and the thread found the hole within a few hours.
+
+The API surface is small on purpose:
+
+```swift
+public struct TargetEnvironment: Sendable, Equatable {
+    public static let simulator: TargetEnvironment
+    public static let macABI: TargetEnvironment
+    public static let musl: TargetEnvironment
+    public static let android: TargetEnvironment
+    public static func custom(_ name: String) -> TargetEnvironment
+}
+```
+
+The matching rules follow the existing platform rules. **The name has to equal the environment segment of the triple, exactly and case-sensitively.** `.custom("gnu")` matches `x86_64-unknown-linux-gnu` but not `armv7-unknown-linux-gnueabihf`. Versions aren't part of the name, so `.android` matches `aarch64-unknown-linux-android28` for any API level. A triple with no environment at all matches no target environment. If you list several environments, one has to match. If you list platforms *and* environments, both have to match.
+
+One more piece I almost skimmed past: the proposal also touches the compiler. Today `#if targetEnvironment(...)` only knows `simulator` and `macCatalyst`, and anything else gets a warning and evaluates to false. Under the pitch, `#if targetEnvironment(name)` is true whenever `name` is the environment of the triple, using the same rules as the manifest. So `#if targetEnvironment(musl)` becomes a real thing you can write, and the manifest and the source finally agree on what they're looking at.
+
+---
+
+## The hole: what does "iOS, not simulator" look like?
+
+Here's the problem with my `CameraKit` example. `.when(platforms: [.iOS])` means all of iOS. Device *and* simulator. So `RealCamera` gets linked on the simulator too, and I'm back to stubbing it. **The pitch lets you say "simulator." It doesn't give you a way to say "not simulator."**
+
+Owen Voorhees raised the deeper version of this early in the thread. An environment segment is only meaningful alongside a platform. `simulator` means one thing for Apple triples and could mean something totally different for a hypothetical Linux or FreeBSD triple. So a condition like `.when(platforms: [.linux, .iOS, .freeBSD], targetEnvironments: [.simulator])` is a trap: three platforms, one environment name, three potentially different meanings.
+
+His suggested shape attaches the environment to the platform instead:
+
+```swift
+.when(platforms: [
+    .linux,
+    .iOS(.simulator),
+    .freeBSD,
+    .custom(name: "someplatform", environment: "someenv")
+])
+```
+
+Jake Petroules from the SwiftPM side agreed, and went a step further: maybe `.when(partialTargetTriples:)`, where each entry is a platform plus an environment. He also pointed out something I genuinely didn't know. `.macCatalyst` and `.android` are *already* platforms in the existing `Platform` type, so adding them as environments would be redundant. The real wins of this pitch are exactly two: glibc versus musl, and simulator versus not-simulator.
+
+And then he asked the question that's still open as I write this: if `.iOS(.simulator)` means the obvious thing, **how do you spell iOS-but-definitely-a-device?** `.iOS` can't change meaning without breaking every manifest that uses it today. So you'd need either a new spelling like `.iOS(.device)` or a "none" environment, and nobody has committed to one yet.
+
+Franz said he'll adapt the pitch toward the platform-attached design. So expect the API above to look different by the time a formal SE number lands. **The idea is settled. The spelling isn't.**
+
+---
+
+## The smaller fights (that still matter)
+
+Two more threads of discussion, both short, both the kind of thing that ends up in a Future Directions section:
+
+**`.macABI` or `.macCatalyst`?** Jed Fox asked why the pitch uses the triple's raw `macabi` name when nobody outside a triple says "Mac ABI." Franz's answer: staying true to the actual segment avoids introducing a custom name-mapping layer. Reasonable, but I'd bet on `.macCatalyst` surviving review, because that's the word every developer already knows and the existing platform constant already uses it.
+
+**Why `musl` but not `gnu`?** Jonathan Grynspan asked. There's no answer in the thread yet. My guess is that glibc is the default and you'd use the *absence* of the musl condition to mean it, but that's the same "how do I say not-X" problem wearing a Linux hat. It'd be cleaner to have both.
+
+And one architectural note from Daniel Schaefer, who maintains SwiftPM: package resolution happens before SwiftPM knows which platform you're building for. The conditions have to be carried into the build description and resolved later, per build request, which is how platform conditions already work. Franz confirmed the pitch doesn't touch resolution at all. It's build-time only. Good. That's the only version of this that could ship without a rewrite.
+
+---
+
+## What this changes for your packages
+
+If you maintain a Swift package that wraps hardware, a vendor SDK, or a C library whose availability depends on the libc, here's the practical shape of what's coming:
+
+**Your mock becomes a target, not a block.** `SimulatorCamera` gets its own module, its own tests, and never compiles into a device build. I've spent years telling people to [split packages along the seams where implementations differ](/blog/spm-modular-architecture-swift-when-to-split). This is the first time the manifest will let the *simulator* be one of those seams.
+
+**Your traits go back to being features.** A trait should be "this package can optionally talk to CloudKit," not "we're on a simulator." If you've been abusing traits for triple detection, you'll get to delete that.
+
+**You'll need a tools-version dance.** Using the new condition means requiring whatever tools version ships it. Packages that also support older toolchains can put the new conditions in a version-specific manifest, something like `Package@swift-6.5.swift`, and keep the old one for everybody else. Same choreography as the [embedInCode tools-version bump](/blog/swiftpm-embedincode-object-file-span-fix) a few months back. Annoying, familiar, survivable.
+
+**Static Linux builds get a lot less hacky.** If you ship a Swift server binary with the Static Linux SDK, you've probably got a `#if` somewhere that guesses at musl. Soon the manifest can just know.
+
+This is one of those proposals that nobody will remember in two years because it will feel like it was always there. It's in good company. SwiftPM has had a quietly productive year, from [remote compilation caching getting accepted](/blog/se-0547-accepted-remote-caching-cut-swiftpm) to traits to this. Most of the interesting Swift Evolution work right now isn't in the language. It's in the build system.
+
+---
+
+## If you want to weigh in
+
+The pitch is on the Swift Forums under "Target environment conditions in package manifests." Eight posts as of Sunday morning, a revised draft on the way. If you've ever written `#if targetEnvironment(simulator)` around a vendor SDK import and hated it, you have a use case worth posting. The question they most need answered is the boring one: **what should "iOS on a real device" be called?**
+
+Me, I'd take `.iOS(.device)`. It reads like what you mean, and reading like what you mean is the whole point of putting this in the manifest in the first place. For the broader picture of where the simulator falls short and how to design around hardware you can't fake, there's a lesson on [working with system frameworks](/learn/working-with-system-frameworks) that covers the code side of the same problem.
+
+The build system is finally about to know what your source code has known for ten years. Took long enough.
