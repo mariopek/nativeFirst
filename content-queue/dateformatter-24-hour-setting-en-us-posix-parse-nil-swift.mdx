@@ -1,0 +1,202 @@
+---
+title: "Your Date Parsing Works on Every Test Device. Then One User Turns Off 24-Hour Time."
+description: "A fixed-format DateFormatter in Swift respects the user's 12/24-hour override, so a perfectly good server timestamp can come back nil for a handful of users. Here's why Apple's QA1480 bug still bites iOS apps, why en_US_POSIX is the fix, the time zone trap hiding next to it, and how to switch machine dates to ISO8601FormatStyle."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "Dates", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1415604934674-561df9abf539?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A close-up of an analog clock face with its hour and minute hands"
+---
+
+{/*
+SEO keywords: DateFormatter returns nil, DateFormatter 24-hour time setting, en_US_POSIX DateFormatter,
+QA1480, DateFormatter fixed format parsing, DateFormatter HH 12-hour override, ISO8601DateFormatter,
+Date.ISO8601FormatStyle, Swift date parsing fails some users, DateFormatter timeZone UTC
+Internal linking plan: dateformatter-yyyy-week-based-year-bug-swift (the other DateFormatter
+setting trap), decimal-separator-locale-string-format-swift-bug (same "user's locale leaks into
+machine strings" family), jsondecoder-iso8601-fractional-seconds-failure (the other way ISO dates
+fail to parse), dateformatter-recreated-every-call-swift-performance (cache the formatter you fix),
+course /learn/debugging-with-ai
+*/}
+
+The bug report said: "Bookings list is empty. Only for me. My wife's phone shows everything." Same app version. Same account. Same Wi-Fi. Same kitchen table.
+
+I asked for screenshots of everything. Region, language, iOS version, the lot. The only difference between the two phones was one toggle three screens deep in Settings: **24-Hour Time**. Hers was on. His was off.
+
+That toggle was deciding whether my app could read a date.
+
+---
+
+## The formatter that looked bulletproof
+
+Here's the code. It's the kind of thing you write once, it works, and you never think about it again:
+
+```swift
+let formatter = DateFormatter()
+formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+
+let raw = "2026-11-16T14:30:00"
+let date = formatter.date(from: raw)
+```
+
+Lowercase `yyyy`, so it's not [the week-based year trap](/blog/dateformatter-yyyy-week-based-year-bug-swift). Capital `HH`, which means 0–23 hours. An explicit format string. What could possibly be ambiguous?
+
+The format string is a **request**, not a contract. `DateFormatter` starts from the user's locale and the user's preferences, and on iOS one of those preferences is "I want 12-hour time" or "I want 24-hour time," independent of what the region normally uses.
+
+Apple documented this years ago in Technical Q&A QA1480. The short version: when the user has overridden the 12/24-hour setting, `DateFormatter` can **rewrite your format string** to match their preference. Your `HH` stops meaning what you wrote. A string with `14` in the hour slot no longer matches, and `date(from:)` quietly returns `nil`.
+
+No crash. No log. Just `nil`, which most of us immediately `compactMap` away.
+
+---
+
+## Why your tests never saw it
+
+This is the part that makes it nasty. To reproduce it you need a **specific combination**: a region and a 12/24-hour toggle that disagree with each other. A US user who flips 24-Hour Time *on*. A UK or German user who flips it *off*. Most people never touch that switch, so most of your users are fine.
+
+Your simulators run on defaults. Your CI runs on defaults. Your QA team's phones run on whatever the QA team likes, which is usually defaults. Every environment you control agrees with itself.
+
+Then one user with strong opinions about clocks opens your app, and every timestamp from your API vanishes.
+
+I've seen this show up as:
+
+- an empty list (the decoder threw on the first bad date, and the whole array went with it),
+- events sorted to the bottom because the fallback date was `.distantPast`,
+- a "last synced: never" label that never updated, for exactly one user, forever.
+
+The bug reports always sound haunted. "Only on my phone." That's because it really is only on their phone.
+
+---
+
+## The fix is one line, and it's a weird one
+
+```swift
+let formatter = DateFormatter()
+formatter.locale = Locale(identifier: "en_US_POSIX")
+formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+```
+
+`en_US_POSIX` is a special locale that exists for exactly this job. Apple's docs describe it as a locale that's **designed to not change**, either by Apple between OS releases or by user preferences. It ignores the 12/24-hour override. It always uses the Gregorian calendar. It's the locale equivalent of "I'm talking to a computer, not a person."
+
+A useful mental model: there are two kinds of date strings in your app.
+
+- **Strings for humans.** "Monday, 3:30 PM," "16. Nov. 2026, 15:30." These *should* follow the user's locale, calendar, and clock preference. That's the whole point.
+- **Strings for machines.** API payloads, cache keys, filenames, database columns. These must be identical on every device on earth.
+
+Every date bug I've hit in a decade of iOS work came from using a human formatter for a machine string. It's the [same disease as `String(format:)` putting a comma in your prices](/blog/decimal-separator-locale-string-format-swift-bug), just with clocks.
+
+One more habit worth keeping: set `locale` **before** `dateFormat`, the way QA1480's own example does. It costs nothing, and it means the format is never interpreted against the wrong locale, even for a moment.
+
+---
+
+## The trap sitting right next to it
+
+Fixing the locale gets you a parsed date. It doesn't guarantee it's the **right** date.
+
+Look at the format again: `yyyy-MM-dd'T'HH:mm:ss`. No time zone. So which 14:30 is this? `DateFormatter` assumes the device's current time zone. A user in Tokyo and a user in New York parse the same string into two instants 14 hours apart.
+
+If your backend sends UTC (it should), say so:
+
+```swift
+let formatter = DateFormatter()
+formatter.locale = Locale(identifier: "en_US_POSIX")
+formatter.timeZone = TimeZone(secondsFromGMT: 0)
+formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+```
+
+And if the string ends in a literal `'Z'` in your format, that's even sneakier. Quoting the `Z` means "match the character Z," not "this is UTC." Without setting `timeZone`, you're parsing a UTC timestamp as local time while the string literally tells you it's UTC. I've done this. It passed review. It was wrong by exactly my UTC offset, which in Central Europe is small enough to look like a rounding issue for months.
+
+---
+
+## The better fix: stop hand-rolling ISO 8601
+
+If your server sends ISO 8601 (and most do), you don't need a hand-written format at all. Foundation has dedicated tools that are fixed-format by design and don't consult user preferences.
+
+The older one, available everywhere:
+
+```swift
+let iso = ISO8601DateFormatter()
+iso.formatOptions = [.withInternetDateTime]
+
+let date = iso.date(from: "2026-11-16T14:30:00Z")
+```
+
+The modern one, iOS 15 and later:
+
+```swift
+let date = try Date("2026-11-16T14:30:00Z", strategy: .iso8601)
+```
+
+And with `JSONDecoder`, skip the formatter entirely:
+
+```swift
+let decoder = JSONDecoder()
+decoder.dateDecodingStrategy = .iso8601
+```
+
+One warning before you celebrate. The built-in `.iso8601` strategy is strict about fractional seconds, and backends love adding milliseconds without telling anyone. That one has its [own post and its own fix](/blog/jsondecoder-iso8601-fractional-seconds-failure). The short version: if you might see `.123`, use a formatter with `.withFractionalSeconds` and a fallback.
+
+---
+
+## What about displaying dates?
+
+Here's where you do the opposite. For anything a person reads, **don't** use `en_US_POSIX` and **don't** write a fixed format. Let the system build the pattern:
+
+```swift
+let text = date.formatted(date: .abbreviated, time: .shortened)
+```
+
+That respects region, language, calendar, and the 24-hour toggle. The user who turned 24-hour time off gets "3:30 PM." The user who turned it on gets "15:30." Everyone is happy, and you didn't write a single format character.
+
+If you need more control with an old-school `DateFormatter`, use a template instead of a format:
+
+```swift
+let display = DateFormatter()
+display.setLocalizedDateFormatFromTemplate("MMMd jmm")
+```
+
+The `j` in that template means "the user's preferred hour format." It's the polite version of `HH`.
+
+Whichever you use, create it once and reuse it. [A fresh `DateFormatter` per cell is its own performance bug](/blog/dateformatter-recreated-every-call-swift-performance), and fixing the locale on one you rebuild 60 times a second doesn't help anyone.
+
+---
+
+## The test that would have caught it
+
+You can't flip the user's Settings toggle from a unit test, but you can simulate the conflict by handing the formatter a locale whose preferences disagree with your format. The honest version is to centralize your machine formatter and test that it **pins its own locale**, so nobody "simplifies" it later:
+
+```swift
+import Testing
+import Foundation
+
+enum MachineDate {
+    static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return f
+    }()
+}
+
+@Test func machineFormatterIgnoresUserPreferences() throws {
+    #expect(MachineDate.formatter.locale.identifier == "en_US_POSIX")
+    #expect(MachineDate.formatter.timeZone.secondsFromGMT() == 0)
+
+    let date = try #require(MachineDate.formatter.date(from: "2026-11-16T14:30:00"))
+    #expect(MachineDate.formatter.string(from: date) == "2026-11-16T14:30:00")
+}
+```
+
+Then, once per release, do the manual check that actually reproduces it: on a test device set to a 24-hour region, turn **24-Hour Time off**, and open every screen that shows server data. It takes five minutes. It would have saved me two days of "works on my wife's phone."
+
+If you're stuck on a bug that only one user can see, this is exactly the kind of thing where [describing the symptoms precisely to an AI assistant](/learn/debugging-with-ai) pays off. "Only one device, same account, same build" is a huge clue, and it points straight at device settings.
+
+---
+
+## The takeaway
+
+`DateFormatter` was designed to show dates to humans, and humans have preferences. Every time you use it to talk to a server, you're letting one person's Settings app take part in your parsing.
+
+So the rule is short. **Machine strings get `en_US_POSIX` and an explicit time zone, or better, a real ISO 8601 parser. Human strings get the system's localized formatting and no hand-written patterns at all.**
+
+The user who turned off 24-hour time wasn't doing anything wrong. They just wanted their clock to say "PM." My app should have been fine with that.
