@@ -1,0 +1,235 @@
+---
+title: "UserDefaults.bool(forKey:) Returns false for a Key You Never Set. Your 'On by Default' Setting Ships Off."
+description: "UserDefaults.bool(forKey:) can't tell 'the user turned this off' from 'nobody has ever touched this', so every setting that's supposed to default to true quietly starts as false. Here's why, how register(defaults:) fixes it, why the @AppStorage inline default only fixes it for one view, and the widget and first-launch traps sitting right next to it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "UserDefaults", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1520254695104-2765bc239df7?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A light switch mounted on a wall"
+---
+
+{/*
+SEO keywords: UserDefaults bool forKey returns false, UserDefaults default value true, register(defaults:)
+Swift, UserDefaults registration domain, AppStorage default value not saved, UserDefaults integer forKey
+returns 0, UserDefaults object forKey nil, UserDefaults app group widget default, Swift settings default on
+Internal linking plan: appstorage-does-not-observe-what-you-think-it-does (the other @AppStorage
+surprise), codable-null-vs-missing-key-decodeifpresent-swift (same "absent vs explicit value" family),
+widgetkit-app-intents-log-brew-without-opening-app (the widget process that reads the same defaults),
+keychain-vs-in-memory-token-storage-swift (what does and doesn't survive a relaunch),
+course /learn/debugging-with-ai
+*/}
+
+I shipped a haptics toggle once. On by default, obviously. Nobody installs an app hoping the buttons feel dead.
+
+Two weeks later a review came in: "Nice app, but why no haptic feedback?" I opened Settings in my own build. The toggle was on. I tapped a button. It buzzed. I closed the review and felt smug for about four minutes.
+
+Then I deleted the app, reinstalled it, and tapped the same button. Nothing. The toggle in my settings screen still said on.
+
+---
+
+## Two readers, two answers
+
+Here's what the settings screen had:
+
+```swift
+struct SettingsView: View {
+    @AppStorage("hapticsEnabled") private var hapticsEnabled = true
+
+    var body: some View {
+        Toggle("Haptic feedback", isOn: $hapticsEnabled)
+    }
+}
+```
+
+And here's what the thing that actually buzzes had:
+
+```swift
+final class Haptics {
+    func tap() {
+        guard UserDefaults.standard.bool(forKey: "hapticsEnabled") else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+}
+```
+
+Both read the same key. On a fresh install they disagree, and they'll keep disagreeing until the user flips the toggle off and on again.
+
+The `= true` on the `@AppStorage` line isn't a write. It's a fallback that lives inside that one property wrapper. Nothing gets stored in `UserDefaults` until the user changes the value. So the toggle renders as on, because the wrapper found nothing and used its fallback. Meanwhile `bool(forKey:)` found nothing and used *its* fallback.
+
+Its fallback is `false`.
+
+---
+
+## bool(forKey:) has no "I don't know"
+
+The typed getters on `UserDefaults` return non-optional values. That's convenient right up until it matters:
+
+```swift
+let defaults = UserDefaults.standard
+
+defaults.bool(forKey: "neverSet")      // false
+defaults.integer(forKey: "neverSet")   // 0
+defaults.double(forKey: "neverSet")    // 0.0
+defaults.string(forKey: "neverSet")    // nil
+defaults.object(forKey: "neverSet")    // nil
+```
+
+`string(forKey:)` and `object(forKey:)` are honest. They hand you `nil` and let you decide. The numeric and boolean ones pick an answer for you, and the answer is always the zero value.
+
+So `bool(forKey:)` collapses two very different situations into one: "the user turned this off" and "nobody has ever touched this". It's the same shape of problem as [Codable not telling you whether a key was null or missing](/blog/codable-null-vs-missing-key-decodeifpresent-swift). Absence and an explicit value are different facts, and the API flattened them.
+
+For any setting that defaults to off, you'll never notice. For every setting that defaults to **on**, you've shipped it off. Same for `integer(forKey:)`: a "reminders per day" setting you meant to start at 3 starts at 0, and a font-size multiplier you meant to start at 1.0 starts at 0.0, which makes for a very minimalist UI.
+
+---
+
+## The workaround everybody writes first
+
+The first fix is usually this:
+
+```swift
+let enabled = defaults.object(forKey: "hapticsEnabled") as? Bool ?? true
+```
+
+It works. It's also a default value hard-coded at a call site, and you now have two of them (this one and the `@AppStorage` one). Add a widget and a background task and you have four. The day you decide haptics should default to off on iPad, you get to find all of them.
+
+The second fix people reach for is renaming the key so `false` is the right default: `hapticsDisabled` instead of `hapticsEnabled`. Honestly, for a single boolean that's fine and I've done it. It stops scaling the moment you need an integer that doesn't default to zero.
+
+---
+
+## register(defaults:) is the actual answer
+
+`UserDefaults` has had a proper mechanism for this since before most of us wrote Swift:
+
+```swift
+@main
+struct BrewLogApp: App {
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "hapticsEnabled": true,
+            "remindersPerDay": 3,
+            "textScale": 1.0
+        ])
+    }
+
+    var body: some Scene {
+        WindowGroup { ContentView() }
+    }
+}
+```
+
+Now `bool(forKey: "hapticsEnabled")` returns `true` on a fresh install, everywhere in the process, with no `??` at any call site.
+
+Think of `UserDefaults` as a stack of sticky notes. When you ask for a key, it reads from the top down and returns the first note it finds. What the user saved is near the top. `register(defaults:)` puts a note at the very **bottom** of the stack. It only gets read when nothing above it has an opinion.
+
+Three things about that bottom note are worth knowing.
+
+**It's not saved to disk.** Registered defaults live in memory for the current process only. You have to register them on every launch, before anything reads them. That's why it goes in `App.init` or the very top of `didFinishLaunching`, not in some view's `onAppear`.
+
+**It never overwrites the user.** If they turned haptics off, their value sits above yours in the stack and wins. Registering is always safe to repeat.
+
+**It lets you change your mind.** Because nothing was persisted, shipping a new default in version 2.0 reaches everyone who never touched the setting. That's the part the next approach gets wrong.
+
+---
+
+## Don't write defaults on first launch
+
+The other common pattern looks responsible and isn't:
+
+```swift
+if !defaults.bool(forKey: "hasLaunchedBefore") {
+    defaults.set(true, forKey: "hapticsEnabled")
+    defaults.set(3, forKey: "remindersPerDay")
+    defaults.set(true, forKey: "hasLaunchedBefore")
+}
+```
+
+This turns your default into the user's choice. As far as the store is concerned, every user explicitly asked for three reminders a day. When you later decide the default should be one, you can't tell the people who picked three from the people who were handed three.
+
+There's a second problem. Every setting you add in an update is missing for existing users, because their first launch was last year. So you add a `hasMigratedTo2_1` flag, and then another, and now you maintain a small migration system for a haptics toggle.
+
+Registered defaults have neither problem. Unset stays unset, and the fallback is whatever this build says it is.
+
+---
+
+## Where @AppStorage fits
+
+The inline default on `@AppStorage` is only consulted when the store returns nothing for that key. Once you've registered a default, the store does return something, so the registered value is what the wrapper shows. In practice that means the registration is the source of truth and the `= true` in the view becomes a formality.
+
+I still write the inline value, because the initializer makes me, but I keep it identical to the registered one and stop thinking of it as "the default". If you want one more reason to be suspicious of that wrapper, I wrote up [what @AppStorage actually observes](/blog/appstorage-does-not-observe-what-you-think-it-does) a while back.
+
+The cleanest setup I've found is one enum that owns both the keys and the registration dictionary:
+
+```swift
+enum Prefs {
+    static let hapticsEnabled = "hapticsEnabled"
+    static let remindersPerDay = "remindersPerDay"
+
+    static let registered: [String: Any] = [
+        hapticsEnabled: true,
+        remindersPerDay: 3
+    ]
+
+    static func register(in defaults: UserDefaults = .standard) {
+        defaults.register(defaults: registered)
+    }
+}
+```
+
+One list. If a key isn't in it, its default is zero, and that's now a decision instead of an accident.
+
+---
+
+## The widget is a different process
+
+Here's the trap that got me a second time. Registered defaults live in memory, per process. Your widget extension is not your app's process.
+
+So if the app and the widget share settings through an app group suite, the widget needs its own registration call against that suite:
+
+```swift
+let shared = UserDefaults(suiteName: "group.com.example.brewlog")!
+Prefs.register(in: shared)
+```
+
+Call that from the app *and* from the extension's entry point. Otherwise the app thinks haptics, units, or whatever are on, and [the widget that's supposed to mirror it](/blog/widgetkit-app-intents-log-brew-without-opening-app) reads the same key and gets `false`. It's the original bug again, just with a process boundary in the middle so it's harder to spot.
+
+The same goes for anything else that runs your code outside the main app: share extensions, notification service extensions, App Intents running in their own extension.
+
+---
+
+## Testing it
+
+This bug hides from you for a simple reason: your development device isn't a fresh install. You toggled that switch months ago. The value has been persisted ever since, and every reader agrees.
+
+A test with a throwaway suite puts you back on day one:
+
+```swift
+import Testing
+import Foundation
+
+@Test func hapticsDefaultToOnForNewUsers() {
+    let name = "test-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: name)!
+    defer { defaults.removePersistentDomain(forName: name) }
+
+    Prefs.register(in: defaults)
+
+    #expect(defaults.bool(forKey: Prefs.hapticsEnabled) == true)
+    #expect(defaults.integer(forKey: Prefs.remindersPerDay) == 3)
+}
+```
+
+I haven't run this exact snippet, but that's the shape: a fresh suite, register, assert. If you'd rather check by hand, delete the app from the simulator before you test a settings change. Not "run again". Delete. It's the same habit I push in the [debugging lesson](/learn/debugging-with-ai): reproduce in the state your user is in, not the one your device drifted into.
+
+And if you're wondering what else quietly resets or doesn't between launches, the [token that forgets itself on relaunch](/blog/keychain-vs-in-memory-token-storage-swift) is the mirror image of this one.
+
+---
+
+## The short version
+
+- `bool(forKey:)`, `integer(forKey:)`, and `double(forKey:)` return `false`, `0`, and `0.0` for keys that were never set. They can't say "unknown".
+- The `= true` on `@AppStorage` is a per-wrapper fallback. It writes nothing, and no other reader sees it.
+- `register(defaults:)` at launch, every launch, is the fix. It's in-memory, never overrides the user, and lets you change defaults later.
+- Don't `set` defaults on first launch. You'll turn your guesses into user choices.
+- Every extension is its own process. Register there too.
+
+My haptics toggle said "on" for two weeks while doing nothing. The toggle wasn't lying. It was just the only part of the app that had been told the default.
