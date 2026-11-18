@@ -1,0 +1,208 @@
+---
+title: "Calendar.current Isn't Always Gregorian. In Thailand, It's the Year 2569."
+description: "Calendar.current follows the user's chosen calendar, so on a phone set to the Buddhist or Japanese calendar, component(.year) returns 2569 or 8 instead of 2026. Here's how that breaks card expiry checks, age gates, filenames, and date math in Swift apps, and how to fix it with an explicit Gregorian calendar."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "Dates", "Localization", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1591259209967-57fb10170b69?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of printed calendar pages with rows of dates"
+---
+
+{/*
+SEO keywords: Calendar.current Buddhist calendar Swift, Calendar.current year 2569, Japanese calendar
+Reiwa year Swift, Calendar(identifier: .gregorian), component(.year) wrong year iOS, Swift date math
+user calendar setting, credit card expiry year check Swift, DateFormatter yyyy Buddhist year,
+iOS Language & Region Calendar setting, Thai Buddhist Era iOS app bug
+Internal linking plan: dateformatter-yyyy-week-based-year-bug-swift (the other "year isn't the year"
+bug), adding-86400-seconds-is-not-adding-a-day-swift (calendar math done right),
+decimal-separator-locale-string-format-swift-bug (user settings leaking into machine strings),
+dateformatter-recreated-every-call-swift-performance (cache the fixed formatter),
+course /learn/debugging-with-ai, app mention: Invoize (/apps/invoize)
+*/}
+
+The support email came from Bangkok and it was very polite. "Your app says my credit card is expired. I received this card last week. Expiry 08/28."
+
+I typed 08/28 into the simulator. Accepted. I typed it on my phone. Accepted. I typed it on the test iPad, which hadn't been charged since the previous administration. Accepted.
+
+So I did what every developer does when they can't reproduce a bug. I assumed the user had made a typo. **The user had not made a typo.** The user had an iPhone set to the Buddhist calendar, and according to my app, it was the year 2569.
+
+---
+
+## Your users don't all live in 2026
+
+Here's the thing I knew in theory and had never once thought about while writing code: **iOS lets people choose their calendar.** Settings → General → Language & Region → Calendar. The options include Gregorian, Buddhist, and Japanese, and for many users in Thailand, the Buddhist calendar is simply how dates work. Nobody "picked a weird setting." It's their normal.
+
+And `Calendar.current` respects that choice. That's its whole job. It's the calendar the *user* lives in, not the one your backend lives in.
+
+Here's what "the current year" looks like on November 18, 2026, depending on that one setting:
+
+```swift
+let now = Date.now
+
+Calendar(identifier: .gregorian).component(.year, from: now) // 2026
+Calendar(identifier: .buddhist).component(.year, from: now)  // 2569
+Calendar(identifier: .japanese).component(.year, from: now)  // 8 (Reiwa 8)
+```
+
+Same instant. Three different "years." All of them correct, in their own calendar.
+
+The Buddhist Era is the Gregorian year plus 543. The Japanese calendar counts years within the current imperial era, and Reiwa started in 2019, so 2026 is year 8. Your code that does `component(.year, from: .now)` on `Calendar.current` gets whichever one the user's phone is set to.
+
+**`Calendar.current` is a user preference wearing the costume of a constant.**
+
+---
+
+## The card expiry check that rejected every card in Thailand
+
+Here's roughly what my validation looked like. You've probably written this exact function.
+
+```swift
+func isExpired(month: Int, twoDigitYear: Int, now: Date = .now) -> Bool {
+    let calendar = Calendar.current
+    let currentYear = calendar.component(.year, from: now) % 100
+    let currentMonth = calendar.component(.month, from: now)
+
+    if twoDigitYear != currentYear { return twoDigitYear < currentYear }
+    return month < currentMonth
+}
+```
+
+On a Gregorian phone: `2026 % 100` is `26`. A card expiring in `28` is fine.
+
+On a Buddhist phone: `2569 % 100` is `69`. Every card printed on Earth with a year below 69 is "expired." That's all of them.
+
+On a Japanese phone: the current year is `8`. Now a card that expired in 2024 (`24`) sails through, because `24 > 8`. So the Thai user can't pay, and the Japanese user can pay with a dead card that the payment processor will reject three screens later with a much less friendly error.
+
+Two opposite bugs from one line. Damn.
+
+---
+
+## It's not just cards
+
+Once I started grepping for `Calendar.current`, I found the same mistake in places I'd have sworn were safe:
+
+- **Age gates.** `currentYear - birthYear`, where `birthYear` came from a picker built with Gregorian numbers. In Thailand, every user is 543 years older than they think. Congratulations, they're allowed to buy wine.
+- **Building dates from components.** `Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 1))` on a Buddhist phone gives you January 1st, 2026 *Buddhist Era*, which is the year 1483 in Gregorian. Your "fetch everything since the start of this year" query now fetches everything since the late Middle Ages.
+- **Filenames and IDs.** A `DateFormatter` with `dateFormat = "yyyy-MM-dd"` and no fixed locale uses the user's calendar. Your export is now named `backup-2569-11-18.json`, and your "delete backups older than 30 days" parser has opinions about that.
+- **"Is it December?" checks.** A user on the Islamic or Hebrew calendar has completely different month numbers. `component(.month) == 12` is not "December" for them, so your holiday banner appears in the wrong season, or never.
+
+I'll admit this one stung a bit, because I'd already been bitten by the [`YYYY` vs `yyyy` week-based year bug](/blog/dateformatter-yyyy-week-based-year-bug-swift) and thought I'd learned my lesson about "years." Turns out there are more ways for a year to be wrong than I had budgeted for.
+
+---
+
+## The fix: decide which calendar each piece of code is speaking
+
+The rule I use now is simple, and it's the same rule as for [decimal separators](/blog/decimal-separator-locale-string-format-swift-bug):
+
+**If a human reads it, use the user's calendar. If a machine reads it, or it's business logic, use Gregorian, explicitly.**
+
+Card expiry dates are printed in Gregorian. Your backend speaks Gregorian. Legal age is defined in Gregorian years in basically every jurisdiction your App Store listing ships to. So those calculations should never touch `Calendar.current`.
+
+```swift
+extension Calendar {
+    /// Gregorian calendar in the user's time zone.
+    /// Use for business logic, never for display.
+    static let gregorian: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        return calendar
+    }()
+}
+
+func isExpired(month: Int, twoDigitYear: Int, now: Date = .now) -> Bool {
+    let calendar = Calendar.gregorian // card years are Gregorian. Always.
+    let currentYear = calendar.component(.year, from: now) % 100
+    let currentMonth = calendar.component(.month, from: now)
+
+    if twoDigitYear != currentYear { return twoDigitYear < currentYear }
+    return month < currentMonth
+}
+```
+
+One caveat on that static: `TimeZone.current` is captured once, when the static is first touched. If your app does "what day is it for the user" logic and people travel, build the calendar on demand instead, or set the time zone at the call site. Time zones are their own special circus, and I already wrote about [why adding 86,400 seconds isn't adding a day](/blog/adding-86400-seconds-is-not-adding-a-day-swift).
+
+If you care about which day a week starts on, set `firstWeekday` explicitly on that calendar too, rather than trusting whatever it inherited. Week math is the next trap over.
+
+For machine-readable date strings, skip `DateFormatter` entirely when you can:
+
+```swift
+let stamp = Date.now.formatted(.iso8601.year().month().day())
+// "2026-11-18" no matter what calendar the user picked
+```
+
+And if you're stuck with a fixed-format `DateFormatter`, pin it:
+
+```swift
+let formatter = DateFormatter()
+formatter.locale = Locale(identifier: "en_US_POSIX") // Gregorian, fixed rules
+formatter.calendar = Calendar(identifier: .gregorian)
+formatter.dateFormat = "yyyy-MM-dd"
+```
+
+Setting `en_US_POSIX` already gives you a Gregorian calendar, but I set `calendar` too. Belt and suspenders, and the next person reading the code knows it's on purpose. Then [cache that formatter](/blog/dateformatter-recreated-every-call-swift-performance) instead of rebuilding it per call.
+
+---
+
+## Don't "fix" the display side
+
+Here's the part I almost got wrong in the other direction. After the card bug, my first instinct was to search-and-replace every `Calendar.current` with `Calendar(identifier: .gregorian)`. Don't.
+
+When you *show* a date to a person, their calendar is the correct one:
+
+```swift
+Text(order.date, format: .dateTime.year().month().day())
+```
+
+That respects the user's calendar, and it should. A Thai user reading "18 พ.ย. 2569" is reading a perfectly normal date. Showing them 2026 is like a website that insists on displaying your birthday in a format you'd never write.
+
+This matters for anything that ends up on paper, too. If you generate invoices, the invoice *number* (`INV-2026-0042`) is a machine identifier and should be Gregorian, while the human-facing date line on the PDF can follow the user's locale. It's exactly the split I had to think through for date handling in [Invoize](/apps/invoize), and it's easy to get backwards.
+
+**The calendar isn't wrong. Using the user's calendar for your math is.**
+
+---
+
+## How to catch it before Bangkok does
+
+Three things, in order of effort.
+
+**1. Grep.** Search the project for `Calendar.current` and `.component(.year`. For every hit, ask: is a human reading this, or is it math? In my codebase, roughly half the hits were math. That's a lot of quiet bugs.
+
+**2. Feed your helpers the weird calendars.** Plenty of codebases have date helpers that take a `calendar: Calendar` parameter, which callers happily fill with `.current`. A parameterized Swift Testing test tells you which of those helpers give a different *business answer* depending on the user's setting:
+
+```swift
+import Testing
+
+// The old helper, before the fix: the caller chooses the calendar.
+func isExpiredOld(month: Int, twoDigitYear: Int, now: Date, calendar: Calendar) -> Bool {
+    let currentYear = calendar.component(.year, from: now) % 100
+    let currentMonth = calendar.component(.month, from: now)
+    if twoDigitYear != currentYear { return twoDigitYear < currentYear }
+    return month < currentMonth
+}
+
+@Test(arguments: [
+    Calendar.Identifier.gregorian, .buddhist, .japanese, .islamicUmmAlQura, .hebrew
+])
+func expiryDoesNotDependOnUserCalendar(_ id: Calendar.Identifier) {
+    var userCalendar = Calendar(identifier: id)
+    userCalendar.timeZone = TimeZone(identifier: "UTC")!
+    let now = Calendar.gregorian.date(from: DateComponents(year: 2026, month: 11, day: 18))!
+
+    #expect(isExpiredOld(month: 8, twoDigitYear: 28, now: now, calendar: userCalendar) == false)
+    #expect(isExpiredOld(month: 8, twoDigitYear: 24, now: now, calendar: userCalendar) == true)
+}
+```
+
+The Gregorian row passes. The Buddhist, Japanese, Islamic, and Hebrew rows don't, and every failing row is a country where your checkout is broken. That's the signal: this helper has no business accepting a calendar at all, so the fix pins Gregorian inside it, like the version above. Run the same trick against every helper that takes a `Calendar`.
+
+**3. Spend one minute in the simulator.** Settings → General → Language & Region → Calendar → Buddhist. Then open your app and look at every screen with a year on it, and try every flow that validates a date. It's the cheapest QA pass you will ever do. It would have saved me one very polite email and a refund.
+
+If you'd rather have an AI help trace where a wrong year is coming from, the workflow in [Debugging with AI](/learn/debugging-with-ai) works well here: give it the failing input, the device settings, and the function, and ask it to list every place a `Calendar` is created implicitly.
+
+---
+
+## The takeaway
+
+`Calendar.current` isn't "the calendar." It's the user's calendar, and they're allowed to pick a different one than yours. Most of the time that's exactly what you want, because dates shown to people should look like dates to those people.
+
+But the moment you subtract years, compare expiry dates, build a filename, or send something to a server, you've left the user's world and entered yours. **Say which calendar you mean, out loud, in code.** Your app isn't living in 2569. It just doesn't know that yet.
