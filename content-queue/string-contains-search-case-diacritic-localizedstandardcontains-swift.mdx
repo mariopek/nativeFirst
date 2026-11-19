@@ -1,0 +1,240 @@
+---
+title: "Your Search Bar Can't Find \"Café\" When the User Types \"cafe\". String.contains Is Exact."
+description: "Filtering a SwiftUI list with String.contains or lowercased().contains misses accents, and users don't type accents. Here's why \"cafe\" never matches \"Café\", the difference between localizedCaseInsensitiveContains and localizedStandardContains, how to do it in SwiftData #Predicate, how to keep big lists fast, and the test that catches it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "SwiftUI", "iOS Development", "Localization", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1580486935724-4109fdcb55d4?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A small cafe storefront with its name painted on a sign above the door"
+---
+
+{/*
+SEO keywords: Swift search case insensitive, Swift contains ignore accents, diacritic insensitive search Swift,
+localizedStandardContains vs localizedCaseInsensitiveContains, SwiftUI searchable filter accents,
+SwiftData Predicate case insensitive search, String range options diacriticInsensitive,
+folding options Swift, iOS search bar not finding results
+Internal linking plan: swift-string-sort-localizedstandardcompare-numeric-case (the sorting sibling of this bug),
+nsrange-string-count-utf16-emoji-offset-swift (highlighting ranges in the right string),
+decimal-separator-locale-string-format-swift-bug (another "works for me, breaks for real users" locale bug),
+swift-string-count-grapheme-cluster-performance (why String work in a hot loop costs more than it looks),
+course /learn/swiftui-foundations-11-lists-and-empty-states (the empty state your users are now seeing)
+*/}
+
+The bug report had a screenshot and one sentence: "Your search is broken, I have a place called Café Central and it says no results."
+
+I typed "cafe" into the search bar on my own phone. No results. I typed "Café", with the accent, which took me three tries and a long-press on the "e". There it was. **The search worked perfectly, for the one user on Earth who types accents into a search bar.**
+
+That's nobody. Nobody does that. I don't even do that, and I wrote the thing.
+
+---
+
+## The filter that looked fine in code review
+
+Here's roughly what was shipping. You've written this. I've written it a dozen times.
+
+```swift
+struct PlacesView: View {
+    let places: [Place]
+    @State private var query = ""
+
+    var filtered: [Place] {
+        guard !query.isEmpty else { return places }
+        return places.filter { $0.name.lowercased().contains(query.lowercased()) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(filtered) { place in
+                Text(place.name)
+            }
+            .searchable(text: $query)
+        }
+    }
+}
+```
+
+The `lowercased()` on both sides is the classic case-insensitivity trick, and it does exactly what it says. It makes "CAFÉ" into "café". **What it doesn't do is make "é" into "e".** Those are different characters, and `contains` compares characters exactly.
+
+So the filter handles case, misses accents, and passes every test you'll think to write, because your test data is "Coffee Shop" and "Bakery" and "Test Place 1".
+
+---
+
+## Why this one hides so well
+
+If you build apps in English with English sample data, accents are rare enough that you never see this. Then your app shows up in France, Germany, Spain, Brazil, Vietnam, or anywhere a restaurant, a contact, or a street has a name, and every search for those things quietly comes up empty.
+
+And notice who types the plain version: everyone. On iOS, getting "é" means a long-press. On a hardware keyboard it's an option-key combo most people have never memorized. Even people whose names have accents often type searches without them, the same way you don't capitalize when you search for things.
+
+The worst part is the failure mode. **An empty result doesn't crash, doesn't log, and doesn't look like a bug.** It looks like the data isn't there. Users don't file a report. They assume the app lost their stuff, or they leave.
+
+---
+
+## The four ways to write "contains", ranked
+
+Foundation gives you more than one way to ask "is this string in that string," and they disagree in exactly the cases that matter. With `name = "Café Central"`:
+
+```swift
+let name = "Café Central"
+
+name.contains("cafe")                              // false: exact match
+name.lowercased().contains("cafe")                 // false: case fixed, accent isn't
+name.localizedCaseInsensitiveContains("cafe")      // false: case-insensitive, NOT accent-insensitive
+name.localizedStandardContains("cafe")             // true
+```
+
+That third one is the trap. The name has "localized" and "insensitive" in it, so it sounds like the full package. It isn't. It ignores case using the current locale's rules, and that's all it does.
+
+**`localizedStandardContains` is the one you want.** Apple's docs describe it as the most appropriate method for user-level string searches: locale-aware, case-insensitive, and diacritic-insensitive. It's the same behavior the system uses when you search in Settings or Files. If a user expects your search to work like the rest of the phone, this is that.
+
+The fix to the view above is one line:
+
+```swift
+var filtered: [Place] {
+    guard !query.isEmpty else { return places }
+    return places.filter { $0.name.localizedStandardContains(query) }
+}
+```
+
+No `lowercased()` on either side. Let the comparison handle it.
+
+---
+
+## When you need to pick the options yourself
+
+Sometimes you want control, for example to also ignore full-width vs half-width characters (which matters for Japanese input). Drop down to `range(of:options:locale:)`:
+
+```swift
+extension String {
+    func matchesSearch(_ query: String) -> Bool {
+        range(
+            of: query,
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        ) != nil
+    }
+}
+```
+
+This is also the right tool when you want to **highlight** the match, because it hands you a `Range<String.Index>` that points into the original string:
+
+```swift
+func highlighted(_ name: String, query: String) -> AttributedString {
+    var result = AttributedString(name)
+    guard let range = name.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]),
+          let attrRange = Range(range, in: result) else { return result }
+    result[attrRange].font = .body.bold()
+    return result
+}
+```
+
+The one thing not to do is normalize both strings, find the match in the normalized copy, then apply that range to the original. Index values from one string don't belong to another, even when they look like the same text. I've covered the cousin of this mistake in [why your @mention highlight drifts after every emoji](/blog/nsrange-string-count-utf16-emoji-offset-swift). Same lesson: **compute the range on the string you're going to draw.**
+
+---
+
+## SwiftData and Core Data
+
+If your list comes from SwiftData, you probably want the database to do the filtering, not an in-memory `filter`. The good news is that `#Predicate` understands `localizedStandardContains`:
+
+```swift
+@Query private var places: [Place]
+
+init(query: String) {
+    let predicate = #Predicate<Place> { place in
+        query.isEmpty || place.name.localizedStandardContains(query)
+    }
+    _places = Query(filter: predicate, sort: \.name)
+}
+```
+
+Here's the classic mistake: reaching for `lowercased()` inside the predicate. The predicate macro only supports a specific set of operations, so that tends to fail at compile time with a message about unsupported expressions, or worse, push you back to fetching everything and filtering in memory. `localizedStandardContains` is the method that's actually built for this.
+
+For Core Data and `NSPredicate`, the equivalent is the `[cd]` modifier: `name CONTAINS[cd] %@`. That's `c` for case, `d` for diacritics. I've seen production apps with `[c]` and no `d`, which is the same bug with extra steps.
+
+---
+
+## Big lists: fold once, not every keystroke
+
+`localizedStandardContains` does real work. It has to understand that "é" and "e" match, and it has to apply locale rules. Run it across 20,000 contacts on every keystroke and you'll feel it, the same way [String.count walks the whole string](/blog/swift-string-count-grapheme-cluster-performance) when you thought it was free.
+
+The fix is to normalize once, when the data loads, and store the result next to the original:
+
+```swift
+struct Place: Identifiable {
+    let id: UUID
+    let name: String
+    let searchKey: String
+
+    init(id: UUID = UUID(), name: String) {
+        self.id = id
+        self.name = name
+        self.searchKey = name.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+    }
+}
+
+func filter(_ places: [Place], query: String) -> [Place] {
+    let folded = query.folding(
+        options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+        locale: .current
+    )
+    guard !folded.isEmpty else { return places }
+    return places.filter { $0.searchKey.contains(folded) }
+}
+```
+
+Now each keystroke is a plain `contains` against strings that are already in the same shape. Fold the query with **the exact same options** as the keys. If they differ, you're back to a search that silently returns nothing, and this time it's a lot harder to see why.
+
+Use `searchKey` for matching only. Display `name`. Highlight with `range(of:options:)` on `name`.
+
+---
+
+## The honest caveats
+
+Diacritic-insensitive matching isn't the same as "what a native speaker would consider equal." Some languages treat letters with marks as completely separate letters, not as accented versions of a base letter. A Swedish user might not expect "a" to match "å", even though the system search will happily do it.
+
+There's no single right answer here. My rule: **match what the system search does.** Your users already have expectations from Spotlight and Settings, and `localizedStandardContains` is built to match them. If you're building for one specific market with specific rules, test with real names from that market instead of assuming.
+
+---
+
+## The test that would have caught it
+
+This is cheap with Swift Testing's parameterized tests. Put the strings your users will actually type next to the names they'll actually have:
+
+```swift
+import Testing
+
+@Suite("Search matching")
+struct SearchMatchingTests {
+    @Test("Plain-ASCII queries find accented names", arguments: [
+        ("Café Central", "cafe"),
+        ("Crème Brûlée Co.", "creme brulee"),
+        ("São Paulo Bakery", "sao paulo"),
+        ("Zürich Office", "zurich"),
+        ("ÉCOLE", "ecole"),
+    ])
+    func findsAccentedNames(name: String, query: String) {
+        let places = [Place(name: name), Place(name: "Unrelated")]
+        let results = filter(places, query: query)
+        #expect(results.map(\.name) == [name])
+    }
+
+    @Test func emptyQueryReturnsEverything() {
+        let places = [Place(name: "Café"), Place(name: "Bar")]
+        #expect(filter(places, query: "").count == 2)
+    }
+}
+```
+
+Run that against the original `lowercased().contains` version and four of the five cases fail. That's four bug reports you'll never get, because users who hit them don't write in. They just stop searching.
+
+---
+
+## The takeaway
+
+`contains` is a computer's idea of matching. Search is a human's idea of matching. They overlap just enough that you won't notice the gap until your app has users with real names.
+
+If you're auditing this, it's a two-minute grep: look for `lowercased().contains`, `localizedCaseInsensitiveContains`, and `CONTAINS[c]` without the `d`. Every one of them is a search box that can't find "Café".
+
+While you're in there: the sorting side of the same problem, "Zebra" before "apple" and "Track 10" before "Track 2", is in [Swift's < isn't alphabetical](/blog/swift-string-sort-localizedstandardcompare-numeric-case). If you liked hunting this kind of bug, [the decimal separator that breaks for German users](/blog/decimal-separator-locale-string-format-swift-bug) is another one. And if your search now correctly finds nothing, the course lesson on [lists and empty states](/learn/swiftui-foundations-11-lists-and-empty-states) covers showing an empty result that doesn't look like lost data.
