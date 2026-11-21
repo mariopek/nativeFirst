@@ -1,0 +1,205 @@
+---
+title: "Your Base URL Has No Trailing Slash. URL(string:relativeTo:) Just Deleted Your /v2."
+description: "URL(string:relativeTo:) follows RFC 3986, so a base URL like https://api.example.com/v2 without a trailing slash quietly drops /v2 when you resolve an endpoint against it, and a leading slash on the endpoint drops the whole path. Here's why every request suddenly 404s, the xcconfig // comment trap that truncates your base URL, the URL equality and Codable surprises of relative URLs, and a safe join helper with a test."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Networking", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1542993667-cc9c9b736173?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A red 'Road Ahead Closed' sign standing on a city sidewalk at night"
+---
+
+{/*
+SEO keywords: URL(string:relativeTo:) Swift, base URL trailing slash, URL relative path drops path,
+RFC 3986 relative resolution, Swift API base URL /v2 missing, URLSession 404 wrong path,
+xcconfig URL double slash comment, appending(path:) Swift, URL equality relative baseURL
+Internal linking plan: urlcomponents-plus-sign-query-not-encoded-swift (the other URL-building trap),
+uuid-uuidstring-uppercase-backend-lowercase-swift (string you built isn't the string the server sees),
+custom-networking-layer-swift-urlsession-async-await (where the base URL lives),
+swift-networking-retry-token-refresh-request-deduplication (dedup keys = URL equality),
+course /learn/networking-with-ai
+*/}
+
+The staging migration was supposed to be boring. The backend team moved everything under a version prefix, so `https://api.example.com` became `https://api.example.com/v2`, and all I had to do was change one line in the config.
+
+I changed the line. Every single request came back 404.
+
+Not some of them. All of them. And the server logs showed my app happily calling `https://api.example.com/users`, as if `/v2` had never existed. **The base URL was right there in the debugger, `/v2` and all.** Foundation had looked at it and decided I didn't mean it.
+
+Foundation was right. I just didn't know the rules.
+
+---
+
+## The line that ate the prefix
+
+Here's the pattern almost every hand-rolled networking layer uses at some point:
+
+```swift
+let baseURL = URL(string: "https://api.example.com/v2")!
+
+let url = URL(string: "users", relativeTo: baseURL)!
+print(url.absoluteString)
+// https://api.example.com/users
+```
+
+No `/v2`. And it gets worse if your endpoint paths start with a slash, which they usually do because that's how they look in the API docs:
+
+```swift
+let url = URL(string: "/users", relativeTo: baseURL)!
+print(url.absoluteString)
+// https://api.example.com/users
+```
+
+Now add the trailing slash to the base and try again:
+
+```swift
+let baseURL = URL(string: "https://api.example.com/v2/")!
+
+URL(string: "users", relativeTo: baseURL)!.absoluteString
+// https://api.example.com/v2/users   ✅
+
+URL(string: "/users", relativeTo: baseURL)!.absoluteString
+// https://api.example.com/users      ❌ still gone
+```
+
+One character in the base, one character in the endpoint, four possible combinations, and only one of them does what you meant.
+
+---
+
+## This isn't a bug. It's how your browser works.
+
+`URL(string:relativeTo:)` doesn't concatenate strings. It **resolves a relative reference** the way RFC 3986 says to, which is exactly what a browser does with a link on a web page.
+
+Think about a page at `https://example.com/docs/intro.html` with a link `href="setup.html"`. You'd expect to land on `https://example.com/docs/setup.html`. The browser throws away the last segment of the current path, `intro.html`, because that's the *file* you're looking at, and puts the new name next to it.
+
+Now look at your base URL through those eyes. `https://api.example.com/v2` doesn't end in a slash, so `v2` is a file. You're "looking at the v2 document" in the root folder. A relative link to `users` means "the `users` file next to v2," which is `https://api.example.com/users`.
+
+With a trailing slash, `v2/` is a folder, and `users` lives inside it. That's the whole difference.
+
+The leading slash follows the same logic. `href="/setup.html"` means "from the root of the site," no matter what page you're on. So `/users` replaces the entire path of your base, `/v2/` included. Your API docs write endpoints as `/users` because they're describing absolute paths on the server. Foundation read them as exactly that.
+
+**A base URL isn't a prefix. It's a page you're standing on.** Once that clicks, every one of those outputs makes sense.
+
+---
+
+## The config file that cut it even shorter
+
+My actual incident had a second act, and it's worth knowing because it hits the same line of code from a different direction.
+
+Plenty of projects keep the base URL in an `.xcconfig` file, then read it from `Info.plist`:
+
+```
+// Staging.xcconfig
+API_BASE_URL = https://api.example.com/v2
+```
+
+In an xcconfig, **`//` starts a comment.** Everywhere on the line. So that setting's value is `https:` and nothing else. Your `Info.plist` lookup returns `"https:"`, `URL(string:)` happily accepts it, and you spend twenty minutes wondering why the host is nil.
+
+The well-known workaround is to break up the double slash with an empty variable substitution:
+
+```
+API_BASE_URL = https:/$()/api.example.com/v2/
+```
+
+`$()` expands to nothing, so the final value is the real URL, and the xcconfig parser never sees a `//`. It's ugly. Leave a comment above it, on its own line, so the next person doesn't "clean it up."
+
+If you'd rather not play games with the parser, store just the host in the xcconfig and build the scheme and path in code.
+
+---
+
+## Relative URLs have two more surprises
+
+Even when the resolved address is correct, a URL built with `relativeTo:` isn't the same *value* as one built from the full string. It remembers how it was made.
+
+Print one and you'll see it:
+
+```swift
+let base = URL(string: "https://api.example.com/v2/")!
+let relative = URL(string: "users", relativeTo: base)!
+
+print(relative)
+// users -- https://api.example.com/v2/
+print(relative.relativeString)   // users
+print(relative.absoluteString)   // https://api.example.com/v2/users
+```
+
+**Equality compares that structure, not the final address.** Two URLs that point at the same endpoint, one built relatively and one from a full string, aren't `==`:
+
+```swift
+let absolute = URL(string: "https://api.example.com/v2/users")!
+relative == absolute               // false
+relative.absoluteURL == absolute   // true
+```
+
+If you deduplicate in-flight requests or key a cache by URL, like the [request deduplication setup I wrote about](/blog/swift-networking-retry-token-refresh-request-deduplication), this gives you two "different" requests for the same resource. Key on `absoluteURL` and the problem disappears.
+
+The second surprise shows up if you ever `Codable`-encode a relative URL. Foundation encodes a URL without a base as a plain string, but one *with* a base as a keyed object holding the relative part and the base separately. Your backend expected `"https://..."` and got a little dictionary. Same fix: encode `absoluteURL`.
+
+---
+
+## Stop resolving. Start appending.
+
+The honest fix is to admit you never wanted RFC 3986 resolution. You wanted "put this path after that path," and Foundation has an API that means exactly that:
+
+```swift
+let base = URL(string: "https://api.example.com/v2")!
+
+base.appending(path: "users").absoluteString
+// https://api.example.com/v2/users
+```
+
+`appending(path:)` (iOS 16 and later; `appendingPathComponent` before that) treats the base as a directory whether or not it ends in a slash, and it gives you an absolute URL with no base attached, so the equality and Codable surprises go away too.
+
+I still don't let endpoint strings decide how they get glued on. Endpoint definitions get copied from API docs, and API docs love leading slashes. So I normalize at the one place where joining happens:
+
+```swift
+import Foundation
+
+extension URL {
+    /// Appends an API path to a base URL, treating the base as a directory.
+    /// Leading slashes on the path are ignored, so "/users" and "users" behave the same.
+    func appendingEndpoint(_ path: String) -> URL {
+        let trimmed = path.drop(while: { $0 == "/" })
+        return appending(path: String(trimmed))
+    }
+}
+```
+
+And because this is the kind of bug that comes back the next time someone touches the config, I pin it with a test:
+
+```swift
+import Foundation
+import Testing
+
+struct EndpointURLTests {
+    @Test(arguments: [
+        "https://api.example.com/v2",
+        "https://api.example.com/v2/",
+    ])
+    func keepsVersionPrefix(base: String) throws {
+        let baseURL = try #require(URL(string: base))
+
+        #expect(baseURL.appendingEndpoint("users").absoluteString
+                == "https://api.example.com/v2/users")
+        #expect(baseURL.appendingEndpoint("/users").absoluteString
+                == "https://api.example.com/v2/users")
+    }
+}
+```
+
+Four combinations, one answer. That's the whole point.
+
+One thing `appending(path:)` won't do for you: queries. A `?` in a path argument gets percent-encoded as `%3F`, and your query string turns into part of the path. Queries belong in `URLComponents.queryItems`, which has [its own sharp edge with the plus sign](/blog/urlcomponents-plus-sign-query-not-encoded-swift). Paths in the path, queries in the query.
+
+---
+
+## Why this one hides so well
+
+The reason this bug survives code review is that **it works on the first day.** Your base URL starts out as a bare host, `https://api.example.com`, with an empty path. There's nothing to throw away, so resolution and concatenation give the same answer. The trap is armed but nothing can trigger it.
+
+Then someone adds `/v2`, or the app moves behind a gateway at `/mobile-api`, or a staging environment lives under a subpath. One config line changes, nobody touches the networking code, and every request breaks at once. That's a great way to make a config change look like a backend outage.
+
+It's the same family of bug as the [uppercase UUID mismatch](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift): the string you think you sent isn't the string the server received. The defense is the same too. Log `absoluteString` for every request in debug builds. If I'd printed it on day one, the missing `/v2` would have been staring at me before the first 404.
+
+If you're building the networking layer from scratch, [my 100-line URLSession setup](/blog/custom-networking-layer-swift-urlsession-async-await) is a good place to put the `appendingEndpoint` helper, so there's exactly one spot in the app where URLs get joined. If you're having an AI assistant write that layer for you, the [networking lesson in the course](/learn/networking-with-ai) covers what to check in the code it hands back. "How does it join the base URL" should be on the list.
+
+A base URL is a page you're standing on, not a prefix. Stop resolving against it and start appending to it.
