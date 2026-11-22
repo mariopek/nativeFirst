@@ -1,0 +1,243 @@
+---
+title: "ForEach(items, id: \\.self) Works Until Two Items Are Equal. Then SwiftUI Deletes the Wrong Row."
+description: "Using id: \\.self in a SwiftUI ForEach or List makes the value itself the row's identity. Duplicate values, edited structs, and ForEach over indices all break that promise, causing wrong-row deletes, reset @State, lost TextField focus, and index-out-of-range crashes. Here's why, and the stable-ID fix."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["SwiftUI", "Swift", "iOS Development", "Debugging"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1482225084339-a0ef1162ad9d?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Rows of identical umbrellas in repeating colors hanging against a gray sky, each one indistinguishable from its twins"
+---
+
+{/*
+SEO keywords: SwiftUI ForEach id self, ForEach id occurs multiple times within the collection,
+SwiftUI List duplicate rows, SwiftUI delete wrong row, ForEach indices crash index out of range,
+SwiftUI TextField loses focus ForEach, SwiftUI row state resets, Identifiable stable id SwiftUI
+Internal linking plan: swiftui-view-identity-state-reset-bug (identity fundamentals),
+enumerated-offset-is-not-an-index-swift (id: \.offset is the same mistake in a costume),
+swiftui-focusstate-programmatic-focus-gotchas (focus loss), dictionary-uniquekeyswithvalues-duplicate-key-crash-swift
+(the other "duplicates you swore couldn't happen"), course /learn/swiftui-foundations-11-lists-and-empty-states
+*/}
+
+There's a coffee shop near my place where the barista calls out names instead of numbers. It works beautifully until two people named Alex order oat lattes within a minute of each other. Then one Alex gets a drink with too much sugar, the other gets nothing, and nobody's sure whose fault it is.
+
+**`ForEach(items, id: \.self)` is that coffee shop.** It identifies each row by its value. It's lovely right up until two values are the same, and then SwiftUI hands the wrong latte to the wrong row.
+
+I shipped this bug in a tagging screen. A user added the tag "work" twice, swiped to delete the second one, and watched the *first* one vanish instead. They emailed me a screen recording. It was not a fun email to read.
+
+---
+
+## What `id: \.self` actually promises
+
+`ForEach` needs to know which row is which between renders. That's how it decides whether a row was inserted, removed, moved, or just updated, and it's how it keeps each row's `@State`, focus, and animations attached to the right thing.
+
+You give it identity one of two ways. Either your element is `Identifiable`, or you pass a key path with `id:`. And `\.self` is the laziest key path there is: "the value **is** the identity."
+
+```swift
+struct TagsView: View {
+    @State private var tags = ["swift", "work", "ios"]
+
+    var body: some View {
+        List {
+            ForEach(tags, id: \.self) { tag in
+                Text(tag)
+            }
+            .onDelete { offsets in
+                tags.remove(atOffsets: offsets)
+            }
+        }
+    }
+}
+```
+
+That compiles. It works in every demo. It's in roughly half the SwiftUI tutorials on the internet. And it quietly assumes something your data never promised: **that no two elements will ever be equal.**
+
+Identity is supposed to answer "is this the same thing as before?" Equality answers "does this look the same as that?" Those are different questions, and `\.self` pretends they aren't.
+
+---
+
+## Failure #1: duplicates
+
+Append a second `"work"` and run it. SwiftUI will print a runtime warning in the console along the lines of:
+
+```
+ForEach<Array<String>, String, Text>: the ID work occurs multiple times within the collection, this will give undefined results!
+```
+
+**"Undefined results" is doing a lot of work in that sentence.** Here's what it looked like in my app:
+
+- Deleting the second "work" animated the first one away (the array removed the right element, but SwiftUI's diff matched rows by ID and picked a different one to animate out).
+- A `List(selection:)` with `\.self` identity can't tell the two rows apart, so selecting one highlights both. Selection is stored by ID, and both rows have the same one.
+- Any `@State` inside the row view (an expanded flag, a draft text) got shared, swapped, or reset between the two twins depending on the order of operations.
+
+The console warning is the only signal you get, and it's buried in Xcode's log next to forty lines of layout noise. In production, there's no warning at all. There's just a user filing a bug report titled "app deletes random stuff."
+
+The worst part? I had a `Set` of tags in my head. My model was an `Array`. **Nothing in the type system said "unique,"** so nothing enforced it. Same lesson as [the `Dictionary(uniqueKeysWithValues:)` crash](/blog/dictionary-uniquekeyswithvalues-duplicate-key-crash-swift): if your data has to be unique, the uniqueness has to live in code, not in your assumptions.
+
+---
+
+## Failure #2: edited structs change identity
+
+This one is sneakier because there are no duplicates at all.
+
+```swift
+struct Ingredient: Hashable {
+    var name: String
+    var grams: Int
+}
+
+struct RecipeEditor: View {
+    @State private var ingredients = [
+        Ingredient(name: "Coffee", grams: 18),
+        Ingredient(name: "Water", grams: 300)
+    ]
+
+    var body: some View {
+        Form {
+            ForEach($ingredients, id: \.self) { $ingredient in
+                TextField("Name", text: $ingredient.name)
+            }
+        }
+    }
+}
+```
+
+Tap the "Coffee" field and type an "s". The struct is now `Ingredient(name: "Coffees", grams: 18)`. Its hash changed. To SwiftUI, the row with ID `Coffee/18` **disappeared** and a brand-new row with ID `Coffees/18` was inserted in the same spot.
+
+A brand-new row gets a brand-new `TextField`. The old one, the one that had focus, is gone. **So the keyboard drops after every single keystroke.** You type one letter, the keyboard dismisses, you tap again, type one letter, it dismisses again. I spent an embarrassing amount of time poking at `@FocusState` before I realized focus wasn't the bug. (If you're in that hole right now, [the FocusState gotchas post](/blog/swiftui-focusstate-programmatic-focus-gotchas) covers the cases where focus actually *is* the problem.)
+
+With `\.self`, editing a value is indistinguishable from deleting it and inserting a new one. That's the same mechanism behind [SwiftUI resetting state for "no reason"](/blog/swiftui-view-identity-state-reset-bug), just triggered from inside the row instead of from outside.
+
+---
+
+## Failure #3: `ForEach` over indices
+
+The usual "fix" people reach for when they need bindings or positions is this:
+
+```swift
+ForEach(ingredients.indices, id: \.self) { index in
+    TextField("Name", text: $ingredients[index].name)
+}
+```
+
+Now the identity is the index. Index `0` is always row `0`, no matter what's in it. That has two problems.
+
+First, **identity is attached to the position, not the thing.** Delete the first ingredient and every row's ID shifts down by one. SwiftUI thinks the *last* row was deleted and the others just changed their contents. Row state follows the position, not the ingredient, so an "expanded" flag on Coffee suddenly belongs to Water.
+
+Second, it can crash. When you remove the last element, SwiftUI may still evaluate a row closure (or a binding getter) for an index that no longer exists before the diff settles. `$ingredients[index]` on a dead index is an `Index out of range` trap. It's timing-dependent, which means it's the kind of crash you see in Organizer and never on your own phone.
+
+`ForEach(Array(items.enumerated()), id: \.offset)` is the same mistake wearing a fake mustache. An offset is a position, [not an identity and sometimes not even an index](/blog/enumerated-offset-is-not-an-index-swift).
+
+---
+
+## The fix: identity that you assign once and never touch
+
+Give every element a real ID, created when the element is created, stored, and never recomputed.
+
+```swift
+struct Ingredient: Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var grams: Int
+
+    init(id: UUID = UUID(), name: String, grams: Int) {
+        self.id = id
+        self.name = name
+        self.grams = grams
+    }
+}
+
+struct RecipeEditor: View {
+    @State private var ingredients = [
+        Ingredient(name: "Coffee", grams: 18),
+        Ingredient(name: "Water", grams: 300)
+    ]
+
+    var body: some View {
+        Form {
+            ForEach($ingredients) { $ingredient in
+                TextField("Name", text: $ingredient.name)
+                Stepper("\(ingredient.grams) g", value: $ingredient.grams, in: 0...1000)
+            }
+            .onDelete { ingredients.remove(atOffsets: $0) }
+        }
+    }
+}
+```
+
+Three details matter here:
+
+1. **`let id`, not `var`.** If it can change, someone will change it.
+2. **Stored, not computed.** `var id: UUID { UUID() }` compiles and generates a new identity on every read. That's every row being "new" on every render, which is Failure #2 at full volume. I've seen this exact line in production code. Twice. Both times written by me.
+3. **`ForEach($ingredients)`** with the binding initializer. No indices, no `\.self`, and edits mutate the element without touching its identity. Keyboard stays up. State stays put.
+
+If your data comes from a server, use the server's ID. If it's decoded from JSON without one, assign one at decode time and keep it. Don't generate fresh UUIDs every time you map a DTO into a view model, or you've rebuilt Failure #2 one layer down.
+
+---
+
+## What about plain strings?
+
+Sometimes you genuinely have a `[String]`, like tags. You have two honest options.
+
+**If duplicates are valid**, wrap them:
+
+```swift
+struct Tag: Identifiable, Hashable {
+    let id = UUID()
+    var name: String
+}
+```
+
+**If duplicates are invalid**, enforce that at the model layer, where you add tags, not in the view:
+
+```swift
+mutating func addTag(_ raw: String) {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !name.isEmpty, !tags.contains(name) else { return }
+    tags.append(name)
+}
+```
+
+Once the model guarantees uniqueness, `id: \.self` on an immutable string list is fine. That's the rule I follow now: **`\.self` is only acceptable when the values are both unique by construction and never edited in place.** Static menu options, enum cases, a fixed list of SF Symbol names. Not user data.
+
+---
+
+## The test that would have saved me the email
+
+Identity bugs don't show up in snapshot tests, because a snapshot has one frame and identity is about the relationship between two. What you *can* test is the invariant:
+
+```swift
+import Testing
+@testable import Recipes
+
+@Test func ingredientIDsStayUniqueAndStableAcrossEdits() {
+    var recipe = Recipe.sample
+    let idsBefore = recipe.ingredients.map(\.id)
+
+    #expect(Set(idsBefore).count == idsBefore.count)
+
+    recipe.ingredients[0].name = "Decaf"
+    recipe.ingredients[0].grams += 2
+
+    #expect(recipe.ingredients.map(\.id) == idsBefore)
+}
+
+@Test func addingDuplicateTagIsIgnored() {
+    var recipe = Recipe.sample
+    recipe.addTag("work")
+    recipe.addTag(" Work ")
+
+    #expect(recipe.tags.filter { $0 == "work" }.count == 1)
+}
+```
+
+Two cheap tests. One says "editing doesn't change identity," the other says "duplicates can't get in." Between them they'd have caught all three failures before a user ever swiped anything.
+
+And add one more habit: **when you see "occurs multiple times within the collection" in the console, treat it like a crash, not a warning.** It's SwiftUI telling you, as plainly as it ever will, that it's about to guess. If you want to go deeper on building lists that behave, the [Lists and Empty States lesson](/learn/swiftui-foundations-11-lists-and-empty-states) walks through `Identifiable` models from the start.
+
+---
+
+## The short version for your next code review
+
+Grep your project for `id: \.self` and `.indices`. For each hit, ask two questions: can two elements ever be equal, and can an element ever be edited in place? If the answer to either is yes, it needs a real ID.
+
+The coffee shop eventually switched to numbers, by the way. Nobody misses the names. Nobody gets the wrong latte, either.
