@@ -1,0 +1,246 @@
+---
+title: "Your Digits-Only TextField Accepts \"½\". Then Int() Returns nil and the Save Button Does Nothing."
+description: "Swift's Character.isNumber is true for ½, Ⅻ, Arabic-Indic and full-width digits, but Int(String) only parses ASCII 0-9. Here's how a numeric TextField filter lets input through that your parser silently rejects, plus the isWholeNumber, ASCII-only and locale-aware fixes, Regex asciiOnlyDigits(), and the tests that catch it."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "SwiftUI", "Unicode", "Localization", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1574607383077-47ddc2dc51c4?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a calculator keypad with number keys"
+---
+
+{/*
+SEO keywords: Character isNumber Swift, Int from String returns nil, numeric TextField SwiftUI filter,
+Arabic-Indic digits Swift, full-width digits Int parse, isWholeNumber wholeNumberValue,
+Swift Regex asciiOnlyDigits, keyboardType numberPad Arabic, validate digits only Swift
+Internal linking plan: decimal-separator-locale-string-format-swift-bug (locale breaks numbers),
+nsrange-string-count-utf16-emoji-offset-swift (Unicode vs your assumptions),
+swift-string-count-grapheme-cluster-performance (what a Character actually is),
+string-contains-search-case-diacritic-localizedstandardcontains-swift (Unicode-aware comparisons),
+course /learn/debugging-with-ai
+*/}
+
+A tester in Cairo filed a bug with one sentence: "The quantity field doesn't save." No crash. No error. They typed a number, tapped Save, and the sheet just sat there looking at them.
+
+I tried it. It saved fine. I tried it on three devices. Saved fine. I was about to close it as "can't reproduce" when I asked for a screen recording, and there it was: **the number they typed was ٣.** That's a three. Just not the three my code had ever met.
+
+---
+
+## The filter that let it in
+
+Here's the code. You've probably written something close to it:
+
+```swift
+struct QuantityField: View {
+    @Binding var quantity: Int?
+    @State private var text = ""
+
+    var body: some View {
+        TextField("Quantity", text: $text)
+            .keyboardType(.numberPad)
+            .onChange(of: text) { _, newValue in
+                // Strip anything that isn't a number
+                let filtered = newValue.filter(\.isNumber)
+                if filtered != newValue { text = filtered }
+                quantity = Int(filtered)
+            }
+    }
+}
+```
+
+Looks airtight. A number pad, plus a filter that throws away anything that isn't a number. Belt and suspenders.
+
+The problem is that the belt and the suspenders disagree about what a number is.
+
+---
+
+## isNumber is much bigger than you think
+
+`Character.isNumber` follows Unicode, and Unicode has an extremely generous idea of a number. All of these are `true`:
+
+```swift
+let suspects: [Character] = ["7", "٣", "३", "３", "½", "²", "Ⅻ", "⑤"]
+
+for c in suspects {
+    print(c, c.isNumber, Int(String(c)) as Any)
+}
+// 7  true  Optional(7)
+// ٣  true  nil   (Arabic-Indic three)
+// ३  true  nil   (Devanagari three)
+// ３  true  nil   (full-width three)
+// ½  true  nil
+// ²  true  nil
+// Ⅻ  true  nil   (Roman numeral twelve)
+// ⑤  true  nil
+```
+
+Meanwhile `Int(_ description: String)` is strict: an optional `+` or `-`, then ASCII `0` through `9`, and nothing else. No whitespace, no other scripts, no fractions.
+
+So the filter says "yep, that's a number, let it through," and the parser says "never heard of it," and `quantity` quietly becomes `nil`. My Save button was disabled when `quantity == nil`. The tester tapped a disabled button that didn't look disabled enough. **Two components, each correct, combined into a bug.**
+
+---
+
+## "But it's a number pad"
+
+That's what I said too. `.keyboardType(.numberPad)` doesn't promise ASCII digits. It promises the digits the user's system uses.
+
+On a device set up for Arabic with Arabic-Indic numerals, the number pad shows ٠١٢٣٤٥٦٧٨٩. That's not a bug. That's the keyboard doing its job for a few hundred million people. And even with a perfectly ASCII number pad, users can still:
+
+- **paste** anything they want,
+- use a **hardware keyboard** on iPad,
+- switch to a **Japanese keyboard**, where full-width ３ is a tap away,
+- or let **dictation** write "½" for them.
+
+The keyboard type is a hint for the input UI. It's not validation. Treat it like the "please don't" sign on a hotel minibar.
+
+---
+
+## Fix one: decide what you actually accept
+
+Most of the bug is that the code never decided. There are two honest answers.
+
+**Option A: ASCII digits only.** Fine for things like a verification code your server checks as ASCII, or a field that gets sent somewhere that expects `0-9`.
+
+```swift
+extension Character {
+    var isASCIIDigit: Bool {
+        guard let ascii = asciiValue else { return false }
+        return (48...57).contains(ascii) // "0"..."9"
+    }
+}
+
+let filtered = newValue.filter(\.isASCIIDigit)
+```
+
+Now the filter and `Int()` agree. Nothing gets in that the parser can't read. But your Cairo user types ٣ and it vanishes, which is better than a dead Save button and worse than just working.
+
+**Option B: accept any decimal digit, normalize it to ASCII.** This is what I shipped. Unicode has a property for exactly this. Every scalar has a numeric type, and `.decimal` means "a real positional digit, 0 through 9, in some script":
+
+```swift
+extension String {
+    /// Converts any Unicode decimal digits (٣, ३, ３, 3) to ASCII "0"-"9",
+    /// and drops everything else.
+    var normalizedASCIIDigits: String {
+        var result = ""
+        for scalar in unicodeScalars {
+            guard scalar.properties.numericType == .decimal,
+                  let value = scalar.properties.numericValue else { continue }
+            result.append(String(Int(value)))
+        }
+        return result
+    }
+}
+
+"٣٤".normalizedASCIIDigits  // "34"
+"３５".normalizedASCIIDigits // "35"
+"½".normalizedASCIIDigits   // ""   (numeric type is .numeric)
+"⑤²".normalizedASCIIDigits  // ""   (numeric type is .digit, not .decimal)
+```
+
+My first draft used `Character.isWholeNumber` and `wholeNumberValue` here, and it's the wrong tool. Apple's own docs list "④" as a whole number with a value of 4, and Ⅻ comes back as 12. Those are whole numbers, sure. They're not digits you can line up into "42". **The `.decimal` numeric type is the one that means "digit."** Everything else on that list is a number in the same way a clock face is a calculator.
+
+---
+
+## Fix two: let the formatter handle it
+
+If the field is user-facing and localized, I'd skip hand-rolling and let Foundation parse with the user's locale. Here's how you'd do it with `IntegerFormatStyle`:
+
+```swift
+func parseQuantity(_ text: String, locale: Locale = .current) -> Int? {
+    let style = IntegerFormatStyle<Int>(locale: locale)
+    return try? Int(text, format: style)
+}
+```
+
+Formatters understand the locale's numbering system, grouping separators and all. That's the same lesson as the [decimal separator bug](/blog/decimal-separator-locale-string-format-swift-bug): the moment a human typed it, the string belongs to their locale, not yours.
+
+The catch: a formatter for one locale won't necessarily read digits from another script. A user in Germany who pastes ٣ from a chat still gets `nil`. So in practice I do both. Normalize digits to ASCII first, then parse. Boring, predictable, works everywhere.
+
+If you want to *display* numbers back in the user's own digits, format with their locale too. Don't round-trip ٣ into 3 and show them 3 when they typed ٣. That's a small thing that makes an app feel like it was built by someone who'd met them.
+
+---
+
+## Regex has the same trap
+
+Swift Regex's `\d` and `.digit` match Unicode decimal digits by default. So this validation passes for "٣٤" and then `Int()` still fails:
+
+```swift
+let isValid = text.wholeMatch(of: /\d+/) != nil  // true for "٣٤"
+let value = Int(text)                             // nil
+```
+
+If you mean ASCII, say so:
+
+```swift
+let asciiOnly = text.wholeMatch(of: /\d+/.asciiOnlyDigits()) != nil
+```
+
+`NSRegularExpression` goes through ICU, where `\d` also matches any Unicode decimal digit. Same problem, older API. If you ported validation from a backend where `\d` meant ASCII, it doesn't mean that here.
+
+---
+
+## The real fix is one source of truth
+
+What actually went wrong in my code was structural. **The filter and the parser were written against different definitions of "number,"** and nothing forced them to agree. The fix that stuck is a single function both of them use:
+
+```swift
+enum QuantityInput {
+    static func sanitize(_ raw: String) -> String {
+        raw.normalizedASCIIDigits
+    }
+
+    static func parse(_ raw: String) -> Int? {
+        Int(sanitize(raw))
+    }
+}
+```
+
+```swift
+.onChange(of: text) { _, newValue in
+    let clean = QuantityInput.sanitize(newValue)
+    if clean != newValue { text = clean }
+    quantity = QuantityInput.parse(clean)
+}
+```
+
+Now it's impossible for the text field to show something the model can't hold. And if it ever does show something weird, the Save button should say why, not just sit there disabled. "Enter a whole number" beats silence every time.
+
+---
+
+## The tests that would have caught it
+
+This is the kind of bug that never shows up in your own testing, because you only have one keyboard. Write the weird inputs down so the test suite has more keyboards than you do:
+
+```swift
+import Testing
+
+struct QuantityInputTests {
+    @Test(arguments: [
+        ("42", 42),
+        ("٤٢", 42),   // Arabic-Indic
+        ("४२", 42),   // Devanagari
+        ("４２", 42),  // full-width
+        (" 4 2 ", 42), // pasted with spaces
+    ])
+    func parsesDigitsFromAnyScript(input: String, expected: Int) {
+        #expect(QuantityInput.parse(input) == expected)
+    }
+
+    @Test(arguments: ["½", "²", "Ⅻ", "⑤", "", "abc"])
+    func rejectsNonDigits(input: String) {
+        #expect(QuantityInput.sanitize(input).isEmpty)
+    }
+
+    @Test func sanitizedTextAlwaysParses() {
+        for input in ["٣", "३", "３", "7½", "1²3"] {
+            let clean = QuantityInput.sanitize(input)
+            #expect(clean.isEmpty || QuantityInput.parse(clean) != nil)
+        }
+    }
+}
+```
+
+That last test is the invariant that matters: **anything the sanitizer lets through, the parser can read.** If that holds, the Cairo bug can't come back, no matter what keyboard ships next year.
+
+Unicode keeps showing up in places where we assume "a character is a byte and a digit is 0-9." It's the same lesson behind [NSRange offsets breaking on emoji](/blog/nsrange-string-count-utf16-emoji-offset-swift), [what a Character really is](/blog/swift-string-count-grapheme-cluster-performance), and [search that can't find "café"](/blog/string-contains-search-case-diacritic-localizedstandardcontains-swift). If you're tracking down one of these with an AI assistant, give it the exact input bytes, not a description of them. "The user typed 3" sends it the wrong way. "The user typed U+0663" gets you the answer in one message. More on that in the [debugging with AI lesson](/learn/debugging-with-ai).
+
+The tester in Cairo, by the way, got a fixed build two days later. Their reply was "works now." Best two words in software.
