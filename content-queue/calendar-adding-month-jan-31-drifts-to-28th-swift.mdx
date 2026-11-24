@@ -1,0 +1,241 @@
+---
+title: "Your Subscription Renews on the 31st. By April, Swift Has It Renewing on the 28th."
+description: "Calendar.date(byAdding: .month) clamps Jan 31 to Feb 28, and if you add one month to the previous result, every renewal after that lands on the 28th forever. Here's why month arithmetic in Swift drifts, why adding and subtracting a month doesn't round-trip, and how to fix recurring dates by always counting from the anchor date."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "Dates", "Calendar", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1541696395-2abb1755c89a?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A paper wall calendar showing a grid of days for the month"
+---
+
+{/*
+SEO keywords: Calendar date byAdding month Swift, Jan 31 plus one month Feb 28 Swift,
+recurring date drift Swift, subscription renewal date end of month iOS, Swift month arithmetic,
+add month subtract month not reversible, anchor date recurring schedule Swift,
+Calendar enumerateDates matchingPolicy, monthly reminder wrong day iOS, last day of month Swift
+Internal linking plan: adding-86400-seconds-is-not-adding-a-day-swift (use Calendar for human units),
+date-only-birthday-stored-as-date-time-zone-shift-swift (dates that aren't instants),
+dateformatter-yyyy-week-based-year-bug-swift (another calendar gotcha),
+continuousclock-date-elapsed-time-swift (durations vs calendar dates),
+course /learn/swiftui-in-practice
+No app mention this time.
+*/}
+
+The bug report had a screenshot, and the screenshot had a question mark in it. "I signed up on January 31st. Why does the app say my next payment is May 28th?"
+
+I opened the code, ready to defend it. It used `Calendar`. It didn't add 2,592,000 seconds and call it a month. It did everything the blog posts tell you to do, including [my own](/blog/adding-86400-seconds-is-not-adding-a-day-swift). And it was still wrong, because **adding a month to a date is not one operation. It's a decision**, and Foundation made that decision for me, once, in February, and then I made it permanent.
+
+---
+
+## The Clamp
+
+Start with the part nobody argues about. What's January 31st plus one month?
+
+```swift
+import Foundation
+
+var cal = Calendar(identifier: .gregorian)
+cal.timeZone = TimeZone(identifier: "UTC")!
+
+let jan31 = cal.date(from: DateComponents(year: 2027, month: 1, day: 31))!
+let next = cal.date(byAdding: .month, value: 1, to: jan31)!
+// 2027-02-28
+```
+
+There is no February 31st, so `Calendar` clamps to the last valid day of the month. February 28th, or the 29th in a leap year. That's a reasonable answer. Banks do it. Your landlord does it. Nobody files a bug about February.
+
+**The clamp is fine. What you do with its output is where it goes sideways.**
+
+---
+
+## The Drift
+
+Here's the code that shipped. It's the code almost everyone writes the first time, because it reads exactly like the English sentence "the next renewal is one month after the last one."
+
+```swift
+struct Subscription {
+    var nextRenewal: Date
+
+    mutating func didRenew(calendar: Calendar) {
+        nextRenewal = calendar.date(byAdding: .month, value: 1, to: nextRenewal)!
+    }
+}
+```
+
+Walk it forward from January 31st:
+
+| Renewal | Input | Result |
+|---|---|---|
+| 1 | Jan 31 | Feb 28 |
+| 2 | Feb 28 | Mar 28 |
+| 3 | Mar 28 | Apr 28 |
+| 4 | Apr 28 | May 28 |
+
+February 28th plus one month is March 28th. Of course it is. `Calendar` has no idea that this particular Feb 28 used to be a Jan 31. **The original day of the month got thrown away in February, and every renewal after that inherits the damage.**
+
+It's like photocopying a photocopy. The first copy loses a little detail. Every copy after that is a perfect reproduction of the degraded version.
+
+And the worst part: it only bites customers who signed up on the 29th, 30th, or 31st. That's roughly 10% of your users, and none of them are on your team, because you tested on the 14th.
+
+---
+
+## It Doesn't Round-Trip Either
+
+While I was in there, I found the sibling bug. Someone had written an "undo last renewal" path for refunds:
+
+```swift
+let mar31 = cal.date(from: DateComponents(year: 2027, month: 3, day: 31))!
+let back = cal.date(byAdding: .month, value: -1, to: mar31)!   // Feb 28
+let forward = cal.date(byAdding: .month, value: 1, to: back)!  // Mar 28
+```
+
+Minus one month, plus one month, and you've lost three days. **Month arithmetic is not reversible**, because clamping destroys information. Integer division has the same property, and nobody expects `(7 / 2) * 2` to give back 7.
+
+If your code assumes `date + 1 month - 1 month == date`, it's wrong on every 31st that follows a 30-day month, plus late March. Only a handful of days a year, which is exactly why it survives testing. Undo stacks, "previous period" buttons, and refund logic all love that assumption.
+
+---
+
+## The Fix: Count From the Anchor
+
+The fix is boring, which is how you know it's right. **Never derive the next occurrence from the previous occurrence. Derive every occurrence from the original anchor date.**
+
+```swift
+struct Subscription {
+    let anchor: Date        // the day they signed up, never mutated
+    var renewalsCompleted: Int = 0
+
+    func renewalDate(number n: Int, calendar: Calendar) -> Date {
+        calendar.date(byAdding: .month, value: n, to: anchor)!
+    }
+
+    func nextRenewal(calendar: Calendar) -> Date {
+        renewalDate(number: renewalsCompleted + 1, calendar: calendar)
+    }
+}
+```
+
+Now the table looks the way your customer expects:
+
+| n | Anchor + n months |
+|---|---|
+| 1 | Feb 28 |
+| 2 | Mar 31 |
+| 3 | Apr 30 |
+| 4 | May 31 |
+
+Each date gets clamped independently, from the real starting point. February still gets the 28th. March gets its 31st back. Nothing accumulates, because nothing is built on top of anything else.
+
+This is the same mental model as [storing a birthday as date components instead of an instant](/blog/date-only-birthday-stored-as-date-time-zone-shift-swift): **store the intent, not the last computed result.** "Renews on the 31st, or the last day of shorter months" is the intent. "Feb 28" is just one answer to it.
+
+The model change matters more than the function. If your persistence layer only stores `nextRenewal`, you've already lost the anchor and no amount of clever arithmetic can recover it. Store the anchor (and the count, or compute the count from today) and the bug can't happen.
+
+---
+
+## When You Need a Sequence
+
+If you're generating a list, say for a "next 12 payments" screen, the anchor approach still works with a simple map:
+
+```swift
+let upcoming = (1...12).map { n in
+    cal.date(byAdding: .month, value: n, to: anchor)!
+}
+```
+
+Foundation also has a built-in for "every month on day X," and it's worth knowing about because it makes the clamping rule explicit instead of implicit:
+
+```swift
+let day = cal.component(.day, from: anchor)   // 31
+var dates: [Date] = []
+
+cal.enumerateDates(
+    startingAfter: anchor,
+    matching: DateComponents(day: day),
+    matchingPolicy: .previousTimePreservingSmallerComponents
+) { date, _, stop in
+    guard let date else { return }
+    dates.append(date)
+    if dates.count == 12 { stop = true }
+}
+```
+
+The matching policy is where you choose what happens in a month without a 31st. `.previousTimePreservingSmallerComponents` steps back to the last day that exists. The other policies behave differently, and `.strict` is the one to be careful with: it looks for an exact match and simply skips months that don't have one. Before you ship this in a billing path, print a year of output for an anchor on the 31st and the 29th and read it with your own eyes. It takes two minutes and it's the cheapest audit you'll ever do.
+
+**Pick the version you can explain to support.** For most apps that's the anchor-plus-n map. Ten lines, no policy enum, nothing surprising.
+
+---
+
+## The "Last Day of the Month" Customer
+
+There's one more wrinkle, and it's a product question, not a Swift one.
+
+Someone who signs up on February 28th (non-leap year): do they renew on the 28th of every month, or on the last day of every month? From the date alone, you can't tell. Both readings are defensible. Day 28 is what the anchor approach gives you.
+
+If you want "end of month" semantics, model it as its own case:
+
+```swift
+enum RenewalRule {
+    case dayOfMonth(Int)    // clamps in short months
+    case lastDayOfMonth
+}
+
+func occurrence(_ n: Int, rule: RenewalRule, anchor: Date, calendar: Calendar) -> Date {
+    switch rule {
+    case .dayOfMonth:
+        return calendar.date(byAdding: .month, value: n, to: anchor)!
+    case .lastDayOfMonth:
+        let startOfAnchorMonth = calendar.dateInterval(of: .month, for: anchor)!.start
+        let startOfTarget = calendar.date(byAdding: .month, value: n, to: startOfAnchorMonth)!
+        let range = calendar.range(of: .day, in: .month, for: startOfTarget)!
+        return calendar.date(bySetting: .day, value: range.count, of: startOfTarget)!
+    }
+}
+```
+
+The trick in the second branch: move from the **first** of the month, which always exists, then ask the calendar how many days the target month has. No clamping involved, so there's nothing to drift.
+
+Whether you need this depends on who your customers are. Rent and payroll people think in "end of month." Most subscription users think in "same day each month." Ask before you build.
+
+---
+
+## Pin It With Tests
+
+This is the kind of bug that comes back during a refactor, when someone "simplifies" the anchor model into a single `nextRenewal` field. A parameterized test makes that a red build instead of a support ticket.
+
+```swift
+import Testing
+import Foundation
+
+struct RenewalTests {
+    static var cal: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    @Test(arguments: [29, 30, 31])
+    func renewalsNeverDriftFromAnchorDay(day: Int) {
+        let anchor = Self.cal.date(from: DateComponents(year: 2027, month: 1, day: day))!
+        let sub = Subscription(anchor: anchor)
+
+        for n in 1...24 {
+            let date = sub.renewalDate(number: n, calendar: Self.cal)
+            let daysInMonth = Self.cal.range(of: .day, in: .month, for: date)!.count
+            #expect(Self.cal.component(.day, from: date) == min(day, daysInMonth))
+        }
+    }
+}
+```
+
+The invariant is the whole spec in one line: **the renewal day is the anchor day, or the last day of the month if the month is too short.** Two years of renewals, three risky anchor days, no hand-written expectations to get wrong. Note the explicit Gregorian calendar and UTC time zone. A test that depends on the machine's settings is a test that passes on your Mac and fails in CI at 1 AM.
+
+If you're the kind of person who likes building these invariant-style tests into a real app, the [SwiftUI In Practice course](/learn/swiftui-in-practice) does a lot of exactly that.
+
+---
+
+## The Takeaway
+
+`Calendar` didn't have a bug. It answered "what's Feb 28 plus a month?" correctly. I just asked it the wrong question, eleven months in a row.
+
+Date math feels like arithmetic, so we write it like arithmetic: take the last value, add one. But calendar dates aren't numbers. They're answers to rules, and the rule is the thing you need to keep. Like [the week-based year that isn't the year](/blog/dateformatter-yyyy-week-based-year-bug-swift) and [the elapsed time that isn't a date difference](/blog/continuousclock-date-elapsed-time-swift), the fix is to stop treating a human concept as a running total.
+
+**Store the anchor. Count from it every time. Your January 31st customers will never know they were in danger.**
