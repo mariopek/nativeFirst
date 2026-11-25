@@ -1,0 +1,246 @@
+---
+title: "Your Binary Parser Passed Every Test. Then data[0] Crashed in Production Because the Slice Started at 4."
+description: "In Swift, a Data slice keeps the indices of the original buffer. After dropFirst, prefix(upTo:) or a range subscript, data[0] is out of bounds and crashes. Here's why Data is its own SubSequence, why tests built from fresh Data never catch it, and how to write byte parsers that work on any slice."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "Data", "Binary Parsing", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1516259762381-22954d7d3ad2?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Green binary code digits glowing on a dark computer screen"
+---
+
+{/*
+SEO keywords: Swift Data slice index out of range, data[0] crash Swift, Data startIndex not zero,
+Data dropFirst index crash, Data SubSequence Swift, parse binary data Swift, Bluetooth packet parsing Swift,
+Data subdata(in:) rebase, withUnsafeBytes loadUnaligned Swift, UInt32 bigEndian from Data Swift
+Internal linking plan: arrayslice-holds-entire-array-memory-swift (slices share storage),
+enumerated-offset-is-not-an-index-swift (offsets vs indices, same root cause),
+nsrange-string-count-utf16-emoji-offset-swift (another "integers aren't indices" bug),
+string-decoding-utf8-replacement-vs-string-data-encoding-nil-swift (Data → String at the edges),
+course /learn/networking-with-ai
+No app mention this time.
+*/}
+
+The crash log had one line that mattered: an index out of range, inside a function I'd written eight months earlier and never touched since. It parsed a 12-byte sensor packet. It had 14 unit tests. All green. All still green while the app crashed on real devices.
+
+The function hadn't changed. **What changed was where its `Data` came from.** A colleague had refactored the Bluetooth layer to strip a 4-byte frame header with `dropFirst(4)` before handing the payload to my parser. Perfectly reasonable refactor. And it turned my `packet[0]` into a landmine, because that payload's first byte no longer lived at index 0. It lived at index 4.
+
+---
+
+## Data Remembers Where It Came From
+
+Here's the whole bug in four lines:
+
+```swift
+let frame = Data([0xAA, 0xBB, 0x00, 0x0C, 0x01, 0x02, 0x03, 0x04])
+let payload = frame.dropFirst(4)
+
+print(payload.count)       // 4
+print(payload.startIndex)  // 4
+print(payload[0])          // crash: index out of range
+```
+
+`payload` has four bytes. Its indices are `4..<8`. Asking for index 0 is asking for something outside the slice, so Swift traps.
+
+The reason is a type-system detail that's easy to miss: **`Data` is its own `SubSequence`.** When you slice an `Array`, you get an `ArraySlice`, a visibly different type, and at least some part of your brain goes "hm, slice, careful." When you slice `Data`, you get back... `Data`. Same type, same autocomplete, same everything. Except its `startIndex` is wherever the slice began in the original buffer.
+
+That's not a bug in Foundation. It's the same deal as `ArraySlice`: slicing is cheap because the slice shares the parent's storage and keeps the parent's indices (which is also why [an innocent slice can keep a huge buffer alive](/blog/arrayslice-holds-entire-array-memory-swift)). Renumbering would mean copying. Swift chose not to copy, and chose not to tell you with a different type name.
+
+Every one of these gives you a `Data` with a non-zero start:
+
+```swift
+data.dropFirst(n)
+data.suffix(from: i)
+data[4..<8]
+data[4...]
+data.split(separator: 0x00)   // every piece after the first
+```
+
+**The type says `Data`. The indices say "I'm a slice, and I remember everything."**
+
+---
+
+## Why the Tests Never Caught It
+
+My tests looked like this:
+
+```swift
+@Test func parsesTemperature() throws {
+    let packet = Data([0x01, 0x02, 0x00, 0xFA, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    let reading = try SensorReading(packet)
+    #expect(reading.temperature == 25.0)
+}
+```
+
+Every test built a brand-new `Data` from an array literal. **A freshly created `Data` always starts at 0.** So does the `Data` you get back from `URLSession`, from `Data(contentsOf:)`, from `JSONEncoder`. The happy path hands you zero-based buffers so consistently that you start believing it's a law of nature.
+
+Production, meanwhile, was handing me slices. The tests and the app were feeding the same function two different shapes of the same type, and the shape the tests never produced was the only one that crashed.
+
+It's the same family as [`enumerated()` offsets that aren't indices](/blog/enumerated-offset-is-not-an-index-swift) and [`NSRange` lengths that aren't character counts](/blog/nsrange-string-count-utf16-emoji-offset-swift): **an integer that looks like a position, used on a collection that defines positions differently.** It works right up until the two definitions disagree.
+
+---
+
+## The Code That Looks Fine and Isn't
+
+Here's the original parser, reduced to the parts that hurt:
+
+```swift
+struct SensorReading {
+    let id: UInt8
+    let flags: UInt8
+    let temperature: Double
+
+    init(_ packet: Data) throws {
+        guard packet.count == 12 else { throw ParseError.wrongLength }
+        id = packet[0]
+        flags = packet[1]
+        let raw = UInt16(packet[2]) << 8 | UInt16(packet[3])
+        temperature = Double(Int16(bitPattern: raw)) / 10
+    }
+}
+```
+
+The `count` check passes. A 12-byte slice is still 12 bytes. Then `packet[0]` traps.
+
+And trapping is the *lucky* outcome. Picture a helper that only reads the temperature, `packet[2]` and `packet[3]`, handed a slice that starts at index 1. Neither index is out of bounds, so nothing crashes. They just point one byte too early. **Your temperature is quietly wrong**, and you find out when a user emails a screenshot of their fridge reporting 4,000 degrees.
+
+---
+
+## Fix 1: Index Relative to startIndex
+
+The minimal, honest fix is to stop pretending the first byte is at 0:
+
+```swift
+init(_ packet: Data) throws {
+    guard packet.count == 12 else { throw ParseError.wrongLength }
+    let base = packet.startIndex
+    id = packet[base]
+    flags = packet[base + 1]
+    let raw = UInt16(packet[base + 2]) << 8 | UInt16(packet[base + 3])
+    temperature = Double(Int16(bitPattern: raw)) / 10
+}
+```
+
+`Data.Index` is `Int`, so `base + 1` is fine. It works for fresh buffers (base is 0) and for slices (base is whatever). It's also easy to forget on line 40 of a longer parser, which is why I don't love it as the long-term answer.
+
+---
+
+## Fix 2: Read Through a Cursor
+
+For anything bigger than a handful of bytes, I now parse through a tiny reader that owns the position. The parser asks for "the next two bytes," never "index 2":
+
+```swift
+struct ByteReader {
+    private let data: Data
+    private var position: Data.Index
+
+    init(_ data: Data) {
+        self.data = data
+        self.position = data.startIndex
+    }
+
+    var remaining: Int { data.endIndex - position }
+
+    mutating func readUInt8() throws -> UInt8 {
+        guard remaining >= 1 else { throw ParseError.truncated }
+        defer { position += 1 }
+        return data[position]
+    }
+
+    mutating func readUInt16BigEndian() throws -> UInt16 {
+        let high = try readUInt8()
+        let low = try readUInt8()
+        return UInt16(high) << 8 | UInt16(low)
+    }
+
+    mutating func readBytes(_ count: Int) throws -> Data {
+        guard remaining >= count else { throw ParseError.truncated }
+        defer { position += count }
+        return data[position..<(position + count)]
+    }
+}
+
+enum ParseError: Error { case wrongLength, truncated }
+```
+
+And the parser stops doing index math entirely:
+
+```swift
+init(_ packet: Data) throws {
+    guard packet.count == 12 else { throw ParseError.wrongLength }
+    var reader = ByteReader(packet)
+    id = try reader.readUInt8()
+    flags = try reader.readUInt8()
+    temperature = Double(Int16(bitPattern: try reader.readUInt16BigEndian())) / 10
+}
+```
+
+**The only place that touches an index is the reader, and the reader starts at `startIndex`.** Bonus: a truncated packet throws `ParseError.truncated` instead of crashing, which is what you want for bytes coming off a radio.
+
+---
+
+## Fix 3: Drop to Raw Bytes, Which Are Zero-Based
+
+`withUnsafeBytes` hands you an `UnsafeRawBufferPointer` covering exactly the slice's bytes, and **raw buffer offsets always start at 0**:
+
+```swift
+let raw = packet.withUnsafeBytes { buffer in
+    UInt16(bigEndian: buffer.loadUnaligned(fromByteOffset: 2, as: UInt16.self))
+}
+```
+
+`loadUnaligned` (Swift 5.7+) matters here: a slice can begin at any byte, so a plain `load` could hit a misaligned address. This is the fastest option and the right one for large binary formats, but it's "unsafe" in the name for a reason. I use it inside the reader, not sprinkled through business logic.
+
+---
+
+## Fix 4: Rebase When You Genuinely Need Zero
+
+Sometimes you're calling code you don't own that assumes index 0. Then make a real copy that starts at 0:
+
+```swift
+let bytes = [UInt8](payload)   // Array: always zero-based, by definition
+```
+
+An `Array` built from a sequence always starts at 0. That's guaranteed by the type. `payload.subdata(in: payload.startIndex..<payload.endIndex)` also gives you a fresh copy. I don't rely on `Data(payload)` to renumber, because "does this initializer copy or just wrap" is exactly the kind of thing I don't want my correctness to hinge on.
+
+Rebasing costs a copy. For a 12-byte packet that's nothing. For a 40 MB file it's a decision. Most of the time, Fix 2 means you never need it.
+
+---
+
+## Test the Shape Production Actually Sends
+
+The real lesson from the crash wasn't the parser. It was the tests. They only ever fed fresh buffers, so they only ever tested index 0. One helper fixes that for every parser you'll ever write:
+
+```swift
+extension Data {
+    /// The same bytes, but as a slice that does NOT start at index 0.
+    func offsetSlice(padding: Int = 3) -> Data {
+        (Data(repeating: 0xEE, count: padding) + self).dropFirst(padding)
+    }
+}
+
+@Test(arguments: [0, 1, 4, 17])
+func parsesFromAnySlice(padding: Int) throws {
+    let packet = Data([0x01, 0x02, 0x00, 0xFA, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    let input = padding == 0 ? packet : packet.offsetSlice(padding: padding)
+    #expect(input.startIndex == padding)
+
+    let reading = try SensorReading(input)
+    #expect(reading.id == 1)
+    #expect(reading.flags == 2)
+    #expect(reading.temperature == 25.0)
+}
+```
+
+Filling the padding with `0xEE` matters. If a parser accidentally reads from the parent buffer, it reads garbage that fails loudly, not zeros that might pass. **Run your existing parser tests through this once.** If one of them crashes, you just found a production bug for free.
+
+This is also a good prompt to hand an AI assistant when it writes networking or parsing code for you: "test this with a `Data` slice whose `startIndex` isn't zero." It catches the assumption every time, but only if someone asks. That's the habit I push in [the networking-with-AI lesson](/learn/networking-with-ai): the model writes the happy path, you supply the shapes reality actually produces. And once those bytes become text, [the decoding edge has its own surprises](/blog/string-decoding-utf8-replacement-vs-string-data-encoding-nil-swift).
+
+---
+
+## The Takeaway
+
+`Data` looks like a byte array with zero-based integer positions. It isn't. It's a collection whose indices belong to whatever buffer it was cut from, and every `dropFirst`, range subscript and `split` hands you one of those cut pieces while still calling itself plain `Data`.
+
+So never write `data[0]`. Write `data[data.startIndex]`, or better, write a reader that never asks you for a number at all. And test your parsers with a slice that starts at 17, because the next refactor of your networking layer will.
