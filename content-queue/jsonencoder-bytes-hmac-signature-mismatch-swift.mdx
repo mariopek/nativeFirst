@@ -1,0 +1,226 @@
+---
+title: "Your Request Signature Fails on One Request in Ten. JSONEncoder Never Promised You the Same Bytes."
+description: "Signing a JSON body with HMAC in Swift breaks when you encode twice, when a Dictionary changes key order, or when JSONEncoder escapes slashes as \\/. Here's why JSONEncoder output isn't canonical, how it breaks webhook and API signatures, and the fix: sign the exact Data you send."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Codable", "Networking", "CryptoKit", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1573046171778-f6506436ec62?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "Close-up of a red wax seal pressed onto a folded paper envelope"
+---
+
+{/*
+SEO keywords: JSONEncoder HMAC signature mismatch Swift, sign request body Swift CryptoKit,
+JSONEncoder withoutEscapingSlashes, JSONEncoder escapes forward slash, JSONEncoder sortedKeys,
+JSON key order Swift Dictionary, HMAC SHA256 Swift request signing, canonical JSON Swift,
+signature invalid 401 iOS app, webhook signature verification Swift
+Internal linking plan: set-dictionary-iteration-order-hash-seed-swift (why dictionary order moves),
+urlcomponents-plus-sign-query-not-encoded-swift (another "the bytes on the wire aren't what you
+think" bug), custom-networking-layer-swift-urlsession-async-await (where the signing belongs),
+uuid-uuidstring-uppercase-backend-lowercase-swift (client/server string mismatch cousin),
+course /learn/debugging-with-ai
+*/}
+
+The backend dev sent me a screenshot of their logs, and it had the energy of a crime scene photo. `401 invalid_signature`. Not every request. Not most requests. **About one in ten**, scattered across users, devices, and app versions like someone had thrown darts at the dashboard.
+
+"Your HMAC is wrong," they wrote.
+
+"My HMAC is right nine times out of ten," I wrote back, which, in hindsight, is not the defense I thought it was.
+
+---
+
+## The Setup: Signing a Request Body
+
+The API wanted every `POST` signed. Standard stuff: take the request body, run it through HMAC-SHA256 with a shared secret, put the hex digest in a header. The server does the same math on its side and compares. Match means the body wasn't tampered with. No match means 401.
+
+Here's roughly what I had shipped:
+
+```swift
+import CryptoKit
+import Foundation
+
+struct ProfileUpdate: Encodable {
+    let displayName: String
+    let avatarURL: URL?
+    let preferences: [String: Bool]
+}
+
+func signature(for payload: ProfileUpdate, key: SymmetricKey) throws -> String {
+    let body = try JSONEncoder().encode(payload)
+    let mac = HMAC<SHA256>.authenticationCode(for: body, using: key)
+    return mac.map { String(format: "%02x", $0) }.joined()
+}
+
+func makeRequest(_ payload: ProfileUpdate, key: SymmetricKey) throws -> URLRequest {
+    var request = URLRequest(url: URL(string: "https://api.example.com/v1/profile")!)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue(try signature(for: payload, key: key), forHTTPHeaderField: "X-Signature")
+    request.httpBody = try JSONEncoder().encode(payload)
+    return request
+}
+```
+
+Read it once. It looks fine. It looks so fine that it passed code review, passed my unit test, and passed QA.
+
+Now read it again and count the calls to `JSONEncoder().encode`. **Two.** One to sign, one to send. I was signing one sheet of paper and mailing a different one, and trusting the photocopier to be perfect.
+
+---
+
+## Bug One: The Same Value Doesn't Mean the Same Bytes
+
+An HMAC doesn't sign your *data*. It signs your *bytes*. Change one byte, even one that means exactly the same thing in JSON, and the digest is completely different. That's the whole point of a MAC.
+
+And JSONEncoder makes surprisingly few promises about bytes. It promises valid JSON that decodes back to your value. That's it. **It does not promise canonical output**, meaning one exact byte sequence for one logical value.
+
+The biggest offender in my payload was `preferences: [String: Bool]`. A Swift `Dictionary` has no defined order. Its iteration order depends on the hash of each key, and Swift seeds its hasher randomly per process. I wrote a whole post about [why Set and Dictionary order changes between launches](/blog/set-dictionary-iteration-order-hash-seed-swift), and I still walked straight into it here.
+
+Within one process, encoding the same dictionary instance twice will usually give you the same order. Usually. But two dictionaries with identical contents can iterate differently if they were built differently, with a different insertion history or a different capacity. My `preferences` came from merging a defaults dictionary with the user's overrides, and in some code paths the payload got rebuilt between signing and sending. Same keys, same values, different order.
+
+```swift
+// Signed:  {"preferences":{"haptics":true,"darkMode":false},...}
+// Sent:    {"preferences":{"darkMode":false,"haptics":true},...}
+```
+
+The server parses both into the same object. The HMAC sees two different strings. 401.
+
+**Takeaway: if two encodes are involved, you have two chances to disagree with yourself.**
+
+---
+
+## Bug Two: The Slash Nobody Asked For
+
+Fixing the double encode cut the failures in half. The other half stuck around, and they had a pattern once I bothered to look: **every failing request had an avatar URL.**
+
+Here's what JSONEncoder does with a URL by default:
+
+```swift
+let data = try JSONEncoder().encode(["avatar": "https://cdn.example.com/u/42.png"])
+print(String(decoding: data, as: UTF8.self))
+// {"avatar":"https:\/\/cdn.example.com\/u\/42.png"}
+```
+
+Those backslashes are legal. JSON allows `\/` as an escape for `/`, and every parser on earth turns it back into a plain slash. Apple's encoder escapes slashes by default, a habit inherited from the days when people pasted JSON into HTML `<script>` tags and `</script>` inside a string could end the tag early.
+
+The problem was on the other side. The server didn't verify against the raw request bytes. It parsed the JSON into an object, then **re-serialized it** with its own library, which writes plain slashes and sorts keys, and signed *that*. So my bytes said `https:\/\/` and the server's bytes said `https://`. Different bytes, different digest, 401, but only for users who had uploaded a profile picture.
+
+Which is a delightful bug, because it punishes your most engaged users first.
+
+You can turn the escaping off:
+
+```swift
+let encoder = JSONEncoder()
+encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+```
+
+`.sortedKeys` gives you a stable key order, nested dictionaries included. `.withoutEscapingSlashes` (iOS 13 and later) writes slashes as slashes. Together they get you much closer to what most servers produce when they re-serialize.
+
+**Closer. Not identical.** Hold that thought.
+
+---
+
+## The Real Fix: Sign What You Send, Byte for Byte
+
+Both bugs have the same root cause: somebody, somewhere, encoded the value again and assumed the bytes would match. The fix is to make that impossible. Encode exactly once. Sign that `Data`. Send that same `Data`.
+
+```swift
+import CryptoKit
+import Foundation
+
+struct SignedBody {
+    let data: Data
+    let signature: String
+}
+
+enum RequestSigner {
+    static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }()
+
+    static func sign<T: Encodable>(_ value: T, key: SymmetricKey) throws -> SignedBody {
+        let data = try encoder.encode(value)
+        let mac = HMAC<SHA256>.authenticationCode(for: data, using: key)
+        let hex = mac.map { String(format: "%02x", $0) }.joined()
+        return SignedBody(data: data, signature: hex)
+    }
+}
+
+func makeRequest(_ payload: ProfileUpdate, key: SymmetricKey) throws -> URLRequest {
+    let signed = try RequestSigner.sign(payload, key: key)
+
+    var request = URLRequest(url: URL(string: "https://api.example.com/v1/profile")!)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue(signed.signature, forHTTPHeaderField: "X-Signature")
+    request.httpBody = signed.data   // the exact bytes that were signed
+    return request
+}
+```
+
+The important part isn't the encoder options. It's that `SignedBody` carries the bytes and the signature **together**, so there's no code path where you can sign one thing and send another. If your networking layer has a request-building step, like the one in [my URLSession async/await networking layer](/blog/custom-networking-layer-swift-urlsession-async-await), this is where signing belongs: at the very end, after the body is final, never before.
+
+And then ask the server team to verify against the **raw request body**, not a re-serialized copy. This is how Stripe, GitHub, and most serious webhook providers do it, and for exactly this reason. Re-serializing on the server means both sides have to agree on key order, slash escaping, Unicode escaping, whitespace, and how to print `1.0` versus `1`. That's not a protocol. That's a prayer.
+
+**Takeaway: a signature covers bytes, so the bytes have to travel as one object, start to finish.**
+
+---
+
+## Why "Closer, Not Identical" Matters
+
+You might think `.sortedKeys` plus `.withoutEscapingSlashes` makes JSONEncoder canonical. It doesn't, and I'd rather you hear it from me than from a 401 at 1 AM.
+
+There are a few places where two encoders can disagree while both producing perfectly valid JSON:
+
+- **Numbers.** How a `Double` prints (`1` vs `1.0`, exponent notation for very large or small values) is up to the encoder. If floats are in a signed payload, consider sending them as strings or integers in minor units.
+- **Unicode.** Some encoders write `é` as raw UTF-8, others as `é`. And `é` itself can be one code point or two (e plus a combining accent). Same text to a human, different bytes to HMAC.
+- **Dates.** `JSONEncoder`'s default date strategy writes a `Double` of seconds since 2001, which your server almost certainly doesn't expect anyway. Pick `.iso8601` or a custom formatter explicitly.
+- **Platform versions.** Apple rewrote Foundation's JSON coding in Swift over the last few releases. Valid output is guaranteed. Byte-identical output across OS versions is not something I'd bet a signature on.
+
+None of this matters if the server verifies raw bytes. All of it matters if it doesn't. That's the strongest argument I know for raw-body verification: it makes a whole category of disagreement irrelevant.
+
+It's the same family of bug as [the plus sign URLComponents doesn't encode](/blog/urlcomponents-plus-sign-query-not-encoded-swift) and [the UUID that's uppercase on iOS and lowercase on the backend](/blog/uuid-uuidstring-uppercase-backend-lowercase-swift). Two systems that agree on *meaning* and disagree on *bytes*, and you only find out when something compares the bytes.
+
+---
+
+## How I Should Have Caught It
+
+My unit test signed a payload and compared it to a hardcoded digest. It passed because the test payload had one preference and no avatar. A dictionary with one key can't be in the wrong order, and a payload with no URL has no slashes to escape. I'd built a test that couldn't fail.
+
+A better test signs a payload with several dictionary keys and a URL, then checks the signature against the bytes actually set on `httpBody`:
+
+```swift
+import CryptoKit
+import XCTest
+
+final class RequestSignerTests: XCTestCase {
+    func testSignatureCoversExactBodyBytes() throws {
+        let key = SymmetricKey(size: .bits256)
+        let payload = ProfileUpdate(
+            displayName: "Mario",
+            avatarURL: URL(string: "https://cdn.example.com/u/42.png"),
+            preferences: ["haptics": true, "darkMode": false, "sounds": true, "badges": false]
+        )
+
+        let request = try makeRequest(payload, key: key)
+        let body = try XCTUnwrap(request.httpBody)
+        let expected = HMAC<SHA256>.authenticationCode(for: body, using: key)
+            .map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Signature"), expected)
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("\\/"))
+    }
+}
+```
+
+That test would have failed on my original code within a few runs. It encodes the actual rule ("the signature matches the body that was sent") instead of a snapshot of one lucky payload.
+
+When I finally traced this, the useful move wasn't staring at Swift. It was asking for the server's exact pre-image, the string it signed, and diffing it byte by byte against mine. If you're doing that kind of digging with an AI assistant, the [debugging with AI lesson](/learn/debugging-with-ai) has a decent workflow for it. Hand it both byte strings, not your theory about them.
+
+---
+
+## The Short Version
+
+JSONEncoder promises valid JSON, not identical bytes. Dictionaries reorder, slashes get escaped, numbers and Unicode have more than one legal spelling. HMAC notices every one of those.
+
+So encode once, sign that `Data`, send that `Data`, and get the server to verify the raw body. My signature was never wrong. It was a correct signature on a letter I never sent.
