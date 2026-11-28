@@ -1,0 +1,207 @@
+---
+title: "FileManager Says Your File Doesn't Exist. It's Right There. URL.path() Added %20 to the Name."
+description: "URL.path() returns a percent-encoded path by default, so FileManager.fileExists(atPath:) returns false for any file with a space or an accent in its name. Here's why path() and the old path property disagree, how it silently creates duplicate files, and how to fix file URL handling in Swift for good."
+pubDate: PUBDATE_PLACEHOLDER
+tags: ["Swift", "Foundation", "FileManager", "URL", "iOS Development"]
+author: "NativeFirst Team"
+coverImage: "https://images.unsplash.com/photo-1457694587812-e8bf29a43845?w=1600&q=85&auto=format&fit=crop"
+coverImageAlt: "A stack of paper documents and folders piled on a desk"
+---
+
+{/*
+SEO keywords: URL path() percent encoded Swift, FileManager fileExists returns false,
+path(percentEncoded: false), file name with spaces iOS, %20 in file path Swift,
+URL.path vs path(), fileExists atPath not working, duplicate file %20 Swift,
+URL(filePath:) iOS 16, checkResourceIsReachable Swift
+Internal linking plan: storing-absolute-file-paths-ios-container-uuid (another path that lies),
+url-relativeto-base-url-trailing-slash-drops-path-swift (URL APIs doing exactly what they say),
+urlcomponents-plus-sign-query-not-encoded-swift (encoding again),
+string-interpolation-optional-debug-description-swift (a string that looks right and isn't),
+course /learn/debugging-with-ai
+No app mention this time.
+*/}
+
+There's a scene in every haunted house movie where someone says "there's nobody here," and the camera slowly pans to the figure standing right behind them. I had that scene in my debugger last month, except the ghost was a file called `Trip Notes.txt` and the person insisting it didn't exist was `FileManager`.
+
+The file was there. I could see it in the Files app. I could open it in the simulator's container folder in Finder. And `fileExists(atPath:)` looked me in the eye and said `false`.
+
+**It wasn't lying. I'd asked about a different file.** One called `Trip%20Notes.txt`, which genuinely did not exist. Yet.
+
+---
+
+## The Two Paths
+
+Here's the code, more or less as it shipped:
+
+```swift
+let docs = URL.documentsDirectory
+let noteURL = docs.appending(path: "Trip Notes.txt")
+
+if FileManager.default.fileExists(atPath: noteURL.path()) {
+    loadNote(from: noteURL)
+} else {
+    createEmptyNote(at: noteURL)
+}
+```
+
+It looks modern. `URL.documentsDirectory`, `appending(path:)`, and `path()` all arrived together in iOS 16, and they read nicely. The problem is the signature of that last one:
+
+```swift
+func path(percentEncoded: Bool = true) -> String
+```
+
+**The default is `true`.** So `noteURL.path()` hands you something like this:
+
+```
+/var/mobile/Containers/Data/Application/…/Documents/Trip%20Notes.txt
+```
+
+That's a URL-shaped string, not a file system path. The file system doesn't know what `%20` means. To the disk, `%`, `2`, and `0` are just three more characters in a file name. So `fileExists` checks for `Trip%20Notes.txt`, finds nothing, and is completely correct to say so.
+
+The older `path` property, the one without parentheses, does the opposite. It returns the decoded path, `Trip Notes.txt`, which is what every file API expects. Two members, one pair of parentheses apart, with opposite behavior. I've had less confusing conversations with printers.
+
+---
+
+## Why Your Tests Didn't Catch It
+
+Because nobody names a test fixture `Trip Notes.txt`.
+
+My tests used `note.txt`, `test-file.json`, `fixture1.dat`. Developers name files like developers: lowercase, no spaces, no accents. **For plain ASCII names with no spaces, the encoded and decoded paths are identical**, so `path()` and `path` return the same string and every test passes.
+
+Real users don't name files like developers. They name them `Trip Notes`, `Café receipts`, `Résumé (final) FINAL`. Every one of those becomes something different under percent encoding:
+
+```swift
+let names = ["note.txt", "Trip Notes.txt", "Café.txt", "100%.txt"]
+for name in names {
+    let url = URL.documentsDirectory.appending(path: name)
+    print(url.lastPathComponent, "→", url.path().split(separator: "/").last!)
+}
+// note.txt        → note.txt
+// Trip Notes.txt  → Trip%20Notes.txt
+// Café.txt        → Caf%C3%A9.txt
+// 100%.txt        → 100%25.txt
+```
+
+Notice `lastPathComponent` is decoded while `path()` isn't. Same URL, two string views, and only one of them matches the disk. That's the same flavor of bug as [a string interpolation that looks right in the debugger and wrong everywhere else](/blog/string-interpolation-optional-debug-description-swift): the value is "correct," just correct for a different audience.
+
+---
+
+## The Part Where It Gets Worse: Duplicate Files
+
+A false negative from `fileExists` would be annoying on its own. My code did something worse with it. Look at the `else` branch again: if the note doesn't exist, create an empty one.
+
+So the app concluded `Trip Notes.txt` was missing and dutifully wrote a fresh, empty note. Where it wrote it depends on which API you hand the URL to. If you write through the `URL` itself, it lands on `Trip Notes.txt` and **overwrites the user's real note with an empty file.** If, like me, somewhere downstream you rebuild a URL from that encoded string:
+
+```swift
+let rebuilt = URL(filePath: noteURL.path())
+try Data().write(to: rebuilt)
+```
+
+…then `URL(filePath:)` takes the string literally, and you now have a brand new file on disk called `Trip%20Notes.txt`, sitting next to the original. Open the Files app and there are two notes with nearly identical names, one of them empty. Next launch, the app finds the `%20` one and shows the user a blank note.
+
+The user's bug report said "my notes disappeared." They hadn't. They were one file over, haunted by their own encoded twin.
+
+---
+
+## The Fix
+
+The one-line fix is to ask for what you actually want:
+
+```swift
+FileManager.default.fileExists(atPath: noteURL.path(percentEncoded: false))
+```
+
+That works, and it's what I shipped as the hotfix. But "remember to pass `false` every single time" is not a strategy, it's a wish. The better fix is to **stop converting file URLs into strings at all**.
+
+Most file work doesn't need a path string. `Data(contentsOf:)`, `write(to:)`, `FileManager.copyItem(at:to:)`, `moveItem(at:to:)`, `removeItem(at:)`, and `contentsOfDirectory(at:includingPropertiesForKeys:)` all take URLs. For the existence check, there's a URL-based option too:
+
+```swift
+extension URL {
+    /// True if a file or directory exists at this file URL.
+    var fileExists: Bool {
+        (try? checkResourceIsReachable()) ?? false
+    }
+}
+
+if noteURL.fileExists {
+    loadNote(from: noteURL)
+}
+```
+
+`checkResourceIsReachable()` throws when the file isn't there, so the `try?` turns that into a plain `false`. No strings, no encoding, no parentheses roulette.
+
+When you genuinely need a string path, say for a C API, a SQLite database path, or a log line a human will read, put the conversion in exactly one place:
+
+```swift
+extension URL {
+    /// The file system path, decoded. Use this, never path().
+    var fileSystemPath: String {
+        precondition(isFileURL, "fileSystemPath on a non-file URL: \(self)")
+        return path(percentEncoded: false)
+    }
+}
+```
+
+Then grep the codebase and replace every `.path()` on a file URL:
+
+```bash
+grep -rn '\.path()' --include='*.swift' .
+```
+
+That grep found eleven hits in my project. Two were network URLs where encoding was correct. The other nine were file URLs, and four of them were in code paths that wrote to disk. I'm still a little annoyed about how long those had been there.
+
+---
+
+## The Mental Model
+
+**A `URL` is a URL first and a file path second.** URLs are percent-encoded by definition, because they have to survive being pasted into a browser bar, sent over HTTP, and parsed by strangers. File system paths are just bytes the OS stores. When you bridge between the two, someone has to decide whether `%20` means "a space" or "the characters percent, two, zero." Foundation's new `path()` decided the URL side wins, which makes perfect sense for `https://` URLs and quietly breaks every file API you pass it to.
+
+It's the same lesson as [a base URL missing its trailing slash](/blog/url-relativeto-base-url-trailing-slash-drops-path-swift) and [URLComponents leaving your `+` alone](/blog/urlcomponents-plus-sign-query-not-encoded-swift): URL APIs do exactly what the URL spec says, and the spec doesn't care what you meant. And just like [storing absolute file paths that stop working after an update](/blog/storing-absolute-file-paths-ios-container-uuid), the safest file path string is the one you never write down.
+
+---
+
+## A Test That Would Have Caught It
+
+The fix for "my fixtures are too polite" is impolite fixtures. Here's a Swift Testing suite that runs the same round trip over the kinds of names real people use:
+
+```swift
+import Foundation
+import Testing
+
+@Suite struct FileURLTests {
+    static let hostileNames = [
+        "plain.txt",
+        "Trip Notes.txt",
+        "Café receipts.txt",
+        "100% done.txt",
+        "Résumé (final) FINAL.txt",
+    ]
+
+    @Test(arguments: hostileNames)
+    func writtenFileIsFoundAgain(name: String) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appending(path: name)
+        try Data("hello".utf8).write(to: url)
+
+        #expect(url.fileExists)
+        #expect(FileManager.default.fileExists(atPath: url.fileSystemPath))
+
+        let onDisk = try FileManager.default.contentsOfDirectory(atPath: dir.fileSystemPath)
+        #expect(onDisk == [name], "Expected exactly one file named \(name), got \(onDisk)")
+    }
+}
+```
+
+The last expectation is the important one. It doesn't just check the file can be found, it checks **there's exactly one file and it has the name you meant**. That's the assertion that catches the encoded twin. If you've ever had an AI assistant "fix" a file-not-found bug by adding a fallback that creates the file, this test is also how you find out it made things worse. (I wrote more about [getting real answers out of AI when you're debugging](/learn/debugging-with-ai), and "add a test that fails first" is most of it.)
+
+---
+
+## The Takeaway
+
+When `FileManager` says a file doesn't exist and you can see it with your own eyes, print the exact string you passed in. If there's a `%` in it, you've found your ghost.
+
+Then go name a test fixture `Café receipts (final).txt`. Your users already did.
